@@ -1,123 +1,64 @@
 """
-Developer tool: build, upload and push a new app version.
+Developer tool: release a new app version via GitHub.
+
+What it does:
+  1. Sets APP_VERSION (taf_order_app/updater.py) and AppVersion (installer.iss)
+     to the new version.
+  2. Commits the bump.
+  3. Creates and pushes tag  v<version>  (and pushes main).
+
+Pushing the tag triggers the "Build Windows EXE" GitHub Actions workflow,
+which builds the installer and publishes a GitHub Release. Every installed
+client then sees the update on next launch (see taf_order_app/updater.py).
 
 Usage:
-    python push_update.py
-
-Steps:
-  1. Asks for the new version number (e.g. 1.1.0)
-  2. Asks for release notes
-  3. Builds the EXE with PyInstaller
-  4. Uploads dist/TAFOrderEntry.exe to Supabase Storage (bucket: releases)
-  5. Updates the app_versions table so all clients see the new version
-
-Prerequisites:
-  - You must have Director or Admin role
-  - The 'releases' storage bucket must exist and be PUBLIC in Supabase
-    (Dashboard → Storage → New bucket → name: releases → Public: ON)
-  - Run migrate_updater.sql first if you haven't already
+    python push_update.py 2.0.1 "Fixed the thing, added the other thing"
+    python push_update.py            # prompts for version + notes
 """
-import json, os, sys, subprocess, importlib.util, getpass, traceback
+import os, re, sys, subprocess
 
-ROOT = os.path.dirname(os.path.abspath(__file__))
-sys.path.insert(0, ROOT)
+ROOT      = os.path.dirname(os.path.abspath(__file__))
+UPDATER   = os.path.join(ROOT, "taf_order_app", "updater.py")
+INSTALLER = os.path.join(ROOT, "installer.iss")
 
-# Load db directly to avoid openpyxl dependency
-_spec = importlib.util.spec_from_file_location(
-    "taf_order_app.db", os.path.join(ROOT, "taf_order_app", "db.py")
-)
-db = importlib.util.module_from_spec(_spec)
-_spec.loader.exec_module(db)
 
-# Load updater directly
-_spec2 = importlib.util.spec_from_file_location(
-    "taf_order_app.updater", os.path.join(ROOT, "taf_order_app", "updater.py")
-)
-updater = importlib.util.module_from_spec(_spec2)
-_spec2.loader.exec_module(updater)
+def _run(*args):
+    print("  $", " ".join(args))
+    subprocess.run(args, cwd=ROOT, check=True)
+
+
+def _replace(path, pattern, replacement, label):
+    with open(path, encoding="utf-8") as f:
+        text = f.read()
+    new, n = re.subn(pattern, replacement, text, count=1)
+    if n != 1:
+        raise SystemExit(f"ERROR: could not update {label} in {os.path.basename(path)}")
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(new)
 
 
 def main():
-    print("=" * 55)
-    print("  TAF Order App — Push Update Tool")
-    print("=" * 55)
+    args = sys.argv[1:]
+    version = args[0].strip().lstrip("vV") if args else input("New version (e.g. 2.0.1): ").strip().lstrip("vV")
+    if not re.fullmatch(r"\d+\.\d+\.\d+", version):
+        raise SystemExit("ERROR: version must look like 2.0.1")
+    notes = " ".join(args[1:]).strip() if len(args) > 1 else input("Release notes (optional): ").strip()
 
-    # Load API key
-    settings_path = os.path.join(ROOT, "settings.json")
-    with open(settings_path, encoding="utf-8") as f:
-        settings = json.load(f)
-    anon_key = settings.get("supabase_anon_key", "").strip()
-    if not anon_key:
-        print("ERROR: No supabase_anon_key in settings.json")
-        return
+    print(f"\nReleasing v{version} …")
+    _replace(UPDATER,   r'APP_VERSION\s*=\s*"[^"]+"', f'APP_VERSION = "{version}"', "APP_VERSION")
+    _replace(INSTALLER, r'AppVersion=[^\r\n]+',       f'AppVersion={version}',      "AppVersion")
 
-    db.init(anon_key)
-    print("Connected to Supabase.")
+    _run("git", "add", "taf_order_app/updater.py", "installer.iss")
+    _run("git", "commit", "-m", f"Release v{version}" + (f"\n\n{notes}" if notes else ""))
+    _run("git", "tag", "-a", f"v{version}", "-m", (notes or f"v{version}"))
+    _run("git", "push", "origin", "main")
+    _run("git", "push", "origin", f"v{version}")
 
-    # Sign in
-    email    = input("\nDirector/Admin email: ").strip()
-    password = getpass.getpass("Password: ")
-    db.sign_in(email, password)
-    role = db.current_role()
-    print(f"Signed in as: {db.current_username()} ({role})")
-    if role not in ("Director", "Admin"):
-        print("ERROR: Only Directors and Admins can push updates.")
-        return
-
-    # Current version
-    current = updater.get_current_remote_version()
-    print(f"\nCurrent live version: {current}")
-
-    # New version
-    new_version = input("New version number (e.g. 1.1.0): ").strip()
-    if not new_version:
-        print("Cancelled.")
-        return
-
-    release_notes = input("Release notes (optional): ").strip()
-
-    # Build EXE
-    build = input("\nBuild EXE now? (Y/n): ").strip().lower()
-    if build != "n":
-        print("\nBuilding EXE...")
-        result = subprocess.run(
-            [sys.executable, "-m", "PyInstaller", "TAFOrderEntry.spec", "--noconfirm"],
-            cwd=ROOT
-        )
-        if result.returncode != 0:
-            print("ERROR: PyInstaller build failed.")
-            return
-        print("Build complete.")
-
-    exe_path = os.path.join(ROOT, "dist", "TAFOrderEntry.exe")
-    if not os.path.exists(exe_path):
-        print(f"ERROR: EXE not found at {exe_path}")
-        return
-
-    size_mb = os.path.getsize(exe_path) / 1_048_576
-    print(f"\nEXE size: {size_mb:.1f} MB")
-    confirm = input(f"Upload version {new_version} and make it live? (Y/n): ").strip().lower()
-    if confirm == "n":
-        print("Cancelled.")
-        return
-
-    print("\nUploading to Supabase Storage...")
-    print("(This may take a minute depending on file size)")
-
-    url = updater.upload_and_push(exe_path, new_version, release_notes, anon_key)
-
-    print(f"\nDone!")
-    print(f"  Version:  {new_version}")
-    print(f"  URL:      {url}")
-    print(f"  Notes:    {release_notes or '(none)'}")
-    print("\nAll clients will see the update prompt on next launch.")
+    print(f"\nDone. Tag v{version} pushed.")
+    print("GitHub Actions is now building the installer and publishing the release:")
+    print("  https://github.com/MalakaiCS/TAF-App/actions")
+    print("Once the release is live, installed clients will auto-update.")
 
 
-try:
+if __name__ == "__main__":
     main()
-except Exception:
-    print("\n--- Error ---")
-    traceback.print_exc()
-
-print()
-input("Press Enter to close...")

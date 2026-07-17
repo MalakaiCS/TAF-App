@@ -1,19 +1,31 @@
 """
-Auto-update support for TAF Order App.
+Auto-update support for TAF Order App — GitHub Releases edition.
 
-Check:   check_for_update()  → dict or None
-Install: download_and_install(info, progress_cb)
+Update source: the latest published GitHub Release of GITHUB_REPO. Each
+release attaches the Inno Setup installer (TAFOrderEntry_Setup.exe); updating
+downloads it and runs it silently, then relaunches the app.
+
+Public API (unchanged for the GUI):
+    check_for_update()            -> dict | None
+    get_current_remote_version()  -> str
+    download_and_install(info, progress_cb)
+    cleanup_old_exe()
 """
 from __future__ import annotations
-import os, sys, subprocess, tempfile, threading
+import os, sys, json, subprocess, tempfile
 from pathlib import Path
+import urllib.request
 
 APP_VERSION = "2.0.0"
+
+# Public repo whose GitHub Releases drive updates.
+GITHUB_REPO = "MalakaiCS/TAF-App"
+_API_LATEST = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
 
 
 def _parse_version(v: str) -> tuple:
     try:
-        return tuple(int(x) for x in str(v).strip().split("."))
+        return tuple(int(x) for x in str(v).strip().lstrip("vV").split("."))
     except Exception:
         return (0,)
 
@@ -22,82 +34,88 @@ def is_newer(remote: str, local: str = APP_VERSION) -> bool:
     return _parse_version(remote) > _parse_version(local)
 
 
-def check_for_update() -> dict | None:
-    """
-    Returns {"version": str, "download_url": str, "release_notes": str}
-    if a newer version is available, else None.
-    Returns the info even if download_url is empty — the banner handles that case.
-    """
-    from taf_order_app import db
-    if not db.is_ready() or not db.current_user():
-        return None
+def _fetch_latest() -> dict | None:
+    """Return the latest-release JSON from the GitHub API, or None on any error."""
     try:
-        resp = db.get_client().table("app_versions").select("*").eq("id", 1).single().execute()
-        info = resp.data
-        if not info:
-            return None
-        if is_newer(info["version"]):
-            return info
-        return None
+        req = urllib.request.Request(_API_LATEST, headers={
+            "Accept":     "application/vnd.github+json",
+            "User-Agent": f"TAFOrderEntry/{APP_VERSION}",
+        })
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            return json.load(resp)
     except Exception:
         return None
+
+
+def check_for_update() -> dict | None:
+    """
+    Returns {"version", "download_url", "release_notes"} if the latest GitHub
+    release is newer than APP_VERSION, else None. download_url points at the
+    release's installer (.exe) asset.
+    """
+    data = _fetch_latest()
+    if not data:
+        return None
+    tag = (data.get("tag_name") or "").strip()
+    version = tag.lstrip("vV")
+    if not version or not is_newer(version):
+        return None
+
+    download_url = ""
+    for asset in data.get("assets", []):
+        name = (asset.get("name") or "").lower()
+        if name.endswith(".exe"):
+            download_url = asset.get("browser_download_url", "")
+            break
+
+    return {
+        "version":       version,
+        "download_url":  download_url,
+        "release_notes": data.get("body", "") or "",
+    }
 
 
 def get_current_remote_version() -> str:
-    """Return the version string from the DB, or APP_VERSION on error."""
-    from taf_order_app import db
-    try:
-        resp = db.get_client().table("app_versions").select("version").eq("id", 1).single().execute()
-        return resp.data.get("version", APP_VERSION)
-    except Exception:
+    """Return the latest release version from GitHub, or APP_VERSION on error."""
+    data = _fetch_latest()
+    if not data:
         return APP_VERSION
+    return (data.get("tag_name") or APP_VERSION).strip().lstrip("vV") or APP_VERSION
 
 
 def cleanup_old_exe() -> None:
-    """Delete TAFOrderEntry_old.exe left over from a previous auto-update (if any)."""
-    if not getattr(sys, "frozen", False):
-        return
-    try:
-        old = Path(sys.executable).parent / "TAFOrderEntry_old.exe"
-        if old.exists():
-            old.unlink()
-    except Exception:
-        pass
+    """Kept for GUI compatibility. The installer-based update leaves nothing to clean."""
+    return
 
 
 def download_and_install(info: dict, progress_cb=None) -> None:
     """
-    Download the new EXE, swap it in via rename (no batch file needed),
-    and relaunch using ShellExecuteW — identical to the user double-clicking.
+    Download the release installer and run it silently, then relaunch the app.
 
-    Why rename instead of copy?
-      Windows lets you rename a running exe.  Renaming is atomic; copying
-      over a running file is not — and copy via cmd/PowerShell sets up a
-      different process environment that breaks DLL loading.
-
-    Why ShellExecuteW?
-      It launches the exe exactly as Explorer would (correct DLL search path,
-      correct environment).  cmd.exe and PowerShell launch the exe in a
-      shell-child context that can cause python3xx.dll to fail to load.
+    Because this is a PyInstaller *onedir* build (exe + locked _internal DLLs),
+    we can't hot-swap files in place. Instead we hand off to the Inno Setup
+    installer via a detached helper that:
+        1) waits a moment for this app to close,
+        2) runs the installer silently (replacing all files),
+        3) relaunches the app.
+    The GUI exits (os._exit) once progress reaches 100 so the files unlock.
     """
-    import urllib.request
-    import ctypes
-
-    url      = info["download_url"]
-    exe_path = Path(sys.executable) if getattr(sys, "frozen", False) else None
-
-    if exe_path is None:
+    url = info.get("download_url", "")
+    if not url:
         raise RuntimeError(
-            "Auto-update only works when running as a built EXE.\n"
-            "Download the new version manually."
+            "This release has no installer attached yet.\n"
+            "Download the latest version manually from the GitHub Releases page."
+        )
+    if not getattr(sys, "frozen", False):
+        raise RuntimeError(
+            "Auto-update only works in the installed app.\n"
+            "When running from source, just git pull / rebuild."
         )
 
-    new_exe = exe_path.parent / "TAFOrderEntry_update.exe"
-    old_exe = exe_path.parent / "TAFOrderEntry_old.exe"
-
-    # ── Download ─────────────────────────────────────────────────────────────
     if progress_cb:
         progress_cb(0, "Connecting…")
+
+    setup = Path(tempfile.gettempdir()) / "TAFOrderEntry_Setup.exe"
 
     def _report(block_num, block_size, total_size):
         if total_size > 0 and progress_cb:
@@ -105,113 +123,25 @@ def download_and_install(info: dict, progress_cb=None) -> None:
             mb  = total_size / 1_048_576
             progress_cb(pct, f"Downloading… ({pct}% of {mb:.1f} MB)")
 
-    urllib.request.urlretrieve(url, str(new_exe), reporthook=_report)
+    urllib.request.urlretrieve(url, str(setup), reporthook=_report)
 
     if progress_cb:
-        progress_cb(97, "Swapping files…")
+        progress_cb(97, "Starting installer…")
 
-    # ── Atomic file swap ─────────────────────────────────────────────────────
-    # Remove leftover _old exe from any previous update
-    try:
-        if old_exe.exists():
-            old_exe.unlink()
-    except Exception:
-        pass
+    exe_path = Path(sys.executable)
 
-    # Rename the running exe out of the way (Windows allows this for running exes).
-    # Then move the downloaded update into the original location.
-    try:
-        exe_path.rename(old_exe)
-        new_exe.rename(exe_path)
-    except Exception as exc:
-        # Clean up download on failure so it doesn't clutter the folder
-        try:
-            new_exe.unlink()
-        except Exception:
-            pass
-        raise RuntimeError(f"Could not replace executable: {exc}") from exc
-
-    if progress_cb:
-        progress_cb(99, "Restarting…")
-
-    # ── Relaunch via ShellExecuteW ────────────────────────────────────────────
-    # ShellExecuteW is identical to Explorer / double-click.  It sets up the
-    # correct DLL search path and process environment — the batch/PowerShell
-    # approach does not, which caused the python3xx.dll LoadLibrary failure.
-    try:
-        ctypes.windll.shell32.ShellExecuteW(
-            None,                    # hwnd
-            "open",                  # verb
-            str(exe_path),           # file
-            None,                    # parameters
-            str(exe_path.parent),    # working directory
-            1,                       # SW_SHOWNORMAL
-        )
-    except Exception:
-        # Fallback: plain subprocess if ShellExecuteW somehow fails
-        subprocess.Popen(
-            [str(exe_path)],
-            cwd=str(exe_path.parent),
-            creationflags=subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP,
-            close_fds=True,
-        )
-
-    if progress_cb:
-        progress_cb(100, "Restarting…")
-    # Main thread detects pct==100 and calls os._exit(0) after a short delay.
-
-
-def push_version(version: str, download_url: str, release_notes: str = "") -> None:
-    """Developer tool: update the version row in the DB."""
-    from taf_order_app import db
-    import datetime
-    db.get_client().table("app_versions").upsert({
-        "id":           1,
-        "version":      version,
-        "download_url": download_url,
-        "release_notes": release_notes,
-        "updated_at":   datetime.datetime.utcnow().isoformat(),
-    }).execute()
-
-
-def upload_and_push(exe_path: str, version: str, release_notes: str,
-                    anon_key: str) -> str:
-    """
-    Upload the EXE to Supabase Storage and update the version table.
-    Returns the public download URL.
-    """
-    from supabase import create_client
-    from taf_order_app.db import SUPABASE_URL
-
-    client = create_client(SUPABASE_URL, anon_key)
-
-    # Sign in first so we have the Director/Admin session
-    # (called from push_update.py which handles sign-in)
-
-    file_name = "TAFOrderEntry.exe"
-    with open(exe_path, "rb") as f:
-        data = f.read()
-
-    try:
-        client.storage.from_("releases").remove([file_name])
-    except Exception:
-        pass
-
-    client.storage.from_("releases").upload(
-        file_name, data,
-        file_options={"content-type": "application/octet-stream", "upsert": "true"},
+    # Detached helper: pause for the app to exit, silent-install, relaunch.
+    helper = (
+        f'timeout /t 3 /nobreak >nul & '
+        f'"{setup}" /VERYSILENT /SUPPRESSMSGBOXES /NORESTART /NOCANCEL & '
+        f'start "" "{exe_path}"'
     )
+    DETACHED_PROCESS   = 0x00000008
+    CREATE_NO_WINDOW   = 0x08000000
+    subprocess.Popen(["cmd", "/c", helper],
+                     creationflags=DETACHED_PROCESS | CREATE_NO_WINDOW,
+                     close_fds=True)
 
-    url = f"{SUPABASE_URL}/storage/v1/object/public/releases/{file_name}"
-
-    # Update version row
-    import datetime
-    client.table("app_versions").upsert({
-        "id":            1,
-        "version":       version,
-        "download_url":  url,
-        "release_notes": release_notes,
-        "updated_at":    datetime.datetime.utcnow().isoformat(),
-    }).execute()
-
-    return url
+    if progress_cb:
+        progress_cb(100, "Installing update… the app will reopen shortly.")
+    # Main thread detects pct==100 and calls os._exit(0) after a short delay.

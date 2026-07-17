@@ -149,6 +149,10 @@ installer.iss              Inno Setup installer script
 
 - **Roles:** Director / Admin > Manager > Employee gate destructive actions and
   user management.
-- **Auto-update:** the app checks the `app_versions` table and can self-update
-  the packaged exe. Publishing is done with `push_update.py`.
+- **Auto-update:** the app checks the latest **GitHub Release** of this repo and
+  self-updates by downloading and silently running the installer. To ship an
+  update, run `python push_update.py 2.0.1 "release notes"` — it bumps the
+  version, tags `v2.0.1`, and pushes; GitHub Actions then builds the installer
+  and publishes the release. Requires the repo to be **public** (so the updater
+  can read releases without a token) and the `SUPABASE_ANON_KEY` Actions secret.
 - **Fonts:** Public Sans is bundled under the SIL Open Font License.

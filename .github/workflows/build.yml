@@ -1,16 +1,22 @@
-name: Build Windows EXE
+name: Build & Release
 
-# Builds the packaged app, injecting the Supabase anon key from a GitHub
-# Actions secret (SUPABASE_ANON_KEY) instead of committing it to the repo.
+# On a version tag (e.g. v2.0.1): build the exe + installer and publish a
+# GitHub Release with the installer attached — installed clients then
+# auto-update from it (see taf_order_app/updater.py).
 #
-# Runs manually (Actions tab → Run workflow) or when you push a version tag
-# like v2.0.1 — it does NOT build on every push.
+# On manual dispatch: build only, upload the installer as an artifact.
+#
+# The Supabase anon key is injected from the SUPABASE_ANON_KEY Actions secret
+# so it is never committed to the repo.
 
 on:
   workflow_dispatch:
   push:
     tags:
       - 'v*'
+
+permissions:
+  contents: write        # needed for gh release create
 
 jobs:
   build:
@@ -19,6 +25,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # so annotated tag messages are available
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -47,12 +55,30 @@ jobs:
           EOF
           echo "settings.json written (key hidden)."
 
-      - name: Build with PyInstaller
+      - name: Build app (PyInstaller)
         run: pyinstaller --noconfirm --clean TAFOrderEntry.spec
 
-      - name: Upload build artifact
+      - name: Install Inno Setup
+        run: choco install innosetup -y --no-progress
+
+      - name: Build installer
+        run: '& "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" installer.iss'
+
+      - name: Upload installer artifact
         uses: actions/upload-artifact@v4
         with:
-          name: TAFOrderEntry-${{ github.ref_name }}
-          path: dist/TAFOrderEntry
+          name: TAFOrderEntry_Setup
+          path: TAFOrderEntry_Setup.exe
           if-no-files-found: error
+
+      - name: Publish GitHub Release
+        if: startsWith(github.ref, 'refs/tags/')
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="${GITHUB_REF_NAME}"
+          NOTES="$(git tag -l --format='%(contents)' "$TAG")"
+          gh release create "$TAG" "TAFOrderEntry_Setup.exe" \
+            --title "TAF Order Entry $TAG" \
+            --notes "${NOTES:-Release $TAG}"
