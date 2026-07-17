@@ -1,0 +1,58 @@
+name: Build Windows EXE
+
+# Builds the packaged app, injecting the Supabase anon key from a GitHub
+# Actions secret (SUPABASE_ANON_KEY) instead of committing it to the repo.
+#
+# Runs manually (Actions tab → Run workflow) or when you push a version tag
+# like v2.0.1 — it does NOT build on every push.
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Write settings.json from secret
+        shell: bash
+        env:
+          SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
+        run: |
+          if [ -z "$SUPABASE_ANON_KEY" ]; then
+            echo "::error::SUPABASE_ANON_KEY secret is not set. Add it in Settings → Secrets and variables → Actions."
+            exit 1
+          fi
+          cat > settings.json <<EOF
+          {
+            "custom_media_types": [],
+            "supabase_anon_key": "${SUPABASE_ANON_KEY}"
+          }
+          EOF
+          echo "settings.json written (key hidden)."
+
+      - name: Build with PyInstaller
+        run: pyinstaller --noconfirm --clean TAFOrderEntry.spec
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: TAFOrderEntry-${{ github.ref_name }}
+          path: dist/TAFOrderEntry
+          if-no-files-found: error
