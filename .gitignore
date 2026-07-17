@@ -1,0 +1,43 @@
+# ── Secrets / local config ──────────────────────────────────────────────
+# settings.json holds the Supabase key — commit settings.example.json instead.
+settings.json
+.claude/
+
+# ── Python ──────────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+env/
+
+# ── PyInstaller / build output ──────────────────────────────────────────
+build/
+dist/
+*.spec.bak
+*.manifest
+
+# ── Distributables / binaries ───────────────────────────────────────────
+*.exe
+dist.zip
+data_entry_gui.exe
+TAFOrderEntry_Setup.exe
+
+# ── Runtime / user data ─────────────────────────────────────────────────
+orders/
+draft_order.json
+
+# ── Test / scratch artifacts ────────────────────────────────────────────
+Test_TEST.xlsx
+test_test.pdf
+compare_test.pdf
+Templates.pdf
+_*.png
+_*.py
+
+# ── OS / editor ─────────────────────────────────────────────────────────
+Thumbs.db
+Desktop.ini
+.DS_Store
+.idea/
+.vscode/
