@@ -1,0 +1,15 @@
+# TAF Order Entry — runtime + build dependencies
+# Python 3.11+ on Windows (uses Excel/Word COM automation via pywin32)
+
+supabase            # auth + Postgres (pulls postgrest, storage3, realtime, gotrue, httpx)
+reportlab           # PDF worksheet generation
+openpyxl            # Excel template reading/writing
+pypdf               # merging generated PDFs
+python-docx         # Word template handling
+pywin32             # Excel/Word COM automation (Windows only)
+tkcalendar          # date picker widgets
+babel               # locale data (tkcalendar dependency)
+Pillow              # type-badge rendering + image handling
+
+# Build only
+pyinstaller         # packages the app into dist/TAFOrderEntry/
