@@ -57,6 +57,46 @@ if not SETTINGS_FILE.exists():
 # Built-in defaults (never deletable from Settings)
 DEFAULT_MEDIA_TYPES = list(VALID_MEDIA_TYPES)
 
+# Customer-facing note automatically stamped on every stepped-filter item.
+STEPPED_FILTER_NOTE = "*STEPPED FILTER*"
+
+
+def classify_by_channel(channel) -> "tuple[str | None, str | None]":
+    """Map a channel thickness (mm) to an auto filter/media type.
+
+    Returns ``(filter_type, media_type)`` where either element may be ``None``
+    when that field should be left untouched:
+
+      •  9–11 mm  → Flyscreen, GREY media
+      • 12–29 mm  → Flat Panel  (media left as-is)
+      • 30 mm +   → V-form / pleated panel filter (media left as-is)
+    """
+    try:
+        ch = int(str(channel).strip())
+    except (TypeError, ValueError):
+        return (None, None)
+    if 9 <= ch <= 11:
+        return ("Flyscreen", "GREY")
+    if 12 <= ch <= 29:
+        return ("Flat Panel", None)
+    if ch >= 30:
+        return ("V-form", None)
+    return (None, None)
+
+
+def apply_stepped_filter_note(item: dict) -> dict:
+    """Ensure stepped-filter items carry the *STEPPED FILTER* customer note.
+
+    Mutates and returns ``item``. The note is prepended to any existing notes
+    and is idempotent (never added twice).
+    """
+    if (item.get("Filter Type") or "").strip() != "Stepped Filter":
+        return item
+    notes = (item.get("Notes") or "").strip()
+    if STEPPED_FILTER_NOTE.lower() not in notes.lower():
+        item["Notes"] = f"{STEPPED_FILTER_NOTE}\n{notes}".strip() if notes else STEPPED_FILTER_NOTE
+    return item
+
 
 def _load_settings() -> dict:
     if SETTINGS_FILE.exists():
@@ -1207,7 +1247,7 @@ class CompressorFilterDialog(tk.Toplevel):
                 "Short": fl["short"], "Long": fl["long"], "Channel": fl["channel"],
                 "Pleat Insert": False, "Header": False,
                 "Use Stock V-form": False, "Use Stock Flyscreen": False,
-                "Notes": "",
+                "Notes": STEPPED_FILTER_NOTE,
             }],
             "job":   "",
             "notes": "",
@@ -1369,70 +1409,90 @@ class LineItemDialog(tk.Toplevel):
         _media_types = media_types if media_types is not None else DEFAULT_MEDIA_TYPES
 
         # ── Header strip (top) ────────────────────────────────────────────
-        hdr = tk.Frame(self, bg=CA, padx=16, pady=10)
+        hdr = tk.Frame(self, bg=CA, padx=20, pady=14)
         hdr.pack(fill="x", side="top")
         tk.Label(hdr, text=title, bg=CA, fg="white",
-                 font=(FAM, 11, "bold")).pack(anchor="w")
+                 font=(FAM, 12, "bold")).pack(anchor="w")
+        tk.Label(hdr, text="Enter the panel size — the filter & media type are set "
+                           "automatically from the channel thickness.",
+                 bg=CA, fg="white", font=F_SM).pack(anchor="w", pady=(2, 0))
 
         # ── Footer buttons — packed BEFORE body so they always get space ──
-        foot = tk.Frame(self, bg=CBG, padx=16, pady=10)
+        foot = tk.Frame(self, bg=CCA, padx=20, pady=12,
+                        highlightbackground=CSP, highlightthickness=1)
         foot.pack(fill="x", side="bottom")
-        flat_btn(foot, "Cancel",    self._cancel, bg=CNE, pady=7).pack(side="right", padx=(8, 0))
-        flat_btn(foot, "Save Item", self._save,   bg=CGR, pady=7).pack(side="right")
+        flat_btn(foot, "Cancel",    self._cancel, bg=CNE, pady=8).pack(side="right", padx=(10, 0))
+        flat_btn(foot, "Save Item", self._save,   bg=CGR, pady=8).pack(side="right")
 
         # ── Body (fills remaining space between header and footer) ────────
-        body = tk.Frame(self, bg=CBG, padx=16, pady=10)
+        body = tk.Frame(self, bg=CBG, padx=20, pady=16)
         body.pack(fill="both", expand=True, side="top")
 
         # ── Dimensions ────────────────────────────────────────────────────
         dim_f = tk.LabelFrame(body, text=" Dimensions (mm) ",
-                               bg=CBG, fg=CA, font=F_BOLD,
-                               bd=1, relief="groove", padx=12, pady=10)
-        dim_f.pack(fill="x", pady=(0, 8))
+                               bg=CCA, fg=CA, font=F_SEC,
+                               bd=1, relief="solid", padx=16, pady=14)
+        dim_f.pack(fill="x", pady=(0, 12))
 
         self.vars = {}
         for col, key in enumerate(["Quantity", "Short", "Long", "Channel"]):
-            sub = tk.Frame(dim_f, bg=CBG)
-            sub.grid(row=0, column=col, padx=(0, 16), sticky="w")
-            tk.Label(sub, text=key, bg=CBG, fg=CTX, font=F_BODY).pack(anchor="w")
+            dim_f.grid_columnconfigure(col, weight=1, uniform="dim")
+            sub = tk.Frame(dim_f, bg=CCA)
+            sub.grid(row=0, column=col, padx=(0, 14), sticky="ew")
+            tk.Label(sub, text=key.upper(), bg=CCA, fg=CMU,
+                     font=F_BOLD).pack(anchor="w")
             v = tk.StringVar(value=str(initial.get(key, "")))
             self.vars[key] = v
             e = field_entry(sub, textvariable=v, width=10)
-            e.pack()
+            e.pack(fill="x", pady=(3, 0))
             if col == 0:
                 e.focus_set()
 
+        # Auto-classification hint under the dimensions
+        self._auto_hint = tk.Label(
+            dim_f,
+            text="Channel 9–11 → Flyscreen (Grey)   ·   12–29 → Flat Panel   "
+                 "·   30+ → V-form / Pleated",
+            bg=CCA, fg=CMU, font=F_SM, anchor="w")
+        self._auto_hint.grid(row=1, column=0, columnspan=4, sticky="w", pady=(10, 0))
+
         # ── Classification ────────────────────────────────────────────────
         cls_f = tk.LabelFrame(body, text=" Classification ",
-                               bg=CBG, fg=CA, font=F_BOLD,
-                               bd=1, relief="groove", padx=12, pady=10)
-        cls_f.pack(fill="x", pady=(0, 8))
+                               bg=CCA, fg=CA, font=F_SEC,
+                               bd=1, relief="solid", padx=16, pady=14)
+        cls_f.pack(fill="x", pady=(0, 12))
 
         for col, (key, vals) in enumerate([
             ("Filter Type", VALID_FILTER_TYPES),
             ("Media Type",  _media_types),
         ]):
-            sub = tk.Frame(cls_f, bg=CBG)
-            sub.grid(row=0, column=col, padx=(0, 28), sticky="w")
-            tk.Label(sub, text=key, bg=CBG, fg=CTX, font=F_BODY).pack(anchor="w")
+            cls_f.grid_columnconfigure(col, weight=1, uniform="cls")
+            sub = tk.Frame(cls_f, bg=CCA)
+            sub.grid(row=0, column=col, padx=(0, 20), sticky="ew")
+            tk.Label(sub, text=key.upper(), bg=CCA, fg=CMU, font=F_BOLD).pack(anchor="w")
             v = tk.StringVar(value=str(initial.get(key, "")))
             self.vars[key] = v
             # Use tk.OptionMenu instead of ttk.Combobox — always renders cleanly
             v.set(v.get() or vals[0])
             om = tk.OptionMenu(sub, v, *vals)
-            om.config(relief="solid", bd=1, bg=CCA, fg=CTX,
-                      font=F_BODY, width=18, anchor="w",
+            om.config(relief="solid", bd=1, bg=CBG, fg=CTX,
+                      font=F_BODY, anchor="w",
                       activebackground=CRE, activeforeground=CTX,
-                      highlightthickness=0, cursor="hand2")
+                      highlightthickness=0, cursor="hand2", padx=8, pady=4)
             om["menu"].config(bg=CCA, fg=CTX, font=F_BODY,
                               activebackground=CA, activeforeground="white")
-            om.pack()
+            om.pack(fill="x", pady=(3, 0))
+
+        # Auto-set Filter/Media Type from the channel thickness as the user
+        # types. Attached AFTER the initial values are set so editing an
+        # existing item does not clobber its saved classification on open.
+        self.vars["Channel"].trace_add("write", self._on_channel_change)
 
         # ── Options ───────────────────────────────────────────────────────
         opt_f = tk.LabelFrame(body, text=" Options ",
-                               bg=CBG, fg=CA, font=F_BOLD,
-                               bd=1, relief="groove", padx=12, pady=10)
-        opt_f.pack(fill="x", pady=(0, 8))
+                               bg=CCA, fg=CA, font=F_SEC,
+                               bd=1, relief="solid", padx=16, pady=14)
+        opt_f.pack(fill="x", pady=(0, 12))
 
         self.var_pleat    = tk.BooleanVar(value=bool(initial.get("Pleat Insert", False)))
         self.var_header   = tk.BooleanVar(value=bool(initial.get("Header", False)))
@@ -1447,40 +1507,48 @@ class LineItemDialog(tk.Toplevel):
         ]
         for lbl_text, var, row, col in flags:
             tk.Checkbutton(opt_f, text=lbl_text, variable=var,
-                           bg=CBG, fg=CTX, font=F_BODY,
-                           activebackground=CBG, selectcolor=CCA,
+                           bg=CCA, fg=CTX, font=F_BODY,
+                           activebackground=CCA, selectcolor=CBG,
                            cursor="hand2").grid(row=row, column=col,
                                                 sticky="w", padx=(0, 24),
                                                 pady=(0 if row == 0 else 6, 0))
 
         # ── Page Overrides ────────────────────────────────────────────────
         ov_f = tk.LabelFrame(body, text=" Page Overrides (optional) ",
-                              bg=CBG, fg=CA, font=F_BOLD,
-                              bd=1, relief="groove", padx=12, pady=10)
-        ov_f.pack(fill="x", pady=(0, 8))
+                              bg=CCA, fg=CA, font=F_SEC,
+                              bd=1, relief="solid", padx=16, pady=14)
+        ov_f.pack(fill="x", pady=(0, 4))
 
         tk.Label(ov_f,
                  text="These appear on this item's PDF page only, below the global order notes.",
-                 bg=CBG, fg=CMU, font=F_SM).pack(anchor="w", pady=(0, 6))
+                 bg=CCA, fg=CMU, font=F_SM).pack(anchor="w", pady=(0, 8))
 
-        job_row = tk.Frame(ov_f, bg=CBG)
-        job_row.pack(fill="x", pady=(0, 6))
-        tk.Label(job_row, text="Job:", bg=CBG, fg=CTX,
+        job_row = tk.Frame(ov_f, bg=CCA)
+        job_row.pack(fill="x", pady=(0, 8))
+        tk.Label(job_row, text="Job:", bg=CCA, fg=CTX,
                  font=F_BOLD, width=8, anchor="w").pack(side="left")
         self.var_item_job = tk.StringVar(value=str(initial.get("item_job", "") or ""))
-        field_entry(job_row, textvariable=self.var_item_job, width=36).pack(side="left")
+        field_entry(job_row, textvariable=self.var_item_job, width=36).pack(side="left", fill="x", expand=True)
 
-        tk.Label(ov_f, text="Page Notes:", bg=CBG, fg=CTX,
+        tk.Label(ov_f, text="Page Notes:", bg=CCA, fg=CTX,
                  font=F_BOLD).pack(anchor="w")
         self.txt_notes = tk.Text(ov_f, width=60, height=3, wrap="word",
                                   font=F_BODY, relief="solid", bd=1,
-                                  bg=CCA, fg=CTX, insertbackground=CTX)
-        self.txt_notes.pack(fill="x", pady=(2, 0))
+                                  bg=CBG, fg=CTX, insertbackground=CTX)
+        self.txt_notes.pack(fill="x", pady=(3, 0))
         self.txt_notes.insert("1.0", initial.get("Notes", "") or "")
 
         self.bind("<Escape>", lambda e: self._cancel())
 
     # ─────────────────────────────────────────────────────────────────────
+
+    def _on_channel_change(self, *_):
+        """Auto-set Filter Type (and media for flyscreen) from channel mm."""
+        ft, mt = classify_by_channel(self.vars["Channel"].get())
+        if ft:
+            self.vars["Filter Type"].set(ft)
+        if mt:
+            self.vars["Media Type"].set(mt)
 
     def _cancel(self):
         self.result = None
@@ -1525,6 +1593,8 @@ class LineItemDialog(tk.Toplevel):
             "Notes":               self.txt_notes.get("1.0", "end").strip(),
             "item_job":            self.var_item_job.get().strip(),
         }
+        # Stepped filters always carry the *STEPPED FILTER* customer note.
+        apply_stepped_filter_note(self.result)
         self.destroy()
 
 
@@ -5886,6 +5956,11 @@ class ModernOrderApp(tk.Frame):
         header["priority"] = bool(getattr(self, "_priority_var", None) and self._priority_var.get())
 
         ORDERS_DIR.mkdir(parents=True, exist_ok=True)
+
+        # Ensure every stepped filter carries the *STEPPED FILTER* customer note
+        # (covers items loaded/duplicated from older orders too).
+        for _it in self.items:
+            apply_stepped_filter_note(_it)
 
         filter_items = [i for i in self.items if i.get("item_kind", "filter") != "bag"]
         bag_items    = [i for i in self.items if i.get("item_kind") == "bag"]
