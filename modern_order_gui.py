@@ -1543,12 +1543,20 @@ class LineItemDialog(tk.Toplevel):
     # ─────────────────────────────────────────────────────────────────────
 
     def _on_channel_change(self, *_):
-        """Auto-set Filter Type (and media for flyscreen) from channel mm."""
+        """Auto-set Filter Type — and media — from the channel thickness.
+
+        9–11 mm forces Grey media (flyscreen). If the channel is later changed
+        out of that range, the auto-Grey is undone back to the default G4 so a
+        mistaken 9 mm entry doesn't leave Grey stuck on a Flat Panel / V-form.
+        A media type the user picked themselves (anything but Grey) is kept.
+        """
         ft, mt = classify_by_channel(self.vars["Channel"].get())
         if ft:
             self.vars["Filter Type"].set(ft)
         if mt:
             self.vars["Media Type"].set(mt)
+        elif ft and self.vars["Media Type"].get().strip().upper() == "GREY":
+            self.vars["Media Type"].set("G4")
 
     def _cancel(self):
         self.result = None
@@ -2378,16 +2386,41 @@ class ModernOrderApp(tk.Frame):
         self.content.rowconfigure(0, weight=1)
         self.content.columnconfigure(0, weight=1)
 
+        # Build the landing tab + status bar now so "home" paints immediately.
+        # The other six tabs are constructed lazily — a cold start shouldn't be
+        # blocked building screens (and their date pickers / babel locale data)
+        # the user hasn't opened yet. They warm up during idle time below, and
+        # _show_tab builds any tab on demand if it's clicked first.
+        self._lazy_tab_builders = {
+            "prev_orders": self._build_prev_orders_tab,
+            "customers":   self._build_customers_tab,
+            "dashboard":   self._build_dashboard_tab,
+            "stock":       self._build_stock_tab,
+            "audit_log":   self._build_audit_log_tab,
+            "settings":    self._build_settings_tab,
+        }
         self._build_new_order_tab()
-        self._build_prev_orders_tab()
-        self._build_customers_tab()
-        self._build_dashboard_tab()
-        self._build_stock_tab()
-        self._build_audit_log_tab()
-        self._build_settings_tab()
         self._build_status_bar()
 
         self._show_tab("new_order")
+
+        # Warm the remaining tabs one-per-idle-tick so later switches are
+        # instant, without delaying the first paint of the home screen.
+        self.master.after_idle(self._prebuild_next_tab)
+
+    def _ensure_tab_built(self, key: str):
+        """Construct a tab's widgets on first access (lazy building)."""
+        builder = getattr(self, "_lazy_tab_builders", {}).pop(key, None)
+        if builder is not None:
+            builder()
+
+    def _prebuild_next_tab(self):
+        """Build one not-yet-built tab per idle tick, then reschedule."""
+        builders = getattr(self, "_lazy_tab_builders", None)
+        if not builders:
+            return
+        self._ensure_tab_built(next(iter(builders)))
+        self.master.after_idle(self._prebuild_next_tab)
 
     # ── Header bar ────────────────────────────────────────────────────────
 
@@ -2488,6 +2521,7 @@ class ModernOrderApp(tk.Frame):
         self._tab_buttons[key].config(fg=CTX if entering else CMU)
 
     def _show_tab(self, key: str):
+        self._ensure_tab_built(key)   # lazily build the tab if not constructed yet
         self._active_tab = key
         for k, btn in self._tab_buttons.items():
             active = (k == key)
