@@ -2168,8 +2168,8 @@ class ModernOrderApp(tk.Frame):
 
         if not getattr(sys, "frozen", False):
             messagebox.showinfo("Update",
-                "Auto-update only works in the built EXE.\n"
-                "Download the new version manually from your Supabase Storage.")
+                "Auto-update only works in the installed app.\n"
+                "Download the latest version from the GitHub Releases page.")
             return
 
         dlg = tk.Toplevel(self.master)
