@@ -145,6 +145,26 @@ TAFOrderEntry.spec         PyInstaller build spec
 installer.iss              Inno Setup installer script
 ```
 
+## Working from anywhere (incl. your phone)
+
+The whole release pipeline is cloud-based — you can edit code and ship updates
+without a PC.
+
+**Edit code:** open the repo on github.com and edit files inline, or press `.`
+to open the browser VS Code editor (`github.dev`), or use the **GitHub mobile
+app**. Commit straight to `main`.
+
+**Cut a release (one button):** repo → **Actions** tab → **Build & Release** →
+**Run workflow** → type the version (e.g. `2.0.3`) and optional notes → **Run**.
+GitHub bumps the version, builds the Windows installer, and publishes the
+Release. Installed clients then auto-update.
+
+> ⚠️ A published release auto-updates **all** users immediately, and you can't
+> run/test the Windows app on a phone. CI runs a syntax check before building
+> (so a broken commit won't ship), but it can't catch logic bugs — test bigger
+> changes on a Windows PC (install the release's `TAFOrderEntry_Setup.exe`)
+> before relying on them.
+
 ## Notes
 
 - **Roles:** Director / Admin > Manager > Employee gate destructive actions and

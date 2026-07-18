@@ -1,37 +1,79 @@
 name: Build & Release
 
-# On a version tag (e.g. v2.0.1): build the exe + installer and publish a
-# GitHub Release with the installer attached — installed clients then
-# auto-update from it (see taf_order_app/updater.py).
+# Two ways to cut a release:
+#   • From your PHONE / browser: Actions tab → "Build & Release" → Run workflow
+#       → type the version (e.g. 2.0.3) → Run. CI bumps the version, builds the
+#       installer, and publishes the GitHub Release.
+#   • From a PC: `python push_update.py 2.0.3 "notes"` (pushes a v* tag).
 #
-# On manual dispatch: build only, upload the installer as an artifact.
-#
-# The Supabase anon key is injected from the SUPABASE_ANON_KEY Actions secret
-# so it is never committed to the repo.
+# Installed apps auto-update from the published Release (see taf_order_app/updater.py).
+# Requires the SUPABASE_ANON_KEY Actions secret and a public repo.
 
 on:
   workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version to release, e.g. 2.0.3'
+        required: true
+      notes:
+        description: 'Release notes (optional; auto-generated if blank)'
+        required: false
   push:
     tags:
       - 'v*'
 
 permissions:
-  contents: write        # needed for gh release create
+  contents: write
 
 jobs:
-  build:
+  release:
     runs-on: windows-latest
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
         with:
-          fetch-depth: 0   # so annotated tag messages are available
+          fetch-depth: 0
+
+      - name: Resolve version
+        id: ver
+        shell: bash
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            V="${{ github.event.inputs.version }}"
+            echo "$V" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+$' || { echo "::error::Version must look like 2.0.3"; exit 1; }
+            echo "bump=true" >> "$GITHUB_OUTPUT"
+          else
+            V="${GITHUB_REF_NAME#v}"
+            echo "bump=false" >> "$GITHUB_OUTPUT"
+          fi
+          echo "version=$V" >> "$GITHUB_OUTPUT"
+          echo "tag=v$V"    >> "$GITHUB_OUTPUT"
+          echo "Releasing v$V"
+
+      - name: Bump version, commit & tag (phone/dispatch only)
+        if: steps.ver.outputs.bump == 'true'
+        shell: bash
+        run: |
+          V="${{ steps.ver.outputs.version }}"
+          sed -i -E 's/APP_VERSION = "[^"]+"/APP_VERSION = "'"$V"'"/' taf_order_app/updater.py
+          sed -i -E 's/^AppVersion=.*/AppVersion='"$V"'/'            installer.iss
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add taf_order_app/updater.py installer.iss
+          git commit -m "Release v$V" || echo "no version change to commit"
+          git push origin "HEAD:${{ github.ref_name }}"
+          git tag -f "v$V"
+          git push origin "v$V" --force
 
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.12'
+
+      - name: Syntax check (fail fast before shipping)
+        shell: bash
+        run: python -m compileall -q modern_order_gui.py pdf_generator.py template_filler.py taf_order_app
 
       - name: Install dependencies
         run: |
@@ -65,21 +107,17 @@ jobs:
         run: '& "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" installer.iss'
 
       - name: Publish GitHub Release (setup.exe)
-        if: startsWith(github.ref, 'refs/tags/')
         shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          gh release create "${GITHUB_REF_NAME}" "TAFOrderEntry_Setup.exe" \
-            --title "TAF Order Entry ${GITHUB_REF_NAME}" \
-            --generate-notes \
-          || gh release upload "${GITHUB_REF_NAME}" "TAFOrderEntry_Setup.exe" --clobber
-
-      # Manual (non-tag) runs don't publish a Release. Uncomment to get a
-      # downloadable installer from the Actions run (GitHub delivers it zipped):
-      # - name: Upload installer (manual runs)
-      #   if: ${{ !startsWith(github.ref, 'refs/tags/') }}
-      #   uses: actions/upload-artifact@v4
-      #   with:
-      #     name: TAFOrderEntry_Setup
-      #     path: TAFOrderEntry_Setup.exe
+          TAG="${{ steps.ver.outputs.tag }}"
+          if [ -n "${{ github.event.inputs.notes }}" ]; then
+            gh release create "$TAG" "TAFOrderEntry_Setup.exe" \
+              --title "TAF Order Entry $TAG" --notes "${{ github.event.inputs.notes }}" \
+            || gh release upload "$TAG" "TAFOrderEntry_Setup.exe" --clobber
+          else
+            gh release create "$TAG" "TAFOrderEntry_Setup.exe" \
+              --title "TAF Order Entry $TAG" --generate-notes \
+            || gh release upload "$TAG" "TAFOrderEntry_Setup.exe" --clobber
+          fi
