@@ -89,6 +89,8 @@ a = Analysis(
         'docx.oxml',
         'win32com',
         'win32com.client',
+        'win32print',   # get/set default printer for the Print feature
+        'win32api',
         'pywintypes',
         # stdlib extras sometimes missed
         'tkinter',

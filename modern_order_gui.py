@@ -7049,25 +7049,110 @@ class ModernOrderApp(tk.Frame):
         elif failed:
             messagebox.showerror("Error", f"Could not update {failed} order(s).")
 
-    def _print_file(self, path: str) -> None:
-        """Send a file to the configured printer (or OS default if none set)."""
+    @staticmethod
+    def _shell_verb(path: str, verb: str, params: str = "") -> bool:
+        """Run a Windows shell verb ('print' / 'printto') on a file.
+
+        Returns True only on success. ShellExecuteW returns a value > 32 on
+        success and an error code <= 32 on failure — the old code ignored this,
+        so a failed 'printto' looked like it worked and nothing printed.
+        """
         import ctypes
+        rc = ctypes.windll.shell32.ShellExecuteW(
+            None, verb, str(path), (params or None), str(Path(path).parent), 0)
+        return int(rc) > 32
+
+    @staticmethod
+    def _get_default_printer() -> str:
+        """Current Windows default printer name ('' if unknown)."""
+        try:
+            import win32print
+            return win32print.GetDefaultPrinter() or ""
+        except Exception:
+            pass
+        import subprocess as _sp
+        try:
+            out = _sp.run(
+                ["powershell", "-NoProfile", "-Command",
+                 "(Get-CimInstance Win32_Printer -Filter 'Default=TRUE').Name"],
+                creationflags=0x08000000, capture_output=True, text=True, timeout=10)
+            return (out.stdout or "").strip()
+        except Exception:
+            return ""
+
+    @staticmethod
+    def _set_default_printer(name: str) -> bool:
+        """Set the Windows default printer. Returns True on apparent success."""
+        try:
+            import win32print
+            win32print.SetDefaultPrinter(name)
+            return True
+        except Exception:
+            pass
+        import subprocess as _sp
+        esc = name.replace("'", "''")
+        try:
+            r = _sp.run(
+                ["powershell", "-NoProfile", "-Command",
+                 f"(New-Object -ComObject WScript.Network).SetDefaultPrinter('{esc}')"],
+                creationflags=0x08000000, timeout=15)
+            return r.returncode == 0
+        except Exception:
+            return False
+
+    def _print_file(self, path: str) -> bool:
+        """Send a file to the configured printer (or OS default if none set).
+
+        Returns True if the job was handed off successfully, False if it
+        failed (an error dialog is shown in that case).
+        """
         printer = self._settings.get("default_printer", "").strip()
         try:
-            if platform.system() == "Windows":
-                if printer:
-                    # "printto" verb lets us specify the printer name as the parameter
-                    ctypes.windll.shell32.ShellExecuteW(
-                        None, "printto", str(path), f'"{printer}"',
-                        str(Path(path).parent), 0)
-                else:
-                    os.startfile(str(path), "print")
-            else:
+            if platform.system() != "Windows":
                 import subprocess as _sp
                 cmd = ["lpr", "-P", printer, str(path)] if printer else ["lpr", str(path)]
                 _sp.Popen(cmd)
+                return True
+
+            # ── No specific printer → plain 'print' verb → OS default ────────
+            if not printer:
+                if not self._shell_verb(path, "print"):
+                    raise RuntimeError(
+                        "Windows couldn't print this PDF. Make sure a PDF viewer "
+                        "is installed and set as the default for .pdf files.")
+                return True
+
+            # ── A specific printer is configured ────────────────────────────
+            # Try the direct 'printto' verb first (doesn't touch the system
+            # default). Many default PDF handlers (Edge, Chrome) don't register
+            # it, so fall back to temporarily making the chosen printer the
+            # default and using the near-universal 'print' verb, then restore.
+            if self._shell_verb(path, "printto", f'"{printer}"'):
+                return True
+
+            previous = self._get_default_printer()
+            if not self._set_default_printer(printer):
+                raise RuntimeError(
+                    f"Couldn't select the printer '{printer}'.\n"
+                    "Open Settings → Default Printer → Refresh and make sure "
+                    "the name matches exactly, or leave it blank to use the "
+                    "Windows default printer.")
+            try:
+                ok = self._shell_verb(path, "print")
+            finally:
+                # Restore the user's previous default once the PDF app has had
+                # time to launch and spool the job (printing is asynchronous).
+                if previous and previous != printer:
+                    self.master.after(
+                        8000, lambda p=previous: self._set_default_printer(p))
+            if not ok:
+                raise RuntimeError(
+                    "Windows couldn't print this PDF. Make sure a PDF viewer "
+                    "is installed and set as the default for .pdf files.")
+            return True
         except Exception as exc:
             messagebox.showerror("Print Error", f"Could not send to printer:\n{exc}")
+            return False
 
     def _print_prev_order(self):
         """Regenerate the selected order's PDFs and send to the default printer."""
@@ -7175,8 +7260,9 @@ class ModernOrderApp(tk.Frame):
             if not real_pdfs:
                 messagebox.showerror("Print", "No PDF was generated.")
                 return
-            for p in real_pdfs:
-                self._print_file(p)
+            if not all(self._print_file(p) for p in real_pdfs):
+                self.status_var.set("Print failed — see the error message.")
+                return
             self.status_var.set(
                 f"Sent to printer: {row.get('customer','')} / {row.get('order_no','')}")
             _db.log_action("order_printed",
