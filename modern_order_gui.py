@@ -1998,6 +1998,7 @@ class ModernOrderApp(tk.Frame):
         self._all_orders_data: list = []
         self._tab_frames: dict = {}
         self._tab_buttons: dict = {}
+        self._tab_loaded: dict = {}   # tab -> monotonic time of last data load (freshness cache)
 
         # Load persisted settings
         self._settings = _load_settings()
@@ -2424,6 +2425,27 @@ class ModernOrderApp(tk.Frame):
             self._tab_underlines[k].config(bg=CA if active else CCA)
 
         self._tab_frames[key].tkraise()
+        self._maybe_refresh(key)
+
+    # Seconds a tab's data stays "fresh" — bouncing between tabs within this
+    # window skips the re-fetch + treeview rebuild, so switching is instant.
+    _TAB_TTL = 60
+
+    def _maybe_refresh(self, key: str):
+        """Load a tab's data on show, but skip if it was loaded recently.
+
+        Manual Refresh buttons and data mutations call the _refresh_* methods
+        directly (bypassing this gate), so they always run and re-stamp
+        freshness. Order generation invalidates prev_orders + dashboard.
+        """
+        import time
+        # Settings' local-storage line is cheap; always keep it current.
+        if key == "settings" and hasattr(self, "_local_storage_lbl"):
+            self._local_storage_lbl.set(self._local_storage_info())
+
+        if time.monotonic() - self._tab_loaded.get(key, 0.0) < self._TAB_TTL:
+            return  # still fresh — instant switch, no network / rebuild
+        self._tab_loaded[key] = time.monotonic()
 
         if key == "new_order":
             self._load_known_customers()
@@ -2439,8 +2461,6 @@ class ModernOrderApp(tk.Frame):
             self._refresh_audit_log()
         elif key == "settings":
             self._refresh_media_list()
-            if hasattr(self, "_local_storage_lbl"):
-                self._local_storage_lbl.set(self._local_storage_info())
 
     # ── New Order tab ─────────────────────────────────────────────────────
 
@@ -2867,16 +2887,35 @@ class ModernOrderApp(tk.Frame):
                  bg=CA, pady=7, padx=16, font=F_BOLD).pack(side="left")
 
     def _refresh_dashboard(self):
-        """Called when the Dashboard tab is shown."""
-        data = getattr(self, "_all_orders_data", [])
-        if not data:
+        """Called when the Dashboard tab is shown. Fetches order data off the
+        main thread so opening the tab never blocks the UI."""
+        data = getattr(self, "_all_orders_data", None)
+        if data:
+            self._refresh_charts()
+            self._refresh_alerts(data)
+            return
+
+        import queue as _q
+        q = _q.Queue()
+
+        def _work():
             try:
-                data = self._scan_orders()
-                self._all_orders_data = data
+                q.put(self._scan_orders())
             except Exception:
-                data = []
-        self._refresh_charts()
-        self._refresh_alerts(data)
+                q.put([])
+
+        def _poll():
+            try:
+                data = q.get_nowait()
+            except _q.Empty:
+                self.master.after(60, _poll)
+                return
+            self._all_orders_data = data
+            self._refresh_charts()
+            self._refresh_alerts(data)
+
+        threading.Thread(target=_work, daemon=True).start()
+        self.master.after(60, _poll)
 
     def _refresh_charts(self):
         import collections
@@ -6010,6 +6049,11 @@ class ModernOrderApp(tk.Frame):
 
             if opened or json_path:
                 self._clear_draft()
+                # New order created — force Previous Orders + Dashboard to reload
+                # next time they're shown (freshness cache invalidation).
+                self._tab_loaded.pop("prev_orders", None)
+                self._tab_loaded.pop("dashboard", None)
+                self._all_orders_data = []
                 msg = f"Order PDF:\n  {opened}" if opened else ""
                 if json_path:
                     msg += (("\n\n" if msg else "") + f"Order saved:\n  {json_path}")
