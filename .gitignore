@@ -32,8 +32,10 @@ Test_TEST.xlsx
 test_test.pdf
 compare_test.pdf
 Templates.pdf
-_*.png
-_*.py
+# Scratch files live at the repo root only — anchored so they never match
+# package files like taf_order_app/__init__.py.
+/_*.png
+/_*.py
 
 # ── OS / editor ─────────────────────────────────────────────────────────
 Thumbs.db
