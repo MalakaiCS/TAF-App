@@ -1,7 +1,7 @@
 [Setup]
 AppId=TAF Order Entry
 AppName=TAF Order Entry
-AppVersion=2.0.4
+AppVersion=2.0.5
 AppPublisher=TAF
 DefaultDirName={autopf}\TAF Order Entry
 DefaultGroupName=TAF Order Entry
