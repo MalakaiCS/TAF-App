@@ -77,8 +77,6 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          TAG="${GITHUB_REF_NAME}"
-          NOTES="$(git tag -l --format='%(contents)' "$TAG")"
-          gh release create "$TAG" "TAFOrderEntry_Setup.exe" \
-            --title "TAF Order Entry $TAG" \
-            --notes "${NOTES:-Release $TAG}"
+          gh release create "${GITHUB_REF_NAME}" "TAFOrderEntry_Setup.exe" \
+            --title "TAF Order Entry ${GITHUB_REF_NAME}" \
+            --generate-notes
