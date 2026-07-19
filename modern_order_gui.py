@@ -57,6 +57,46 @@ if not SETTINGS_FILE.exists():
 # Built-in defaults (never deletable from Settings)
 DEFAULT_MEDIA_TYPES = list(VALID_MEDIA_TYPES)
 
+# Customer-facing note automatically stamped on every stepped-filter item.
+STEPPED_FILTER_NOTE = "*STEPPED FILTER*"
+
+
+def classify_by_channel(channel) -> "tuple[str | None, str | None]":
+    """Map a channel thickness (mm) to an auto filter/media type.
+
+    Returns ``(filter_type, media_type)`` where either element may be ``None``
+    when that field should be left untouched:
+
+      •  9–11 mm  → Flyscreen, GREY media
+      • 12–29 mm  → Flat Panel  (media left as-is)
+      • 30 mm +   → V-form / pleated panel filter (media left as-is)
+    """
+    try:
+        ch = int(str(channel).strip())
+    except (TypeError, ValueError):
+        return (None, None)
+    if 9 <= ch <= 11:
+        return ("Flyscreen", "GREY")
+    if 12 <= ch <= 29:
+        return ("Flat Panel", None)
+    if ch >= 30:
+        return ("V-form", None)
+    return (None, None)
+
+
+def apply_stepped_filter_note(item: dict) -> dict:
+    """Ensure stepped-filter items carry the *STEPPED FILTER* customer note.
+
+    Mutates and returns ``item``. The note is prepended to any existing notes
+    and is idempotent (never added twice).
+    """
+    if (item.get("Filter Type") or "").strip() != "Stepped Filter":
+        return item
+    notes = (item.get("Notes") or "").strip()
+    if STEPPED_FILTER_NOTE.lower() not in notes.lower():
+        item["Notes"] = f"{STEPPED_FILTER_NOTE}\n{notes}".strip() if notes else STEPPED_FILTER_NOTE
+    return item
+
 
 def _load_settings() -> dict:
     if SETTINGS_FILE.exists():
@@ -1207,7 +1247,7 @@ class CompressorFilterDialog(tk.Toplevel):
                 "Short": fl["short"], "Long": fl["long"], "Channel": fl["channel"],
                 "Pleat Insert": False, "Header": False,
                 "Use Stock V-form": False, "Use Stock Flyscreen": False,
-                "Notes": "",
+                "Notes": STEPPED_FILTER_NOTE,
             }],
             "job":   "",
             "notes": "",
@@ -1369,70 +1409,90 @@ class LineItemDialog(tk.Toplevel):
         _media_types = media_types if media_types is not None else DEFAULT_MEDIA_TYPES
 
         # ── Header strip (top) ────────────────────────────────────────────
-        hdr = tk.Frame(self, bg=CA, padx=16, pady=10)
+        hdr = tk.Frame(self, bg=CA, padx=20, pady=14)
         hdr.pack(fill="x", side="top")
         tk.Label(hdr, text=title, bg=CA, fg="white",
-                 font=(FAM, 11, "bold")).pack(anchor="w")
+                 font=(FAM, 12, "bold")).pack(anchor="w")
+        tk.Label(hdr, text="Enter the panel size — the filter & media type are set "
+                           "automatically from the channel thickness.",
+                 bg=CA, fg="white", font=F_SM).pack(anchor="w", pady=(2, 0))
 
         # ── Footer buttons — packed BEFORE body so they always get space ──
-        foot = tk.Frame(self, bg=CBG, padx=16, pady=10)
+        foot = tk.Frame(self, bg=CCA, padx=20, pady=12,
+                        highlightbackground=CSP, highlightthickness=1)
         foot.pack(fill="x", side="bottom")
-        flat_btn(foot, "Cancel",    self._cancel, bg=CNE, pady=7).pack(side="right", padx=(8, 0))
-        flat_btn(foot, "Save Item", self._save,   bg=CGR, pady=7).pack(side="right")
+        flat_btn(foot, "Cancel",    self._cancel, bg=CNE, pady=8).pack(side="right", padx=(10, 0))
+        flat_btn(foot, "Save Item", self._save,   bg=CGR, pady=8).pack(side="right")
 
         # ── Body (fills remaining space between header and footer) ────────
-        body = tk.Frame(self, bg=CBG, padx=16, pady=10)
+        body = tk.Frame(self, bg=CBG, padx=20, pady=16)
         body.pack(fill="both", expand=True, side="top")
 
         # ── Dimensions ────────────────────────────────────────────────────
         dim_f = tk.LabelFrame(body, text=" Dimensions (mm) ",
-                               bg=CBG, fg=CA, font=F_BOLD,
-                               bd=1, relief="groove", padx=12, pady=10)
-        dim_f.pack(fill="x", pady=(0, 8))
+                               bg=CCA, fg=CA, font=F_SEC,
+                               bd=1, relief="solid", padx=16, pady=14)
+        dim_f.pack(fill="x", pady=(0, 12))
 
         self.vars = {}
         for col, key in enumerate(["Quantity", "Short", "Long", "Channel"]):
-            sub = tk.Frame(dim_f, bg=CBG)
-            sub.grid(row=0, column=col, padx=(0, 16), sticky="w")
-            tk.Label(sub, text=key, bg=CBG, fg=CTX, font=F_BODY).pack(anchor="w")
+            dim_f.grid_columnconfigure(col, weight=1, uniform="dim")
+            sub = tk.Frame(dim_f, bg=CCA)
+            sub.grid(row=0, column=col, padx=(0, 14), sticky="ew")
+            tk.Label(sub, text=key.upper(), bg=CCA, fg=CMU,
+                     font=F_BOLD).pack(anchor="w")
             v = tk.StringVar(value=str(initial.get(key, "")))
             self.vars[key] = v
             e = field_entry(sub, textvariable=v, width=10)
-            e.pack()
+            e.pack(fill="x", pady=(3, 0))
             if col == 0:
                 e.focus_set()
 
+        # Auto-classification hint under the dimensions
+        self._auto_hint = tk.Label(
+            dim_f,
+            text="Channel 9–11 → Flyscreen (Grey)   ·   12–29 → Flat Panel   "
+                 "·   30+ → V-form / Pleated",
+            bg=CCA, fg=CMU, font=F_SM, anchor="w")
+        self._auto_hint.grid(row=1, column=0, columnspan=4, sticky="w", pady=(10, 0))
+
         # ── Classification ────────────────────────────────────────────────
         cls_f = tk.LabelFrame(body, text=" Classification ",
-                               bg=CBG, fg=CA, font=F_BOLD,
-                               bd=1, relief="groove", padx=12, pady=10)
-        cls_f.pack(fill="x", pady=(0, 8))
+                               bg=CCA, fg=CA, font=F_SEC,
+                               bd=1, relief="solid", padx=16, pady=14)
+        cls_f.pack(fill="x", pady=(0, 12))
 
         for col, (key, vals) in enumerate([
             ("Filter Type", VALID_FILTER_TYPES),
             ("Media Type",  _media_types),
         ]):
-            sub = tk.Frame(cls_f, bg=CBG)
-            sub.grid(row=0, column=col, padx=(0, 28), sticky="w")
-            tk.Label(sub, text=key, bg=CBG, fg=CTX, font=F_BODY).pack(anchor="w")
+            cls_f.grid_columnconfigure(col, weight=1, uniform="cls")
+            sub = tk.Frame(cls_f, bg=CCA)
+            sub.grid(row=0, column=col, padx=(0, 20), sticky="ew")
+            tk.Label(sub, text=key.upper(), bg=CCA, fg=CMU, font=F_BOLD).pack(anchor="w")
             v = tk.StringVar(value=str(initial.get(key, "")))
             self.vars[key] = v
             # Use tk.OptionMenu instead of ttk.Combobox — always renders cleanly
             v.set(v.get() or vals[0])
             om = tk.OptionMenu(sub, v, *vals)
-            om.config(relief="solid", bd=1, bg=CCA, fg=CTX,
-                      font=F_BODY, width=18, anchor="w",
+            om.config(relief="solid", bd=1, bg=CBG, fg=CTX,
+                      font=F_BODY, anchor="w",
                       activebackground=CRE, activeforeground=CTX,
-                      highlightthickness=0, cursor="hand2")
+                      highlightthickness=0, cursor="hand2", padx=8, pady=4)
             om["menu"].config(bg=CCA, fg=CTX, font=F_BODY,
                               activebackground=CA, activeforeground="white")
-            om.pack()
+            om.pack(fill="x", pady=(3, 0))
+
+        # Auto-set Filter/Media Type from the channel thickness as the user
+        # types. Attached AFTER the initial values are set so editing an
+        # existing item does not clobber its saved classification on open.
+        self.vars["Channel"].trace_add("write", self._on_channel_change)
 
         # ── Options ───────────────────────────────────────────────────────
         opt_f = tk.LabelFrame(body, text=" Options ",
-                               bg=CBG, fg=CA, font=F_BOLD,
-                               bd=1, relief="groove", padx=12, pady=10)
-        opt_f.pack(fill="x", pady=(0, 8))
+                               bg=CCA, fg=CA, font=F_SEC,
+                               bd=1, relief="solid", padx=16, pady=14)
+        opt_f.pack(fill="x", pady=(0, 12))
 
         self.var_pleat    = tk.BooleanVar(value=bool(initial.get("Pleat Insert", False)))
         self.var_header   = tk.BooleanVar(value=bool(initial.get("Header", False)))
@@ -1447,40 +1507,56 @@ class LineItemDialog(tk.Toplevel):
         ]
         for lbl_text, var, row, col in flags:
             tk.Checkbutton(opt_f, text=lbl_text, variable=var,
-                           bg=CBG, fg=CTX, font=F_BODY,
-                           activebackground=CBG, selectcolor=CCA,
+                           bg=CCA, fg=CTX, font=F_BODY,
+                           activebackground=CCA, selectcolor=CBG,
                            cursor="hand2").grid(row=row, column=col,
                                                 sticky="w", padx=(0, 24),
                                                 pady=(0 if row == 0 else 6, 0))
 
         # ── Page Overrides ────────────────────────────────────────────────
         ov_f = tk.LabelFrame(body, text=" Page Overrides (optional) ",
-                              bg=CBG, fg=CA, font=F_BOLD,
-                              bd=1, relief="groove", padx=12, pady=10)
-        ov_f.pack(fill="x", pady=(0, 8))
+                              bg=CCA, fg=CA, font=F_SEC,
+                              bd=1, relief="solid", padx=16, pady=14)
+        ov_f.pack(fill="x", pady=(0, 4))
 
         tk.Label(ov_f,
                  text="These appear on this item's PDF page only, below the global order notes.",
-                 bg=CBG, fg=CMU, font=F_SM).pack(anchor="w", pady=(0, 6))
+                 bg=CCA, fg=CMU, font=F_SM).pack(anchor="w", pady=(0, 8))
 
-        job_row = tk.Frame(ov_f, bg=CBG)
-        job_row.pack(fill="x", pady=(0, 6))
-        tk.Label(job_row, text="Job:", bg=CBG, fg=CTX,
+        job_row = tk.Frame(ov_f, bg=CCA)
+        job_row.pack(fill="x", pady=(0, 8))
+        tk.Label(job_row, text="Job:", bg=CCA, fg=CTX,
                  font=F_BOLD, width=8, anchor="w").pack(side="left")
         self.var_item_job = tk.StringVar(value=str(initial.get("item_job", "") or ""))
-        field_entry(job_row, textvariable=self.var_item_job, width=36).pack(side="left")
+        field_entry(job_row, textvariable=self.var_item_job, width=36).pack(side="left", fill="x", expand=True)
 
-        tk.Label(ov_f, text="Page Notes:", bg=CBG, fg=CTX,
+        tk.Label(ov_f, text="Page Notes:", bg=CCA, fg=CTX,
                  font=F_BOLD).pack(anchor="w")
         self.txt_notes = tk.Text(ov_f, width=60, height=3, wrap="word",
                                   font=F_BODY, relief="solid", bd=1,
-                                  bg=CCA, fg=CTX, insertbackground=CTX)
-        self.txt_notes.pack(fill="x", pady=(2, 0))
+                                  bg=CBG, fg=CTX, insertbackground=CTX)
+        self.txt_notes.pack(fill="x", pady=(3, 0))
         self.txt_notes.insert("1.0", initial.get("Notes", "") or "")
 
         self.bind("<Escape>", lambda e: self._cancel())
 
     # ─────────────────────────────────────────────────────────────────────
+
+    def _on_channel_change(self, *_):
+        """Auto-set Filter Type — and media — from the channel thickness.
+
+        9–11 mm forces Grey media (flyscreen). If the channel is later changed
+        out of that range, the auto-Grey is undone back to the default G4 so a
+        mistaken 9 mm entry doesn't leave Grey stuck on a Flat Panel / V-form.
+        A media type the user picked themselves (anything but Grey) is kept.
+        """
+        ft, mt = classify_by_channel(self.vars["Channel"].get())
+        if ft:
+            self.vars["Filter Type"].set(ft)
+        if mt:
+            self.vars["Media Type"].set(mt)
+        elif ft and self.vars["Media Type"].get().strip().upper() == "GREY":
+            self.vars["Media Type"].set("G4")
 
     def _cancel(self):
         self.result = None
@@ -1525,6 +1601,8 @@ class LineItemDialog(tk.Toplevel):
             "Notes":               self.txt_notes.get("1.0", "end").strip(),
             "item_job":            self.var_item_job.get().strip(),
         }
+        # Stepped filters always carry the *STEPPED FILTER* customer note.
+        apply_stepped_filter_note(self.result)
         self.destroy()
 
 
@@ -2238,48 +2316,53 @@ class ModernOrderApp(tk.Frame):
     def _check_update_manual(self):
         from taf_order_app.updater import check_for_update, get_current_remote_version
         import queue as _q
-        self._check_upd_btn.config(state="disabled", text="Checking…")
+
+        # Guard against re-entrancy. We keep the button ENABLED and just change
+        # its label — the disabled pill renders light-on-light and looked like
+        # the button had vanished. (No self.update() here either — calling it
+        # inside a click handler is a re-entrancy hazard.)
+        if getattr(self, "_upd_checking", False):
+            return
+        self._upd_checking = True
+        self._check_upd_btn.config(text="Checking…")
         self._upd_status_var.set("Checking for updates…")
-        self.update()
         q = _q.Queue()
 
         def _work():
             try:
-                info = check_for_update()
-                q.put(("ok", info))
+                info   = check_for_update()
+                remote = get_current_remote_version()
+                q.put(("ok", (info, remote)))
             except Exception as exc:
                 q.put(("error", str(exc)))
 
         def _poll():
             try:
-                while True:
-                    kind, data = q.get_nowait()
-                    self._check_upd_btn.config(state="normal", text="Check for Updates")
-                    if kind == "ok":
-                        if data:
-                            v     = data.get("version", "")
-                            notes = data.get("release_notes", "")
-                            preview = (notes.splitlines()[0].strip()[:60] + "…") if notes else ""
-                            self._upd_status_var.set(
-                                f"v{v} is available" + (f"  —  {preview}" if preview else ""))
-                            self._pending_update = data
-                            self._install_upd_btn.pack(side="left", padx=(8, 0))
-                            self._update_banner_shown = False   # allow re-show
-                            self._show_update_banner(data)
-                        else:
-                            remote = get_current_remote_version()
-                            self._upd_status_var.set(
-                                f"You are up to date.  (Latest: v{remote})")
-                            self._install_upd_btn.pack_forget()
-                    else:
-                        self._upd_status_var.set(f"Check failed: {data}")
-                    return
+                kind, data = q.get_nowait()
             except _q.Empty:
-                pass
-            self.master.after(100, _poll)
+                self.master.after(150, _poll)
+                return
+            # Whatever happened, always restore the button so it can't get
+            # stuck / invisible.
+            self._upd_checking = False
+            self._check_upd_btn.config(state="normal", text="Check for Updates")
+            if kind == "ok":
+                info, remote = data
+                if info:
+                    v = info.get("version", "")
+                    self._upd_status_var.set(f"v{v} is available.")
+                    self._pending_update = info
+                    self._install_upd_btn.pack(side="left", padx=(8, 0))
+                    self._update_banner_shown = False   # allow re-show
+                    self._show_update_banner(info)
+                else:
+                    self._upd_status_var.set(f"You're up to date.  (v{remote})")
+                    self._install_upd_btn.pack_forget()
+            else:
+                self._upd_status_var.set(f"Check failed: {data}")
 
         threading.Thread(target=_work, daemon=True).start()
-        self.master.after(100, _poll)
+        self.master.after(150, _poll)
 
     def _open_user_management(self):
         from taf_order_app.user_management import UserManagementDialog
@@ -2308,16 +2391,42 @@ class ModernOrderApp(tk.Frame):
         self.content.rowconfigure(0, weight=1)
         self.content.columnconfigure(0, weight=1)
 
+        # Build the landing tab + status bar now so "home" paints immediately.
+        # The other six tabs are constructed lazily — a cold start shouldn't be
+        # blocked building screens (and their date pickers / babel locale data)
+        # the user hasn't opened yet. They warm up during idle time below, and
+        # _show_tab builds any tab on demand if it's clicked first.
+        self._lazy_tab_builders = {
+            "prev_orders": self._build_prev_orders_tab,
+            "customers":   self._build_customers_tab,
+            "dashboard":   self._build_dashboard_tab,
+            "stock":       self._build_stock_tab,
+            "audit_log":   self._build_audit_log_tab,
+            "settings":    self._build_settings_tab,
+        }
         self._build_new_order_tab()
-        self._build_prev_orders_tab()
-        self._build_customers_tab()
-        self._build_dashboard_tab()
-        self._build_stock_tab()
-        self._build_audit_log_tab()
-        self._build_settings_tab()
         self._build_status_bar()
 
-        self._show_tab("new_order")
+        # Land on Settings at startup (per request), not New Order.
+        self._show_tab("settings")
+
+        # Warm the remaining tabs one-per-idle-tick so later switches are
+        # instant, without delaying the first paint of the home screen.
+        self.master.after_idle(self._prebuild_next_tab)
+
+    def _ensure_tab_built(self, key: str):
+        """Construct a tab's widgets on first access (lazy building)."""
+        builder = getattr(self, "_lazy_tab_builders", {}).pop(key, None)
+        if builder is not None:
+            builder()
+
+    def _prebuild_next_tab(self):
+        """Build one not-yet-built tab per idle tick, then reschedule."""
+        builders = getattr(self, "_lazy_tab_builders", None)
+        if not builders:
+            return
+        self._ensure_tab_built(next(iter(builders)))
+        self.master.after_idle(self._prebuild_next_tab)
 
     # ── Header bar ────────────────────────────────────────────────────────
 
@@ -2418,6 +2527,7 @@ class ModernOrderApp(tk.Frame):
         self._tab_buttons[key].config(fg=CTX if entering else CMU)
 
     def _show_tab(self, key: str):
+        self._ensure_tab_built(key)   # lazily build the tab if not constructed yet
         self._active_tab = key
         for k, btn in self._tab_buttons.items():
             active = (k == key)
@@ -2772,7 +2882,7 @@ class ModernOrderApp(tk.Frame):
         tbl_wrap.rowconfigure(0, weight=1)
         tbl_wrap.columnconfigure(0, weight=1)
 
-        ocols = ("customer", "order_no", "date_ordered", "date_due", "status", "n_items", "created_by", "file")
+        ocols = ("customer", "order_no", "date_ordered", "date_due", "status", "printed", "n_items", "created_by", "file")
         self.orders_tree = ttk.Treeview(tbl_wrap, columns=ocols,
                                          show="tree headings",
                                          style="TAF.Treeview",
@@ -2787,6 +2897,7 @@ class ModernOrderApp(tk.Frame):
             "date_ordered": ("Date Ordered",   110, "center"),
             "date_due":     ("Date Due",       100, "center"),
             "status":       ("Status",         120, "center"),
+            "printed":      ("Printed",         90, "center"),
             "n_items":      ("# Items",         70, "center"),
             "created_by":   ("Created By",     180, "w"),
             "file":         ("Source",         130, "center"),
@@ -3326,6 +3437,9 @@ class ModernOrderApp(tk.Frame):
 
         flat_btn(top, "↻ Refresh", self._refresh_customers_list,
                  bg=CNE, pady=5, padx=10, font=F_BODY).pack(side="right", padx=(8, 0))
+        flat_btn(top, "⇩ Import from Orders",
+                 self._import_customers_from_orders,
+                 bg=CGR, pady=5, padx=12, font=F_BODY).pack(side="right", padx=(8, 0))
         flat_btn(top, "+ Add Customer",
                  lambda: self._open_customer_dialog(),
                  bg=CA, pady=5, padx=12, font=F_BOLD).pack(side="right")
@@ -3389,6 +3503,114 @@ class ModernOrderApp(tk.Frame):
                  bg=CRD, pady=7).pack(side="right")
 
         self._customers_data: list = []
+
+    # ── Import customers from existing orders ─────────────────────────────
+    @staticmethod
+    def _split_location(loc: str) -> "tuple[str, str]":
+        """Best-effort split of a free-text location into (city, state)."""
+        loc = (loc or "").strip()
+        if not loc:
+            return "", ""
+        if "," in loc:
+            city, state = loc.rsplit(",", 1)
+            return city.strip(), state.strip()
+        return loc, ""
+
+    def _import_customers_from_orders(self):
+        """Create customer records for every customer that appears in existing
+        orders (DB + local) but isn't in the customer database yet."""
+        if not (_db.is_ready() and _db.current_user()):
+            messagebox.showinfo("Import from Orders",
+                "You need to be signed in to the shared database to import customers.")
+            return
+        if not messagebox.askyesno(
+                "Import from Orders",
+                "Scan all previous orders and add any customers that aren't in "
+                "the customer database yet?\n\n"
+                "Existing customers are left untouched. Contact name and "
+                "location are filled in from each customer's most recent order "
+                "where available."):
+            return
+
+        self.status_var.set("Importing customers from orders…")
+
+        def _work():
+            added, err = [], None
+            try:
+                # Existing names (active + inactive) to avoid duplicates.
+                existing = {(c.get("name") or "").strip().lower()
+                            for c in _db.get_customers(active_only=False)}
+
+                # Gather headers from DB orders (richest) + local JSON orders.
+                headers = []
+                try:
+                    for r in _db.get_all_orders():
+                        h = r.get("header") or {}
+                        headers.append({
+                            "name":      r.get("customer_name") or h.get("Customer Name", ""),
+                            "attention": h.get("Attention", ""),
+                            "location":  h.get("Location", ""),
+                        })
+                except Exception:
+                    pass
+                for r in self._scan_local_orders():
+                    h = (r.get("db_header") or {})
+                    headers.append({
+                        "name":      r.get("customer", ""),
+                        "attention": h.get("Attention", ""),
+                        "location":  h.get("Location", ""),
+                    })
+
+                # First occurrence wins (orders come newest-first).
+                seen, to_add = set(existing), {}
+                for h in headers:
+                    name = (h.get("name") or "").strip()
+                    key  = name.lower()
+                    if not name or key in seen:
+                        continue
+                    seen.add(key)
+                    to_add[key] = h
+
+                for h in to_add.values():
+                    city, state = self._split_location(h.get("location", ""))
+                    try:
+                        _db.create_customer({
+                            "name":           h["name"].strip(),
+                            "contact_person": (h.get("attention") or "").strip(),
+                            "delivery_city":  city,
+                            "delivery_state": state,
+                            "notes":          "Imported from existing orders.",
+                            "is_active":      True,
+                        })
+                        added.append(h["name"].strip())
+                    except Exception:
+                        pass
+            except Exception as exc:
+                err = str(exc)
+
+            def _done():
+                if err:
+                    messagebox.showerror("Import from Orders", f"Import failed:\n{err}")
+                    self.status_var.set("Customer import failed.")
+                    return
+                if added:
+                    _db.log_action("customers_imported",
+                                   f"{len(added)} customer(s) added from orders")
+                    preview = "\n".join(f"  • {n}" for n in sorted(added)[:20])
+                    more = f"\n  …and {len(added) - 20} more" if len(added) > 20 else ""
+                    messagebox.showinfo("Import from Orders",
+                        f"Added {len(added)} new customer(s):\n\n{preview}{more}")
+                else:
+                    messagebox.showinfo("Import from Orders",
+                        "No new customers found — every customer in your orders "
+                        "is already in the database.")
+                self.status_var.set(
+                    f"Customer import complete — {len(added)} added.")
+                self._refresh_customers_list()
+
+            self.master.after(0, _done)
+
+        threading.Thread(target=_work, daemon=True).start()
 
     def _refresh_customers_list(self):
         import queue as _q
@@ -5887,6 +6109,11 @@ class ModernOrderApp(tk.Frame):
 
         ORDERS_DIR.mkdir(parents=True, exist_ok=True)
 
+        # Ensure every stepped filter carries the *STEPPED FILTER* customer note
+        # (covers items loaded/duplicated from older orders too).
+        for _it in self.items:
+            apply_stepped_filter_note(_it)
+
         filter_items = [i for i in self.items if i.get("item_kind", "filter") != "bag"]
         bag_items    = [i for i in self.items if i.get("item_kind") == "bag"]
         total        = len(self.items)
@@ -6005,7 +6232,8 @@ class ModernOrderApp(tk.Frame):
 
             # ── Save JSON + Database ───────────────────────────────────────
             prog.advance("Saving order…")
-            json_path = None
+            json_path     = None
+            new_order_id  = None
             try:
                 json_path = service.save_order_json(header, all_items)
             except Exception as exc:
@@ -6013,7 +6241,7 @@ class ModernOrderApp(tk.Frame):
 
             if _db.is_ready() and _db.current_user():
                 try:
-                    _db.save_order(header, all_items, order_type)
+                    new_order_id = _db.save_order(header, all_items, order_type)
                     _db.log_action("order_created",
                         f"Customer: {header.get('Customer Name','')}  "
                         f"O/N: {header.get('Order Number','')}  "
@@ -6025,24 +6253,22 @@ class ModernOrderApp(tk.Frame):
 
             # ── Hand results back to the main thread ──────────────────────
             prog.after(0, lambda: _finish(opened, json_path, errors,
-                                          real_pdfs, pdf_paths))
+                                          real_pdfs, pdf_paths, new_order_id))
 
-        def _finish(opened, json_path, errors, real_pdfs, pdf_paths):
+        def _finish(opened, json_path, errors, real_pdfs, pdf_paths, new_order_id=None):
             prog.close()
-            # Open the file(s)
+
+            # Collect the PDF(s) to send to the printer. We no longer open the
+            # PDF on generation — it's generated (and saved) then printed
+            # automatically, same routing the Print button uses.
+            to_print = []
             if len(real_pdfs) > 1:
                 merged = str(ORDERS_DIR / f"{base}_order.pdf")
-                if os.path.exists(merged):
-                    os.startfile(merged)
-                else:
-                    for p in real_pdfs:
-                        os.startfile(p)
+                to_print = [merged] if os.path.exists(merged) else list(real_pdfs)
             elif real_pdfs:
-                os.startfile(real_pdfs[0])
+                to_print = [real_pdfs[0]]
             elif pdf_paths:
-                for p in pdf_paths:
-                    if os.path.exists(p):
-                        os.startfile(p)
+                to_print = [p for p in pdf_paths if os.path.exists(p)]
 
             if errors:
                 messagebox.showerror("Errors", "\n\n".join(errors))
@@ -6057,7 +6283,37 @@ class ModernOrderApp(tk.Frame):
                 msg = f"Order PDF:\n  {opened}" if opened else ""
                 if json_path:
                     msg += (("\n\n" if msg else "") + f"Order saved:\n  {json_path}")
-                self.status_var.set("Order generated and opened.")
+
+                # Send to the printer on a background thread so the UI stays
+                # responsive while the job spools (printing can take seconds).
+                if to_print:
+                    self.status_var.set("Order generated — sending to printer…")
+
+                    def _print_worker():
+                        perr = ""
+                        for p in to_print:
+                            perr = self._print_file(p)
+                            if perr:
+                                break
+                        if not perr:
+                            # Auto-printed on generate → flag it printed.
+                            self._flag_printed(db_id=new_order_id, json_path=json_path)
+
+                        def _done():
+                            if perr:
+                                messagebox.showerror(
+                                    "Print Error",
+                                    f"The order was generated and saved, but "
+                                    f"printing failed:\n{perr}")
+                                self.status_var.set("Order generated — printing failed.")
+                            else:
+                                self.status_var.set("Order generated and sent to printer.")
+                        self.master.after(0, _done)
+
+                    threading.Thread(target=_print_worker, daemon=True).start()
+                else:
+                    self.status_var.set("Order generated.")
+
                 messagebox.showinfo("Done", msg)
 
         threading.Thread(target=_worker, daemon=True).start()
@@ -6125,6 +6381,8 @@ class ModernOrderApp(tk.Frame):
                     "db_id":        None,
                     "db_header":    None,
                     "db_items":     None,
+                    "printed":      bool(h.get("printed", False)),
+                    "printed_at":   h.get("printed_at", ""),
                 })
             except Exception:
                 pass
@@ -6157,6 +6415,8 @@ class ModernOrderApp(tk.Frame):
                         "db_items":     r.get("items") or [],
                         "priority":          bool((r.get("header") or {}).get("priority", False)),
                         "status":            (r.get("header") or {}).get("status", "Pending") or "Pending",
+                        "printed":           bool((r.get("header") or {}).get("printed", False)),
+                        "printed_at":        (r.get("header") or {}).get("printed_at", ""),
                         "notes_list":        (r.get("header") or {}).get("order_notes") or [],
                         "notes_count":       len((r.get("header") or {}).get("order_notes") or []),
                     })
@@ -6294,6 +6554,7 @@ class ModernOrderApp(tk.Frame):
             otype_label = {"bags": "Bags", "mixed": "Mixed", "filter": "Filter"}.get(ot, "Filter")
             src_label   = "Database" if row.get("source") == "db" else row.get("filename", "")
             cust_display = ("🚨 " + row["customer"]) if is_priority else row["customer"]
+            printed_lbl  = "🖨 Printed" if row.get("printed") else "—"
             _badge = _type_badge(otype_label)
             self.orders_tree.insert("", "end", iid=str(i), tags=(tag,),
                 text=("" if _badge else otype_label), image=(_badge or ""),
@@ -6303,6 +6564,7 @@ class ModernOrderApp(tk.Frame):
                 row["date_ordered"],
                 row["date_due"],
                 status_lbl,
+                printed_lbl,
                 row["n_items"],
                 row.get("created_by", ""),
                 src_label,
@@ -6940,25 +7202,147 @@ class ModernOrderApp(tk.Frame):
         elif failed:
             messagebox.showerror("Error", f"Could not update {failed} order(s).")
 
-    def _print_file(self, path: str) -> None:
-        """Send a file to the configured printer (or OS default if none set)."""
+    @staticmethod
+    def _shell_verb(path: str, verb: str, params: str = "") -> bool:
+        """Run a Windows shell verb ('print' / 'printto') on a file.
+
+        Returns True only on success. ShellExecuteW returns a value > 32 on
+        success and an error code <= 32 on failure — the old code ignored this,
+        so a failed 'printto' looked like it worked and nothing printed.
+        """
         import ctypes
+        rc = ctypes.windll.shell32.ShellExecuteW(
+            None, verb, str(path), (params or None), str(Path(path).parent), 0)
+        return int(rc) > 32
+
+    @staticmethod
+    def _get_default_printer() -> str:
+        """Current Windows default printer name ('' if unknown)."""
+        try:
+            import win32print
+            return win32print.GetDefaultPrinter() or ""
+        except Exception:
+            pass
+        import subprocess as _sp
+        try:
+            out = _sp.run(
+                ["powershell", "-NoProfile", "-Command",
+                 "(Get-CimInstance Win32_Printer -Filter 'Default=TRUE').Name"],
+                creationflags=0x08000000, capture_output=True, text=True, timeout=10)
+            return (out.stdout or "").strip()
+        except Exception:
+            return ""
+
+    @staticmethod
+    def _set_default_printer(name: str) -> bool:
+        """Set the Windows default printer. Returns True on apparent success."""
+        try:
+            import win32print
+            win32print.SetDefaultPrinter(name)
+            return True
+        except Exception:
+            pass
+        import subprocess as _sp
+        esc = name.replace("'", "''")
+        try:
+            r = _sp.run(
+                ["powershell", "-NoProfile", "-Command",
+                 f"(New-Object -ComObject WScript.Network).SetDefaultPrinter('{esc}')"],
+                creationflags=0x08000000, timeout=15)
+            return r.returncode == 0
+        except Exception:
+            return False
+
+    @staticmethod
+    def _print_with_sumatra(path: str, printer: str) -> bool:
+        """Print a PDF via the bundled SumatraPDF.exe.
+
+        SumatraPDF renders and prints the PDF itself, so it needs no PDF viewer
+        and no shell 'print'/'printto' verb — it talks to the printer directly.
+        Prints to the given printer, or the Windows default when none is set.
+
+        Returns True on success, False if the helper is missing or fails, so
+        the caller can fall back to the shell-verb method.
+        """
+        helper = RESOURCE_DIR / "SumatraPDF.exe"
+        if not helper.exists():
+            return False
+        import subprocess as _sp
+        if printer:
+            cmd = [str(helper), "-print-to", printer,
+                   "-silent", "-exit-when-done", str(path)]
+        else:
+            cmd = [str(helper), "-print-to-default",
+                   "-silent", "-exit-when-done", str(path)]
+        try:
+            # -silent suppresses dialogs; CREATE_NO_WINDOW hides any flash.
+            r = _sp.run(cmd, creationflags=0x08000000, timeout=180)
+            return r.returncode == 0
+        except Exception:
+            return False
+
+    def _print_file(self, path: str) -> str:
+        """Send a file to the configured printer (or OS default if none set).
+
+        Returns "" on success, or an error message on failure. This method
+        blocks while the print job spools, so it MUST be called from a
+        background thread — it touches no UI, so that is safe.
+        """
         printer = self._settings.get("default_printer", "").strip()
         try:
-            if platform.system() == "Windows":
-                if printer:
-                    # "printto" verb lets us specify the printer name as the parameter
-                    ctypes.windll.shell32.ShellExecuteW(
-                        None, "printto", str(path), f'"{printer}"',
-                        str(Path(path).parent), 0)
-                else:
-                    os.startfile(str(path), "print")
-            else:
+            if platform.system() != "Windows":
                 import subprocess as _sp
                 cmd = ["lpr", "-P", printer, str(path)] if printer else ["lpr", str(path)]
                 _sp.Popen(cmd)
+                return ""
+
+            # ── Preferred: bundled SumatraPDF.exe (no PDF viewer needed) ─────
+            # It renders + prints the PDF directly to the chosen printer (or the
+            # Windows default when blank). If the helper is absent or fails, we
+            # fall through to the shell-verb path below.
+            if str(path).lower().endswith(".pdf") and \
+                    self._print_with_sumatra(path, printer):
+                return ""
+
+            # ── No specific printer → plain 'print' verb → OS default ────────
+            if not printer:
+                if not self._shell_verb(path, "print"):
+                    raise RuntimeError(
+                        "Windows couldn't print this PDF. Make sure a PDF viewer "
+                        "is installed and set as the default for .pdf files.")
+                return ""
+
+            # ── A specific printer is configured ────────────────────────────
+            # Try the direct 'printto' verb first (doesn't touch the system
+            # default). Many default PDF handlers (Edge, Chrome) don't register
+            # it, so fall back to temporarily making the chosen printer the
+            # default and using the near-universal 'print' verb, then restore.
+            if self._shell_verb(path, "printto", f'"{printer}"'):
+                return ""
+
+            previous = self._get_default_printer()
+            if not self._set_default_printer(printer):
+                raise RuntimeError(
+                    f"Couldn't select the printer '{printer}'.\n"
+                    "Open Settings → Default Printer → Refresh and make sure "
+                    "the name matches exactly, or leave it blank to use the "
+                    "Windows default printer.")
+            try:
+                ok = self._shell_verb(path, "print")
+            finally:
+                # Restore the user's previous default once the PDF app has had
+                # time to launch and spool the job (printing is asynchronous).
+                # A plain Timer avoids touching Tk from this worker thread.
+                if previous and previous != printer:
+                    import threading as _th
+                    _th.Timer(8.0, lambda p=previous: self._set_default_printer(p)).start()
+            if not ok:
+                raise RuntimeError(
+                    "Windows couldn't print this PDF. Make sure a PDF viewer "
+                    "is installed and set as the default for .pdf files.")
+            return ""
         except Exception as exc:
-            messagebox.showerror("Print Error", f"Could not send to printer:\n{exc}")
+            return str(exc)
 
     def _print_prev_order(self):
         """Regenerate the selected order's PDFs and send to the default printer."""
@@ -7066,14 +7450,63 @@ class ModernOrderApp(tk.Frame):
             if not real_pdfs:
                 messagebox.showerror("Print", "No PDF was generated.")
                 return
-            for p in real_pdfs:
-                self._print_file(p)
-            self.status_var.set(
-                f"Sent to printer: {row.get('customer','')} / {row.get('order_no','')}")
-            _db.log_action("order_printed",
-                f"Customer: {row.get('customer','')}  O/N: {row.get('order_no','')}")
+
+            # Spooling blocks (SumatraPDF can take several seconds), so do it on
+            # a background thread — otherwise the whole UI freezes ("Not
+            # Responding") until the printer finishes. UI updates are marshalled
+            # back to the main thread with after().
+            self.status_var.set(f"Sending to printer: {row.get('customer','')}…")
+
+            def _print_worker():
+                err = ""
+                for p in real_pdfs:
+                    err = self._print_file(p)
+                    if err:
+                        break
+                if not err:
+                    # Flag the order as printed (shows in the Previous Orders list).
+                    self._flag_printed(db_id=row.get("db_id"), json_path=row.get("path"))
+                    try:
+                        _db.log_action("order_printed",
+                            f"Customer: {row.get('customer','')}  O/N: {row.get('order_no','')}")
+                    except Exception:
+                        pass
+
+                def _done():
+                    if err:
+                        messagebox.showerror(
+                            "Print Error", f"Could not send to printer:\n{err}")
+                        self.status_var.set("Print failed — see the error message.")
+                    else:
+                        self.status_var.set(
+                            f"Sent to printer: {row.get('customer','')} / {row.get('order_no','')}")
+                        # Refresh so the "Printed" column updates.
+                        self._tab_loaded.pop("prev_orders", None)
+                        self._all_orders_data = []
+                        self._refresh_orders_list()
+                self.master.after(0, _done)
+
+            threading.Thread(target=_print_worker, daemon=True).start()
 
         threading.Thread(target=_worker, daemon=True).start()
+
+    def _flag_printed(self, db_id=None, json_path=None):
+        """Mark an order as printed in the shared DB and/or its local JSON."""
+        if db_id:
+            try:
+                _db.mark_order_printed(str(db_id))
+            except Exception:
+                pass
+        if json_path:
+            try:
+                p = Path(json_path)
+                payload = json.loads(p.read_text(encoding="utf-8"))
+                h = payload.setdefault("header", {})
+                h["printed"]    = True
+                h["printed_at"] = _dt_module.datetime.now().strftime("%d/%m/%Y %H:%M")
+                p.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+            except Exception:
+                pass
 
     def _view_order_history(self):
         """Show a popup with the full audit history for the selected order."""

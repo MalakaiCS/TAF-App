@@ -16,7 +16,7 @@ import os, sys, json, subprocess, tempfile
 from pathlib import Path
 import urllib.request
 
-APP_VERSION = "2.0.2"
+APP_VERSION = "2.2.1"
 
 # Public repo whose GitHub Releases drive updates.
 GITHUB_REPO = "MalakaiCS/TAF-App"
@@ -129,19 +129,79 @@ def download_and_install(info: dict, progress_cb=None) -> None:
         progress_cb(97, "Starting installer…")
 
     exe_path = Path(sys.executable)
+    app_dir  = exe_path.parent
+    app_pid  = os.getpid()
 
-    # Detached helper: pause for the app to exit, silent-install, relaunch.
-    helper = (
-        f'timeout /t 3 /nobreak >nul & '
-        f'"{setup}" /VERYSILENT /SUPPRESSMSGBOXES /NORESTART /NOCANCEL & '
-        f'start "" "{exe_path}"'
-    )
-    DETACHED_PROCESS   = 0x00000008
-    CREATE_NO_WINDOW   = 0x08000000
-    subprocess.Popen(["cmd", "/c", helper],
-                     creationflags=DETACHED_PROCESS | CREATE_NO_WINDOW,
-                     close_fds=True)
+    # Logs so a failed update can actually be diagnosed instead of guessed at.
+    data_dir = Path(os.environ.get("APPDATA", tempfile.gettempdir())) / "TAF Order Entry"
+    try:
+        data_dir.mkdir(parents=True, exist_ok=True)
+    except Exception:
+        data_dir = Path(tempfile.gettempdir())
+    diag    = data_dir / "update.log"
+    innolog = data_dir / "update_install_inno.log"
+
+    # ── Hand off to a detached .cmd helper that:
+    #     1) waits for THIS app to fully exit (tasklist poll — no console-input
+    #        dependency like `timeout`, which fails in a detached process),
+    #     2) installs to the SAME place the app already lives:
+    #         • silent install if that folder is user-writable (per-user install),
+    #         • elevated install (one UAC prompt) if it isn't (Program Files),
+    #           which is why a silent install could "close and not install",
+    #     3) relaunches the app.
+    #    Every step is written to update.log so failures are visible.
+    bat = Path(tempfile.gettempdir()) / "TAFOrderEntry_update.cmd"
+    bat_text = f"""@echo off
+> "{diag}" echo [update] started - waiting for app PID {app_pid} to exit
+set /a tries=0
+:waitloop
+tasklist /FI "PID eq {app_pid}" 2>nul | find "{app_pid}" >nul
+if errorlevel 1 goto afterwait
+set /a tries+=1
+if %tries% geq 20 (
+  >> "{diag}" echo [update] app still running after wait cap - proceeding anyway
+  goto afterwait
+)
+ping -n 2 127.0.0.1 >nul
+goto waitloop
+:afterwait
+>> "{diag}" echo [update] proceeding after %tries% cycles - testing write access to "{app_dir}"
+(echo test)> "{app_dir}\\__wtest.tmp" 2>nul
+if exist "{app_dir}\\__wtest.tmp" (
+  del "{app_dir}\\__wtest.tmp" 2>nul
+  >> "{diag}" echo [update] location is writable - running SILENT install
+  "{setup}" /VERYSILENT /SUPPRESSMSGBOXES /NORESTART /NOCANCEL /LOG="{innolog}"
+  >> "{diag}" echo [update] installer exit code: %errorlevel%
+) else (
+  >> "{diag}" echo [update] location needs admin - elevating install (UAC prompt)
+  powershell -NoProfile -Command "Start-Process -FilePath '{setup}' -ArgumentList '/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART','/NOCANCEL','/LOG={innolog}' -Verb RunAs -Wait"
+  >> "{diag}" echo [update] elevated install returned
+)
+>> "{diag}" echo [update] relaunching app
+start "" "{exe_path}"
+>> "{diag}" echo [update] done
+"""
+    bat.write_text(bat_text, encoding="utf-8")
+
+    # The helper MUST outlive the app. DETACHED_PROCESS + CREATE_NO_WINDOW give
+    # it no console; CREATE_BREAKAWAY_FROM_JOB frees it from any job object the
+    # app is in, so it isn't killed mid-wait when the app exits (the log getting
+    # stuck at "waiting for app ... to exit" is exactly that symptom). Breakaway
+    # can be rejected by a job that disallows it, so fall back without it.
+    DETACHED_PROCESS          = 0x00000008
+    CREATE_NO_WINDOW          = 0x08000000
+    CREATE_BREAKAWAY_FROM_JOB = 0x01000000
+    base_flags = DETACHED_PROCESS | CREATE_NO_WINDOW
+    try:
+        subprocess.Popen(["cmd", "/c", str(bat)],
+                         creationflags=base_flags | CREATE_BREAKAWAY_FROM_JOB,
+                         close_fds=True)
+    except Exception:
+        subprocess.Popen(["cmd", "/c", str(bat)],
+                         creationflags=base_flags,
+                         close_fds=True)
 
     if progress_cb:
         progress_cb(100, "Installing update… the app will reopen shortly.")
-    # Main thread detects pct==100 and calls os._exit(0) after a short delay.
+    # Main thread detects pct==100 and calls os._exit(0) after a short delay so
+    # the app's files unlock; the helper's tasklist wait then proceeds.

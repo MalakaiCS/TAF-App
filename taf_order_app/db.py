@@ -260,7 +260,8 @@ def reload_profile() -> None:
 
 # ── Orders ────────────────────────────────────────────────────────────────────
 
-def save_order(header: dict, items: list, order_type: str) -> None:
+def save_order(header: dict, items: list, order_type: str) -> "str | None":
+    """Insert an order and return its new id (or None if it can't be read)."""
     user = _current_user
     if not user:
         raise RuntimeError("Not logged in.")
@@ -284,15 +285,32 @@ def save_order(header: dict, items: list, order_type: str) -> None:
     }
     # Add new columns only if migration has been run (graceful degradation)
     try:
-        get_client().table("orders").insert(
+        resp = get_client().table("orders").insert(
             {**data, "created_by_role": prof.get("role", "Employee")}
         ).execute()
     except Exception as exc:
         if "created_by_role" in str(exc) or "archived" in str(exc):
             # Migration not yet run — insert without new columns
-            get_client().table("orders").insert(data).execute()
+            resp = get_client().table("orders").insert(data).execute()
         else:
             raise
+    try:
+        return (resp.data or [{}])[0].get("id")
+    except Exception:
+        return None
+
+
+def mark_order_printed(order_id: str) -> None:
+    """Flag an order as printed (stored in the header JSON — no migration)."""
+    import datetime as _dt
+    try:
+        resp = get_client().table("orders").select("header").eq("id", order_id).single().execute()
+        header = dict(resp.data.get("header") or {})
+        header["printed"]    = True
+        header["printed_at"] = _dt.datetime.now().strftime("%d/%m/%Y %H:%M")
+        get_client().table("orders").update({"header": header}).eq("id", order_id).execute()
+    except Exception:
+        pass
 
 
 def tables_exist() -> tuple[bool, bool]:
