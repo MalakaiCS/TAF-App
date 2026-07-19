@@ -97,6 +97,22 @@ jobs:
           EOF
           echo "settings.json written (key hidden)."
 
+      - name: Fetch PDFtoPrinter helper (viewer-free PDF printing)
+        shell: bash
+        run: |
+          URL="http://www.columbia.edu/~em36/PDFtoPrinter.exe"
+          for i in 1 2 3; do
+            curl -fL --retry 3 -o PDFtoPrinter.exe "$URL" && break
+            echo "PDFtoPrinter download attempt $i failed"; sleep 3
+          done
+          if [ -f PDFtoPrinter.exe ] && [ "$(stat -c%s PDFtoPrinter.exe 2>/dev/null || echo 0)" -gt 100000 ] \
+             && head -c2 PDFtoPrinter.exe | grep -q "MZ"; then
+            echo "PDFtoPrinter.exe fetched ($(stat -c%s PDFtoPrinter.exe) bytes)."
+          else
+            echo "::warning::PDFtoPrinter.exe not fetched or invalid — the app will fall back to the shell-verb print path for this build."
+            rm -f PDFtoPrinter.exe
+          fi
+
       - name: Build app (PyInstaller)
         run: pyinstaller --noconfirm --clean TAFOrderEntry.spec
 

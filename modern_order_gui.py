@@ -7100,6 +7100,32 @@ class ModernOrderApp(tk.Frame):
         except Exception:
             return False
 
+    @staticmethod
+    def _print_with_pdftoprinter(path: str, printer: str) -> bool:
+        """Print a PDF via the bundled PDFtoPrinter.exe.
+
+        PDFtoPrinter renders and prints the PDF itself, so it needs no PDF
+        viewer and no shell 'print'/'printto' verb — it just talks to the
+        printer directly. Called with the file (and optionally the printer
+        name); prints to the Windows default when no printer is given.
+
+        Returns True on success, False if the helper is missing or fails, so
+        the caller can fall back to the shell-verb method.
+        """
+        helper = RESOURCE_DIR / "PDFtoPrinter.exe"
+        if not helper.exists():
+            return False
+        import subprocess as _sp
+        cmd = [str(helper), str(path)]
+        if printer:
+            cmd.append(printer)   # PDFtoPrinter takes the printer name verbatim
+        try:
+            # /s keeps it silent; CREATE_NO_WINDOW hides any console flash.
+            r = _sp.run(cmd, creationflags=0x08000000, timeout=180)
+            return r.returncode == 0
+        except Exception:
+            return False
+
     def _print_file(self, path: str) -> bool:
         """Send a file to the configured printer (or OS default if none set).
 
@@ -7112,6 +7138,14 @@ class ModernOrderApp(tk.Frame):
                 import subprocess as _sp
                 cmd = ["lpr", "-P", printer, str(path)] if printer else ["lpr", str(path)]
                 _sp.Popen(cmd)
+                return True
+
+            # ── Preferred: bundled PDFtoPrinter.exe (no PDF viewer needed) ────
+            # It renders + prints the PDF directly to the chosen printer (or the
+            # Windows default when blank). If the helper is absent or fails, we
+            # fall through to the shell-verb path below.
+            if str(path).lower().endswith(".pdf") and \
+                    self._print_with_pdftoprinter(path, printer):
                 return True
 
             # ── No specific printer → plain 'print' verb → OS default ────────

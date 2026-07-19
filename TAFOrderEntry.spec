@@ -6,10 +6,16 @@
 # In one-dir mode all files live permanently next to the exe — no temp folder,
 # no cleanup, no warning.
 #
+import os
 from PyInstaller.utils.hooks import collect_data_files
 
 # Collect all babel locale data files properly (1000+ .dat files + global.dat)
 babel_datas = collect_data_files('babel', include_py_files=False)
+
+# PDFtoPrinter.exe lets us print PDFs without a PDF viewer. CI downloads it
+# before the build; if it's absent (e.g. a local source build) we simply don't
+# bundle it and the app falls back to the Windows shell 'print' verb.
+pdf_helper_datas = [('PDFtoPrinter.exe', '.')] if os.path.exists('PDFtoPrinter.exe') else []
 
 a = Analysis(
     ['modern_order_gui.py'],
@@ -23,7 +29,7 @@ a = Analysis(
         ('Templates.xlsx',          '.'),
         ('settings.json',           '.'),
         ('fonts',                   'fonts'),   # bundled Public Sans .ttf files
-    ] + babel_datas,
+    ] + babel_datas + pdf_helper_datas,
     hiddenimports=[
         # supabase + deps
         'supabase',
