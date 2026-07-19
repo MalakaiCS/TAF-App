@@ -2882,7 +2882,7 @@ class ModernOrderApp(tk.Frame):
         tbl_wrap.rowconfigure(0, weight=1)
         tbl_wrap.columnconfigure(0, weight=1)
 
-        ocols = ("customer", "order_no", "date_ordered", "date_due", "status", "n_items", "created_by", "file")
+        ocols = ("customer", "order_no", "date_ordered", "date_due", "status", "printed", "n_items", "created_by", "file")
         self.orders_tree = ttk.Treeview(tbl_wrap, columns=ocols,
                                          show="tree headings",
                                          style="TAF.Treeview",
@@ -2897,6 +2897,7 @@ class ModernOrderApp(tk.Frame):
             "date_ordered": ("Date Ordered",   110, "center"),
             "date_due":     ("Date Due",       100, "center"),
             "status":       ("Status",         120, "center"),
+            "printed":      ("Printed",         90, "center"),
             "n_items":      ("# Items",         70, "center"),
             "created_by":   ("Created By",     180, "w"),
             "file":         ("Source",         130, "center"),
@@ -6120,7 +6121,8 @@ class ModernOrderApp(tk.Frame):
 
             # ── Save JSON + Database ───────────────────────────────────────
             prog.advance("Saving order…")
-            json_path = None
+            json_path     = None
+            new_order_id  = None
             try:
                 json_path = service.save_order_json(header, all_items)
             except Exception as exc:
@@ -6128,7 +6130,7 @@ class ModernOrderApp(tk.Frame):
 
             if _db.is_ready() and _db.current_user():
                 try:
-                    _db.save_order(header, all_items, order_type)
+                    new_order_id = _db.save_order(header, all_items, order_type)
                     _db.log_action("order_created",
                         f"Customer: {header.get('Customer Name','')}  "
                         f"O/N: {header.get('Order Number','')}  "
@@ -6140,9 +6142,9 @@ class ModernOrderApp(tk.Frame):
 
             # ── Hand results back to the main thread ──────────────────────
             prog.after(0, lambda: _finish(opened, json_path, errors,
-                                          real_pdfs, pdf_paths))
+                                          real_pdfs, pdf_paths, new_order_id))
 
-        def _finish(opened, json_path, errors, real_pdfs, pdf_paths):
+        def _finish(opened, json_path, errors, real_pdfs, pdf_paths, new_order_id=None):
             prog.close()
 
             # Collect the PDF(s) to send to the printer. We no longer open the
@@ -6182,6 +6184,9 @@ class ModernOrderApp(tk.Frame):
                             perr = self._print_file(p)
                             if perr:
                                 break
+                        if not perr:
+                            # Auto-printed on generate → flag it printed.
+                            self._flag_printed(db_id=new_order_id, json_path=json_path)
 
                         def _done():
                             if perr:
@@ -6265,6 +6270,8 @@ class ModernOrderApp(tk.Frame):
                     "db_id":        None,
                     "db_header":    None,
                     "db_items":     None,
+                    "printed":      bool(h.get("printed", False)),
+                    "printed_at":   h.get("printed_at", ""),
                 })
             except Exception:
                 pass
@@ -6297,6 +6304,8 @@ class ModernOrderApp(tk.Frame):
                         "db_items":     r.get("items") or [],
                         "priority":          bool((r.get("header") or {}).get("priority", False)),
                         "status":            (r.get("header") or {}).get("status", "Pending") or "Pending",
+                        "printed":           bool((r.get("header") or {}).get("printed", False)),
+                        "printed_at":        (r.get("header") or {}).get("printed_at", ""),
                         "notes_list":        (r.get("header") or {}).get("order_notes") or [],
                         "notes_count":       len((r.get("header") or {}).get("order_notes") or []),
                     })
@@ -6434,6 +6443,7 @@ class ModernOrderApp(tk.Frame):
             otype_label = {"bags": "Bags", "mixed": "Mixed", "filter": "Filter"}.get(ot, "Filter")
             src_label   = "Database" if row.get("source") == "db" else row.get("filename", "")
             cust_display = ("🚨 " + row["customer"]) if is_priority else row["customer"]
+            printed_lbl  = "🖨 Printed" if row.get("printed") else "—"
             _badge = _type_badge(otype_label)
             self.orders_tree.insert("", "end", iid=str(i), tags=(tag,),
                 text=("" if _badge else otype_label), image=(_badge or ""),
@@ -6443,6 +6453,7 @@ class ModernOrderApp(tk.Frame):
                 row["date_ordered"],
                 row["date_due"],
                 status_lbl,
+                printed_lbl,
                 row["n_items"],
                 row.get("created_by", ""),
                 src_label,
@@ -7342,6 +7353,8 @@ class ModernOrderApp(tk.Frame):
                     if err:
                         break
                 if not err:
+                    # Flag the order as printed (shows in the Previous Orders list).
+                    self._flag_printed(db_id=row.get("db_id"), json_path=row.get("path"))
                     try:
                         _db.log_action("order_printed",
                             f"Customer: {row.get('customer','')}  O/N: {row.get('order_no','')}")
@@ -7356,11 +7369,33 @@ class ModernOrderApp(tk.Frame):
                     else:
                         self.status_var.set(
                             f"Sent to printer: {row.get('customer','')} / {row.get('order_no','')}")
+                        # Refresh so the "Printed" column updates.
+                        self._tab_loaded.pop("prev_orders", None)
+                        self._all_orders_data = []
+                        self._refresh_orders_list()
                 self.master.after(0, _done)
 
             threading.Thread(target=_print_worker, daemon=True).start()
 
         threading.Thread(target=_worker, daemon=True).start()
+
+    def _flag_printed(self, db_id=None, json_path=None):
+        """Mark an order as printed in the shared DB and/or its local JSON."""
+        if db_id:
+            try:
+                _db.mark_order_printed(str(db_id))
+            except Exception:
+                pass
+        if json_path:
+            try:
+                p = Path(json_path)
+                payload = json.loads(p.read_text(encoding="utf-8"))
+                h = payload.setdefault("header", {})
+                h["printed"]    = True
+                h["printed_at"] = _dt_module.datetime.now().strftime("%d/%m/%Y %H:%M")
+                p.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+            except Exception:
+                pass
 
     def _view_order_history(self):
         """Show a popup with the full audit history for the selected order."""
