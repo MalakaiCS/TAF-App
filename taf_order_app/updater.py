@@ -153,13 +153,19 @@ def download_and_install(info: dict, progress_cb=None) -> None:
     bat = Path(tempfile.gettempdir()) / "TAFOrderEntry_update.cmd"
     bat_text = f"""@echo off
 > "{diag}" echo [update] started - waiting for app PID {app_pid} to exit
+set /a tries=0
 :waitloop
 tasklist /FI "PID eq {app_pid}" 2>nul | find "{app_pid}" >nul
-if not errorlevel 1 (
-  ping -n 2 127.0.0.1 >nul
-  goto waitloop
+if errorlevel 1 goto afterwait
+set /a tries+=1
+if %tries% geq 20 (
+  >> "{diag}" echo [update] app still running after wait cap - proceeding anyway
+  goto afterwait
 )
->> "{diag}" echo [update] app exited - testing write access to "{app_dir}"
+ping -n 2 127.0.0.1 >nul
+goto waitloop
+:afterwait
+>> "{diag}" echo [update] proceeding after %tries% cycles - testing write access to "{app_dir}"
 (echo test)> "{app_dir}\\__wtest.tmp" 2>nul
 if exist "{app_dir}\\__wtest.tmp" (
   del "{app_dir}\\__wtest.tmp" 2>nul
@@ -177,11 +183,23 @@ start "" "{exe_path}"
 """
     bat.write_text(bat_text, encoding="utf-8")
 
-    DETACHED_PROCESS = 0x00000008
-    CREATE_NO_WINDOW = 0x08000000
-    subprocess.Popen(["cmd", "/c", str(bat)],
-                     creationflags=DETACHED_PROCESS | CREATE_NO_WINDOW,
-                     close_fds=True)
+    # The helper MUST outlive the app. DETACHED_PROCESS + CREATE_NO_WINDOW give
+    # it no console; CREATE_BREAKAWAY_FROM_JOB frees it from any job object the
+    # app is in, so it isn't killed mid-wait when the app exits (the log getting
+    # stuck at "waiting for app ... to exit" is exactly that symptom). Breakaway
+    # can be rejected by a job that disallows it, so fall back without it.
+    DETACHED_PROCESS          = 0x00000008
+    CREATE_NO_WINDOW          = 0x08000000
+    CREATE_BREAKAWAY_FROM_JOB = 0x01000000
+    base_flags = DETACHED_PROCESS | CREATE_NO_WINDOW
+    try:
+        subprocess.Popen(["cmd", "/c", str(bat)],
+                         creationflags=base_flags | CREATE_BREAKAWAY_FROM_JOB,
+                         close_fds=True)
+    except Exception:
+        subprocess.Popen(["cmd", "/c", str(bat)],
+                         creationflags=base_flags,
+                         close_fds=True)
 
     if progress_cb:
         progress_cb(100, "Installing update… the app will reopen shortly.")
