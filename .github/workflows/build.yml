@@ -97,21 +97,29 @@ jobs:
           EOF
           echo "settings.json written (key hidden)."
 
-      - name: Fetch PDFtoPrinter helper (viewer-free PDF printing)
+      - name: Fetch SumatraPDF helper (viewer-free PDF printing)
         shell: bash
         run: |
-          URL="http://www.columbia.edu/~em36/PDFtoPrinter.exe"
+          # SumatraPDF prints PDFs straight to a named printer with no PDF
+          # viewer. We get it from the pinned `pdf-to-printer` npm package,
+          # which vendors it — the npm registry is reliably reachable from CI
+          # (columbia.edu, the original PDFtoPrinter host, 403s datacenter IPs).
+          TARBALL="https://registry.npmjs.org/pdf-to-printer/-/pdf-to-printer-5.8.0.tgz"
           for i in 1 2 3; do
-            curl -fL --retry 3 -o PDFtoPrinter.exe "$URL" && break
-            echo "PDFtoPrinter download attempt $i failed"; sleep 3
+            curl -fL --retry 3 -o p2p.tgz "$TARBALL" && break
+            echo "npm tarball attempt $i failed"; sleep 3
           done
-          if [ -f PDFtoPrinter.exe ] && [ "$(stat -c%s PDFtoPrinter.exe 2>/dev/null || echo 0)" -gt 100000 ] \
-             && head -c2 PDFtoPrinter.exe | grep -q "MZ"; then
-            echo "PDFtoPrinter.exe fetched ($(stat -c%s PDFtoPrinter.exe) bytes)."
+          tar xzf p2p.tgz 2>/dev/null || true
+          cp package/dist/SumatraPDF-*.exe SumatraPDF.exe 2>/dev/null || true
+          if [ -f SumatraPDF.exe ] && [ "$(stat -c%s SumatraPDF.exe 2>/dev/null || echo 0)" -gt 1000000 ] \
+             && head -c2 SumatraPDF.exe | grep -q "MZ"; then
+            echo "SumatraPDF.exe bundled ($(stat -c%s SumatraPDF.exe) bytes)."
           else
-            echo "::warning::PDFtoPrinter.exe not fetched or invalid — the app will fall back to the shell-verb print path for this build."
-            rm -f PDFtoPrinter.exe
+            echo "::error::SumatraPDF.exe not obtained — printing would fall back to the PDF-viewer path. Failing the build so a broken print feature isn't shipped."
+            rm -f SumatraPDF.exe
+            exit 1
           fi
+          rm -rf package p2p.tgz
 
       - name: Build app (PyInstaller)
         run: pyinstaller --noconfirm --clean TAFOrderEntry.spec

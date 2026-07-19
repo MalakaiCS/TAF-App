@@ -7101,26 +7101,28 @@ class ModernOrderApp(tk.Frame):
             return False
 
     @staticmethod
-    def _print_with_pdftoprinter(path: str, printer: str) -> bool:
-        """Print a PDF via the bundled PDFtoPrinter.exe.
+    def _print_with_sumatra(path: str, printer: str) -> bool:
+        """Print a PDF via the bundled SumatraPDF.exe.
 
-        PDFtoPrinter renders and prints the PDF itself, so it needs no PDF
-        viewer and no shell 'print'/'printto' verb — it just talks to the
-        printer directly. Called with the file (and optionally the printer
-        name); prints to the Windows default when no printer is given.
+        SumatraPDF renders and prints the PDF itself, so it needs no PDF viewer
+        and no shell 'print'/'printto' verb — it talks to the printer directly.
+        Prints to the given printer, or the Windows default when none is set.
 
         Returns True on success, False if the helper is missing or fails, so
         the caller can fall back to the shell-verb method.
         """
-        helper = RESOURCE_DIR / "PDFtoPrinter.exe"
+        helper = RESOURCE_DIR / "SumatraPDF.exe"
         if not helper.exists():
             return False
         import subprocess as _sp
-        cmd = [str(helper), str(path)]
         if printer:
-            cmd.append(printer)   # PDFtoPrinter takes the printer name verbatim
+            cmd = [str(helper), "-print-to", printer,
+                   "-silent", "-exit-when-done", str(path)]
+        else:
+            cmd = [str(helper), "-print-to-default",
+                   "-silent", "-exit-when-done", str(path)]
         try:
-            # /s keeps it silent; CREATE_NO_WINDOW hides any console flash.
+            # -silent suppresses dialogs; CREATE_NO_WINDOW hides any flash.
             r = _sp.run(cmd, creationflags=0x08000000, timeout=180)
             return r.returncode == 0
         except Exception:
@@ -7140,12 +7142,12 @@ class ModernOrderApp(tk.Frame):
                 _sp.Popen(cmd)
                 return True
 
-            # ── Preferred: bundled PDFtoPrinter.exe (no PDF viewer needed) ────
+            # ── Preferred: bundled SumatraPDF.exe (no PDF viewer needed) ─────
             # It renders + prints the PDF directly to the chosen printer (or the
             # Windows default when blank). If the helper is absent or fails, we
             # fall through to the shell-verb path below.
             if str(path).lower().endswith(".pdf") and \
-                    self._print_with_pdftoprinter(path, printer):
+                    self._print_with_sumatra(path, printer):
                 return True
 
             # ── No specific printer → plain 'print' verb → OS default ────────
