@@ -2402,7 +2402,8 @@ class ModernOrderApp(tk.Frame):
         self._build_new_order_tab()
         self._build_status_bar()
 
-        self._show_tab("new_order")
+        # Land on Settings at startup (per request), not New Order.
+        self._show_tab("settings")
 
         # Warm the remaining tabs one-per-idle-tick so later switches are
         # instant, without delaying the first paint of the home screen.
@@ -6138,20 +6139,18 @@ class ModernOrderApp(tk.Frame):
 
         def _finish(opened, json_path, errors, real_pdfs, pdf_paths):
             prog.close()
-            # Open the file(s)
+
+            # Collect the PDF(s) to send to the printer. We no longer open the
+            # PDF on generation — it's generated (and saved) then printed
+            # automatically, same routing the Print button uses.
+            to_print = []
             if len(real_pdfs) > 1:
                 merged = str(ORDERS_DIR / f"{base}_order.pdf")
-                if os.path.exists(merged):
-                    os.startfile(merged)
-                else:
-                    for p in real_pdfs:
-                        os.startfile(p)
+                to_print = [merged] if os.path.exists(merged) else list(real_pdfs)
             elif real_pdfs:
-                os.startfile(real_pdfs[0])
+                to_print = [real_pdfs[0]]
             elif pdf_paths:
-                for p in pdf_paths:
-                    if os.path.exists(p):
-                        os.startfile(p)
+                to_print = [p for p in pdf_paths if os.path.exists(p)]
 
             if errors:
                 messagebox.showerror("Errors", "\n\n".join(errors))
@@ -6166,7 +6165,34 @@ class ModernOrderApp(tk.Frame):
                 msg = f"Order PDF:\n  {opened}" if opened else ""
                 if json_path:
                     msg += (("\n\n" if msg else "") + f"Order saved:\n  {json_path}")
-                self.status_var.set("Order generated and opened.")
+
+                # Send to the printer on a background thread so the UI stays
+                # responsive while the job spools (printing can take seconds).
+                if to_print:
+                    self.status_var.set("Order generated — sending to printer…")
+
+                    def _print_worker():
+                        perr = ""
+                        for p in to_print:
+                            perr = self._print_file(p)
+                            if perr:
+                                break
+
+                        def _done():
+                            if perr:
+                                messagebox.showerror(
+                                    "Print Error",
+                                    f"The order was generated and saved, but "
+                                    f"printing failed:\n{perr}")
+                                self.status_var.set("Order generated — printing failed.")
+                            else:
+                                self.status_var.set("Order generated and sent to printer.")
+                        self.master.after(0, _done)
+
+                    threading.Thread(target=_print_worker, daemon=True).start()
+                else:
+                    self.status_var.set("Order generated.")
+
                 messagebox.showinfo("Done", msg)
 
         threading.Thread(target=_worker, daemon=True).start()
