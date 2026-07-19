@@ -7128,11 +7128,12 @@ class ModernOrderApp(tk.Frame):
         except Exception:
             return False
 
-    def _print_file(self, path: str) -> bool:
+    def _print_file(self, path: str) -> str:
         """Send a file to the configured printer (or OS default if none set).
 
-        Returns True if the job was handed off successfully, False if it
-        failed (an error dialog is shown in that case).
+        Returns "" on success, or an error message on failure. This method
+        blocks while the print job spools, so it MUST be called from a
+        background thread — it touches no UI, so that is safe.
         """
         printer = self._settings.get("default_printer", "").strip()
         try:
@@ -7140,7 +7141,7 @@ class ModernOrderApp(tk.Frame):
                 import subprocess as _sp
                 cmd = ["lpr", "-P", printer, str(path)] if printer else ["lpr", str(path)]
                 _sp.Popen(cmd)
-                return True
+                return ""
 
             # ── Preferred: bundled SumatraPDF.exe (no PDF viewer needed) ─────
             # It renders + prints the PDF directly to the chosen printer (or the
@@ -7148,7 +7149,7 @@ class ModernOrderApp(tk.Frame):
             # fall through to the shell-verb path below.
             if str(path).lower().endswith(".pdf") and \
                     self._print_with_sumatra(path, printer):
-                return True
+                return ""
 
             # ── No specific printer → plain 'print' verb → OS default ────────
             if not printer:
@@ -7156,7 +7157,7 @@ class ModernOrderApp(tk.Frame):
                     raise RuntimeError(
                         "Windows couldn't print this PDF. Make sure a PDF viewer "
                         "is installed and set as the default for .pdf files.")
-                return True
+                return ""
 
             # ── A specific printer is configured ────────────────────────────
             # Try the direct 'printto' verb first (doesn't touch the system
@@ -7164,7 +7165,7 @@ class ModernOrderApp(tk.Frame):
             # it, so fall back to temporarily making the chosen printer the
             # default and using the near-universal 'print' verb, then restore.
             if self._shell_verb(path, "printto", f'"{printer}"'):
-                return True
+                return ""
 
             previous = self._get_default_printer()
             if not self._set_default_printer(printer):
@@ -7178,17 +7179,17 @@ class ModernOrderApp(tk.Frame):
             finally:
                 # Restore the user's previous default once the PDF app has had
                 # time to launch and spool the job (printing is asynchronous).
+                # A plain Timer avoids touching Tk from this worker thread.
                 if previous and previous != printer:
-                    self.master.after(
-                        8000, lambda p=previous: self._set_default_printer(p))
+                    import threading as _th
+                    _th.Timer(8.0, lambda p=previous: self._set_default_printer(p)).start()
             if not ok:
                 raise RuntimeError(
                     "Windows couldn't print this PDF. Make sure a PDF viewer "
                     "is installed and set as the default for .pdf files.")
-            return True
+            return ""
         except Exception as exc:
-            messagebox.showerror("Print Error", f"Could not send to printer:\n{exc}")
-            return False
+            return str(exc)
 
     def _print_prev_order(self):
         """Regenerate the selected order's PDFs and send to the default printer."""
@@ -7296,13 +7297,37 @@ class ModernOrderApp(tk.Frame):
             if not real_pdfs:
                 messagebox.showerror("Print", "No PDF was generated.")
                 return
-            if not all(self._print_file(p) for p in real_pdfs):
-                self.status_var.set("Print failed — see the error message.")
-                return
-            self.status_var.set(
-                f"Sent to printer: {row.get('customer','')} / {row.get('order_no','')}")
-            _db.log_action("order_printed",
-                f"Customer: {row.get('customer','')}  O/N: {row.get('order_no','')}")
+
+            # Spooling blocks (SumatraPDF can take several seconds), so do it on
+            # a background thread — otherwise the whole UI freezes ("Not
+            # Responding") until the printer finishes. UI updates are marshalled
+            # back to the main thread with after().
+            self.status_var.set(f"Sending to printer: {row.get('customer','')}…")
+
+            def _print_worker():
+                err = ""
+                for p in real_pdfs:
+                    err = self._print_file(p)
+                    if err:
+                        break
+                if not err:
+                    try:
+                        _db.log_action("order_printed",
+                            f"Customer: {row.get('customer','')}  O/N: {row.get('order_no','')}")
+                    except Exception:
+                        pass
+
+                def _done():
+                    if err:
+                        messagebox.showerror(
+                            "Print Error", f"Could not send to printer:\n{err}")
+                        self.status_var.set("Print failed — see the error message.")
+                    else:
+                        self.status_var.set(
+                            f"Sent to printer: {row.get('customer','')} / {row.get('order_no','')}")
+                self.master.after(0, _done)
+
+            threading.Thread(target=_print_worker, daemon=True).start()
 
         threading.Thread(target=_worker, daemon=True).start()
 
