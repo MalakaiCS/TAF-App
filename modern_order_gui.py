@@ -3437,6 +3437,9 @@ class ModernOrderApp(tk.Frame):
 
         flat_btn(top, "↻ Refresh", self._refresh_customers_list,
                  bg=CNE, pady=5, padx=10, font=F_BODY).pack(side="right", padx=(8, 0))
+        flat_btn(top, "⇩ Import from Orders",
+                 self._import_customers_from_orders,
+                 bg=CGR, pady=5, padx=12, font=F_BODY).pack(side="right", padx=(8, 0))
         flat_btn(top, "+ Add Customer",
                  lambda: self._open_customer_dialog(),
                  bg=CA, pady=5, padx=12, font=F_BOLD).pack(side="right")
@@ -3500,6 +3503,114 @@ class ModernOrderApp(tk.Frame):
                  bg=CRD, pady=7).pack(side="right")
 
         self._customers_data: list = []
+
+    # ── Import customers from existing orders ─────────────────────────────
+    @staticmethod
+    def _split_location(loc: str) -> "tuple[str, str]":
+        """Best-effort split of a free-text location into (city, state)."""
+        loc = (loc or "").strip()
+        if not loc:
+            return "", ""
+        if "," in loc:
+            city, state = loc.rsplit(",", 1)
+            return city.strip(), state.strip()
+        return loc, ""
+
+    def _import_customers_from_orders(self):
+        """Create customer records for every customer that appears in existing
+        orders (DB + local) but isn't in the customer database yet."""
+        if not (_db.is_ready() and _db.current_user()):
+            messagebox.showinfo("Import from Orders",
+                "You need to be signed in to the shared database to import customers.")
+            return
+        if not messagebox.askyesno(
+                "Import from Orders",
+                "Scan all previous orders and add any customers that aren't in "
+                "the customer database yet?\n\n"
+                "Existing customers are left untouched. Contact name and "
+                "location are filled in from each customer's most recent order "
+                "where available."):
+            return
+
+        self.status_var.set("Importing customers from orders…")
+
+        def _work():
+            added, err = [], None
+            try:
+                # Existing names (active + inactive) to avoid duplicates.
+                existing = {(c.get("name") or "").strip().lower()
+                            for c in _db.get_customers(active_only=False)}
+
+                # Gather headers from DB orders (richest) + local JSON orders.
+                headers = []
+                try:
+                    for r in _db.get_all_orders():
+                        h = r.get("header") or {}
+                        headers.append({
+                            "name":      r.get("customer_name") or h.get("Customer Name", ""),
+                            "attention": h.get("Attention", ""),
+                            "location":  h.get("Location", ""),
+                        })
+                except Exception:
+                    pass
+                for r in self._scan_local_orders():
+                    h = (r.get("db_header") or {})
+                    headers.append({
+                        "name":      r.get("customer", ""),
+                        "attention": h.get("Attention", ""),
+                        "location":  h.get("Location", ""),
+                    })
+
+                # First occurrence wins (orders come newest-first).
+                seen, to_add = set(existing), {}
+                for h in headers:
+                    name = (h.get("name") or "").strip()
+                    key  = name.lower()
+                    if not name or key in seen:
+                        continue
+                    seen.add(key)
+                    to_add[key] = h
+
+                for h in to_add.values():
+                    city, state = self._split_location(h.get("location", ""))
+                    try:
+                        _db.create_customer({
+                            "name":           h["name"].strip(),
+                            "contact_person": (h.get("attention") or "").strip(),
+                            "delivery_city":  city,
+                            "delivery_state": state,
+                            "notes":          "Imported from existing orders.",
+                            "is_active":      True,
+                        })
+                        added.append(h["name"].strip())
+                    except Exception:
+                        pass
+            except Exception as exc:
+                err = str(exc)
+
+            def _done():
+                if err:
+                    messagebox.showerror("Import from Orders", f"Import failed:\n{err}")
+                    self.status_var.set("Customer import failed.")
+                    return
+                if added:
+                    _db.log_action("customers_imported",
+                                   f"{len(added)} customer(s) added from orders")
+                    preview = "\n".join(f"  • {n}" for n in sorted(added)[:20])
+                    more = f"\n  …and {len(added) - 20} more" if len(added) > 20 else ""
+                    messagebox.showinfo("Import from Orders",
+                        f"Added {len(added)} new customer(s):\n\n{preview}{more}")
+                else:
+                    messagebox.showinfo("Import from Orders",
+                        "No new customers found — every customer in your orders "
+                        "is already in the database.")
+                self.status_var.set(
+                    f"Customer import complete — {len(added)} added.")
+                self._refresh_customers_list()
+
+            self.master.after(0, _done)
+
+        threading.Thread(target=_work, daemon=True).start()
 
     def _refresh_customers_list(self):
         import queue as _q
