@@ -16,7 +16,7 @@ import os, sys, json, subprocess, tempfile
 from pathlib import Path
 import urllib.request
 
-APP_VERSION = "2.0.8"
+APP_VERSION = "2.0.9"
 
 # Public repo whose GitHub Releases drive updates.
 GITHUB_REPO = "MalakaiCS/TAF-App"
