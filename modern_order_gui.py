@@ -2316,48 +2316,53 @@ class ModernOrderApp(tk.Frame):
     def _check_update_manual(self):
         from taf_order_app.updater import check_for_update, get_current_remote_version
         import queue as _q
-        self._check_upd_btn.config(state="disabled", text="Checking…")
+
+        # Guard against re-entrancy. We keep the button ENABLED and just change
+        # its label — the disabled pill renders light-on-light and looked like
+        # the button had vanished. (No self.update() here either — calling it
+        # inside a click handler is a re-entrancy hazard.)
+        if getattr(self, "_upd_checking", False):
+            return
+        self._upd_checking = True
+        self._check_upd_btn.config(text="Checking…")
         self._upd_status_var.set("Checking for updates…")
-        self.update()
         q = _q.Queue()
 
         def _work():
             try:
-                info = check_for_update()
-                q.put(("ok", info))
+                info   = check_for_update()
+                remote = get_current_remote_version()
+                q.put(("ok", (info, remote)))
             except Exception as exc:
                 q.put(("error", str(exc)))
 
         def _poll():
             try:
-                while True:
-                    kind, data = q.get_nowait()
-                    self._check_upd_btn.config(state="normal", text="Check for Updates")
-                    if kind == "ok":
-                        if data:
-                            v     = data.get("version", "")
-                            notes = data.get("release_notes", "")
-                            preview = (notes.splitlines()[0].strip()[:60] + "…") if notes else ""
-                            self._upd_status_var.set(
-                                f"v{v} is available" + (f"  —  {preview}" if preview else ""))
-                            self._pending_update = data
-                            self._install_upd_btn.pack(side="left", padx=(8, 0))
-                            self._update_banner_shown = False   # allow re-show
-                            self._show_update_banner(data)
-                        else:
-                            remote = get_current_remote_version()
-                            self._upd_status_var.set(
-                                f"You are up to date.  (Latest: v{remote})")
-                            self._install_upd_btn.pack_forget()
-                    else:
-                        self._upd_status_var.set(f"Check failed: {data}")
-                    return
+                kind, data = q.get_nowait()
             except _q.Empty:
-                pass
-            self.master.after(100, _poll)
+                self.master.after(150, _poll)
+                return
+            # Whatever happened, always restore the button so it can't get
+            # stuck / invisible.
+            self._upd_checking = False
+            self._check_upd_btn.config(state="normal", text="Check for Updates")
+            if kind == "ok":
+                info, remote = data
+                if info:
+                    v = info.get("version", "")
+                    self._upd_status_var.set(f"v{v} is available.")
+                    self._pending_update = info
+                    self._install_upd_btn.pack(side="left", padx=(8, 0))
+                    self._update_banner_shown = False   # allow re-show
+                    self._show_update_banner(info)
+                else:
+                    self._upd_status_var.set(f"You're up to date.  (v{remote})")
+                    self._install_upd_btn.pack_forget()
+            else:
+                self._upd_status_var.set(f"Check failed: {data}")
 
         threading.Thread(target=_work, daemon=True).start()
-        self.master.after(100, _poll)
+        self.master.after(150, _poll)
 
     def _open_user_management(self):
         from taf_order_app.user_management import UserManagementDialog
