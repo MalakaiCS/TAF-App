@@ -129,61 +129,61 @@ def download_and_install(info: dict, progress_cb=None) -> None:
         progress_cb(97, "Starting installer…")
 
     exe_path = Path(sys.executable)
+    app_dir  = exe_path.parent
     app_pid  = os.getpid()
 
-    # ── Hand off to a detached helper that (1) waits for THIS app to fully
-    #    exit so its exe/DLLs unlock, (2) runs the installer to completion,
-    #    (3) relaunches the updated app. ────────────────────────────────────
-    #
-    # The previous helper used cmd's `timeout`, which fails instantly under a
-    # detached / no-console process ("input redirection is not supported").
-    # Chained with `&`, that made the installer run *before* the app had
-    # closed, so it couldn't overwrite the locked files and the silent install
-    # aborted — the app shut down but nothing updated. The installer has no
-    # AppMutex, so it can't close the app itself; we must wait it out here.
-    # PowerShell's Wait-Process / Start-Sleep need no console, so they work
-    # correctly when launched detached.
-    def _ps_quote(p) -> str:
-        return "'" + str(p).replace("'", "''") + "'"
+    # Logs so a failed update can actually be diagnosed instead of guessed at.
+    data_dir = Path(os.environ.get("APPDATA", tempfile.gettempdir())) / "TAF Order Entry"
+    try:
+        data_dir.mkdir(parents=True, exist_ok=True)
+    except Exception:
+        data_dir = Path(tempfile.gettempdir())
+    diag    = data_dir / "update.log"
+    innolog = data_dir / "update_install_inno.log"
 
-    ps_script = "\n".join([
-        "$ErrorActionPreference = 'SilentlyContinue'",
-        # 1) Wait for the running app to close (up to 30s) so its files unlock.
-        f"try {{ Wait-Process -Id {app_pid} -Timeout 30 }} catch {{ }}",
-        "Start-Sleep -Seconds 1",
-        # 2) Install the update silently and WAIT for it to finish.
-        f"Start-Process -FilePath {_ps_quote(setup)} "
-        f"-ArgumentList '/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART','/NOCANCEL' -Wait",
-        # 3) Relaunch the updated app.
-        f"Start-Process -FilePath {_ps_quote(exe_path)}",
-        "",
-    ])
-    ps_path = Path(tempfile.gettempdir()) / "TAFOrderEntry_update.ps1"
-    ps_path.write_text(ps_script, encoding="utf-8")
+    # ── Hand off to a detached .cmd helper that:
+    #     1) waits for THIS app to fully exit (tasklist poll — no console-input
+    #        dependency like `timeout`, which fails in a detached process),
+    #     2) installs to the SAME place the app already lives:
+    #         • silent install if that folder is user-writable (per-user install),
+    #         • elevated install (one UAC prompt) if it isn't (Program Files),
+    #           which is why a silent install could "close and not install",
+    #     3) relaunches the app.
+    #    Every step is written to update.log so failures are visible.
+    bat = Path(tempfile.gettempdir()) / "TAFOrderEntry_update.cmd"
+    bat_text = f"""@echo off
+> "{diag}" echo [update] started - waiting for app PID {app_pid} to exit
+:waitloop
+tasklist /FI "PID eq {app_pid}" 2>nul | find "{app_pid}" >nul
+if not errorlevel 1 (
+  ping -n 2 127.0.0.1 >nul
+  goto waitloop
+)
+>> "{diag}" echo [update] app exited - testing write access to "{app_dir}"
+(echo test)> "{app_dir}\\__wtest.tmp" 2>nul
+if exist "{app_dir}\\__wtest.tmp" (
+  del "{app_dir}\\__wtest.tmp" 2>nul
+  >> "{diag}" echo [update] location is writable - running SILENT install
+  "{setup}" /VERYSILENT /SUPPRESSMSGBOXES /NORESTART /NOCANCEL /LOG="{innolog}"
+  >> "{diag}" echo [update] installer exit code: %errorlevel%
+) else (
+  >> "{diag}" echo [update] location needs admin - elevating install (UAC prompt)
+  powershell -NoProfile -Command "Start-Process -FilePath '{setup}' -ArgumentList '/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART','/NOCANCEL','/LOG={innolog}' -Verb RunAs -Wait"
+  >> "{diag}" echo [update] elevated install returned
+)
+>> "{diag}" echo [update] relaunching app
+start "" "{exe_path}"
+>> "{diag}" echo [update] done
+"""
+    bat.write_text(bat_text, encoding="utf-8")
 
     DETACHED_PROCESS = 0x00000008
     CREATE_NO_WINDOW = 0x08000000
-    flags = DETACHED_PROCESS | CREATE_NO_WINDOW
-
-    try:
-        subprocess.Popen(
-            ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass",
-             "-WindowStyle", "Hidden", "-File", str(ps_path)],
-            creationflags=flags, close_fds=True)
-    except Exception:
-        # Fallback if PowerShell can't be launched: a cmd helper that uses
-        # `ping` for the delay (works with no console, unlike `timeout`) and
-        # relies on `&` running sequentially so the install finishes before
-        # the relaunch.
-        helper = (
-            f'ping 127.0.0.1 -n 5 >nul & '
-            f'"{setup}" /VERYSILENT /SUPPRESSMSGBOXES /NORESTART /NOCANCEL & '
-            f'start "" "{exe_path}"'
-        )
-        subprocess.Popen(["cmd", "/c", helper],
-                         creationflags=flags, close_fds=True)
+    subprocess.Popen(["cmd", "/c", str(bat)],
+                     creationflags=DETACHED_PROCESS | CREATE_NO_WINDOW,
+                     close_fds=True)
 
     if progress_cb:
         progress_cb(100, "Installing update… the app will reopen shortly.")
-    # Main thread detects pct==100 and calls os._exit(0) after a short delay,
-    # which lets the helper's Wait-Process return and the install proceed.
+    # Main thread detects pct==100 and calls os._exit(0) after a short delay so
+    # the app's files unlock; the helper's tasklist wait then proceeds.
