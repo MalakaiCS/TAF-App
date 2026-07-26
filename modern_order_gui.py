@@ -1407,6 +1407,10 @@ class LineItemDialog(tk.Toplevel):
         self.result = None
         initial = initial or {}
         _media_types = media_types if media_types is not None else DEFAULT_MEDIA_TYPES
+        # Keep the exact list shown in the dropdown — Save must validate against
+        # THIS (built-ins + custom types), not VALID_MEDIA_TYPES alone, or any
+        # custom media type gets rejected and the item silently never saves.
+        self._media_types = list(_media_types)
 
         # ── Header strip (top) ────────────────────────────────────────────
         hdr = tk.Frame(self, bg=CA, padx=20, pady=14)
@@ -1582,7 +1586,9 @@ class LineItemDialog(tk.Toplevel):
             messagebox.showerror("Invalid Input",
                                  "Please select a valid Filter Type.", parent=self)
             return
-        if mt not in VALID_MEDIA_TYPES:
+        # Validate against the dropdown's own list (built-ins + custom types) —
+        # checking VALID_MEDIA_TYPES alone rejected every custom media type.
+        if mt not in self._media_types and mt not in VALID_MEDIA_TYPES:
             messagebox.showerror("Invalid Input",
                                  "Please select a valid Media Type.", parent=self)
             return
