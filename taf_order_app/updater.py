@@ -141,67 +141,106 @@ def download_and_install(info: dict, progress_cb=None) -> None:
     diag    = data_dir / "update.log"
     innolog = data_dir / "update_install_inno.log"
 
-    # ── Hand off to a detached .cmd helper that:
-    #     1) waits for THIS app to fully exit (tasklist poll — no console-input
-    #        dependency like `timeout`, which fails in a detached process),
-    #     2) installs to the SAME place the app already lives:
-    #         • silent install if that folder is user-writable (per-user install),
-    #         • elevated install (one UAC prompt) if it isn't (Program Files),
-    #           which is why a silent install could "close and not install",
-    #     3) relaunches the app.
-    #    Every step is written to update.log so failures are visible.
-    bat = Path(tempfile.gettempdir()) / "TAFOrderEntry_update.cmd"
-    bat_text = f"""@echo off
-> "{diag}" echo [update] started - waiting for app PID {app_pid} to exit
-set /a tries=0
-:waitloop
-tasklist /FI "PID eq {app_pid}" 2>nul | find "{app_pid}" >nul
-if errorlevel 1 goto afterwait
-set /a tries+=1
-if %tries% geq 20 (
-  >> "{diag}" echo [update] app still running after wait cap - proceeding anyway
-  goto afterwait
-)
-ping -n 2 127.0.0.1 >nul
-goto waitloop
-:afterwait
->> "{diag}" echo [update] proceeding after %tries% cycles - testing write access to "{app_dir}"
-(echo test)> "{app_dir}\\__wtest.tmp" 2>nul
-if exist "{app_dir}\\__wtest.tmp" (
-  del "{app_dir}\\__wtest.tmp" 2>nul
-  >> "{diag}" echo [update] location is writable - running SILENT install
-  "{setup}" /VERYSILENT /SUPPRESSMSGBOXES /NORESTART /NOCANCEL /LOG="{innolog}"
-  >> "{diag}" echo [update] installer exit code: %errorlevel%
-) else (
-  >> "{diag}" echo [update] location needs admin - elevating install (UAC prompt)
-  powershell -NoProfile -Command "Start-Process -FilePath '{setup}' -ArgumentList '/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART','/NOCANCEL','/LOG={innolog}' -Verb RunAs -Wait"
-  >> "{diag}" echo [update] elevated install returned
-)
->> "{diag}" echo [update] relaunching app
-start "" "{exe_path}"
->> "{diag}" echo [update] done
-"""
-    bat.write_text(bat_text, encoding="utf-8")
+    # ── Helper script (PowerShell): wait for the app to exit, install to the
+    #    same folder (silent if writable, elevated if not), relaunch, and log
+    #    every step so failures are diagnosable. ────────────────────────────
+    def _q(p) -> str:
+        return "'" + str(p).replace("'", "''") + "'"
 
-    # The helper MUST outlive the app. DETACHED_PROCESS + CREATE_NO_WINDOW give
-    # it no console; CREATE_BREAKAWAY_FROM_JOB frees it from any job object the
-    # app is in, so it isn't killed mid-wait when the app exits (the log getting
-    # stuck at "waiting for app ... to exit" is exactly that symptom). Breakaway
-    # can be rejected by a job that disallows it, so fall back without it.
-    DETACHED_PROCESS          = 0x00000008
-    CREATE_NO_WINDOW          = 0x08000000
-    CREATE_BREAKAWAY_FROM_JOB = 0x01000000
-    base_flags = DETACHED_PROCESS | CREATE_NO_WINDOW
+    inno_args = f"/VERYSILENT /SUPPRESSMSGBOXES /NORESTART /NOCANCEL /LOG=\"{innolog}\""
+    ps_script = f"""
+$ErrorActionPreference = 'Continue'
+$log = {_q(diag)}
+Add-Content -Path $log -Value '[helper] started - waiting for app PID {app_pid} to exit'
+try {{ Wait-Process -Id {app_pid} -Timeout 60 -ErrorAction SilentlyContinue }} catch {{ }}
+Start-Sleep -Seconds 2
+$appDir = {_q(app_dir)}
+$test   = Join-Path $appDir '__wtest.tmp'
+$canWrite = $true
+try {{ Set-Content -Path $test -Value 'x' -ErrorAction Stop
+      Remove-Item $test -ErrorAction SilentlyContinue }} catch {{ $canWrite = $false }}
+if ($canWrite) {{
+  Add-Content -Path $log -Value '[helper] app folder writable - running silent install'
+  $p = Start-Process -FilePath {_q(setup)} -ArgumentList {_q(inno_args)} -Wait -PassThru
+  Add-Content -Path $log -Value ('[helper] installer exit code: ' + $p.ExitCode)
+}} else {{
+  Add-Content -Path $log -Value '[helper] app folder needs admin - elevated install (UAC prompt)'
+  try {{ Start-Process -FilePath {_q(setup)} -ArgumentList {_q(inno_args)} -Verb RunAs -Wait }} catch {{ }}
+  Add-Content -Path $log -Value '[helper] elevated install returned'
+}}
+Add-Content -Path $log -Value '[helper] relaunching app'
+Start-Process -FilePath {_q(exe_path)}
+try {{ schtasks /Delete /TN 'TAFOrderEntryUpdate' /F 2>$null | Out-Null }} catch {{ }}
+Add-Content -Path $log -Value '[helper] done'
+"""
+    ps_path = Path(tempfile.gettempdir()) / "TAFOrderEntry_update.ps1"
+    ps_path.write_text(ps_script, encoding="utf-8-sig")
+
+    def _diag_write(line: str, reset: bool = False) -> None:
+        try:
+            with open(diag, "w" if reset else "a", encoding="utf-8") as f:
+                f.write(line + "\n")
+        except Exception:
+            pass
+
+    _diag_write(f"[update] v{APP_VERSION} -> v{info.get('version','?')} - launching helper", reset=True)
+
+    # ── Launch the helper OUTSIDE the app's process tree. ─────────────────
+    # Update logs kept stopping at the first line: the helper (a child of the
+    # app) was killed the moment the app exited, because the app runs inside a
+    # Windows job object with kill-on-close that also DENIES breakaway (so the
+    # CREATE_BREAKAWAY_FROM_JOB attempt silently fell back into the job).
+    # Fix: ask a system service to start the helper instead — processes
+    # created via WMI (or Task Scheduler) are parented to the service, not the
+    # app, so they are untouched by the app's job. Every attempt is logged.
+    CREATE_NO_WINDOW = 0x08000000
+    helper_cmd = (f'powershell.exe -NoProfile -ExecutionPolicy Bypass '
+                  f'-WindowStyle Hidden -File "{ps_path}"')
+
+    launched = False
+
+    # 1) WMI (Win32_Process.Create) — helper is parented to the WMI service.
     try:
-        subprocess.Popen(["cmd", "/c", str(bat)],
-                         creationflags=base_flags | CREATE_BREAKAWAY_FROM_JOB,
-                         close_fds=True)
+        cim = ("$r = Invoke-CimMethod -ClassName Win32_Process -MethodName Create "
+               "-Arguments @{ CommandLine = " + _q(helper_cmd) + " }; "
+               "exit [int]$r.ReturnValue")
+        r = subprocess.run(["powershell", "-NoProfile", "-Command", cim],
+                           creationflags=CREATE_NO_WINDOW, timeout=40)
+        launched = (r.returncode == 0)
     except Exception:
-        subprocess.Popen(["cmd", "/c", str(bat)],
-                         creationflags=base_flags,
-                         close_fds=True)
+        launched = False
+    _diag_write(f"[update] launch via WMI: {'ok' if launched else 'FAILED'}")
+
+    # 2) Task Scheduler — task processes run under the scheduler service.
+    if not launched:
+        try:
+            subprocess.run(["schtasks", "/Create", "/TN", "TAFOrderEntryUpdate",
+                            "/TR", helper_cmd, "/SC", "ONCE", "/ST", "23:59", "/F"],
+                           creationflags=CREATE_NO_WINDOW, timeout=40)
+            r = subprocess.run(["schtasks", "/Run", "/TN", "TAFOrderEntryUpdate"],
+                               creationflags=CREATE_NO_WINDOW, timeout=40)
+            launched = (r.returncode == 0)
+        except Exception:
+            launched = False
+        _diag_write(f"[update] launch via Task Scheduler: {'ok' if launched else 'FAILED'}")
+
+    # 3) Last resort: direct child with breakaway (works when no job denies it).
+    if not launched:
+        DETACHED_PROCESS          = 0x00000008
+        CREATE_BREAKAWAY_FROM_JOB = 0x01000000
+        base = DETACHED_PROCESS | CREATE_NO_WINDOW
+        try:
+            subprocess.Popen(["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass",
+                              "-WindowStyle", "Hidden", "-File", str(ps_path)],
+                             creationflags=base | CREATE_BREAKAWAY_FROM_JOB,
+                             close_fds=True)
+        except Exception:
+            subprocess.Popen(["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass",
+                              "-WindowStyle", "Hidden", "-File", str(ps_path)],
+                             creationflags=base, close_fds=True)
+        _diag_write("[update] launch via direct child (breakaway attempt)")
 
     if progress_cb:
         progress_cb(100, "Installing update… the app will reopen shortly.")
     # Main thread detects pct==100 and calls os._exit(0) after a short delay so
-    # the app's files unlock; the helper's tasklist wait then proceeds.
+    # the app's files unlock; the helper's Wait-Process then proceeds.
