@@ -7675,7 +7675,32 @@ def _start_app():
     root = tk.Tk()
     root.withdraw()          # hide until login succeeds
     _load_app_fonts()        # register Public Sans before any widgets are built
-    root.title(APP_TITLE)
+    # Show the running version in the title so support always knows the build.
+    root.title(f"{APP_TITLE}  —  v{APP_VERSION}")
+
+    # ── Never let a UI error vanish silently ─────────────────────────────
+    # In the windowed (no-console) exe, an exception inside a Tk callback is
+    # invisible: the callback just aborts, which looks like "I clicked and
+    # nothing happened". Log every callback exception to app_error.log and
+    # show it, so failures are diagnosable instead of silent.
+    def _report_callback_exception(exc, val, tb):
+        log_path = APP_DIR / "app_error.log"
+        try:
+            import traceback
+            with open(log_path, "a", encoding="utf-8") as f:
+                f.write(f"\n[{_dt_module.datetime.now():%d/%m/%Y %H:%M:%S}] "
+                        f"v{APP_VERSION} — error in UI callback:\n")
+                traceback.print_exception(exc, val, tb, file=f)
+        except Exception:
+            pass
+        try:
+            messagebox.showerror(
+                "Unexpected Error",
+                f"Something went wrong:\n\n{val}\n\n"
+                f"Details were saved to:\n{log_path}")
+        except Exception:
+            pass
+    root.report_callback_exception = _report_callback_exception
     root.configure(bg=CBG)
     _apply_icon(root)
 
