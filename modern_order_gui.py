@@ -436,7 +436,16 @@ def _badge_image(text, bg, fg, h=22, pad_x=11):
     key = (text, bg, fg, h)
     cached = _BADGE_CACHE.get(key)
     if cached is not None:
-        return cached
+        # A cached PhotoImage belongs to the Tk window it was created under.
+        # After sign-out the whole window is rebuilt, and using a stale image
+        # raises TclError ('image "pyimageN" doesn't exist') — which silently
+        # killed list refreshes (items not appearing after Save). Verify the
+        # image is still alive; if not, drop it and re-render.
+        try:
+            cached.tk.call("image", "type", str(cached))
+            return cached
+        except Exception:
+            _BADGE_CACHE.pop(key, None)
     try:
         from PIL import Image, ImageDraw, ImageFont, ImageTk
     except Exception:
@@ -7674,6 +7683,9 @@ def _start_app():
 
     root = tk.Tk()
     root.withdraw()          # hide until login succeeds
+    # A fresh Tk root invalidates every previously-rendered PhotoImage (this
+    # runs again after sign-out) — drop the badge cache so it re-renders.
+    _BADGE_CACHE.clear()
     _load_app_fonts()        # register Public Sans before any widgets are built
     # Show the running version in the title so support always knows the build.
     root.title(f"{APP_TITLE}  —  v{APP_VERSION}")
