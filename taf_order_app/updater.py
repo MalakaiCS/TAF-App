@@ -169,7 +169,7 @@ if ($canWrite) {{
   Add-Content -Path $log -Value '[helper] elevated install returned'
 }}
 Add-Content -Path $log -Value '[helper] relaunching app'
-Start-Process -FilePath {_q(exe_path)}
+Start-Process -FilePath {_q(exe_path)} -WorkingDirectory {_q(app_dir)}
 try {{ schtasks /Delete /TN 'TAFOrderEntryUpdate' /F 2>$null | Out-Null }} catch {{ }}
 Add-Content -Path $log -Value '[helper] done'
 """

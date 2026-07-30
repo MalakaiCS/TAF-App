@@ -2086,7 +2086,10 @@ class ModernOrderApp(tk.Frame):
     def __init__(self, master):
         super().__init__(master, bg=CBG)
         self.master = master
-        self.service = OrderService()
+        # Anchor order storage to APP_DIR (never cwd — see OrderService).
+        # This also aligns saved order JSONs with ORDERS_DIR, where the
+        # Previous Orders local scan looks for them.
+        self.service = OrderService(APP_DIR)
         self.items: list = []
         self._all_orders_data: list = []
         self._tab_frames: dict = {}
