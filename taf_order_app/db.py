@@ -497,6 +497,31 @@ def can_manage_media_types() -> bool:
     return role_level() >= 3
 
 
+# ── Shared catalogue (dedicated filter presets & filter types) ────────────────
+# One row per list in catalog_lists (key text, value jsonb). The app falls
+# back to its built-in defaults when the table is missing or unreachable.
+
+def get_catalog_map() -> dict:
+    """Return {key: value} for every stored catalogue list. Raises on failure
+    so callers can fall back to local caches / built-in defaults."""
+    resp = get_client().table("catalog_lists").select("key, value").execute()
+    return {r["key"]: r["value"] for r in (resp.data or [])}
+
+
+def set_catalog_value(key: str, value) -> None:
+    """Create or replace one catalogue list (value is JSON-serialisable)."""
+    import datetime as _dt
+    get_client().table("catalog_lists").upsert({
+        "key":        key,
+        "value":      value,
+        "updated_at": _dt.datetime.now(_dt.timezone.utc).isoformat(),
+    }).execute()
+
+
+def can_manage_catalog() -> bool:
+    return role_level() >= 3
+
+
 # ── Audit Log ─────────────────────────────────────────────────────────────────
 
 def log_action(action: str, details: str = "") -> None:

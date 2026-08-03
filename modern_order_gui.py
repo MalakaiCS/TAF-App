@@ -318,6 +318,79 @@ STEPPED_PACKS = {
 
 COMPRESSOR_PACKS = DEDICATED_FILTER_PACKS
 
+# ── Editable catalogue ───────────────────────────────────────────────────────
+# The preset tables above are only the *defaults*. Managers can add/edit/
+# remove models from the Dedicated Filter Presets dialog; changes are stored
+# in the shared catalog_lists table (see migrate_catalog.sql) so every PC
+# sees the same presets, with a local cache for offline starts. The dicts are
+# mutated IN PLACE so every existing reference picks up changes.
+
+import copy as _copy
+DEFAULT_GD_PACKS      = _copy.deepcopy(DEDICATED_FILTER_PACKS)
+DEFAULT_SIGRIST_PACK  = _copy.deepcopy(SIGRIST_PACK)
+DEFAULT_STEPPED_PACKS = _copy.deepcopy(STEPPED_PACKS)
+
+CATALOG_CACHE_FILE = APP_DIR / "catalog_cache.json"
+
+
+def _apply_catalog(data: dict) -> None:
+    """Overwrite the in-memory preset tables from a catalogue dict."""
+    gd = data.get("gd_packs")
+    if isinstance(gd, dict) and gd:
+        DEDICATED_FILTER_PACKS.clear()
+        DEDICATED_FILTER_PACKS.update(gd)
+    sig = data.get("sigrist_pack")
+    if isinstance(sig, dict) and sig.get("filters"):
+        SIGRIST_PACK.clear()
+        SIGRIST_PACK.update(sig)
+    st = data.get("stepped_packs")
+    if isinstance(st, dict) and st:
+        STEPPED_PACKS.clear()
+        STEPPED_PACKS.update(st)
+
+
+def _load_catalog_cache() -> None:
+    try:
+        if CATALOG_CACHE_FILE.exists():
+            _apply_catalog(json.loads(CATALOG_CACHE_FILE.read_text(encoding="utf-8")))
+    except Exception:
+        pass
+
+
+def _save_catalog_cache() -> None:
+    try:
+        CATALOG_CACHE_FILE.write_text(json.dumps({
+            "gd_packs":      DEDICATED_FILTER_PACKS,
+            "sigrist_pack":  SIGRIST_PACK,
+            "stepped_packs": STEPPED_PACKS,
+        }, indent=2), encoding="utf-8")
+    except Exception:
+        pass
+
+
+def _persist_catalog_key(key: str, value, parent=None) -> bool:
+    """Save one catalogue list to the shared DB (+ local cache). Returns
+    True if the shared save worked; shows a helpful error if not."""
+    _save_catalog_cache()
+    if not (_db.is_ready() and _db.current_user()):
+        return False
+    try:
+        _db.set_catalog_value(key, value)
+        _db.log_action("catalog_changed", f"Updated {key}")
+        return True
+    except Exception as exc:
+        try:
+            messagebox.showerror(
+                "Database Error",
+                "The change is applied on this PC, but couldn't be saved to "
+                f"the shared database:\n{exc}\n\n"
+                "If this mentions a missing 'catalog_lists' table, run "
+                "migrate_catalog.sql in the Supabase SQL Editor.",
+                parent=parent)
+        except Exception:
+            pass
+        return False
+
 
 # ── COM pre-warm ─────────────────────────────────────────────────────────────
 # Called once on a background thread right after the window opens.
@@ -893,6 +966,223 @@ class CalendarPicker(tk.Toplevel):
 # Compressor Filter Preset Dialog
 # ═══════════════════════════════════════════════════════════════════════════
 
+class _PresetRowDialog(tk.Toplevel):
+    """Small modal for one preset row (a mounting frame or a filter).
+
+    `fields` is a list of (key, label, kind) where kind is "int" or "str".
+    result = None if cancelled, else {key: value}.
+    """
+
+    def __init__(self, master, title, fields, initial=None):
+        super().__init__(master)
+        self.title(title)
+        self.resizable(False, False)
+        self.transient(master)
+        self.grab_set()
+        self.configure(bg=CBG)
+        self.result = None
+        initial = initial or {}
+        self._fields = fields
+
+        hdr = tk.Frame(self, bg=CA, padx=14, pady=8)
+        hdr.pack(fill="x", side="top")
+        tk.Label(hdr, text=title, bg=CA, fg="white", font=F_BOLD).pack(anchor="w")
+
+        foot = tk.Frame(self, bg=CBG, padx=16, pady=12)
+        foot.pack(fill="x", side="bottom")
+        flat_btn(foot, "Cancel", self.destroy, bg=CNE, pady=6).pack(side="right", padx=(6, 0))
+        flat_btn(foot, "Save",   self._save,   bg=CGR, pady=6).pack(side="right")
+
+        body = tk.Frame(self, bg=CBG, padx=16, pady=12)
+        body.pack(fill="both", expand=True, side="top")
+        self._vars = {}
+        for i, (key, label, kind) in enumerate(fields):
+            tk.Label(body, text=label, bg=CBG, fg=CTX,
+                     font=F_BODY, anchor="w").grid(row=i, column=0, sticky="w", pady=4)
+            v = tk.StringVar(value=str(initial.get(key, "") if initial.get(key) is not None else ""))
+            self._vars[key] = v
+            e = field_entry(body, textvariable=v, width=16)
+            e.grid(row=i, column=1, sticky="ew", padx=(12, 0), pady=4)
+            if i == 0:
+                e.focus_set()
+        body.columnconfigure(1, weight=1)
+
+        self.bind("<Return>", lambda e: self._save())
+        self.bind("<Escape>", lambda e: self.destroy())
+
+    def _save(self):
+        out = {}
+        for key, label, kind in self._fields:
+            raw = self._vars[key].get().strip()
+            if kind == "int":
+                try:
+                    out[key] = int(raw)
+                except Exception:
+                    messagebox.showwarning(
+                        "Invalid Number",
+                        f"'{label}' must be a whole number.", parent=self)
+                    return
+                if out[key] <= 0:
+                    messagebox.showwarning(
+                        "Invalid Number",
+                        f"'{label}' must be greater than zero.", parent=self)
+                    return
+            else:
+                out[key] = raw
+        self.result = out
+        self.destroy()
+
+
+class _GDModelEditor(tk.Toplevel):
+    """Add / edit one Comp Air / Gardner Denver housing model: its name, its
+    mounting frames and its filters. result = None or (name, pack dict)."""
+
+    FRAME_FIELDS  = [("qty", "Quantity", "int"), ("short", "Short (mm)", "int"),
+                     ("long", "Long (mm)", "int"), ("label", "Label (optional)", "str")]
+    FILTER_FIELDS = [("qty", "Quantity", "int"), ("short", "Short (mm)", "int"),
+                     ("long", "Long (mm)", "int"), ("channel", "Channel (mm)", "int"),
+                     ("media", "Media (blank = G4)", "str"),
+                     ("filter_type", "Filter Type (blank = V-form)", "str"),
+                     ("label", "Label (optional)", "str")]
+
+    def __init__(self, master, name="", pack=None):
+        super().__init__(master)
+        self.title("Edit Model" if name else "Add Model")
+        self.transient(master)
+        self.grab_set()
+        self.configure(bg=CBG)
+        self.result = None
+        pack = pack or {}
+        self._frames  = [dict(f) for f in pack.get("frames", [])]
+        self._filters = [dict(f) for f in pack.get("filters", [])]
+
+        hdr = tk.Frame(self, bg=CA, padx=16, pady=10)
+        hdr.pack(fill="x", side="top")
+        tk.Label(hdr, text=("Edit Model" if name else "Add Model"),
+                 bg=CA, fg="white", font=(FAM, 11, "bold")).pack(anchor="w")
+        tk.Label(hdr, text="Mounting frames become a note on the worksheet; "
+                           "filters become the actual line items.",
+                 bg=CA, fg="#A9CCE3", font=F_SM).pack(anchor="w")
+
+        foot = tk.Frame(self, bg=CBG, padx=16, pady=10)
+        foot.pack(fill="x", side="bottom")
+        flat_btn(foot, "Cancel", self.destroy, bg=CNE, pady=7).pack(side="right", padx=(8, 0))
+        flat_btn(foot, "Save",   self._save,   bg=CGR, pady=7).pack(side="right")
+
+        body = tk.Frame(self, bg=CBG, padx=16, pady=12)
+        body.pack(fill="both", expand=True, side="top")
+
+        name_row = tk.Frame(body, bg=CBG)
+        name_row.pack(fill="x", pady=(0, 10))
+        tk.Label(name_row, text="Model name:", bg=CBG, fg=CTX,
+                 font=F_BOLD).pack(side="left", padx=(0, 8))
+        self._name_var = tk.StringVar(value=name)
+        ent = field_entry(name_row, textvariable=self._name_var, width=24)
+        ent.pack(side="left", fill="x", expand=True)
+        if not name:
+            ent.focus_set()
+
+        self._frames_tree  = self._build_section(
+            body, "Mounting Frames  (optional — housing orders only)",
+            ("Qty", "Short", "Long", "Label"), self._frames, self.FRAME_FIELDS)
+        self._filters_tree = self._build_section(
+            body, "Filters",
+            ("Qty", "Short", "Long", "Channel", "Media", "Type", "Label"),
+            self._filters, self.FILTER_FIELDS)
+
+        self._refresh_tree(self._frames_tree,  self._frames,
+                           ("qty", "short", "long", "label"))
+        self._refresh_tree(self._filters_tree, self._filters,
+                           ("qty", "short", "long", "channel", "media",
+                            "filter_type", "label"))
+
+        self.update_idletasks()
+        W, H = 620, 600
+        self.geometry(f"{W}x{H}+{master.winfo_rootx()+40}+{max(0, master.winfo_rooty()-20)}")
+
+    def _build_section(self, parent, title, columns, rows_ref, fields):
+        tk.Label(parent, text=title, bg=CBG, fg=CA,
+                 font=F_SEC, anchor="w").pack(anchor="w", pady=(6, 4))
+        wrap = tk.Frame(parent, bg=CCA, highlightbackground=CSP, highlightthickness=1)
+        wrap.pack(fill="both", expand=True)
+        tree = ttk.Treeview(wrap, columns=columns, show="headings",
+                            style="TAF.Treeview", height=5)
+        for c in columns:
+            tree.heading(c, text=c)
+            tree.column(c, width=90, anchor="center",
+                        stretch=(c == "Label"))
+        tree.pack(fill="both", expand=True, padx=1, pady=1)
+
+        bar = tk.Frame(parent, bg=CBG)
+        bar.pack(anchor="w", pady=(4, 2))
+        keys = tuple(f[0] for f in fields)
+        flat_btn(bar, "+ Add", lambda: self._row_add(tree, rows_ref, fields, keys),
+                 bg=CA,  pady=4, padx=8, font=F_SM).pack(side="left", padx=(0, 4))
+        flat_btn(bar, "Edit",  lambda: self._row_edit(tree, rows_ref, fields, keys),
+                 bg=CNE, pady=4, padx=8, font=F_SM).pack(side="left", padx=(0, 4))
+        flat_btn(bar, "Remove", lambda: self._row_remove(tree, rows_ref, keys),
+                 bg=CRD, pady=4, padx=8, font=F_SM).pack(side="left")
+        return tree
+
+    def _refresh_tree(self, tree, rows, keys):
+        for iid in tree.get_children():
+            tree.delete(iid)
+        for i, r in enumerate(rows):
+            tree.insert("", "end", iid=str(i),
+                        values=tuple(r.get(k, "") for k in keys))
+
+    def _row_add(self, tree, rows, fields, keys):
+        dlg = _PresetRowDialog(self, "Add Row", fields)
+        self.wait_window(dlg)
+        try:
+            self.grab_set()   # child dialog took the grab — take it back
+        except Exception:
+            pass
+        if dlg.result:
+            row = {k: v for k, v in dlg.result.items()
+                   if not (isinstance(v, str) and not v)}
+            rows.append(row)
+            self._refresh_tree(tree, rows, keys)
+
+    def _row_edit(self, tree, rows, fields, keys):
+        sel = tree.selection()
+        if not sel:
+            messagebox.showinfo("Edit Row", "Select a row first.", parent=self)
+            return
+        idx = int(sel[0])
+        dlg = _PresetRowDialog(self, "Edit Row", fields, initial=rows[idx])
+        self.wait_window(dlg)
+        try:
+            self.grab_set()   # child dialog took the grab — take it back
+        except Exception:
+            pass
+        if dlg.result:
+            rows[idx] = {k: v for k, v in dlg.result.items()
+                         if not (isinstance(v, str) and not v)}
+            self._refresh_tree(tree, rows, keys)
+
+    def _row_remove(self, tree, rows, keys):
+        sel = tree.selection()
+        if not sel:
+            messagebox.showinfo("Remove Row", "Select a row first.", parent=self)
+            return
+        rows.pop(int(sel[0]))
+        self._refresh_tree(tree, rows, keys)
+
+    def _save(self):
+        name = self._name_var.get().strip()
+        if not name:
+            messagebox.showwarning("Name Required",
+                                   "Enter a model name.", parent=self)
+            return
+        if not self._filters:
+            messagebox.showwarning("No Filters",
+                                   "Add at least one filter row.", parent=self)
+            return
+        self.result = (name, {"frames": self._frames, "filters": self._filters})
+        self.destroy()
+
+
 class CompressorFilterDialog(tk.Toplevel):
     """
     Dedicated Filter Presets dialog — three tabs:
@@ -903,12 +1193,16 @@ class CompressorFilterDialog(tk.Toplevel):
     result = None if cancelled, else {"items": [...], "job": str, "notes": str}
     """
 
-    _GD_MODELS = list(DEDICATED_FILTER_PACKS.keys())
-
     def __init__(self, master):
         super().__init__(master)
+        # Managers and above can add/edit/remove the presets themselves
+        # (shown offline too, so a dev copy without Supabase still has them).
+        try:
+            self._can_manage = (not _db.is_ready()) or bool(
+                _db.current_user() and _db.can_manage_catalog())
+        except Exception:
+            self._can_manage = False
         self.title("Dedicated Filter Presets")
-        self.resizable(False, False)
         self.transient(master)
         self.grab_set()
         self.lift()
@@ -921,7 +1215,9 @@ class CompressorFilterDialog(tk.Toplevel):
         hdr.pack(fill="x")
         tk.Label(hdr, text="Dedicated Filter Presets",
                  bg=CA, fg="white", font=(FAM, 11, "bold")).pack(anchor="w")
-        tk.Label(hdr, text="Select a preset — filter items will be added to the current order",
+        tk.Label(hdr, text=("Select a preset — filter items will be added to the current order"
+                            + ("   ·   presets can be added, edited and removed below"
+                               if self._can_manage else "")),
                  bg=CA, fg="#A9CCE3", font=F_SM).pack(anchor="w")
 
         # ── Notebook (tabs) ────────────────────────────────────────────────
@@ -947,10 +1243,11 @@ class CompressorFilterDialog(tk.Toplevel):
         flat_btn(foot, "Add to Order", self._confirm, bg=CGR, pady=7).pack(side="right")
 
         self.update_idletasks()
-        W, H = 600, 500
+        W, H = (660, 580) if self._can_manage else (600, 500)
         px = master.winfo_rootx() + master.winfo_width()  // 2 - W // 2
         py = master.winfo_rooty() + master.winfo_height() // 2 - H // 2
-        self.geometry(f"{W}x{H}+{px}+{py}")
+        self.geometry(f"{W}x{H}+{px}+{max(0, py)}")
+        self.minsize(560, 460)
 
     # ── Tab 1: Comp Air / Gardner Denver ──────────────────────────────────
 
@@ -1009,13 +1306,21 @@ class CompressorFilterDialog(tk.Toplevel):
         left.pack(side="left", fill="y", padx=(0, 14))
         tk.Label(left, text="Model", bg=CBG, fg=CMU, font=F_SM).pack(anchor="w", pady=(0, 4))
 
-        self._gd_model = tk.StringVar(value=self._GD_MODELS[0])
-        for m in self._GD_MODELS:
-            tk.Radiobutton(left, text=m, variable=self._gd_model, value=m,
-                           bg=CBG, fg=CTX, font=F_BODY,
-                           activebackground=CRE, selectcolor=CCA,
-                           command=self._gd_update_preview, cursor="hand2"
-                           ).pack(anchor="w", pady=1)
+        # Model radio list — rebuilt whenever a model is added/edited/removed
+        self._gd_model = tk.StringVar()
+        self._gd_list_frame = tk.Frame(left, bg=CBG)
+        self._gd_list_frame.pack(anchor="w", fill="y")
+        self._gd_rebuild_models()
+
+        if self._can_manage:
+            mgr = tk.Frame(left, bg=CBG)
+            mgr.pack(anchor="w", pady=(8, 0))
+            flat_btn(mgr, "+ Add", self._gd_add_model,
+                     bg=CA,  pady=4, padx=8, font=F_SM).pack(side="left", padx=(0, 4))
+            flat_btn(mgr, "Edit",  self._gd_edit_model,
+                     bg=CNE, pady=4, padx=8, font=F_SM).pack(side="left", padx=(0, 4))
+            flat_btn(mgr, "Delete", self._gd_delete_model,
+                     bg=CRD, pady=4, padx=8, font=F_SM).pack(side="left")
 
         right = tk.Frame(cols, bg=CBG)
         right.pack(side="left", fill="both", expand=True)
@@ -1040,10 +1345,103 @@ class CompressorFilterDialog(tk.Toplevel):
 
         self._gd_update_preview()
 
+    def _gd_rebuild_models(self, select=None):
+        """(Re)draw the model radio list from DEDICATED_FILTER_PACKS."""
+        for w in self._gd_list_frame.winfo_children():
+            w.destroy()
+        models = list(DEDICATED_FILTER_PACKS.keys())
+        if select in models:
+            self._gd_model.set(select)
+        elif self._gd_model.get() not in models:
+            self._gd_model.set(models[0] if models else "")
+        for m in models:
+            tk.Radiobutton(self._gd_list_frame, text=m, variable=self._gd_model,
+                           value=m, bg=CBG, fg=CTX, font=F_BODY,
+                           activebackground=CRE, selectcolor=CCA,
+                           command=self._gd_update_preview, cursor="hand2"
+                           ).pack(anchor="w", pady=1)
+        if not models:
+            tk.Label(self._gd_list_frame, text="(no models — add one)",
+                     bg=CBG, fg=CMU, font=F_SM).pack(anchor="w")
+        # Skipped on the first call: the preview widgets are built after this
+        # list, and _build_gd_tab refreshes the preview itself at the end.
+        if hasattr(self, "_gd_txt"):
+            self._gd_update_preview()
+
+    def _gd_add_model(self):
+        dlg = _GDModelEditor(self)
+        self.wait_window(dlg)
+        try:
+            self.grab_set()   # child dialog took the grab — take it back
+        except Exception:
+            pass
+        if not dlg.result:
+            return
+        name, pack = dlg.result
+        if name in DEDICATED_FILTER_PACKS:
+            messagebox.showwarning("Duplicate",
+                f'A model named "{name}" already exists.', parent=self)
+            return
+        DEDICATED_FILTER_PACKS[name] = pack
+        _persist_catalog_key("gd_packs", DEDICATED_FILTER_PACKS, parent=self)
+        self._gd_rebuild_models(select=name)
+
+    def _gd_edit_model(self):
+        model = self._gd_model.get()
+        if not model or model not in DEDICATED_FILTER_PACKS:
+            messagebox.showinfo("Edit Model", "Select a model first.", parent=self)
+            return
+        dlg = _GDModelEditor(self, name=model, pack=DEDICATED_FILTER_PACKS[model])
+        self.wait_window(dlg)
+        try:
+            self.grab_set()   # child dialog took the grab — take it back
+        except Exception:
+            pass
+        if not dlg.result:
+            return
+        new_name, pack = dlg.result
+        if new_name != model and new_name in DEDICATED_FILTER_PACKS:
+            messagebox.showwarning("Duplicate",
+                f'A model named "{new_name}" already exists.', parent=self)
+            return
+        # Rebuild preserving list order (so a rename keeps its position)
+        rebuilt = {}
+        for k, v in DEDICATED_FILTER_PACKS.items():
+            if k == model:
+                rebuilt[new_name] = pack
+            else:
+                rebuilt[k] = v
+        DEDICATED_FILTER_PACKS.clear()
+        DEDICATED_FILTER_PACKS.update(rebuilt)
+        _persist_catalog_key("gd_packs", DEDICATED_FILTER_PACKS, parent=self)
+        self._gd_rebuild_models(select=new_name)
+
+    def _gd_delete_model(self):
+        model = self._gd_model.get()
+        if not model or model not in DEDICATED_FILTER_PACKS:
+            messagebox.showinfo("Delete Model", "Select a model first.", parent=self)
+            return
+        if not messagebox.askyesno(
+                "Delete Model",
+                f'Delete the "{model}" preset?\n\n'
+                "Existing orders are unaffected — this only removes the preset "
+                "from this dialog.", parent=self, icon="warning", default="no"):
+            return
+        DEDICATED_FILTER_PACKS.pop(model, None)
+        _persist_catalog_key("gd_packs", DEDICATED_FILTER_PACKS, parent=self)
+        self._gd_rebuild_models()
+
     def _gd_update_preview(self):
         model   = self._gd_model.get()
         is_rep  = self._gd_order_type.get() == "rep"
-        pack    = DEDICATED_FILTER_PACKS[model]
+        pack    = DEDICATED_FILTER_PACKS.get(model)
+        if pack is None:
+            self._gd_lbl_job.config(text="—")
+            self._gd_txt.config(state="normal")
+            self._gd_txt.delete("1.0", "end")
+            self._gd_txt.insert("end", "(no model selected)")
+            self._gd_txt.config(state="disabled")
+            return
         try:
             sets = max(1, int(self._gd_qty.get()))
         except Exception:
@@ -1062,7 +1460,9 @@ class CompressorFilterDialog(tk.Toplevel):
             qty = max(1, fl["qty"] // 2) if is_rep else fl["qty"]
             qty *= sets
             lbl = f"  [{fl.get('label', '')}]" if fl.get("label") else ""
-            lines.append(f"  V-form  {fl['short']}x{fl['long']}x{fl['channel']}mm  G4  x{qty}{lbl}")
+            lines.append(f"  {fl.get('filter_type', 'V-form')}  "
+                         f"{fl['short']}x{fl['long']}x{fl['channel']}mm  "
+                         f"{fl.get('media', 'G4')}  x{qty}{lbl}")
         self._gd_txt.config(state="normal")
         self._gd_txt.delete("1.0", "end")
         self._gd_txt.insert("end", "\n".join(lines) or "(no items)")
@@ -1074,24 +1474,17 @@ class CompressorFilterDialog(tk.Toplevel):
         frm = tk.Frame(nb, bg=CBG, padx=20, pady=16)
         nb.add(frm, text="  Sigrist  ")
 
-        tk.Label(frm, text="Sigrist Filter",
-                 bg=CBG, fg=CA, font=F_SEC, anchor="w").pack(anchor="w")
+        top = tk.Frame(frm, bg=CBG)
+        top.pack(fill="x")
+        tk.Label(top, text="Sigrist Filter",
+                 bg=CBG, fg=CA, font=F_SEC, anchor="w").pack(side="left")
+        if self._can_manage:
+            flat_btn(top, "Edit Spec", self._sigrist_edit,
+                     bg=CNE, pady=4, padx=10, font=F_SM).pack(side="right")
         tk.Frame(frm, bg=CSP, height=1).pack(fill="x", pady=(6, 10))
 
-        specs = [
-            ("Dimensions",  "412 x 412 x 90 mm"),
-            ("Filter Type", "V-form"),
-            ("Media",       "F5 Rated"),
-            ("Note",        "BLANK F5 Labels should be used"),
-        ]
-        for label, value in specs:
-            row = tk.Frame(frm, bg=CBG)
-            row.pack(fill="x", pady=3)
-            tk.Label(row, text=f"{label}:", bg=CBG, fg=CMU,
-                     font=F_BOLD, width=14, anchor="w").pack(side="left")
-            fg = CRD if label == "Note" else CTX
-            tk.Label(row, text=value, bg=CBG, fg=fg,
-                     font=F_BODY, anchor="w").pack(side="left")
+        self._sigrist_spec_frame = tk.Frame(frm, bg=CBG)
+        self._sigrist_spec_frame.pack(fill="x")
 
         tk.Frame(frm, bg=CSP, height=1).pack(fill="x", pady=(14, 8))
 
@@ -1103,10 +1496,68 @@ class CompressorFilterDialog(tk.Toplevel):
         tk.Spinbox(qty_row, from_=1, to=50, textvariable=self._sigrist_qty,
                    width=5, font=F_BODY, relief="solid", bd=1).pack(side="left")
 
-        tk.Label(frm,
-                 text="Clicking 'Add to Order' will add the selected quantity of\n"
-                      "V-form 412x412x90mm filters with F5 media.",
-                 bg=CBG, fg=CMU, font=F_SM, justify="left").pack(anchor="w")
+        self._sigrist_hint = tk.Label(frm, text="", bg=CBG, fg=CMU,
+                                      font=F_SM, justify="left")
+        self._sigrist_hint.pack(anchor="w")
+        self._sigrist_refresh()
+
+    def _sigrist_spec(self) -> dict:
+        """The single Sigrist filter spec (falling back to the default)."""
+        fl = (SIGRIST_PACK.get("filters") or [{}])[0]
+        return fl or dict(DEFAULT_SIGRIST_PACK["filters"][0])
+
+    def _sigrist_refresh(self):
+        fl = self._sigrist_spec()
+        for w in self._sigrist_spec_frame.winfo_children():
+            w.destroy()
+        specs = [
+            ("Dimensions",  f"{fl.get('short','')} x {fl.get('long','')} x "
+                            f"{fl.get('channel','')} mm"),
+            ("Filter Type", fl.get("filter_type", "V-form")),
+            ("Media",       fl.get("media", "F5")),
+        ]
+        note = fl.get("note", "BLANK F5 Labels To be used!")
+        if note:
+            specs.append(("Note", note))
+        for label, value in specs:
+            row = tk.Frame(self._sigrist_spec_frame, bg=CBG)
+            row.pack(fill="x", pady=3)
+            tk.Label(row, text=f"{label}:", bg=CBG, fg=CMU,
+                     font=F_BOLD, width=14, anchor="w").pack(side="left")
+            fg = CRD if label == "Note" else CTX
+            tk.Label(row, text=value, bg=CBG, fg=fg,
+                     font=F_BODY, anchor="w").pack(side="left")
+        self._sigrist_hint.config(
+            text="Clicking 'Add to Order' will add the selected quantity of\n"
+                 f"{fl.get('filter_type','V-form')} "
+                 f"{fl.get('short','')}x{fl.get('long','')}x{fl.get('channel','')}mm "
+                 f"filters with {fl.get('media','F5')} media.")
+
+    def _sigrist_edit(self):
+        fields = [("short", "Short (mm)", "int"), ("long", "Long (mm)", "int"),
+                  ("channel", "Channel (mm)", "int"),
+                  ("filter_type", "Filter Type", "str"), ("media", "Media", "str"),
+                  ("note", "Note (optional)", "str")]
+        cur = dict(self._sigrist_spec())
+        cur.setdefault("note", "BLANK F5 Labels To be used!")
+        dlg = _PresetRowDialog(self, "Edit Sigrist Spec", fields, initial=cur)
+        self.wait_window(dlg)
+        try:
+            self.grab_set()   # child dialog took the grab — take it back
+        except Exception:
+            pass
+        if not dlg.result:
+            return
+        spec = dict(dlg.result)
+        spec["qty"] = 1
+        if not spec.get("filter_type"):
+            spec["filter_type"] = "V-form"
+        if not spec.get("media"):
+            spec["media"] = "F5"
+        SIGRIST_PACK.clear()
+        SIGRIST_PACK["filters"] = [spec]
+        _persist_catalog_key("sigrist_pack", SIGRIST_PACK, parent=self)
+        self._sigrist_refresh()
 
     # ── Tab 3: Stepped Filters ────────────────────────────────────────────
 
@@ -1114,17 +1565,23 @@ class CompressorFilterDialog(tk.Toplevel):
         frm = tk.Frame(nb, bg=CBG, padx=20, pady=16)
         nb.add(frm, text="  Stepped Filters  ")
 
-        tk.Label(frm, text="Stepped Filter Presets",
-                 bg=CBG, fg=CA, font=F_SEC, anchor="w").pack(anchor="w")
+        top = tk.Frame(frm, bg=CBG)
+        top.pack(fill="x")
+        tk.Label(top, text="Stepped Filter Presets",
+                 bg=CBG, fg=CA, font=F_SEC, anchor="w").pack(side="left")
+        if self._can_manage:
+            flat_btn(top, "Delete", self._stepped_delete,
+                     bg=CRD, pady=4, padx=8, font=F_SM).pack(side="right")
+            flat_btn(top, "Edit",   self._stepped_edit,
+                     bg=CNE, pady=4, padx=8, font=F_SM).pack(side="right", padx=(0, 4))
+            flat_btn(top, "+ Add",  self._stepped_add,
+                     bg=CA,  pady=4, padx=8, font=F_SM).pack(side="right", padx=(0, 4))
         tk.Frame(frm, bg=CSP, height=1).pack(fill="x", pady=(6, 12))
 
-        self._stepped_model = tk.StringVar(value="535x535x50")
-        for key, label in [("535x535x50",  "535 x 535 x 50 mm"),
-                            ("535x1135x50", "535 x 1135 x 50 mm")]:
-            tk.Radiobutton(frm, text=label, variable=self._stepped_model, value=key,
-                           bg=CBG, fg=CTX, font=F_BODY,
-                           activebackground=CRE, selectcolor=CCA, cursor="hand2"
-                           ).pack(anchor="w", pady=3)
+        self._stepped_model = tk.StringVar()
+        self._stepped_list_frame = tk.Frame(frm, bg=CBG)
+        self._stepped_list_frame.pack(fill="x")
+        self._stepped_rebuild()
 
         tk.Frame(frm, bg=CSP, height=1).pack(fill="x", pady=(12, 10))
 
@@ -1157,6 +1614,100 @@ class CompressorFilterDialog(tk.Toplevel):
                       "Stepped Filter items with 180 Media.",
                  bg=CBG, fg=CMU, font=F_SM, justify="left").pack(anchor="w")
 
+    # ── Stepped preset management ─────────────────────────────────────────
+
+    def _stepped_rebuild(self, select=None):
+        for w in self._stepped_list_frame.winfo_children():
+            w.destroy()
+        keys = list(STEPPED_PACKS.keys())
+        if select in keys:
+            self._stepped_model.set(select)
+        elif self._stepped_model.get() not in keys:
+            self._stepped_model.set(keys[0] if keys else "")
+        for key in keys:
+            fl = (STEPPED_PACKS[key].get("filters") or [{}])[0]
+            label = (f"{fl.get('short','')} x {fl.get('long','')} x "
+                     f"{fl.get('channel','')} mm") if fl else key
+            tk.Radiobutton(self._stepped_list_frame, text=label,
+                           variable=self._stepped_model, value=key,
+                           bg=CBG, fg=CTX, font=F_BODY,
+                           activebackground=CRE, selectcolor=CCA, cursor="hand2"
+                           ).pack(anchor="w", pady=3)
+        if not keys:
+            tk.Label(self._stepped_list_frame, text="(no sizes — add one)",
+                     bg=CBG, fg=CMU, font=F_SM).pack(anchor="w")
+
+    _STEPPED_FIELDS = [("short", "Short (mm)", "int"), ("long", "Long (mm)", "int"),
+                       ("channel", "Channel (mm)", "int"), ("media", "Media", "str")]
+
+    def _stepped_save(self, spec: dict, replacing: str = None):
+        spec = dict(spec)
+        spec["qty"] = 1
+        spec["filter_type"] = "Stepped Filter"
+        if not spec.get("media"):
+            spec["media"] = "180"
+        key = f"{spec['short']}x{spec['long']}x{spec['channel']}"
+        if key != replacing and key in STEPPED_PACKS:
+            messagebox.showwarning("Duplicate",
+                f"A {spec['short']} x {spec['long']} x {spec['channel']} mm "
+                "preset already exists.", parent=self)
+            return None
+        rebuilt = {}
+        if replacing and replacing in STEPPED_PACKS:
+            for k, v in STEPPED_PACKS.items():
+                rebuilt[key if k == replacing else k] = (
+                    {"filters": [spec]} if k == replacing else v)
+        else:
+            rebuilt = dict(STEPPED_PACKS)
+            rebuilt[key] = {"filters": [spec]}
+        STEPPED_PACKS.clear()
+        STEPPED_PACKS.update(rebuilt)
+        _persist_catalog_key("stepped_packs", STEPPED_PACKS, parent=self)
+        self._stepped_rebuild(select=key)
+        return key
+
+    def _stepped_add(self):
+        dlg = _PresetRowDialog(self, "Add Stepped Size", self._STEPPED_FIELDS,
+                               initial={"media": "180"})
+        self.wait_window(dlg)
+        try:
+            self.grab_set()   # child dialog took the grab — take it back
+        except Exception:
+            pass
+        if dlg.result:
+            self._stepped_save(dlg.result)
+
+    def _stepped_edit(self):
+        key = self._stepped_model.get()
+        if not key or key not in STEPPED_PACKS:
+            messagebox.showinfo("Edit Size", "Select a size first.", parent=self)
+            return
+        cur = (STEPPED_PACKS[key].get("filters") or [{}])[0]
+        dlg = _PresetRowDialog(self, "Edit Stepped Size", self._STEPPED_FIELDS,
+                               initial=cur)
+        self.wait_window(dlg)
+        try:
+            self.grab_set()   # child dialog took the grab — take it back
+        except Exception:
+            pass
+        if dlg.result:
+            self._stepped_save(dlg.result, replacing=key)
+
+    def _stepped_delete(self):
+        key = self._stepped_model.get()
+        if not key or key not in STEPPED_PACKS:
+            messagebox.showinfo("Delete Size", "Select a size first.", parent=self)
+            return
+        if not messagebox.askyesno(
+                "Delete Size",
+                f'Delete the "{key}" stepped-filter preset?\n\n'
+                "Existing orders are unaffected.",
+                parent=self, icon="warning", default="no"):
+            return
+        STEPPED_PACKS.pop(key, None)
+        _persist_catalog_key("stepped_packs", STEPPED_PACKS, parent=self)
+        self._stepped_rebuild()
+
     # ── Confirm — build result based on active tab ────────────────────────
 
     def _confirm(self):
@@ -1186,7 +1737,11 @@ class CompressorFilterDialog(tk.Toplevel):
     def _confirm_gd(self):
         model   = self._gd_model.get()
         is_rep  = self._gd_order_type.get() == "rep"
-        pack    = DEDICATED_FILTER_PACKS[model]
+        pack    = DEDICATED_FILTER_PACKS.get(model)
+        if pack is None:
+            messagebox.showinfo("No Model",
+                                "Select a model first.", parent=self)
+            return
         items   = []
         try:
             sets = max(1, int(self._gd_qty.get()))
@@ -1212,7 +1767,8 @@ class CompressorFilterDialog(tk.Toplevel):
             qty *= sets
             items.append({
                 "item_kind": "filter", "Quantity": qty,
-                "Filter Type": fl.get("filter_type", "V-form"), "Media Type": "G4",
+                "Filter Type": fl.get("filter_type", "V-form"),
+                "Media Type":  fl.get("media", "G4"),
                 "Short": fl["short"], "Long": fl["long"], "Channel": fl["channel"],
                 "Pleat Insert": False, "Header": False,
                 "Use Stock V-form": False, "Use Stock Flyscreen": False,
@@ -1231,23 +1787,31 @@ class CompressorFilterDialog(tk.Toplevel):
             qty = max(1, int(self._sigrist_qty.get()))
         except Exception:
             qty = 1
+        fl   = self._sigrist_spec()
+        note = fl.get("note", "BLANK F5 Labels To be used!")
         self.result = {
             "items": [{
                 "item_kind": "filter", "Quantity": qty,
-                "Filter Type": "V-form", "Media Type": "F5",
-                "Short": 412, "Long": 412, "Channel": 90,
+                "Filter Type": fl.get("filter_type", "V-form"),
+                "Media Type":  fl.get("media", "F5"),
+                "Short":   fl.get("short", 412),
+                "Long":    fl.get("long", 412),
+                "Channel": fl.get("channel", 90),
                 "Pleat Insert": False, "Header": False,
                 "Use Stock V-form": False, "Use Stock Flyscreen": False,
-                "Notes": "BLANK F5 Labels To be used!",
+                "Notes": note,
             }],
             "job":   "",
-            "notes": "BLANK F5 Labels To be used!",
+            "notes": note,
         }
         self.destroy()
 
     def _confirm_stepped(self):
         key  = self._stepped_model.get()
-        pack = STEPPED_PACKS[key]
+        pack = STEPPED_PACKS.get(key)
+        if not pack or not pack.get("filters"):
+            messagebox.showinfo("No Size", "Select a size first.", parent=self)
+            return
         fl   = pack["filters"][0]
         try:
             qty = max(1, int(self._stepped_qty.get()))
@@ -1255,9 +1819,11 @@ class CompressorFilterDialog(tk.Toplevel):
             qty = 1
         self.result = {
             "items": [{
-                "item_kind": "filter", "Quantity": fl["qty"] * qty,
-                "Filter Type": fl["filter_type"], "Media Type": fl["media"],
-                "Short": fl["short"], "Long": fl["long"], "Channel": fl["channel"],
+                "item_kind": "filter", "Quantity": fl.get("qty", 1) * qty,
+                "Filter Type": fl.get("filter_type", "Stepped Filter"),
+                "Media Type":  fl.get("media", "180"),
+                "Short": fl.get("short"), "Long": fl.get("long"),
+                "Channel": fl.get("channel"),
                 "Pleat Insert": False, "Header": False,
                 "Use Stock V-form": False, "Use Stock Flyscreen": False,
                 "Notes": STEPPED_FILTER_NOTE,
@@ -1408,7 +1974,8 @@ class _ProgressDialog(tk.Toplevel):
 class LineItemDialog(tk.Toplevel):
     """Modal dialog for adding or editing a single line item."""
 
-    def __init__(self, master, title="Line Item", initial=None, media_types=None):
+    def __init__(self, master, title="Line Item", initial=None, media_types=None,
+                 filter_types=None):
         super().__init__(master)
         self.title(title)
         self.resizable(False, False)
@@ -1420,10 +1987,11 @@ class LineItemDialog(tk.Toplevel):
         self.result = None
         initial = initial or {}
         _media_types = media_types if media_types is not None else DEFAULT_MEDIA_TYPES
-        # Keep the exact list shown in the dropdown — Save must validate against
-        # THIS (built-ins + custom types), not VALID_MEDIA_TYPES alone, or any
-        # custom media type gets rejected and the item silently never saves.
-        self._media_types = list(_media_types)
+        # Keep the exact lists shown in the dropdowns — Save must validate
+        # against THESE (built-ins + custom types), not the built-in lists
+        # alone, or any custom type gets rejected and the item never saves.
+        self._media_types  = list(_media_types)
+        self._filter_types = list(filter_types) if filter_types else list(VALID_FILTER_TYPES)
 
         # ── Header strip (top) ────────────────────────────────────────────
         hdr = tk.Frame(self, bg=CA, padx=20, pady=14)
@@ -1480,7 +2048,7 @@ class LineItemDialog(tk.Toplevel):
         cls_f.pack(fill="x", pady=(0, 12))
 
         for col, (key, vals) in enumerate([
-            ("Filter Type", VALID_FILTER_TYPES),
+            ("Filter Type", self._filter_types),
             ("Media Type",  _media_types),
         ]):
             cls_f.grid_columnconfigure(col, weight=1, uniform="cls")
@@ -1595,7 +2163,7 @@ class LineItemDialog(tk.Toplevel):
         ft = self.vars["Filter Type"].get().strip()
         mt = self.vars["Media Type"].get().strip()
 
-        if ft not in VALID_FILTER_TYPES:
+        if ft not in self._filter_types and ft not in VALID_FILTER_TYPES:
             messagebox.showerror("Invalid Input",
                                  "Please select a valid Filter Type.", parent=self)
             return
@@ -2103,6 +2671,11 @@ class ModernOrderApp(tk.Frame):
         # Load persisted settings
         self._settings = _load_settings()
         self._custom_media: list = list(self._settings.get("custom_media_types", []))
+        self._custom_filter_types: list = list(
+            self._settings.get("custom_filter_types", []))
+        # Presets/filter types come from the shared catalogue; start from the
+        # last-known local copy so a slow or offline start still has them.
+        _load_catalog_cache()
 
         self._draft_save_id        = None   # debounce handle for auto-save
         self._tooltip_win          = None   # hover tooltip window ref
@@ -2119,6 +2692,9 @@ class ModernOrderApp(tk.Frame):
 
         # Push any orders queued while offline, then re-check every 5 minutes
         self.master.after(3000, self._start_pending_sync_loop)
+
+        # Pull the shared catalogue (presets + custom filter types)
+        self.master.after(200, self._refresh_catalog_from_db)
 
         # First launch after an update → show that version's release notes once
         self.master.after(1500, self._maybe_show_whats_new)
@@ -2402,6 +2978,14 @@ class ModernOrderApp(tk.Frame):
         seen = set(DEFAULT_MEDIA_TYPES)
         custom = [m for m in self._custom_media if m not in seen]
         return DEFAULT_MEDIA_TYPES + custom
+
+    @property
+    def all_filter_types(self) -> list:
+        """Built-in filter types followed by any user-added custom ones."""
+        seen = set(VALID_FILTER_TYPES)
+        custom = [f for f in getattr(self, "_custom_filter_types", [])
+                  if f not in seen]
+        return list(VALID_FILTER_TYPES) + custom
 
     # ── Top-level layout ──────────────────────────────────────────────────
 
@@ -4993,6 +5577,43 @@ class ModernOrderApp(tk.Frame):
 
         self._refresh_media_list()
 
+        # ── Filter Types card ─────────────────────────────────────────────
+        ft_o, ft_b = card_frame(frm, title="Filter Types")
+        ft_o.grid(row=9, column=0, sticky="ew", pady=(12, 0))
+        ft_b.columnconfigure(0, weight=1)
+
+        tk.Label(ft_b,
+                 text="Add your own filter types (they appear in the Line Item "
+                      "dialog alongside the built-ins).\n"
+                      "Built-in types (shown in grey) cannot be changed. Shared "
+                      "with every PC via the database.",
+                 bg=CCA, fg=CMU, font=F_SM, justify="left", anchor="w",
+                 ).grid(row=0, column=0, sticky="w", pady=(0, 8))
+
+        ft_wrap = tk.Frame(ft_b, bg=CSP)
+        ft_wrap.grid(row=1, column=0, sticky="ew", pady=(0, 8))
+        self.filter_types_lb = tk.Listbox(
+            ft_wrap, font=F_BODY, bg=CCA, fg=CTX,
+            selectbackground=CA, selectforeground="white",
+            activestyle="none", relief="flat", bd=0,
+            highlightthickness=0, height=10)
+        self.filter_types_lb.pack(side="left", fill="both", expand=True, padx=1, pady=1)
+        ft_sb = ttk.Scrollbar(ft_wrap, orient="vertical",
+                              command=self.filter_types_lb.yview)
+        ft_sb.pack(side="right", fill="y")
+        self.filter_types_lb.configure(yscrollcommand=ft_sb.set)
+
+        ft_tb = tk.Frame(ft_b, bg=CCA)
+        ft_tb.grid(row=2, column=0, sticky="w")
+        flat_btn(ft_tb, "+ Add Type", self._add_filter_type,
+                 bg=CA,  pady=5, padx=10, font=F_BODY).pack(side="left", padx=(0, 6))
+        flat_btn(ft_tb, "Edit",       self._edit_filter_type,
+                 bg=CNE, pady=5, padx=10, font=F_BODY).pack(side="left", padx=(0, 6))
+        flat_btn(ft_tb, "Delete",     self._delete_filter_type,
+                 bg=CRD, pady=5, padx=10, font=F_BODY).pack(side="left")
+
+        self._refresh_filter_types_list()
+
         # ── Local Storage ─────────────────────────────────────────────────
         ls_card = tk.Frame(frm, bg=CCA, bd=1, relief="solid", padx=16, pady=12)
         ls_card.grid(row=7, column=0, sticky="ew", pady=(12, 0))
@@ -5347,8 +5968,10 @@ class ModernOrderApp(tk.Frame):
             return None   # built-in — not editable
         return idx - n
 
-    def _prompt_media_name(self, title="Media Type", initial="") -> "str | None":
-        """Simple inline prompt dialog for a media type name."""
+    def _prompt_media_name(self, title="Media Type", initial="",
+                           upper=True) -> "str | None":
+        """Simple inline prompt dialog for a type name. Media codes are
+        upper-cased; filter type names keep their capitalisation."""
         dlg = tk.Toplevel(self.master)
         dlg.title(title)
         dlg.resizable(False, False)
@@ -5366,7 +5989,9 @@ class ModernOrderApp(tk.Frame):
         result = [None]
 
         def _ok():
-            v = var.get().strip().upper()
+            v = var.get().strip()
+            if upper:
+                v = v.upper()
             if not v:
                 messagebox.showwarning("Empty", "Please enter a type name.", parent=dlg)
                 return
@@ -5502,6 +6127,120 @@ class ModernOrderApp(tk.Frame):
     def _persist_media(self):
         self._settings["custom_media_types"] = self._custom_media
         _save_settings(self._settings)
+
+    # ── Shared catalogue (presets + custom filter types) ──────────────────
+
+    def _refresh_catalog_from_db(self):
+        """Pull the shared catalogue in the background; fall back to the
+        local cache (already loaded) if the table is missing or offline."""
+        if not (_db.is_ready() and _db.current_user()):
+            return
+
+        def _work():
+            try:
+                data = _db.get_catalog_map()
+            except Exception:
+                return   # offline or migration not run — keep cached values
+            def _apply():
+                _apply_catalog(data)
+                cft = data.get("custom_filter_types")
+                if isinstance(cft, list):
+                    self._custom_filter_types = [str(x) for x in cft]
+                    self._settings["custom_filter_types"] = self._custom_filter_types
+                    _save_settings(self._settings)
+                    if hasattr(self, "filter_types_lb"):
+                        self._refresh_filter_types_list()
+                _save_catalog_cache()
+            self.master.after(0, _apply)
+
+        threading.Thread(target=_work, daemon=True).start()
+
+    def _refresh_filter_types_list(self):
+        self.filter_types_lb.delete(0, "end")
+        for ft in VALID_FILTER_TYPES:
+            self.filter_types_lb.insert("end", f"  {ft}  (built-in)")
+        for ft in self._custom_filter_types:
+            self.filter_types_lb.insert("end", f"  {ft}")
+        for i in range(len(VALID_FILTER_TYPES)):
+            self.filter_types_lb.itemconfig(i, fg=CMU)
+
+    def _selected_custom_filter_index(self):
+        sel = self.filter_types_lb.curselection()
+        if not sel:
+            return None
+        idx = sel[0] - len(VALID_FILTER_TYPES)
+        return idx if 0 <= idx < len(self._custom_filter_types) else None
+
+    def _persist_filter_types(self):
+        self._settings["custom_filter_types"] = self._custom_filter_types
+        _save_settings(self._settings)
+        _persist_catalog_key("custom_filter_types", self._custom_filter_types,
+                             parent=self.master)
+
+    def _can_manage_catalog_ui(self) -> bool:
+        try:
+            if _db.is_ready() and not _db.can_manage_catalog():
+                messagebox.showwarning("No Permission",
+                    "Only Managers, Admins and Directors can change filter types.")
+                return False
+        except Exception:
+            pass
+        return True
+
+    def _add_filter_type(self):
+        if not self._can_manage_catalog_ui():
+            return
+        name = self._prompt_media_name(title="Add Filter Type", upper=False)
+        if not name:
+            return
+        if name in self.all_filter_types:
+            messagebox.showwarning("Duplicate",
+                f'"{name}" already exists in the filter type list.')
+            return
+        self._custom_filter_types.append(name)
+        self._persist_filter_types()
+        self._refresh_filter_types_list()
+        self.status_var.set(f'Filter type "{name}" added.')
+
+    def _edit_filter_type(self):
+        if not self._can_manage_catalog_ui():
+            return
+        ci = self._selected_custom_filter_index()
+        if ci is None:
+            messagebox.showinfo("Edit", "Select a custom filter type to edit. "
+                                        "Built-in types cannot be changed.")
+            return
+        old = self._custom_filter_types[ci]
+        new = self._prompt_media_name(title="Edit Filter Type", initial=old, upper=False)
+        if not new or new == old:
+            return
+        if new in self.all_filter_types:
+            messagebox.showwarning("Duplicate",
+                f'"{new}" already exists in the filter type list.')
+            return
+        self._custom_filter_types[ci] = new
+        self._persist_filter_types()
+        self._refresh_filter_types_list()
+        self.status_var.set(f'Filter type renamed to "{new}".')
+
+    def _delete_filter_type(self):
+        if not self._can_manage_catalog_ui():
+            return
+        ci = self._selected_custom_filter_index()
+        if ci is None:
+            messagebox.showinfo("Delete", "Select a custom filter type to delete. "
+                                          "Built-in types cannot be removed.")
+            return
+        name = self._custom_filter_types[ci]
+        if not messagebox.askyesno("Delete",
+                f'Delete filter type "{name}"?\n\n'
+                "Existing orders that use it will still open correctly,\n"
+                "but new items won't be able to select it."):
+            return
+        self._custom_filter_types.pop(ci)
+        self._persist_filter_types()
+        self._refresh_filter_types_list()
+        self.status_var.set(f'Filter type "{name}" deleted.')
 
     # ── Status bar ────────────────────────────────────────────────────────
 
@@ -6100,7 +6839,8 @@ class ModernOrderApp(tk.Frame):
 
     def _add_filter_item(self):
         dlg = LineItemDialog(self.master, title="Add Filter Item",
-                             media_types=self.all_media_types)
+                             media_types=self.all_media_types,
+                             filter_types=self.all_filter_types)
         self.master.wait_window(dlg)
         if dlg.result:
             dlg.result["item_kind"] = "filter"
@@ -6168,7 +6908,8 @@ class ModernOrderApp(tk.Frame):
         else:
             dlg = LineItemDialog(self.master, title="Edit Filter Item",
                                  initial=item,
-                                 media_types=self.all_media_types)
+                                 media_types=self.all_media_types,
+                                 filter_types=self.all_filter_types)
         self.master.wait_window(dlg)
         if dlg.result:
             dlg.result["item_kind"] = item.get("item_kind", "filter")
@@ -6346,6 +7087,7 @@ class ModernOrderApp(tk.Frame):
         # Snapshot of items captured now (immutable inside thread)
         all_items        = list(self.items)
         custom_media     = list(self._custom_media)
+        custom_filter_types = list(self._custom_filter_types)
         service          = self.service
 
         def _worker():
@@ -6362,6 +7104,7 @@ class ModernOrderApp(tk.Frame):
                     return service.create_order(
                         header, filter_items, persist_json=False,
                         extra_media_types=custom_media, auto_open=False,
+                        extra_filter_types=custom_filter_types,
                         page_start=1, grand_total=total)
 
                 def _do_bags():
@@ -6399,6 +7142,7 @@ class ModernOrderApp(tk.Frame):
                         r = service.create_order(
                             header, filter_items, persist_json=False,
                             extra_media_types=custom_media, auto_open=False,
+                            extra_filter_types=custom_filter_types,
                             page_start=1, grand_total=total)
                         prog.advance("Exporting to PDF…")
                         p = r.get("output_path", "")
@@ -6903,18 +7647,6 @@ class ModernOrderApp(tk.Frame):
             if "item_kind" not in it:
                 it["item_kind"] = "bag" if "product_type" in it else "filter"
 
-        if row.get("source") == "db":
-            _name_hdr  = {
-                "Customer Name": row.get("customer", ""),
-                "Order Number":  row.get("order_no", ""),
-                "Date Ordered":  row.get("date_ordered", ""),
-                "Date Due":      row.get("date_due", ""),
-            }
-            base       = self._apply_pdf_name_template(_name_hdr, order_type)
-            _base_path = ORDERS_DIR / base
-        else:
-            _base_path = row["path"].with_suffix("")
-            base       = row["path"].stem
         filter_items = [i for i in items if i.get("item_kind", "filter") != "bag"]
         bag_items    = [i for i in items if i.get("item_kind") == "bag"]
         total        = len(items)
@@ -6930,9 +7662,25 @@ class ModernOrderApp(tk.Frame):
         else:
             order_type = "filter"
 
+        # order_type must be known before naming the output files — building
+        # the name first raised UnboundLocalError for database-sourced orders.
+        if row.get("source") == "db":
+            _name_hdr  = {
+                "Customer Name": row.get("customer", ""),
+                "Order Number":  row.get("order_no", ""),
+                "Date Ordered":  row.get("date_ordered", ""),
+                "Date Due":      row.get("date_due", ""),
+            }
+            base       = self._apply_pdf_name_template(_name_hdr, order_type)
+            _base_path = ORDERS_DIR / base
+        else:
+            _base_path = row["path"].with_suffix("")
+            base       = row["path"].stem
+
         prog         = _ProgressDialog(self.master, order_type)
         service      = self.service
         custom_media = list(self._custom_media)
+        custom_filter_types = list(self._custom_filter_types)
 
         label = row.get("customer") or row.get("filename") or "order"
         self.status_var.set(f"Regenerating {label}…")
@@ -6948,6 +7696,7 @@ class ModernOrderApp(tk.Frame):
                     return service.create_order(
                         header, filter_items, persist_json=False,
                         extra_media_types=custom_media, auto_open=False,
+                        extra_filter_types=custom_filter_types,
                         page_start=1, grand_total=total)
 
                 def _do_bags():
@@ -6980,6 +7729,7 @@ class ModernOrderApp(tk.Frame):
                         r = service.create_order(
                             header, filter_items, persist_json=False,
                             extra_media_types=custom_media, auto_open=False,
+                            extra_filter_types=custom_filter_types,
                             page_start=1, grand_total=total)
                         prog.advance("Exporting to PDF…")
                         p = r.get("output_path", "")
@@ -7620,6 +8370,7 @@ class ModernOrderApp(tk.Frame):
         prog         = _ProgressDialog(self.master, order_type)
         service      = self.service
         custom_media = list(self._custom_media)
+        custom_filter_types = list(self._custom_filter_types)
         self.status_var.set(f"Preparing to print {row.get('customer','')}…")
 
         def _worker():
@@ -7631,6 +8382,7 @@ class ModernOrderApp(tk.Frame):
                     r = service.create_order(
                         header, filter_items, persist_json=False,
                         extra_media_types=custom_media, auto_open=False,
+                        extra_filter_types=custom_filter_types,
                         page_start=1, grand_total=total)
                     prog.advance("Exporting to PDF…")
                     p = r.get("output_path", "")

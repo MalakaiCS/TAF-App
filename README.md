@@ -15,16 +15,17 @@ log, stock management and a customer database.
 ## Features
 
 - **New Order** — filter & bag/roll line items, dedicated compressor-filter
-  presets, live worksheet + order-PDF generation.
-- **Previous Orders** — search / filter, reload, duplicate, regenerate, status
-  tracking, priority flags, notes, per-order history.
+  presets (add / edit / remove your own), duplicate-order warning, live
+  worksheet + order-PDF generation.
+- **Previous Orders** — search / filter, view items, reload, duplicate,
+  regenerate, status tracking, priority flags, notes, per-order history.
 - **Dashboard** — orders-per-week, order-type and busiest-customer charts, low
   stock alerts.
 - **Stock** — items with images, on-hand / minimum levels, adjustments & history.
 - **Customers** — full customer database with delivery/billing details.
 - **Audit Log** — every significant action recorded.
-- **Settings** — media types, low-stock thresholds, user management, light/dark
-  mode, change password, in-app software update.
+- **Settings** — media types, custom filter types, low-stock thresholds, user
+  management, light/dark mode, change password, in-app software update.
 
 ## Tech stack
 
@@ -79,7 +80,10 @@ In the Supabase dashboard → **SQL Editor**, run these once (in order):
 3. `stock_schema.sql`
 4. `extra_columns_migration.sql`
 5. The `migrate_*.sql` files (audit log, media types, stock alerts, updater,
-   user management) — run any that apply to bring an existing DB up to date.
+   user management, catalogue) — run any that apply to bring an existing DB
+   up to date. `migrate_catalog.sql` backs the editable dedicated-filter
+   presets and custom filter types; without it those edits stay on one PC
+   instead of being shared.
 
 ### Create the first admin account
 

@@ -58,10 +58,12 @@ class OrderService:
                      extra_media_types: List[str] = None,
                      auto_open: bool = True,
                      page_start: int = 1,
-                     grand_total: int = None) -> Dict[str, Any]:
+                     grand_total: int = None,
+                     extra_filter_types: List[str] = None) -> Dict[str, Any]:
         # Validate
         validate_header(header)
-        validate_items(items, extra_media_types=extra_media_types)
+        validate_items(items, extra_media_types=extra_media_types,
+                       extra_filter_types=extra_filter_types)
 
         # Persist
         json_path = None
