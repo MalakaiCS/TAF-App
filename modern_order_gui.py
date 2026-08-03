@@ -46,6 +46,10 @@ APP_DIR.mkdir(parents=True, exist_ok=True)
 ORDERS_DIR    = APP_DIR / "orders"
 DRAFT_FILE    = APP_DIR / "draft_order.json"
 SETTINGS_FILE = APP_DIR / "settings.json"
+# Orders that couldn't reach the shared database (no connection) wait here
+# and are re-sent automatically — see _sync_pending_orders.
+PENDING_SYNC_DIR  = APP_DIR / "pending_sync"
+LAST_VERSION_FILE = APP_DIR / "last_seen_version.txt"
 
 # On first run after install, seed settings.json from bundled resources
 if not SETTINGS_FILE.exists():
@@ -2113,6 +2117,12 @@ class ModernOrderApp(tk.Frame):
         # Offer to restore any unsaved draft (after UI is fully built)
         self.master.after(600, self._check_restore_draft)
 
+        # Push any orders queued while offline, then re-check every 5 minutes
+        self.master.after(3000, self._start_pending_sync_loop)
+
+        # First launch after an update → show that version's release notes once
+        self.master.after(1500, self._maybe_show_whats_new)
+
         # Clean up any leftover _old.exe from a previous auto-update
         try:
             from taf_order_app.updater import cleanup_old_exe
@@ -2425,8 +2435,8 @@ class ModernOrderApp(tk.Frame):
         self._build_new_order_tab()
         self._build_status_bar()
 
-        # Land on Settings at startup (per request), not New Order.
-        self._show_tab("settings")
+        # Land on New Order at startup — it's the tab staff use most.
+        self._show_tab("new_order")
 
         # Warm the remaining tabs one-per-idle-tick so later switches are
         # instant, without delaying the first paint of the home screen.
@@ -2944,6 +2954,8 @@ class ModernOrderApp(tk.Frame):
         bot = tk.Frame(frm, bg=CBG, pady=8)
         bot.grid(row=2, column=0, sticky="ew")
 
+        flat_btn(bot, "👁 View Items",         self._view_order_items,
+                 bg=CA,  pady=7).pack(side="left", padx=(0, 8))
         flat_btn(bot, "Load into New Order",   self._load_prev_order,
                  bg=CA,  pady=7).pack(side="left", padx=(0, 8))
         flat_btn(bot, "Duplicate Order",       self._duplicate_prev_order,
@@ -5814,6 +5826,152 @@ class ModernOrderApp(tk.Frame):
         else:
             self._clear_draft()
 
+    # ── Offline order queue ───────────────────────────────────────────────
+    # Orders that couldn't be written to the shared database (connection down,
+    # Supabase unreachable) are parked as JSON in pending_sync/ and re-sent
+    # automatically: shortly after startup and every 5 minutes thereafter.
+
+    def _queue_order_for_sync(self, header, items, order_type, reason=""):
+        """Park an order locally for later database sync. Returns the path,
+        or None if even the local write failed."""
+        try:
+            PENDING_SYNC_DIR.mkdir(parents=True, exist_ok=True)
+            stamp = _dt_module.datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+            path = PENDING_SYNC_DIR / f"order_{stamp}.json"
+            path.write_text(json.dumps({
+                "header":     header,
+                "items":      items,
+                "order_type": order_type,
+                "queued_at":  _dt_module.datetime.now().isoformat(timespec="seconds"),
+                "error":      (reason or "")[:300],
+            }, indent=2, default=str), encoding="utf-8")
+            return path
+        except Exception:
+            return None
+
+    def _start_pending_sync_loop(self):
+        """Try to sync queued orders now, then re-check every 5 minutes."""
+        self._sync_pending_orders()
+        self.master.after(5 * 60 * 1000, self._start_pending_sync_loop)
+
+    def _sync_pending_orders(self):
+        try:
+            files = sorted(PENDING_SYNC_DIR.glob("*.json"))
+        except Exception:
+            files = []
+        if not files or not (_db.is_ready() and _db.current_user()):
+            return
+
+        def _work():
+            synced = 0
+            for p in files:
+                try:
+                    payload = json.loads(p.read_text(encoding="utf-8"))
+                    header  = payload.get("header", {})
+                    items   = payload.get("items", [])
+                    otype   = payload.get("order_type", "filter")
+
+                    # If the order actually reached the database (e.g. the
+                    # original insert timed out *after* succeeding), don't
+                    # insert it twice — just drop the queued copy.
+                    already = False
+                    try:
+                        on   = (header.get("Order Number", "") or "").strip().lower()
+                        cust = (header.get("Customer Name", "") or "").strip().lower()
+                        for d in _db.find_potential_duplicates(
+                                header.get("Customer Name", ""),
+                                header.get("Order Number", ""), items):
+                            if ((d.get("order_number", "") or "").strip().lower() == on
+                                    and (d.get("customer_name", "") or "").strip().lower() == cust):
+                                already = True
+                                break
+                    except Exception:
+                        pass
+
+                    if not already:
+                        _db.save_order(header, items, otype)
+                        _db.log_action("order_created",
+                            f"Customer: {header.get('Customer Name','')}  "
+                            f"O/N: {header.get('Order Number','')}  "
+                            f"Type: {otype}  Items: {len(items)}  "
+                            f"(entered offline {payload.get('queued_at','')}, synced now)")
+                    p.unlink()
+                    synced += 1
+                except Exception:
+                    break   # still offline — leave the rest for the next cycle
+
+            if synced:
+                def _done():
+                    self.status_var.set(
+                        f"Synced {synced} queued order{'s' if synced != 1 else ''} "
+                        f"to the shared database.")
+                    self._tab_loaded.pop("prev_orders", None)
+                    self._tab_loaded.pop("dashboard", None)
+                self.master.after(0, _done)
+
+        threading.Thread(target=_work, daemon=True).start()
+
+    # ── "What's New" after an update ──────────────────────────────────────
+
+    def _maybe_show_whats_new(self):
+        """On the first launch of a new version, show its release notes once."""
+        try:
+            seen = LAST_VERSION_FILE.read_text(encoding="utf-8").strip()
+        except Exception:
+            seen = ""
+        if seen == APP_VERSION:
+            return
+        try:
+            LAST_VERSION_FILE.write_text(APP_VERSION, encoding="utf-8")
+        except Exception:
+            pass
+        if not seen:
+            return   # fresh install, not an update — nothing to announce
+
+        def _work():
+            try:
+                from taf_order_app import updater as _upd
+                notes = _upd.get_release_notes(APP_VERSION)
+            except Exception:
+                notes = ""
+            self.master.after(0, lambda: self._show_whats_new_dialog(notes, seen))
+
+        threading.Thread(target=_work, daemon=True).start()
+
+    def _show_whats_new_dialog(self, notes: str, old_version: str):
+        dlg = tk.Toplevel(self.master)
+        dlg.title(f"What's New — v{APP_VERSION}")
+        dlg.transient(self.master)
+        dlg.configure(bg=CBG)
+        W, H = 560, 420
+        dlg.geometry(f"{W}x{H}+{self.master.winfo_rootx()+self.master.winfo_width()//2-W//2}"
+                     f"+{self.master.winfo_rooty()+self.master.winfo_height()//2-H//2}")
+
+        hdr = tk.Frame(dlg, bg=CA, padx=14, pady=10)
+        hdr.pack(fill="x")
+        tk.Label(hdr, text=f"✨ Updated to v{APP_VERSION}", bg=CA, fg="white",
+                 font=(FAM, 12, "bold")).pack(anchor="w")
+        tk.Label(hdr, text=f"You were on v{old_version}", bg=CA, fg="#A9CCE3",
+                 font=F_SM).pack(anchor="w")
+
+        body = tk.Frame(dlg, bg=CCA, highlightbackground=CSP, highlightthickness=1)
+        body.pack(fill="both", expand=True, padx=14, pady=12)
+        txt = tk.Text(body, bg=CCA, fg=CTX, font=F_BODY, wrap="word",
+                      relief="flat", padx=12, pady=10)
+        vsb = ttk.Scrollbar(body, orient="vertical", command=txt.yview)
+        txt.configure(yscrollcommand=vsb.set)
+        vsb.pack(side="right", fill="y")
+        txt.pack(side="left", fill="both", expand=True)
+        txt.insert("1.0", notes.strip() or
+                   "The update installed successfully.\n\n"
+                   "Release notes couldn't be fetched right now — you can read "
+                   "them any time on the GitHub releases page.")
+        txt.configure(state="disabled")
+
+        foot = tk.Frame(dlg, bg=CBG, pady=4, padx=14)
+        foot.pack(fill="x")
+        flat_btn(foot, "Close", dlg.destroy, bg=CA, pady=6, padx=18).pack(side="right", pady=(0, 10))
+
     # ── PDF naming template ───────────────────────────────────────────────
 
     def _apply_pdf_name_template(self, header: dict, order_type: str = "filter") -> str:
@@ -6125,6 +6283,39 @@ class ModernOrderApp(tk.Frame):
             header["Created By"] = _db.current_full_name() or _db.current_username() or ""
         header["priority"] = bool(getattr(self, "_priority_var", None) and self._priority_var.get())
 
+        # ── Duplicate-order guard ─────────────────────────────────────────
+        # Catch the same order being keyed twice (including by two people at
+        # once): ask the shared database for the same order number, or the
+        # same customer with identical line items in the last fortnight.
+        if _db.is_ready() and _db.current_user():
+            self.status_var.set("Checking for duplicate orders…")
+            self.master.update_idletasks()
+            try:
+                dupes = _db.find_potential_duplicates(
+                    header.get("Customer Name", ""),
+                    header.get("Order Number", ""),
+                    self.items)
+            except Exception:
+                dupes = []   # offline / query failed — never block generating
+            if dupes:
+                lines = []
+                for d in dupes[:5]:
+                    who = d.get("full_name") or d.get("username") or "unknown"
+                    ts  = (d.get("created_at") or "")[:16].replace("T", "  ")
+                    lines.append(
+                        f"•  O/N {d.get('order_number') or '—'}  ·  "
+                        f"{d.get('customer_name','')}\n"
+                        f"    {d.get('duplicate_reason','')} — created by {who}"
+                        f"{('  ·  ' + ts) if ts.strip() else ''}")
+                if not messagebox.askyesno(
+                        "Possible Duplicate Order",
+                        "This looks like a duplicate of an order already in the "
+                        "system:\n\n" + "\n\n".join(lines) +
+                        "\n\nGenerate it anyway?",
+                        icon="warning", default="no"):
+                    self.status_var.set("Order not generated — flagged as possible duplicate.")
+                    return
+
         ORDERS_DIR.mkdir(parents=True, exist_ok=True)
 
         # Ensure every stepped filter carries the *STEPPED FILTER* customer note
@@ -6265,7 +6456,18 @@ class ModernOrderApp(tk.Frame):
                         f"O/N: {header.get('Order Number','')}  "
                         f"Type: {order_type}  Items: {len(all_items)}")
                 except Exception as exc:
-                    errors.append(f"Database save failed: {exc}\n\nThe order was saved locally but not to the shared database.")
+                    # Couldn't reach the shared database — queue the order
+                    # locally and let the background sync push it through
+                    # when the connection returns.
+                    q_path = self._queue_order_for_sync(header, all_items,
+                                                        order_type, str(exc))
+                    if q_path:
+                        errors.append(
+                            "Couldn't reach the shared database — the order was "
+                            "saved on this PC and will sync automatically when "
+                            "the connection returns.")
+                    else:
+                        errors.append(f"Database save failed: {exc}\n\nThe order was saved locally but not to the shared database.")
 
             prog.advance("Done!")
 
@@ -7526,6 +7728,111 @@ class ModernOrderApp(tk.Frame):
             except Exception:
                 pass
 
+    def _view_order_items(self):
+        """Popup listing the selected order's line items — see what's in an
+        order without loading it into the New Order tab."""
+        row = self._get_selected_order()
+        if row is None:
+            messagebox.showinfo("View Items", "Select an order from the list first.")
+            return
+
+        # Header + items straight from the DB row or the local JSON file
+        if row.get("source") == "db":
+            header = dict(row.get("db_header") or {})
+            items  = list(row.get("db_items") or [])
+        else:
+            try:
+                payload = json.loads(Path(row["path"]).read_text(encoding="utf-8"))
+                header  = payload.get("header", {})
+                items   = payload.get("items", [])
+            except Exception as exc:
+                messagebox.showerror("View Items", f"Could not read order file:\n{exc}")
+                return
+
+        order_no = row.get("order_no", "")
+        dlg = tk.Toplevel(self.master)
+        dlg.title(f"Order Items — {order_no}")
+        dlg.transient(self.master)
+        dlg.grab_set()
+        dlg.configure(bg=CBG)
+        W, H = 960, 520
+        dlg.geometry(f"{W}x{H}+{self.master.winfo_rootx()+self.master.winfo_width()//2-W//2}"
+                     f"+{self.master.winfo_rooty()+self.master.winfo_height()//2-H//2}")
+
+        hdr = tk.Frame(dlg, bg=CA, padx=14, pady=10)
+        hdr.pack(fill="x")
+        tk.Label(hdr, text=row.get("customer", ""), bg=CA, fg="white",
+                 font=(FAM, 11, "bold")).pack(anchor="w")
+        sub_bits = [f"O/N: {order_no or '—'}"]
+        if header.get("Date Ordered"): sub_bits.append(f"Ordered {header['Date Ordered']}")
+        if header.get("Date Due"):     sub_bits.append(f"Due {header['Date Due']}")
+        sub_bits.append(f"{len(items)} item{'s' if len(items) != 1 else ''}")
+        tk.Label(hdr, text="  ·  ".join(sub_bits),
+                 bg=CA, fg="#A9CCE3", font=F_SM).pack(anchor="w")
+
+        tbl_wrap = tk.Frame(dlg, bg=CCA, highlightbackground=CSP, highlightthickness=1)
+        tbl_wrap.pack(fill="both", expand=True, padx=14, pady=(12, 0))
+        tbl_wrap.rowconfigure(0, weight=1)
+        tbl_wrap.columnconfigure(0, weight=1)
+
+        cols = ("qty", "item", "size", "media", "notes")
+        tree = ttk.Treeview(tbl_wrap, columns=cols, show="headings",
+                            style="TAF.Treeview")
+        tree.grid(row=0, column=0, sticky="nsew")
+        for col, (hd_txt, wd, anc, stretch) in {
+            "qty":   ("Qty",              60, "center", False),
+            "item":  ("Item",            250, "w",      True),
+            "size":  ("Size (mm)",       170, "center", False),
+            "media": ("Media",           110, "center", False),
+            "notes": ("Notes",           260, "w",      True),
+        }.items():
+            tree.heading(col, text=hd_txt, anchor="center" if anc == "center" else "w")
+            tree.column(col, width=wd, anchor=anc, minwidth=40, stretch=stretch)
+        tree.tag_configure("even", background=CRE)
+        tree.tag_configure("odd",  background=CCA)
+
+        vsb = ttk.Scrollbar(tbl_wrap, orient="vertical", command=tree.yview)
+        vsb.grid(row=0, column=1, sticky="ns")
+        tree.configure(yscrollcommand=vsb.set)
+
+        for i, it in enumerate(items):
+            if (it.get("item_kind") or "filter") == "bag":
+                name = it.get("product_type", "Bag / Roll")
+                pn   = (it.get("part_number") or "").strip()
+                if pn:
+                    name += f"   (P/N {pn})"
+                if it.get("roll_width") or it.get("roll_length"):
+                    size = f"{it.get('roll_width','')} × {it.get('roll_length','')}".strip(" ×")
+                else:
+                    dims = [it.get("width"), it.get("height"), it.get("depth")]
+                    size = " × ".join(str(d) for d in dims if d)
+                qty   = it.get("quantity", "")
+                media = it.get("media", "")
+                notes = it.get("notes", "")
+            else:
+                name  = it.get("Filter Type", "Filter")
+                size  = f"{it.get('Short','')} × {it.get('Long','')} × {it.get('Channel','')}"
+                qty   = it.get("Quantity", "")
+                media = it.get("Media Type", "")
+                notes = it.get("Notes", "")
+            tree.insert("", "end", tags=("even" if i % 2 == 0 else "odd",),
+                        values=(qty, name, size, media, notes))
+
+        if header.get("Notes"):
+            tk.Label(dlg, text=f"Order notes:  {header['Notes']}",
+                     bg=CBG, fg=CMU, font=F_SM, wraplength=W - 40,
+                     justify="left", anchor="w").pack(fill="x", padx=16, pady=(8, 0))
+
+        foot = tk.Frame(dlg, bg=CBG, pady=10, padx=14)
+        foot.pack(fill="x")
+        flat_btn(foot, "Close", dlg.destroy, bg=CNE, pady=6).pack(side="right")
+
+        def _load_and_close():
+            dlg.destroy()
+            self._load_prev_order()
+        flat_btn(foot, "Load into New Order", _load_and_close,
+                 bg=CA, pady=6).pack(side="right", padx=(0, 8))
+
     def _view_order_history(self):
         """Show a popup with the full audit history for the selected order."""
         row = self._get_selected_order()
@@ -7693,21 +8000,37 @@ def _start_app():
     # Show the running version in the title so support always knows the build.
     root.title(f"{APP_TITLE}  —  v{APP_VERSION}")
 
-    # ── Never let a UI error vanish silently ─────────────────────────────
+    # ── Never let an error vanish silently ───────────────────────────────
     # In the windowed (no-console) exe, an exception inside a Tk callback is
     # invisible: the callback just aborts, which looks like "I clicked and
-    # nothing happened". Log every callback exception to app_error.log and
-    # show it, so failures are diagnosable instead of silent.
-    def _report_callback_exception(exc, val, tb):
+    # nothing happened". Every unhandled error (UI callback, background
+    # thread, or startup) is appended to app_error.log AND mirrored to the
+    # shared audit log — so crashes on any machine are diagnosable centrally,
+    # without asking staff for screenshots.
+    def _record_crash(kind, exc, val, tb):
         log_path = APP_DIR / "app_error.log"
         try:
             import traceback
             with open(log_path, "a", encoding="utf-8") as f:
                 f.write(f"\n[{_dt_module.datetime.now():%d/%m/%Y %H:%M:%S}] "
-                        f"v{APP_VERSION} — error in UI callback:\n")
+                        f"v{APP_VERSION} — {kind}:\n")
                 traceback.print_exception(exc, val, tb, file=f)
         except Exception:
             pass
+        try:
+            if _db.is_ready() and _db.current_user():
+                import traceback
+                detail = "".join(traceback.format_exception(exc, val, tb))[-1500:]
+                threading.Thread(
+                    target=lambda: _db.log_action(
+                        "app_error", f"v{APP_VERSION} — {kind}:\n{detail}"),
+                    daemon=True).start()
+        except Exception:
+            pass
+        return log_path
+
+    def _report_callback_exception(exc, val, tb):
+        log_path = _record_crash("error in UI callback", exc, val, tb)
         try:
             messagebox.showerror(
                 "Unexpected Error",
@@ -7716,6 +8039,19 @@ def _start_app():
         except Exception:
             pass
     root.report_callback_exception = _report_callback_exception
+
+    _prev_sys_hook = sys.excepthook
+    def _sys_hook(exc, val, tb):
+        _record_crash("unhandled error", exc, val, tb)
+        _prev_sys_hook(exc, val, tb)
+    sys.excepthook = _sys_hook
+
+    def _thread_hook(args):
+        if args.exc_type is SystemExit:
+            return
+        _record_crash(f"error in thread {args.thread.name if args.thread else '?'}",
+                      args.exc_type, args.exc_value, args.exc_traceback)
+    threading.excepthook = _thread_hook
     root.configure(bg=CBG)
     _apply_icon(root)
 

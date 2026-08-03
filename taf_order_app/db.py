@@ -300,6 +300,79 @@ def save_order(header: dict, items: list, order_type: str) -> "str | None":
         return None
 
 
+def item_signature(items: list) -> str:
+    """Stable fingerprint of an order's line items, for duplicate detection.
+
+    Only the fields that define *what is being made* participate — notes,
+    part-number overrides etc. don't stop two orders being duplicates.
+    """
+    import hashlib
+    import json as _json
+    core = []
+    for it in (items or []):
+        if (it.get("item_kind") or "filter") == "bag":
+            key = {k: it.get(k) for k in ("product_type", "quantity", "media",
+                                          "width", "height", "depth")}
+        else:
+            key = {k: it.get(k) for k in ("Quantity", "Short", "Long",
+                                          "Channel", "Filter Type", "Media Type")}
+        core.append(_json.dumps(key, sort_keys=True, default=str))
+    return hashlib.sha1("|".join(sorted(core)).encode("utf-8")).hexdigest()
+
+
+def find_potential_duplicates(customer: str, order_number: str,
+                              items: list, days: int = 14) -> list:
+    """Return existing orders that look like duplicates of the one described.
+
+    Two signals, checked against the shared database:
+      • an order with the same order number already exists; or
+      • the same customer has an order with identical line items created in
+        the last `days` days (two people keying the same job at once).
+    Each returned row carries a human-readable "duplicate_reason".
+    """
+    import datetime as _dt
+    c = get_client()
+    matches: dict = {}
+
+    on = (order_number or "").strip()
+    if on:
+        try:
+            resp = (c.table("orders")
+                    .select("id, customer_name, order_number, full_name, username, created_at")
+                    .ilike("order_number", on.replace("%", "\\%"))
+                    .execute())
+            for r in resp.data or []:
+                r["duplicate_reason"] = "same order number"
+                matches[r["id"]] = r
+        except Exception:
+            pass
+
+    cust = (customer or "").strip()
+    if cust and items:
+        sig = item_signature(items)
+        since = (_dt.datetime.now(_dt.timezone.utc) - _dt.timedelta(days=days)).isoformat()
+        try:
+            resp = (c.table("orders")
+                    .select("id, customer_name, order_number, full_name, username, created_at, items")
+                    .ilike("customer_name", cust.replace("%", "\\%"))
+                    .gte("created_at", since)
+                    .execute())
+            for r in resp.data or []:
+                if item_signature(r.get("items") or []) != sig:
+                    continue
+                r.pop("items", None)
+                if r["id"] in matches:
+                    matches[r["id"]]["duplicate_reason"] = \
+                        "same order number and identical items"
+                else:
+                    r["duplicate_reason"] = "identical items for this customer"
+                    matches[r["id"]] = r
+        except Exception:
+            pass
+
+    return list(matches.values())
+
+
 def mark_order_printed(order_id: str) -> None:
     """Flag an order as printed (stored in the header JSON — no migration)."""
     import datetime as _dt

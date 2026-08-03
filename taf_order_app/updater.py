@@ -83,6 +83,21 @@ def get_current_remote_version() -> str:
     return (data.get("tag_name") or APP_VERSION).strip().lstrip("vV") or APP_VERSION
 
 
+def get_release_notes(version: str) -> str:
+    """Return the release-notes body for a specific version, or '' on any error."""
+    url = f"https://api.github.com/repos/{GITHUB_REPO}/releases/tags/v{version}"
+    try:
+        req = urllib.request.Request(url, headers={
+            "Accept":     "application/vnd.github+json",
+            "User-Agent": f"TAFOrderEntry/{APP_VERSION}",
+        })
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            data = json.load(resp)
+        return (data.get("body") or "").strip()
+    except Exception:
+        return ""
+
+
 def cleanup_old_exe() -> None:
     """Kept for GUI compatibility. The installer-based update leaves nothing to clean."""
     return
