@@ -20,6 +20,8 @@ log, stock management and a customer database.
 - **Import Purchase Order** — upload a PDF, photo, scan or emailed order and
   the app reads it, shows what it found for checking, then generates and
   prints the worksheets. Handles several purchase orders in one file.
+- **Send from your phone** — photograph a purchase order on a phone and it
+  arrives in the office app ready to review, from anywhere.
 - **Previous Orders** — search / filter, view items, reload, duplicate,
   regenerate, status tracking, priority flags, notes, per-order history.
 - **Dashboard** — orders-per-week, order-type and busiest-customer charts, low
@@ -110,6 +112,34 @@ where anyone could extract it.
 Costs a few cents per page. Skip this and the rest of the app works normally —
 the Import button just explains that the reader isn't set up yet.
 
+### Enable sending from a phone (optional)
+
+Lets staff photograph a purchase order on their phone and have it arrive in the
+office app. Requires purchase-order import above.
+
+1. Run `migrate_po_inbox.sql` in the **SQL Editor** — creates the private
+   `po-inbox` bucket the photos land in.
+2. Deploy the phone page **with JWT verification off** — the page has to load
+   before anyone can sign in:
+
+   ```bash
+   supabase functions deploy po-upload --no-verify-jwt
+   ```
+
+   Dashboard: deploy `supabase/functions/po-upload/index.ts` as `po-upload`,
+   then switch **Verify JWT** off in its settings.
+3. On each phone, open
+   `https://<your-project>.supabase.co/functions/v1/po-upload` and add it to
+   the home screen. Staff sign in with their normal TAF login.
+
+The page is only HTML and JavaScript — signing in happens inside it, and
+Storage row-level security governs what a signed-in person may do, so no key
+beyond the public anon key is ever exposed.
+
+The office app sweeps for new photos every minute, reads them in the
+background, and shows a **📱 Phone Inbox** button on the New Order tab when
+orders are ready to review.
+
 ### Create the first admin account
 
 ```bash
@@ -166,12 +196,12 @@ taf_order_app/
   order_service.py         Order build/save orchestration
   bag_filler.py            Word worksheet filling (COM)
   updater.py               In-app auto-update (APP_VERSION lives here)
-  po_import.py             Purchase-order import (calls the extract-orders function)
+  po_import.py             Purchase-order import + phone inbox
   user_management.py       Roles & user admin
   models.py / validation.py
 fonts/                     Bundled Public Sans (OFL)
 *.sql                      Schema + migrations
-supabase/functions/        Edge Functions (extract-orders: reads purchase orders)
+supabase/functions/        Edge Functions (extract-orders, po-upload)
 TAFOrderEntry.spec         PyInstaller build spec
 installer.iss              Inno Setup installer script
 ```

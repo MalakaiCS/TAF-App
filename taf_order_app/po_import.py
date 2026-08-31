@@ -226,3 +226,109 @@ def _normalise_order(raw: Dict[str, Any]) -> Dict[str, Any]:
 def strip_review_fields(item: Dict[str, Any]) -> Dict[str, Any]:
     """Drop the underscore-prefixed review metadata before generating."""
     return {k: v for k, v in item.items() if not k.startswith("_")}
+
+
+# ── Phone inbox ──────────────────────────────────────────────────────────────
+# Photos sent from a phone land in the `po-inbox` bucket. The app sweeps for
+# finished batches, brings each one down to this PC, reads it, and clears the
+# cloud copy. The extracted orders wait locally until someone reviews them, so
+# a cancelled review never loses the photos.
+
+def _inbox_dir(app_dir: Path) -> Path:
+    d = Path(app_dir) / "phone_inbox"
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def fetch_new_batches(app_dir: Path) -> List[str]:
+    """Download and read any finished phone batches.
+
+    Returns the batch ids newly made ready for review. Safe to call on a timer;
+    stays silent when offline or when the bucket doesn't exist yet.
+    """
+    if not is_configured():
+        return []
+    try:
+        batches = _db.list_po_inbox_batches()
+    except Exception:
+        return []          # offline, or migrate_po_inbox.sql not run yet
+
+    ready: List[str] = []
+    for b in batches:
+        batch  = b["batch"]
+        photos = b["photos"]
+        dest   = _inbox_dir(app_dir) / batch
+        if (dest / "orders.json").exists():
+            continue       # already read and waiting for review
+        try:
+            dest.mkdir(parents=True, exist_ok=True)
+            local: List[str] = []
+            for name in photos:
+                p = dest / name
+                if not p.exists():
+                    p.write_bytes(_db.download_po_photo(batch, name))
+                local.append(str(p))
+
+            orders = extract_orders(local)
+
+            manifest = b.get("manifest") or {}
+            note = (manifest.get("note") or "").strip()
+            for o in orders:
+                # The sender's note belongs with the order, and who sent it is
+                # worth showing on the review screen.
+                if note:
+                    existing = (o["header"].get("Notes") or "").strip()
+                    o["header"]["Notes"] = f"{existing}\n{note}".strip()
+                o["source"] = "phone"
+                o["sent_by"] = manifest.get("sent_by", "")
+            (dest / "orders.json").write_text(
+                json.dumps({
+                    "batch":    batch,
+                    "sent_by":  manifest.get("sent_by", ""),
+                    "sent_at":  manifest.get("sent_at", ""),
+                    "note":     note,
+                    "photos":   photos,
+                    "orders":   orders,
+                }, indent=2, default=str),
+                encoding="utf-8")
+            # Only now is the cloud copy redundant — the photos and what was
+            # read from them are both on this PC.
+            _db.delete_po_batch(batch, photos)
+            ready.append(batch)
+        except POImportError:
+            # Reading failed (no API key, unreadable photos). Leave the cloud
+            # copy in place so it retries, and don't wedge the sweep.
+            continue
+        except Exception:
+            continue
+    return ready
+
+
+def pending_batches(app_dir: Path) -> List[Dict[str, Any]]:
+    """Batches read and waiting for someone to review them, oldest first."""
+    out: List[Dict[str, Any]] = []
+    try:
+        folders = sorted(_inbox_dir(app_dir).iterdir())
+    except Exception:
+        return out
+    for d in folders:
+        f = d / "orders.json"
+        if not f.is_file():
+            continue
+        try:
+            payload = json.loads(f.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        if payload.get("orders"):
+            payload["dir"] = str(d)
+            out.append(payload)
+    return out
+
+
+def clear_batch(app_dir: Path, batch: str) -> None:
+    """Discard a batch once it has been generated or dismissed."""
+    import shutil
+    try:
+        shutil.rmtree(_inbox_dir(app_dir) / batch, ignore_errors=True)
+    except Exception:
+        pass

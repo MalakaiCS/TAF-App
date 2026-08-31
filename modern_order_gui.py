@@ -3076,6 +3076,9 @@ class ModernOrderApp(tk.Frame):
         # Push any orders queued while offline, then re-check every 5 minutes
         self.master.after(3000, self._start_pending_sync_loop)
 
+        # Collect and read any purchase-order photos sent from a phone
+        self.master.after(5000, self._start_phone_inbox_loop)
+
         # Pull the shared catalogue (presets + custom filter types)
         self.master.after(200, self._refresh_catalog_from_db)
 
@@ -3799,6 +3802,11 @@ class ModernOrderApp(tk.Frame):
         flat_btn(gen_row, "📄  Import Purchase Order",
                  self._import_purchase_orders, bg=CA,
                  pady=10, padx=18, font=F_BOLD).pack(side="left")
+        # Only shown once photos sent from a phone are read and waiting.
+        self._inbox_btn = flat_btn(gen_row, "📱  Phone Inbox",
+                                   self._open_phone_inbox, bg=CGR,
+                                   pady=10, padx=18, font=F_BOLD)
+        self._refresh_inbox_badge()
 
     # ── Previous Orders tab ───────────────────────────────────────────────
 
@@ -7397,6 +7405,77 @@ class ModernOrderApp(tk.Frame):
         """Merge a list of PDF file paths into one. Returns True on success."""
         return _ProgressDialog._merge(pdf_paths, out_path)
 
+    # ── Phone inbox ───────────────────────────────────────────────────────
+    # Photos sent from a phone are collected, read and queued in the
+    # background; the button below appears with a count when any are ready.
+
+    def _start_phone_inbox_loop(self):
+        """Sweep the phone inbox now, then every minute."""
+        self._sweep_phone_inbox()
+        self.master.after(60 * 1000, self._start_phone_inbox_loop)
+
+    def _sweep_phone_inbox(self):
+        if not _po_import.is_configured():
+            return
+
+        def _work():
+            try:
+                ready = _po_import.fetch_new_batches(APP_DIR)
+            except Exception:
+                ready = []
+
+            def _done():
+                if ready:
+                    pend = _po_import.pending_batches(APP_DIR)
+                    n = sum(len(p.get("orders") or []) for p in pend)
+                    self.status_var.set(
+                        f"📱 {n} order{'s' if n != 1 else ''} from a phone are "
+                        f"ready to review — open Phone Inbox on the New Order tab.")
+                self._refresh_inbox_badge()
+            self.master.after(0, _done)
+
+        threading.Thread(target=_work, daemon=True).start()
+
+    def _refresh_inbox_badge(self):
+        """Show the Phone Inbox button only while something is waiting."""
+        btn = getattr(self, "_inbox_btn", None)
+        if btn is None:
+            return
+        try:
+            pend = _po_import.pending_batches(APP_DIR)
+        except Exception:
+            pend = []
+        n = sum(len(p.get("orders") or []) for p in pend)
+        if n:
+            btn.config(text=f"📱  Phone Inbox ({n})")
+            btn.pack(side="left", padx=(8, 0))
+        else:
+            btn.pack_forget()
+
+    def _open_phone_inbox(self):
+        """Review the oldest batch of phone-sent orders."""
+        pend = _po_import.pending_batches(APP_DIR)
+        if not pend:
+            messagebox.showinfo(
+                "Phone Inbox",
+                "Nothing waiting.\n\nPhotos sent from a phone appear here "
+                "within a minute of being sent.")
+            self._refresh_inbox_badge()
+            return
+
+        payload = pend[0]
+        batch   = payload.get("batch", "")
+        orders  = payload.get("orders") or []
+        who     = payload.get("sent_by") or "a phone"
+        for o in orders:
+            o.setdefault("warnings", [])
+            o["warnings"] = [f"Sent from {who}"] + list(o["warnings"])
+
+        self._review_imported_orders(
+            orders,
+            on_finish=lambda: (_po_import.clear_batch(APP_DIR, batch),
+                               self._refresh_inbox_badge()))
+
     # ── Purchase-order import ─────────────────────────────────────────────
 
     def _import_purchase_orders(self):
@@ -7475,7 +7554,14 @@ class ModernOrderApp(tk.Frame):
 
         threading.Thread(target=_work, daemon=True).start()
 
-    def _review_imported_orders(self, orders):
+    def _review_imported_orders(self, orders, on_finish=None):
+        """Show the review screen, then generate whatever was approved.
+
+        `on_finish` runs once the batch is dealt with either way — it's what
+        clears a phone batch from the inbox, including when the review is
+        cancelled (the photos have been read; leaving it queued would just
+        re-prompt forever).
+        """
         n = len(orders)
         self.status_var.set(
             f"Read {n} purchase order{'s' if n != 1 else ''} — check them before generating.")
@@ -7485,10 +7571,12 @@ class ModernOrderApp(tk.Frame):
         self.master.wait_window(dlg)
         if not dlg.result:
             self.status_var.set("Purchase order import cancelled.")
+            if on_finish:
+                on_finish()
             return
-        self._generate_imported_orders(dlg.result)
+        self._generate_imported_orders(dlg.result, on_finish=on_finish)
 
-    def _generate_imported_orders(self, orders):
+    def _generate_imported_orders(self, orders, on_finish=None):
         """Generate, save and print each approved order in turn.
 
         Each one goes through the normal Generate path — same validation,
@@ -7511,6 +7599,8 @@ class ModernOrderApp(tk.Frame):
                             "skipped, flagged as duplicates, or reported an "
                             "error above.")
                 messagebox.showinfo("Import Complete", msg)
+                if on_finish:
+                    on_finish()
                 return
 
             order = orders[idx]

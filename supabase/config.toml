@@ -1,0 +1,13 @@
+project_id = "djexdkwohkylunnwbxpf"
+
+# Reads uploaded purchase orders. Called by the desktop app with the signed-in
+# user's token, so JWT verification stays on (the default).
+[functions.extract-orders]
+verify_jwt = true
+
+# Serves the phone page staff use to photograph a purchase order. JWT
+# verification must be OFF: the page has to load before anyone can sign in.
+# The page itself is only HTML and JavaScript — signing in happens inside it,
+# and Storage row-level security governs what any signed-in person may do.
+[functions.po-upload]
+verify_jwt = false

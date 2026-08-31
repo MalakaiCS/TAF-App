@@ -854,6 +854,65 @@ def can_manage_stock() -> bool:
     return role_level() >= 3
 
 
+# ── Phone photo inbox (purchase orders sent from a phone) ────────────────────
+# Layout in the private `po-inbox` bucket (see migrate_po_inbox.sql):
+#     <batch-id>/01.jpg, 02.jpg, …
+#     <batch-id>/_complete.json   ← written last by the phone page
+# A batch without the marker is still uploading and must be left alone.
+
+PO_INBOX_BUCKET = "po-inbox"
+_PO_MARKER = "_complete.json"
+
+
+def list_po_inbox_batches() -> list:
+    """Return finished batches waiting to be read, oldest first.
+
+    Each entry is {"batch", "photos": [names], "manifest": {...}}. Raises on a
+    connection failure so the caller can stay quiet and retry later.
+    """
+    store = get_client().storage.from_(PO_INBOX_BUCKET)
+    folders = store.list("") or []
+    batches = []
+    for entry in folders:
+        name = entry.get("name") or ""
+        # Storage lists folders as entries with no id / metadata.
+        if not name or entry.get("id"):
+            continue
+        files = store.list(name) or []
+        filenames = [f.get("name") or "" for f in files]
+        if _PO_MARKER not in filenames:
+            continue      # still uploading — leave it for the next sweep
+        photos = sorted(n for n in filenames
+                        if n and not n.startswith("_"))
+        if not photos:
+            continue
+        manifest = {}
+        try:
+            import json as _json
+            raw = store.download(f"{name}/{_PO_MARKER}")
+            manifest = _json.loads(bytes(raw).decode("utf-8"))
+        except Exception:
+            pass
+        batches.append({"batch": name, "photos": photos, "manifest": manifest})
+    batches.sort(key=lambda b: b["batch"])
+    return batches
+
+
+def download_po_photo(batch: str, name: str) -> bytes:
+    """Fetch one photo out of a batch."""
+    return bytes(get_client().storage.from_(PO_INBOX_BUCKET)
+                 .download(f"{batch}/{name}"))
+
+
+def delete_po_batch(batch: str, names: list) -> None:
+    """Remove a batch from the cloud once its photos are safely on this PC."""
+    paths = [f"{batch}/{n}" for n in names] + [f"{batch}/{_PO_MARKER}"]
+    try:
+        get_client().storage.from_(PO_INBOX_BUCKET).remove(paths)
+    except Exception:
+        pass
+
+
 # ── Customer list (for autocomplete) ─────────────────────────────────────────
 
 def get_known_customers() -> list[str]:
