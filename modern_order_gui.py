@@ -21,6 +21,7 @@ from concurrent.futures import ThreadPoolExecutor
 from taf_order_app import OrderService
 from taf_order_app.validation import VALID_FILTER_TYPES, VALID_MEDIA_TYPES
 from taf_order_app import db as _db
+from taf_order_app import po_import as _po_import
 from taf_order_app.bag_filler import (
     BAG_PRODUCT_TYPES, BAG_MEDIA_TYPES, ROLL_MEDIA_TYPES,
     ROLL_WIDTHS, ROLL_LENGTHS, STANDARD_SIZES,
@@ -2650,6 +2651,388 @@ def _safe_int(s) -> int:
 
 
 # ═══════════════════════════════════════════════════════════════════════════
+# Imported Purchase Order Review
+# ═══════════════════════════════════════════════════════════════════════════
+
+def _int_or_zero(value) -> int:
+    """Parse a dimension; 0 for anything unreadable (which is a fault worth
+    flagging, never a value to quietly generate a filter from)."""
+    try:
+        return int(str(value).strip())
+    except Exception:
+        return 0
+
+class POReviewDialog(tk.Toplevel):
+    """Check what was read out of an uploaded purchase order before anything
+    is manufactured.
+
+    Every field stays editable, each line shows the text it was read from, and
+    anything the reader was unsure about is highlighted — a misread dimension
+    costs a scrapped filter, so nothing generates until a person has looked.
+
+    result = None if cancelled, else a list of {"header", "items"} to generate.
+    """
+
+    CONF_COLORS = {
+        "low":    ("#FDECEC", "#C0392B"),
+        "medium": ("#FFF3CD", "#856404"),
+    }
+
+    def __init__(self, master, orders, media_types=None, filter_types=None):
+        super().__init__(master)
+        self.title("Review Imported Purchase Orders")
+        self.transient(master)
+        self.grab_set()
+        self.configure(bg=CBG)
+        self.result = None
+        self._orders = orders
+        self._media_types  = media_types  or list(DEFAULT_MEDIA_TYPES)
+        self._filter_types = filter_types or list(VALID_FILTER_TYPES)
+        self._current = None
+        for o in self._orders:
+            o.setdefault("include", True)
+
+        n = len(orders)
+        hdr = tk.Frame(self, bg=CA, padx=16, pady=10)
+        hdr.pack(fill="x", side="top")
+        tk.Label(hdr, text=f"Found {n} purchase order{'s' if n != 1 else ''}",
+                 bg=CA, fg="white", font=(FAM, 12, "bold")).pack(anchor="w")
+        tk.Label(hdr, text="Check every line against the document — amber and red "
+                           "rows are ones the reader wasn't sure about.",
+                 bg=CA, fg="#A9CCE3", font=F_SM).pack(anchor="w")
+
+        foot = tk.Frame(self, bg=CBG, padx=16, pady=10)
+        foot.pack(fill="x", side="bottom")
+        flat_btn(foot, "Cancel", self._cancel, bg=CNE, pady=8).pack(side="right", padx=(8, 0))
+        self._go_btn = flat_btn(foot, "Generate & Print", self._confirm, bg=CGR, pady=8)
+        self._go_btn.pack(side="right")
+        self._count_lbl = tk.Label(foot, text="", bg=CBG, fg=CMU, font=F_SM)
+        self._count_lbl.pack(side="left")
+
+        body = tk.Frame(self, bg=CBG, padx=14, pady=12)
+        body.pack(fill="both", expand=True, side="top")
+        body.columnconfigure(1, weight=1)
+        body.rowconfigure(0, weight=1)
+
+        # ── Left: the orders found ────────────────────────────────────────
+        left = tk.Frame(body, bg=CBG)
+        left.grid(row=0, column=0, sticky="ns", padx=(0, 12))
+        tk.Label(left, text="Orders", bg=CBG, fg=CMU, font=F_SM).pack(anchor="w")
+        lb_wrap = tk.Frame(left, bg=CSP)
+        lb_wrap.pack(fill="both", expand=True)
+        self._order_lb = tk.Listbox(lb_wrap, font=F_BODY, bg=CCA, fg=CTX,
+                                    selectbackground=CA, selectforeground="white",
+                                    activestyle="none", relief="flat", bd=0,
+                                    highlightthickness=0, width=32, height=16)
+        self._order_lb.pack(fill="both", expand=True, padx=1, pady=1)
+        self._order_lb.bind("<<ListboxSelect>>", lambda e: self._on_select())
+
+        self._include_var = tk.BooleanVar(value=True)
+        tk.Checkbutton(left, text="Include this order", variable=self._include_var,
+                       command=self._toggle_include, bg=CBG, fg=CTX, font=F_BODY,
+                       activebackground=CBG, selectcolor=CCA,
+                       cursor="hand2").pack(anchor="w", pady=(8, 0))
+
+        # ── Right: the selected order ─────────────────────────────────────
+        right = tk.Frame(body, bg=CBG)
+        right.grid(row=0, column=1, sticky="nsew")
+        right.columnconfigure(0, weight=1)
+        right.rowconfigure(2, weight=1)
+
+        self._warn_lbl = tk.Label(right, text="", bg="#FDECEC", fg="#C0392B",
+                                  font=F_SM, justify="left", anchor="w",
+                                  wraplength=640, padx=10, pady=6)
+
+        hf = tk.LabelFrame(right, text=" Order Details ", bg=CCA, fg=CA,
+                           font=F_SEC, bd=1, relief="solid", padx=12, pady=10)
+        hf.grid(row=1, column=0, sticky="ew")
+        self._hvars = {}
+        fields = [("Customer Name", True), ("Order Number", True),
+                  ("Date Ordered", True), ("Date Due", False),
+                  ("Attention", False), ("Job", False),
+                  ("Location", True), ("Notes", False)]
+        for i, (key, required) in enumerate(fields):
+            r, c = divmod(i, 2)
+            sub = tk.Frame(hf, bg=CCA)
+            sub.grid(row=r, column=c, sticky="ew", padx=(0, 14), pady=3)
+            hf.columnconfigure(c, weight=1)
+            tk.Label(sub, text=key.upper() + (" *" if required else ""),
+                     bg=CCA, fg=(CRD if required else CMU),
+                     font=F_BOLD).pack(anchor="w")
+            v = tk.StringVar()
+            self._hvars[key] = v
+            v.trace_add("write", lambda *_a, k=key: self._on_header_edit(k))
+            field_entry(sub, textvariable=v, width=24).pack(fill="x", pady=(2, 0))
+
+        itf = tk.Frame(right, bg=CBG)
+        itf.grid(row=2, column=0, sticky="nsew", pady=(10, 0))
+        itf.rowconfigure(1, weight=1)
+        itf.columnconfigure(0, weight=1)
+        tk.Label(itf, text="Line items — double-click to correct one",
+                 bg=CBG, fg=CMU, font=F_SM).grid(row=0, column=0, sticky="w")
+
+        tw = tk.Frame(itf, bg=CCA, highlightbackground=CSP, highlightthickness=1)
+        tw.grid(row=1, column=0, sticky="nsew")
+        tw.rowconfigure(0, weight=1)
+        tw.columnconfigure(0, weight=1)
+        cols = ("qty", "type", "size", "media", "notes", "read")
+        self._items_tree = ttk.Treeview(tw, columns=cols, show="headings",
+                                        style="TAF.Treeview", height=8)
+        self._items_tree.grid(row=0, column=0, sticky="nsew")
+        for col, (txt, wd, anc, stretch) in {
+            "qty":   ("Qty",             50,  "center", False),
+            "type":  ("Filter Type",     130, "w",      False),
+            "size":  ("Size (mm)",       150, "center", False),
+            "media": ("Media",           80,  "center", False),
+            "notes": ("Notes",           160, "w",      True),
+            "read":  ("Read from PO",    260, "w",      True),
+        }.items():
+            self._items_tree.heading(col, text=txt,
+                                     anchor="center" if anc == "center" else "w")
+            self._items_tree.column(col, width=wd, anchor=anc, minwidth=40,
+                                    stretch=stretch)
+        for level, (bg, fg) in self.CONF_COLORS.items():
+            self._items_tree.tag_configure(level, background=bg, foreground=fg)
+        self._items_tree.tag_configure("high", background=CCA)
+        vsb = ttk.Scrollbar(tw, orient="vertical", command=self._items_tree.yview)
+        vsb.grid(row=0, column=1, sticky="ns")
+        self._items_tree.configure(yscrollcommand=vsb.set)
+        self._items_tree.bind("<Double-1>", lambda e: self._edit_item())
+
+        bar = tk.Frame(itf, bg=CBG)
+        bar.grid(row=2, column=0, sticky="w", pady=(6, 0))
+        flat_btn(bar, "Edit Item",   self._edit_item,
+                 bg=CNE, pady=5, padx=10, font=F_BODY).pack(side="left", padx=(0, 6))
+        flat_btn(bar, "Remove Item", self._remove_item,
+                 bg=CRD, pady=5, padx=10, font=F_BODY).pack(side="left")
+
+        self._refresh_order_list()
+        if self._orders:
+            self._order_lb.selection_set(0)
+            self._on_select()
+
+        self.update_idletasks()
+        W, H = 1040, 720
+        self.geometry(f"{W}x{H}+{max(0, master.winfo_rootx() + 40)}"
+                      f"+{max(0, master.winfo_rooty() + 10)}")
+        self.minsize(880, 560)
+        self.protocol("WM_DELETE_WINDOW", self._cancel)
+
+    # ── Order list ────────────────────────────────────────────────────────
+
+    def _missing_required(self, order) -> list:
+        h = order["header"]
+        return [k for k in ("Customer Name", "Order Number",
+                            "Date Ordered", "Location")
+                if not (h.get(k) or "").strip()]
+
+    def _item_problems(self, order) -> list:
+        """Line-item faults that would fail validation or make a wrong filter.
+
+        Caught here rather than at generation, so the fix is a dropdown in
+        this dialog instead of a confusing error part-way through a batch.
+        """
+        problems = []
+        for n, it in enumerate(order["items"], start=1):
+            ft = (it.get("Filter Type") or "").strip()
+            mt = (it.get("Media Type") or "").strip()
+            if ft not in self._filter_types:
+                problems.append(
+                    f"Line {n}: filter type "
+                    + (f'"{ft}" isn\'t one the app knows' if ft else "is blank")
+                    + " — edit the line to pick one.")
+            if mt not in self._media_types:
+                problems.append(
+                    f"Line {n}: media "
+                    + (f'"{mt}" isn\'t one the app knows' if mt else "is blank")
+                    + " — edit the line to pick one.")
+            missing_dims = [label for label, key in
+                            (("short", "Short"), ("long", "Long"), ("channel", "Channel"))
+                            if not _int_or_zero(it.get(key))]
+            if missing_dims:
+                problems.append(
+                    f"Line {n}: {', '.join(missing_dims)} not read from the "
+                    "document — check the size against the order.")
+        return problems
+
+    def _needs_attention(self, order) -> bool:
+        return bool(self._missing_required(order)
+                    or not order["items"]
+                    or self._item_problems(order))
+
+    def _refresh_order_list(self):
+        sel = self._order_lb.curselection()
+        self._order_lb.delete(0, "end")
+        for o in self._orders:
+            h = o["header"]
+            label = (h.get("Customer Name") or "(no customer)")[:22]
+            on    = h.get("Order Number") or "—"
+            mark  = "  " if o.get("include", True) else "✕ "
+            flag  = ""
+            if self._needs_attention(o):
+                flag = "  ⚠"
+            elif o.get("confidence") == "low":
+                flag = "  ●"
+            self._order_lb.insert(
+                "end", f"{mark}{label}  ·  {on}  ({len(o['items'])}){flag}")
+        for i, o in enumerate(self._orders):
+            if not o.get("include", True):
+                self._order_lb.itemconfig(i, fg=CMU)
+            elif self._needs_attention(o) or o.get("confidence") == "low":
+                self._order_lb.itemconfig(i, fg="#C0392B")
+        if sel:
+            self._order_lb.selection_set(sel[0])
+        self._update_count()
+
+    def _update_count(self):
+        ready, blocked = 0, 0
+        for o in self._orders:
+            if not o.get("include", True):
+                continue
+            if self._needs_attention(o):
+                blocked += 1
+            else:
+                ready += 1
+        bits = [f"{ready} order{'s' if ready != 1 else ''} ready"]
+        if blocked:
+            bits.append(f"{blocked} still missing required fields (marked ⚠)")
+        self._count_lbl.config(text="   ·   ".join(bits))
+
+    def _on_select(self):
+        sel = self._order_lb.curselection()
+        if not sel:
+            return
+        self._current = sel[0]
+        order = self._orders[self._current]
+        self._loading = True
+        for k, var in self._hvars.items():
+            var.set(order["header"].get(k, ""))
+        self._loading = False
+        self._include_var.set(order.get("include", True))
+        self._refresh_items()
+
+        warns = list(order.get("warnings") or [])
+        missing = self._missing_required(order)
+        if missing:
+            warns.insert(0, "Required field(s) still blank: " + ", ".join(missing))
+        if not order["items"]:
+            warns.insert(0, "This order has no line items.")
+        warns.extend(self._item_problems(order))
+        if warns:
+            self._warn_lbl.config(text="⚠  " + "\n⚠  ".join(warns))
+            self._warn_lbl.grid(row=0, column=0, sticky="ew", pady=(0, 8))
+        else:
+            self._warn_lbl.grid_remove()
+
+    def _on_header_edit(self, key):
+        if getattr(self, "_loading", False) or self._current is None:
+            return
+        self._orders[self._current]["header"][key] = self._hvars[key].get()
+        self._refresh_order_list()
+
+    def _toggle_include(self):
+        if self._current is None:
+            return
+        self._orders[self._current]["include"] = bool(self._include_var.get())
+        self._refresh_order_list()
+
+    # ── Items ─────────────────────────────────────────────────────────────
+
+    def _refresh_items(self):
+        for iid in self._items_tree.get_children():
+            self._items_tree.delete(iid)
+        if self._current is None:
+            return
+        for i, it in enumerate(self._orders[self._current]["items"]):
+            conf = (it.get("_confidence") or "high").lower()
+            size = f"{it.get('Short','')} × {it.get('Long','')} × {it.get('Channel','')}"
+            self._items_tree.insert(
+                "", "end", iid=str(i),
+                tags=(conf if conf in self.CONF_COLORS else "high",),
+                values=(it.get("Quantity", ""),
+                        it.get("Filter Type", "") or "—",
+                        size,
+                        it.get("Media Type", "") or "—",
+                        it.get("Notes", ""),
+                        it.get("_source_text", "")))
+
+    def _selected_item_index(self):
+        sel = self._items_tree.selection()
+        return int(sel[0]) if sel else None
+
+    def _edit_item(self):
+        idx = self._selected_item_index()
+        if idx is None or self._current is None:
+            messagebox.showinfo("Edit Item", "Select a line item first.", parent=self)
+            return
+        items = self._orders[self._current]["items"]
+        dlg = LineItemDialog(self, title="Correct Line Item", initial=items[idx],
+                             media_types=self._media_types,
+                             filter_types=self._filter_types)
+        self.wait_window(dlg)
+        try:
+            self.grab_set()   # child dialog took the grab — take it back
+        except Exception:
+            pass
+        if dlg.result:
+            # A human has now confirmed this line, so it stops being flagged.
+            src = items[idx].get("_source_text", "")
+            items[idx] = dict(dlg.result)
+            items[idx]["_confidence"]  = "high"
+            items[idx]["_source_text"] = src
+            self._refresh_items()
+            self._on_select()
+
+    def _remove_item(self):
+        idx = self._selected_item_index()
+        if idx is None or self._current is None:
+            messagebox.showinfo("Remove Item", "Select a line item first.", parent=self)
+            return
+        self._orders[self._current]["items"].pop(idx)
+        self._refresh_items()
+        self._refresh_order_list()
+        self._on_select()
+
+    # ── Finish ────────────────────────────────────────────────────────────
+
+    def _cancel(self):
+        self.result = None
+        self.destroy()
+
+    def _confirm(self):
+        approved = [o for o in self._orders if o.get("include", True)]
+        if not approved:
+            messagebox.showinfo("Nothing to Generate",
+                                "No orders are ticked for import.", parent=self)
+            return
+
+        bad = [o for o in approved if self._needs_attention(o)]
+        if bad:
+            messagebox.showwarning(
+                "Incomplete Orders",
+                f"{len(bad)} of the ticked orders still need attention "
+                "(marked ⚠ in the list).\n\n"
+                "Fill in the missing fields, or untick those orders, then try "
+                "again.", parent=self)
+            return
+
+        n = len(approved)
+        if not messagebox.askyesno(
+                "Generate Orders",
+                f"Generate and print {n} order{'s' if n != 1 else ''}?\n\n"
+                "Worksheets are created, saved to the shared database and sent "
+                "to the printer — the same as pressing Generate Output on each "
+                "one.", parent=self):
+            return
+
+        self.result = [{
+            "header": dict(o["header"]),
+            "items":  [_po_import.strip_review_fields(i) for i in o["items"]],
+        } for o in approved]
+        self.destroy()
+
+
+# ═══════════════════════════════════════════════════════════════════════════
 # Main Application
 # ═══════════════════════════════════════════════════════════════════════════
 
@@ -3413,6 +3796,9 @@ class ModernOrderApp(tk.Frame):
         flat_btn(gen_row, "Generate Output",
                  self._generate, bg=CGR,
                  pady=10, padx=22, font=F_BOLD).pack(side="right")
+        flat_btn(gen_row, "📄  Import Purchase Order",
+                 self._import_purchase_orders, bg=CA,
+                 pady=10, padx=18, font=F_BOLD).pack(side="left")
 
     # ── Previous Orders tab ───────────────────────────────────────────────
 
@@ -7011,13 +7397,170 @@ class ModernOrderApp(tk.Frame):
         """Merge a list of PDF file paths into one. Returns True on success."""
         return _ProgressDialog._merge(pdf_paths, out_path)
 
-    def _generate(self):
+    # ── Purchase-order import ─────────────────────────────────────────────
+
+    def _import_purchase_orders(self):
+        """Read one or more purchase orders out of uploaded documents, then
+        open the review screen before anything is generated."""
+        if not _po_import.is_configured():
+            messagebox.showwarning(
+                "Sign In Required",
+                "Importing purchase orders needs a signed-in connection to the "
+                "shared database.")
+            return
+
+        paths = filedialog.askopenfilenames(
+            title="Select purchase order document(s)",
+            filetypes=[
+                ("Purchase orders", "*.pdf *.png *.jpg *.jpeg *.gif *.webp *.txt *.eml"),
+                ("PDF files",   "*.pdf"),
+                ("Images",      "*.png *.jpg *.jpeg *.gif *.webp"),
+                ("Text / email", "*.txt *.eml *.msg"),
+                ("All files",   "*.*"),
+            ])
+        if not paths:
+            return
+
+        n = len(paths)
+        prog = tk.Toplevel(self.master)
+        prog.title("Reading Purchase Orders")
+        prog.transient(self.master)
+        prog.grab_set()
+        prog.resizable(False, False)
+        prog.configure(bg=CBG)
+        prog.protocol("WM_DELETE_WINDOW", lambda: None)
+        tk.Label(prog, bg=CA, fg="white", font=(FAM, 11, "bold"),
+                 text="Reading purchase orders…", padx=20, pady=12,
+                 anchor="w").pack(fill="x")
+        tk.Label(prog, bg=CBG, fg=CTX, font=F_BODY, justify="left", padx=20,
+                 pady=14, text=f"Sending {n} document{'s' if n != 1 else ''} to be read.\n"
+                               "This usually takes 10–40 seconds.").pack(anchor="w")
+        bar = ttk.Progressbar(prog, mode="indeterminate", length=340)
+        bar.pack(padx=20, pady=(0, 16))
+        bar.start(12)
+        prog.update_idletasks()
+        W, H = 400, 190
+        prog.geometry(f"{W}x{H}+{self.master.winfo_rootx()+self.master.winfo_width()//2-W//2}"
+                      f"+{self.master.winfo_rooty()+self.master.winfo_height()//2-H//2}")
+
+        self.status_var.set("Reading purchase orders…")
+
+        def _work():
+            try:
+                orders = _po_import.extract_orders(list(paths))
+                err = ""
+            except _po_import.POImportError as exc:
+                orders, err = [], str(exc)
+            except Exception as exc:
+                orders, err = [], f"Import failed:\n{exc}"
+
+            def _done():
+                bar.stop()
+                prog.grab_release()
+                prog.destroy()
+                if err:
+                    self.status_var.set("Purchase order import failed.")
+                    messagebox.showerror("Import Failed", err)
+                    return
+                if not orders:
+                    self.status_var.set("No purchase orders found in those files.")
+                    messagebox.showinfo(
+                        "Nothing Found",
+                        "No purchase orders could be read from those files.\n\n"
+                        "If it's a photo, check the whole page is in frame and "
+                        "the text is legible.")
+                    return
+                self._review_imported_orders(orders)
+            self.master.after(0, _done)
+
+        threading.Thread(target=_work, daemon=True).start()
+
+    def _review_imported_orders(self, orders):
+        n = len(orders)
+        self.status_var.set(
+            f"Read {n} purchase order{'s' if n != 1 else ''} — check them before generating.")
+        dlg = POReviewDialog(self.master, orders,
+                             media_types=self.all_media_types,
+                             filter_types=self.all_filter_types)
+        self.master.wait_window(dlg)
+        if not dlg.result:
+            self.status_var.set("Purchase order import cancelled.")
+            return
+        self._generate_imported_orders(dlg.result)
+
+    def _generate_imported_orders(self, orders):
+        """Generate, save and print each approved order in turn.
+
+        Each one goes through the normal Generate path — same validation,
+        duplicate check, database save and printing — so an imported order is
+        indistinguishable from a hand-entered one afterwards.
+        """
+        total = len(orders)
+        results = {"ok": 0, "failed": 0}
+
+        def _run(idx):
+            if idx >= total:
+                done = results["ok"]
+                failed = results["failed"]
+                self.status_var.set(
+                    f"Imported {done} of {total} order{'s' if total != 1 else ''}.")
+                msg = (f"{done} order{'s' if done != 1 else ''} generated, saved "
+                       f"and sent to the printer.")
+                if failed:
+                    msg += (f"\n\n{failed} were not generated — they were "
+                            "skipped, flagged as duplicates, or reported an "
+                            "error above.")
+                messagebox.showinfo("Import Complete", msg)
+                return
+
+            order = orders[idx]
+            self.status_var.set(
+                f"Generating imported order {idx + 1} of {total}…")
+            self._load_order_into_form(order["header"], order["items"])
+
+            def _next(ok):
+                results["ok" if ok else "failed"] += 1
+                # Let the current order's dialogs close before starting the
+                # next one, so the popups don't stack up.
+                self.master.after(400, lambda: _run(idx + 1))
+
+            self._generate(on_done=_next, quiet=True)
+
+        _run(0)
+
+    def _load_order_into_form(self, header, items):
+        """Put an order into the New Order tab, replacing whatever is there."""
+        for k, var in self.hvars.items():
+            var.set(str(header.get(k, "")))
+        self.txt_header_notes.delete("1.0", "end")
+        self.txt_header_notes.insert("1.0", header.get("Notes", "") or "")
+        self.items = [dict(i) for i in items]
+        for it in self.items:
+            it.setdefault("item_kind", "bag" if "product_type" in it else "filter")
+        self._refresh_items_tree()
+        self._show_tab("new_order")
+        self.master.update_idletasks()
+
+    def _generate(self, on_done=None, quiet=False):
+        """Generate, save and print the current order.
+
+        `on_done(ok)` fires once the order finishes (or is abandoned), which is
+        what lets an imported batch run one order after another. `quiet`
+        suppresses the per-order "Done" popup so a batch shows a single summary
+        instead of one dialog per order — errors are always shown.
+        """
+        def _bail(ok=False):
+            if on_done:
+                on_done(ok)
+
         # ── Validate required fields first ────────────────────────────────
         if not self._validate_header():
             self._show_tab("new_order")   # make sure we're on the right tab
+            _bail()
             return
         if not self.items:
             messagebox.showwarning("No Items", "Add at least one item before generating.")
+            _bail()
             return
         header = self._collect_header()
         if _db.is_ready() and _db.current_user():
@@ -7055,6 +7598,7 @@ class ModernOrderApp(tk.Frame):
                         "\n\nGenerate it anyway?",
                         icon="warning", default="no"):
                     self.status_var.set("Order not generated — flagged as possible duplicate.")
+                    _bail()
                     return
 
         ORDERS_DIR.mkdir(parents=True, exist_ok=True)
@@ -7278,7 +7822,11 @@ class ModernOrderApp(tk.Frame):
                 else:
                     self.status_var.set("Order generated.")
 
-                messagebox.showinfo("Done", msg)
+                if not quiet:
+                    messagebox.showinfo("Done", msg)
+                _bail(True)
+            else:
+                _bail(False)
 
         threading.Thread(target=_worker, daemon=True).start()
 

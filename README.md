@@ -17,6 +17,9 @@ log, stock management and a customer database.
 - **New Order** — filter & bag/roll line items, dedicated compressor-filter
   presets (add / edit / remove your own), duplicate-order warning, live
   worksheet + order-PDF generation.
+- **Import Purchase Order** — upload a PDF, photo, scan or emailed order and
+  the app reads it, shows what it found for checking, then generates and
+  prints the worksheets. Handles several purchase orders in one file.
 - **Previous Orders** — search / filter, view items, reload, duplicate,
   regenerate, status tracking, priority flags, notes, per-order history.
 - **Dashboard** — orders-per-week, order-type and busiest-customer charts, low
@@ -85,6 +88,28 @@ In the Supabase dashboard → **SQL Editor**, run these once (in order):
    presets and custom filter types; without it those edits stay on one PC
    instead of being shared.
 
+### Enable purchase-order import (optional)
+
+**Import Purchase Order** reads uploaded documents with Claude. The API key
+lives in a Supabase Edge Function so it is never shipped inside the installer,
+where anyone could extract it.
+
+1. Get an Anthropic API key from [console.anthropic.com](https://console.anthropic.com).
+2. Deploy the function and give it the key:
+
+   ```bash
+   supabase secrets set ANTHROPIC_API_KEY=sk-ant-...
+   supabase functions deploy extract-orders
+   ```
+
+   No terminal? In the Supabase dashboard: **Edge Functions → Deploy a new
+   function**, name it `extract-orders`, paste in
+   `supabase/functions/extract-orders/index.ts`, then add `ANTHROPIC_API_KEY`
+   under **Edge Functions → Secrets**.
+
+Costs a few cents per page. Skip this and the rest of the app works normally —
+the Import button just explains that the reader isn't set up yet.
+
 ### Create the first admin account
 
 ```bash
@@ -141,10 +166,12 @@ taf_order_app/
   order_service.py         Order build/save orchestration
   bag_filler.py            Word worksheet filling (COM)
   updater.py               In-app auto-update (APP_VERSION lives here)
+  po_import.py             Purchase-order import (calls the extract-orders function)
   user_management.py       Roles & user admin
   models.py / validation.py
 fonts/                     Bundled Public Sans (OFL)
 *.sql                      Schema + migrations
+supabase/functions/        Edge Functions (extract-orders: reads purchase orders)
 TAFOrderEntry.spec         PyInstaller build spec
 installer.iss              Inno Setup installer script
 ```
