@@ -20,8 +20,9 @@ log, stock management and a customer database.
 - **Import Purchase Order** — upload a PDF, photo, scan or emailed order and
   the app reads it, shows what it found for checking, then generates and
   prints the worksheets. Handles several purchase orders in one file.
-- **Send from your phone** — photograph a purchase order on a phone and it
-  arrives in the office app ready to review, from anywhere.
+- **Send from your phone** — scan a QR code to link a phone, photograph a
+  purchase order, and it arrives in the office app ready to review — from
+  anywhere.
 - **Previous Orders** — search / filter, view items, reload, duplicate,
   regenerate, status tracking, priority flags, notes, per-order history.
 - **Dashboard** — orders-per-week, order-type and busiest-customer charts, low
@@ -128,9 +129,15 @@ office app. Requires purchase-order import above.
 
    Dashboard: deploy `supabase/functions/po-upload/index.ts` as `po-upload`,
    then switch **Verify JWT** off in its settings.
-3. On each phone, open
-   `https://<your-project>.supabase.co/functions/v1/po-upload` and add it to
-   the home screen. Staff sign in with their normal TAF login.
+3. Link a phone: in the app, **New Order** -> **Import Purchase Order** ->
+   **Photograph it on a phone**, and scan the QR code shown. Add the page to
+   the phone's home screen and it behaves like an app. Staff sign in with
+   their normal TAF login the first time.
+
+   The QR carries a pairing id, so photos from that phone come back to the PC
+   that showed the code rather than to whichever office PC sweeps first. The
+   plain address `https://<your-project>.supabase.co/functions/v1/po-upload`
+   also works; unpaired photos go to whichever PC picks them up.
 
 The page is only HTML and JavaScript — signing in happens inside it, and
 Storage row-level security governs what a signed-in person may do, so no key

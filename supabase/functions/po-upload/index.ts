@@ -1,9 +1,14 @@
 // Supabase Edge Function: po-upload
 //
 // Serves the phone page staff use to photograph a purchase order and send it
-// to the office. The photos land in the private `po-inbox` bucket (see
+// to the office. Photos land in the private `po-inbox` bucket (see
 // migrate_po_inbox.sql) and the desktop app picks them up, reads them and
 // clears them.
+//
+// Pairing: the desktop app shows a QR code containing this URL plus ?p=<id>.
+// Scanning it links the phone to that PC, and the id travels with every batch
+// so photos go back to the machine that asked for them rather than to
+// whichever office PC happens to sweep first.
 //
 // This function must be deployed with JWT verification OFF, because it serves
 // a plain web page that has to load *before* anyone can sign in. That is safe:
@@ -18,11 +23,19 @@
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL") ?? "";
 const ANON_KEY = Deno.env.get("SUPABASE_ANON_KEY") ?? "";
 
+// The body is encoded to UTF-8 bytes explicitly and the markup below is kept
+// pure ASCII (HTML entities instead of literal punctuation and emoji), so the
+// page still reads correctly even if something downstream serves it with the
+// wrong charset.
+const ENCODER = new TextEncoder();
+
 Deno.serve(() => {
-  return new Response(page(), {
+  return new Response(ENCODER.encode(page()), {
+    status: 200,
     headers: {
-      "Content-Type": "text/html; charset=utf-8",
-      "Cache-Control": "no-store",
+      "content-type": "text/html; charset=utf-8",
+      "cache-control": "no-store",
+      "x-content-type-options": "nosniff",
     },
   });
 });
@@ -34,7 +47,7 @@ function page(): string {
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="theme-color" content="#1B3A5C">
-<title>TAF · Send Purchase Order</title>
+<title>TAF &middot; Send Purchase Order</title>
 <link rel="apple-touch-icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Crect width='100' height='100' fill='%231B3A5C'/%3E%3Ctext x='50' y='68' font-size='54' font-family='sans-serif' font-weight='bold' fill='white' text-anchor='middle'%3ET%3C/text%3E%3C/svg%3E">
 <style>
   :root {
@@ -72,13 +85,16 @@ function page(): string {
     background:var(--blue); border:0; border-radius:10px; cursor:pointer;
   }
   button.ghost { background:#fff; color:var(--blue); border:1.5px solid var(--blue); }
-  button.grey  { background:var(--muted); }
   button:disabled { opacity:.55; }
   button + button { margin-top:9px; }
   .msg { padding:11px 13px; border-radius:9px; font-size:14px; margin-bottom:12px; display:none; }
   .msg.err  { background:#FDECEC; color:var(--red);   display:block; }
   .msg.ok   { background:#E7F6EE; color:var(--green); display:block; }
-  .msg.warn { background:#FFF6DA; color:var(--amber); display:block; }
+  .pill {
+    display:inline-block; background:#E7F6EE; color:var(--green);
+    border-radius:20px; padding:4px 11px; font-size:12px; font-weight:700;
+    margin-bottom:12px;
+  }
   .shots { display:grid; grid-template-columns:repeat(3,1fr); gap:8px; margin:12px 0 0; }
   .shot { position:relative; aspect-ratio:3/4; border-radius:9px; overflow:hidden;
           border:1px solid var(--line); background:#000; }
@@ -91,7 +107,6 @@ function page(): string {
                background:rgba(0,0,0,.55); color:#fff; border-radius:0 8px 0 0; }
   .row { display:flex; align-items:center; justify-content:space-between; gap:10px; }
   .muted { color:var(--muted); font-size:13px; }
-  .who { font-size:13px; color:#A9CCE3; }
   a.signout { color:#A9CCE3; font-size:13px; text-decoration:underline; }
   .hide { display:none !important; }
   progress { width:100%; height:9px; margin-top:12px; }
@@ -110,8 +125,8 @@ function page(): string {
 
 <main>
   <div id="msg" class="msg"></div>
+  <div id="pair" class="pill hide"></div>
 
-  <!-- Sign in -->
   <section id="loginCard" class="card">
     <div class="field">
       <label for="email">Email</label>
@@ -128,9 +143,8 @@ function page(): string {
     </p>
   </section>
 
-  <!-- Capture + send -->
   <section id="sendCard" class="card hide">
-    <button id="shootBtn">📷 &nbsp;Take a photo</button>
+    <button id="shootBtn">&#128247; &nbsp;Take a photo</button>
     <button id="pickBtn" class="ghost">Choose from library</button>
     <input id="camera" type="file" accept="image/*" capture="environment" multiple class="hide">
     <input id="library" type="file" accept="image/*" multiple class="hide">
@@ -161,23 +175,36 @@ const sb = createClient(SUPABASE_URL, ANON_KEY);
 const $ = (id) => document.getElementById(id);
 const shots = [];   // {file, url}
 
+// ---- Pairing -----------------------------------------------------------
+// ?p=<id> comes from the QR code the desktop app shows. Remember it so the
+// page keeps working from a home-screen shortcut, which has no query string.
+const params    = new URLSearchParams(location.search);
+const pairId    = params.get("p")  || localStorage.getItem("taf_pair_id")    || "";
+const pairLabel = params.get("n")  || localStorage.getItem("taf_pair_label") || "";
+if (params.get("p")) {
+  localStorage.setItem("taf_pair_id", params.get("p"));
+  localStorage.setItem("taf_pair_label", params.get("n") || "");
+}
+if (pairId) {
+  $("pair").textContent = "Linked to " + (pairLabel || "the office PC");
+  $("pair").classList.remove("hide");
+}
+
 function say(text, kind) {
   const m = $("msg");
   m.textContent = text;
   m.className = "msg" + (kind ? " " + kind : "");
-  if (!text) m.className = "msg";
   if (text) window.scrollTo({ top: 0, behavior: "smooth" });
 }
 
-// ── Session ─────────────────────────────────────────────────────────────
+// ---- Session -----------------------------------------------------------
 async function refresh() {
   const { data } = await sb.auth.getSession();
   const signedIn = !!data.session;
   $("loginCard").classList.toggle("hide", signedIn);
   $("sendCard").classList.toggle("hide", !signedIn);
   $("signout").classList.toggle("hide", !signedIn);
-  if (signedIn) $("sub").textContent = data.session.user.email;
-  else $("sub").textContent = "Total Air Filtration";
+  $("sub").textContent = signedIn ? data.session.user.email : "Total Air Filtration";
 }
 
 $("loginBtn").onclick = async () => {
@@ -185,7 +212,7 @@ $("loginBtn").onclick = async () => {
   const pw    = $("pw").value;
   if (!email || !pw) { say("Enter your email and password.", "err"); return; }
   $("loginBtn").disabled = true;
-  $("loginBtn").textContent = "Signing in…";
+  $("loginBtn").textContent = "Signing in...";
   const { error } = await sb.auth.signInWithPassword({ email, password: pw });
   $("loginBtn").disabled = false;
   $("loginBtn").textContent = "Sign in";
@@ -202,7 +229,7 @@ $("signout").onclick = async (e) => {
   refresh();
 };
 
-// ── Photos ──────────────────────────────────────────────────────────────
+// ---- Photos ------------------------------------------------------------
 $("shootBtn").onclick = () => $("camera").click();
 $("pickBtn").onclick  = () => $("library").click();
 for (const id of ["camera", "library"]) {
@@ -222,7 +249,7 @@ function drawShots() {
     const img = document.createElement("img");
     img.src = s.url;
     const b = document.createElement("button");
-    b.textContent = "×";
+    b.textContent = "\\u00d7";
     b.title = "Remove";
     b.onclick = () => { URL.revokeObjectURL(s.url); shots.splice(i, 1); drawShots(); };
     const n = document.createElement("span");
@@ -237,11 +264,11 @@ function drawShots() {
     "Send " + shots.length + " photo" + (shots.length === 1 ? "" : "s") + " to office";
 }
 
-// ── Send ────────────────────────────────────────────────────────────────
+// ---- Send --------------------------------------------------------------
 $("sendBtn").onclick = async () => {
   if (!shots.length) return;
   const { data: sess } = await sb.auth.getSession();
-  if (!sess.session) { say("Your sign-in expired — sign in again.", "err"); refresh(); return; }
+  if (!sess.session) { say("Your sign-in expired - sign in again.", "err"); refresh(); return; }
 
   const stamp = new Date().toISOString().replace(/[:.]/g, "-");
   const batch = stamp + "-" + Math.random().toString(36).slice(2, 8);
@@ -257,7 +284,7 @@ $("sendBtn").onclick = async () => {
       const f    = shots[i].file;
       const ext  = (f.name.split(".").pop() || "jpg").toLowerCase().replace(/[^a-z0-9]/g, "");
       const name = String(i + 1).padStart(2, "0") + "." + (ext || "jpg");
-      $("sendBtn").textContent = "Sending photo " + (i + 1) + " of " + shots.length + "…";
+      $("sendBtn").textContent = "Sending photo " + (i + 1) + " of " + shots.length + "...";
       const { error } = await sb.storage.from("po-inbox")
         .upload(batch + "/" + name, f, {
           contentType: f.type || "image/jpeg",
@@ -268,13 +295,15 @@ $("sendBtn").onclick = async () => {
       $("bar").value = Math.round(((i + 1) / (shots.length + 1)) * 100);
     }
 
-    // Written last: the app only picks up a batch once this marker exists,
-    // so it can never read a half-uploaded set of photos.
+    // Written last: the app only picks up a batch once this marker exists, so
+    // it can never read a half-uploaded set of photos.
     const manifest = {
-      photos:      names,
-      note:        $("note").value.trim(),
-      sent_by:     sess.session.user.email,
-      sent_at:     new Date().toISOString(),
+      photos:     names,
+      note:       $("note").value.trim(),
+      sent_by:    sess.session.user.email,
+      sent_at:    new Date().toISOString(),
+      pair_id:    pairId,
+      pair_label: pairLabel,
     };
     const { error: mErr } = await sb.storage.from("po-inbox").upload(
       batch + "/_complete.json",
@@ -287,10 +316,11 @@ $("sendBtn").onclick = async () => {
     shots.length = 0;
     $("note").value = "";
     drawShots();
-    say("Sent. The office app will pick it up within a minute — you can close this page.", "ok");
+    say("Sent. " + (pairLabel ? pairLabel : "The office app") +
+        " will pick it up within a minute - you can close this page.", "ok");
   } catch (err) {
-    say("Couldn't send: " + (err?.message || err) +
-        (names.length ? "  (" + names.length + " photo(s) did upload — resend the rest.)" : ""),
+    say("Couldn't send: " + (err && err.message ? err.message : err) +
+        (names.length ? "  (" + names.length + " photo(s) did upload - resend the rest.)" : ""),
         "err");
   } finally {
     $("sendBtn").disabled = false;

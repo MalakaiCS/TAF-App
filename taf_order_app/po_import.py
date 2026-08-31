@@ -240,8 +240,12 @@ def _inbox_dir(app_dir: Path) -> Path:
     return d
 
 
-def fetch_new_batches(app_dir: Path) -> List[str]:
-    """Download and read any finished phone batches.
+def fetch_new_batches(app_dir: Path, pair_id: str = "") -> List[str]:
+    """Download and read any finished phone batches meant for this PC.
+
+    A phone paired by QR code stamps its batches with that PC's pairing id, so
+    two office PCs never race for the same photos. Batches with no pairing id
+    (a phone using the plain link) are picked up by whoever sweeps first.
 
     Returns the batch ids newly made ready for review. Safe to call on a timer;
     stays silent when offline or when the bucket doesn't exist yet.
@@ -257,6 +261,9 @@ def fetch_new_batches(app_dir: Path) -> List[str]:
     for b in batches:
         batch  = b["batch"]
         photos = b["photos"]
+        sent_to = ((b.get("manifest") or {}).get("pair_id") or "").strip()
+        if sent_to and pair_id and sent_to != pair_id:
+            continue       # addressed to a different PC — leave it alone
         dest   = _inbox_dir(app_dir) / batch
         if (dest / "orders.json").exists():
             continue       # already read and waiting for review

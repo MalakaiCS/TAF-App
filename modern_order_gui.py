@@ -7420,7 +7420,7 @@ class ModernOrderApp(tk.Frame):
 
         def _work():
             try:
-                ready = _po_import.fetch_new_batches(APP_DIR)
+                ready = _po_import.fetch_new_batches(APP_DIR, self._pair_id())
             except Exception:
                 ready = []
 
@@ -7478,9 +7478,145 @@ class ModernOrderApp(tk.Frame):
 
     # ── Purchase-order import ─────────────────────────────────────────────
 
+    # ── Phone pairing ─────────────────────────────────────────────────────
+
+    def _pair_id(self) -> str:
+        """This PC's pairing id — stamped on photos sent from a paired phone
+        so they come back here and not to another office PC."""
+        pid = (self._settings.get("phone_pair_id") or "").strip()
+        if not pid:
+            import uuid
+            pid = uuid.uuid4().hex[:12]
+            self._settings["phone_pair_id"] = pid
+            _save_settings(self._settings)
+        return pid
+
+    def _pair_label(self) -> str:
+        """Friendly name shown on the phone once it's linked."""
+        who = ""
+        try:
+            who = _db.current_full_name() or _db.current_username() or ""
+        except Exception:
+            pass
+        pc = os.environ.get("COMPUTERNAME") or platform.node() or "office PC"
+        return f"{who} ({pc})" if who else pc
+
+    def _pair_url(self) -> str:
+        from urllib.parse import urlencode
+        base = _db.SUPABASE_URL.rstrip("/")
+        q = urlencode({"p": self._pair_id(), "n": self._pair_label()})
+        return f"{base}/functions/v1/po-upload?{q}"
+
+    def _show_phone_qr(self):
+        """Show the QR code a phone scans to link to this PC, and wait for
+        photos to arrive."""
+        try:
+            import qrcode
+            from PIL import ImageTk
+        except Exception as exc:
+            messagebox.showerror(
+                "QR Code Unavailable",
+                f"Couldn't build the QR code:\n{exc}\n\n"
+                "You can still open this address on the phone:\n"
+                f"{self._pair_url()}")
+            return
+
+        url = self._pair_url()
+        dlg = tk.Toplevel(self.master)
+        dlg.title("Send from Phone")
+        dlg.transient(self.master)
+        dlg.grab_set()
+        dlg.configure(bg=CBG)
+        dlg.resizable(False, False)
+
+        hdr = tk.Frame(dlg, bg=CA, padx=18, pady=12)
+        hdr.pack(fill="x")
+        tk.Label(hdr, text="Scan with your phone", bg=CA, fg="white",
+                 font=(FAM, 12, "bold")).pack(anchor="w")
+        tk.Label(hdr, text="Point the phone camera at the code, then photograph "
+                           "the purchase order.",
+                 bg=CA, fg="#A9CCE3", font=F_SM).pack(anchor="w")
+
+        body = tk.Frame(dlg, bg=CBG, padx=18, pady=16)
+        body.pack(fill="both", expand=True)
+
+        try:
+            made = qrcode.make(url, box_size=8, border=2)
+            # qrcode returns a thin wrapper; unwrap it so ImageTk always gets
+            # a real PIL image regardless of the installed version.
+            img = (made.get_image() if hasattr(made, "get_image") else made).convert("RGB")
+            photo = ImageTk.PhotoImage(img)
+            lbl = tk.Label(body, image=photo, bg=CBG, bd=1, relief="solid")
+            lbl.image = photo          # keep a reference or Tk drops it
+            lbl.pack()
+        except Exception as exc:
+            tk.Label(body, text=f"Couldn't draw the code: {exc}",
+                     bg=CBG, fg=CRD, font=F_BODY).pack()
+
+        tk.Label(body, text=f"Linked to: {self._pair_label()}",
+                 bg=CBG, fg=CTX, font=F_BOLD).pack(pady=(12, 2))
+        tk.Label(body,
+                 text="Sign in on the phone with your normal TAF login the "
+                      "first time.\nPhotos sent from it come straight back to "
+                      "this PC.",
+                 bg=CBG, fg=CMU, font=F_SM, justify="center").pack()
+
+        status = tk.StringVar(value="Waiting for photos from the phone...")
+        tk.Label(body, textvariable=status, bg=CBG, fg=CA,
+                 font=F_BOLD, wraplength=340, justify="center").pack(pady=(14, 0))
+
+        link = tk.Entry(body, font=F_SM, width=46, relief="solid", bd=1)
+        link.insert(0, url)
+        link.configure(state="readonly")
+        link.pack(pady=(12, 0))
+        tk.Label(body, text="(if the camera won't scan, open this address on the phone)",
+                 bg=CBG, fg=CMU, font=F_SM).pack(pady=(3, 0))
+
+        # Stops the poll below when the window goes away, so a closed dialog
+        # can't reopen itself or keep sweeping in the background.
+        state = {"alive": True}
+        def _closed():
+            state["alive"] = False
+            try:
+                dlg.destroy()
+            except Exception:
+                pass
+
+        foot = tk.Frame(dlg, bg=CBG, padx=18, pady=12)
+        foot.pack(fill="x")
+        flat_btn(foot, "Close", _closed, bg=CNE, pady=7).pack(side="right")
+        dlg.protocol("WM_DELETE_WINDOW", _closed)
+
+        def _poll():
+            if not state["alive"]:
+                return
+
+            def _work():
+                try:
+                    ready = _po_import.fetch_new_batches(APP_DIR, self._pair_id())
+                except Exception:
+                    ready = []
+
+                def _after():
+                    if not state["alive"]:
+                        return
+                    if ready:
+                        _closed()
+                        self._refresh_inbox_badge()
+                        self._open_phone_inbox()
+                    else:
+                        self.master.after(5000, _poll)
+                self.master.after(0, _after)
+
+            threading.Thread(target=_work, daemon=True).start()
+
+        self.master.after(3000, _poll)
+
+    # ── Purchase-order import ─────────────────────────────────────────────
+
     def _import_purchase_orders(self):
-        """Read one or more purchase orders out of uploaded documents, then
-        open the review screen before anything is generated."""
+        """Offer the two ways in: photograph it on a phone, or pick a file
+        that's already on this PC."""
         if not _po_import.is_configured():
             messagebox.showwarning(
                 "Sign In Required",
@@ -7488,6 +7624,52 @@ class ModernOrderApp(tk.Frame):
                 "shared database.")
             return
 
+        dlg = tk.Toplevel(self.master)
+        dlg.title("Import Purchase Order")
+        dlg.transient(self.master)
+        dlg.grab_set()
+        dlg.resizable(False, False)
+        dlg.configure(bg=CBG)
+
+        hdr = tk.Frame(dlg, bg=CA, padx=18, pady=12)
+        hdr.pack(fill="x")
+        tk.Label(hdr, text="Import Purchase Order", bg=CA, fg="white",
+                 font=(FAM, 12, "bold")).pack(anchor="w")
+        tk.Label(hdr, text="Where is the purchase order?",
+                 bg=CA, fg="#A9CCE3", font=F_SM).pack(anchor="w")
+
+        body = tk.Frame(dlg, bg=CBG, padx=18, pady=16)
+        body.pack(fill="both", expand=True)
+
+        def _choose(fn):
+            dlg.destroy()
+            fn()
+
+        flat_btn(body, "📱   Photograph it on a phone",
+                 lambda: _choose(self._show_phone_qr),
+                 bg=CA, pady=11, padx=18).pack(fill="x")
+        tk.Label(body, text="Shows a QR code to scan. Photos come straight back here.",
+                 bg=CBG, fg=CMU, font=F_SM).pack(anchor="w", pady=(4, 14))
+
+        flat_btn(body, "📁   Choose a file on this PC",
+                 lambda: _choose(self._import_po_files),
+                 bg=CNE, pady=11, padx=18).pack(fill="x")
+        tk.Label(body, text="PDF, photo, scan or a saved email.",
+                 bg=CBG, fg=CMU, font=F_SM).pack(anchor="w", pady=(4, 0))
+
+        foot = tk.Frame(dlg, bg=CBG, padx=18, pady=12)
+        foot.pack(fill="x")
+        flat_btn(foot, "Cancel", dlg.destroy, bg=CNE, pady=7).pack(side="right")
+
+        dlg.update_idletasks()
+        W = max(360, dlg.winfo_reqwidth())
+        H = dlg.winfo_reqheight()
+        dlg.geometry(f"{W}x{H}+{self.master.winfo_rootx()+self.master.winfo_width()//2-W//2}"
+                     f"+{self.master.winfo_rooty()+self.master.winfo_height()//2-H//2}")
+
+    def _import_po_files(self):
+        """Read one or more purchase orders out of files on this PC, then
+        open the review screen before anything is generated."""
         paths = filedialog.askopenfilenames(
             title="Select purchase order document(s)",
             filetypes=[

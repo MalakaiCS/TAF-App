@@ -64,6 +64,10 @@ a = Analysis(
         'taf_order_app.models',
         'taf_order_app.validation',
         'taf_order_app.bag_filler',
+        'taf_order_app.po_import',
+        # Phone-pairing QR code
+        'qrcode',
+        'qrcode.image.pil',
         # Calendar picker
         'tkcalendar',
         'babel',
