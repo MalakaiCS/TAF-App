@@ -7501,11 +7501,26 @@ class ModernOrderApp(tk.Frame):
         pc = os.environ.get("COMPUTERNAME") or platform.node() or "office PC"
         return f"{who} ({pc})" if who else pc
 
+    def _publish_phone_page(self) -> str:
+        """Make sure the phone page is live, and return the URL to open.
+
+        Published to public Storage rather than served by an Edge Function:
+        Storage returns exactly the content type set at upload, so the page
+        always reaches the phone as HTML.
+        """
+        from taf_order_app import phone_page as _pp
+        want = _pp.PAGE_VERSION
+        if self._settings.get("phone_page_version") != want:
+            html = _pp.render(_db.SUPABASE_URL, _db.current_anon_key())
+            _db.publish_phone_page(html)          # raises → caller explains
+            self._settings["phone_page_version"] = want
+            _save_settings(self._settings)
+        return _db.phone_page_url()
+
     def _pair_url(self) -> str:
         from urllib.parse import urlencode
-        base = _db.SUPABASE_URL.rstrip("/")
         q = urlencode({"p": self._pair_id(), "n": self._pair_label()})
-        return f"{base}/functions/v1/po-upload?{q}"
+        return f"{self._publish_phone_page()}?{q}"
 
     def _show_phone_qr(self):
         """Show the QR code a phone scans to link to this PC, and wait for
@@ -7516,12 +7531,23 @@ class ModernOrderApp(tk.Frame):
         except Exception as exc:
             messagebox.showerror(
                 "QR Code Unavailable",
-                f"Couldn't build the QR code:\n{exc}\n\n"
-                "You can still open this address on the phone:\n"
-                f"{self._pair_url()}")
+                f"Couldn't build the QR code:\n{exc}")
             return
 
-        url = self._pair_url()
+        self.status_var.set("Publishing the phone page…")
+        self.master.update_idletasks()
+        try:
+            url = self._pair_url()
+        except Exception as exc:
+            self.status_var.set("Phone page not published.")
+            messagebox.showerror(
+                "Phone Page Not Set Up",
+                f"Couldn't publish the page phones open:\n{exc}\n\n"
+                "If this mentions a missing bucket, run "
+                "migrate_phone_page.sql in the Supabase SQL Editor "
+                "(supabase.com → your project → SQL Editor → New query).")
+            return
+        self.status_var.set("")
         dlg = tk.Toplevel(self.master)
         dlg.title("Send from Phone")
         dlg.transient(self.master)

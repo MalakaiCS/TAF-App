@@ -65,6 +65,7 @@ a = Analysis(
         'taf_order_app.validation',
         'taf_order_app.bag_filler',
         'taf_order_app.po_import',
+        'taf_order_app.phone_page',
         # Phone-pairing QR code
         'qrcode',
         'qrcode.image.pil',

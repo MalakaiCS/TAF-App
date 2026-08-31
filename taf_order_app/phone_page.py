@@ -1,47 +1,23 @@
-// Supabase Edge Function: po-upload
-//
-// Serves the phone page staff use to photograph a purchase order and send it
-// to the office. Photos land in the private `po-inbox` bucket (see
-// migrate_po_inbox.sql) and the desktop app picks them up, reads them and
-// clears them.
-//
-// Pairing: the desktop app shows a QR code containing this URL plus ?p=<id>.
-// Scanning it links the phone to that PC, and the id travels with every batch
-// so photos go back to the machine that asked for them rather than to
-// whichever office PC happens to sweep first.
-//
-// This function must be deployed with JWT verification OFF, because it serves
-// a plain web page that has to load *before* anyone can sign in. That is safe:
-// the page is only HTML and JavaScript. Everything it does afterwards runs as
-// the person who signs in, and Storage row-level security decides what they
-// may actually do. No key beyond the public anon key is ever sent to it.
-//
-// Deploy:
-//   supabase functions deploy po-upload --no-verify-jwt
-// (dashboard: deploy it, then turn "Verify JWT" off in the function settings)
+"""
+The page staff open on their phone to photograph a purchase order.
 
-const SUPABASE_URL = Deno.env.get("SUPABASE_URL") ?? "";
-const ANON_KEY = Deno.env.get("SUPABASE_ANON_KEY") ?? "";
+It is published to a public Supabase Storage bucket rather than served by an
+Edge Function: Storage is a plain object store that returns exactly the
+content type set at upload, whereas the function's response was reaching
+phones labelled ``text/plain`` and browsers never sniff that into HTML, so
+the page arrived as unstyled source.
 
-// The body is encoded to UTF-8 bytes explicitly and the markup below is kept
-// pure ASCII (HTML entities instead of literal punctuation and emoji), so the
-// page still reads correctly even if something downstream serves it with the
-// wrong charset.
-const ENCODER = new TextEncoder();
+Only the public project URL and the anon (publishable) key are baked in --
+the same pair already shipped inside the desktop app -- and Storage
+row-level security still decides what any signed-in person may actually do.
+"""
+from __future__ import annotations
 
-Deno.serve(() => {
-  return new Response(ENCODER.encode(page()), {
-    status: 200,
-    headers: {
-      "content-type": "text/html; charset=utf-8",
-      "cache-control": "no-store",
-      "x-content-type-options": "nosniff",
-    },
-  });
-});
+# Bump when the markup changes so the app knows to republish.
+PAGE_VERSION = 3
 
-function page(): string {
-  return `<!doctype html>
+_TEMPLATE = r"""
+<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
@@ -168,8 +144,8 @@ function page(): string {
 <script type="module">
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 
-const SUPABASE_URL = ${JSON.stringify(SUPABASE_URL)};
-const ANON_KEY     = ${JSON.stringify(ANON_KEY)};
+const SUPABASE_URL = "__SUPABASE_URL__";
+const ANON_KEY     = "__ANON_KEY__";
 const sb = createClient(SUPABASE_URL, ANON_KEY);
 
 const $ = (id) => document.getElementById(id);
@@ -249,7 +225,7 @@ function drawShots() {
     const img = document.createElement("img");
     img.src = s.url;
     const b = document.createElement("button");
-    b.textContent = "\\u00d7";
+    b.textContent = "\u00d7";
     b.title = "Remove";
     b.onclick = () => { URL.revokeObjectURL(s.url); shots.splice(i, 1); drawShots(); };
     const n = document.createElement("span");
@@ -332,5 +308,13 @@ $("sendBtn").onclick = async () => {
 refresh();
 </script>
 </body>
-</html>`;
-}
+</html>
+"""
+
+
+def render(supabase_url: str, anon_key: str) -> str:
+    """Return the page with this project's URL and anon key filled in."""
+    return (_TEMPLATE
+            .replace("__SUPABASE_URL__", supabase_url or "")
+            .replace("__ANON_KEY__", anon_key or "")
+            .strip() + "\n")

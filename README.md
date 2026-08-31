@@ -118,30 +118,26 @@ the Import button just explains that the reader isn't set up yet.
 Lets staff photograph a purchase order on their phone and have it arrive in the
 office app. Requires purchase-order import above.
 
-1. Run `migrate_po_inbox.sql` in the **SQL Editor** — creates the private
-   `po-inbox` bucket the photos land in.
-2. Deploy the phone page **with JWT verification off** — the page has to load
-   before anyone can sign in:
+1. Run `migrate_po_inbox.sql` in the **SQL Editor** — the private bucket the
+   photos land in.
+2. Run `migrate_phone_page.sql` in the **SQL Editor** — the public bucket that
+   hosts the page phones open.
+3. Link a phone: in the app, **New Order** → **Import Purchase Order** →
+   **Photograph it on a phone**. The app publishes the page on first use and
+   shows a QR code; scan it with the phone camera. Add the page to the phone's
+   home screen and it behaves like an app. Staff sign in with their normal TAF
+   login the first time.
 
-   ```bash
-   supabase functions deploy po-upload --no-verify-jwt
-   ```
+The QR carries a pairing id, so photos from that phone come back to the PC that
+showed the code rather than to whichever office PC sweeps first.
 
-   Dashboard: deploy `supabase/functions/po-upload/index.ts` as `po-upload`,
-   then switch **Verify JWT** off in its settings.
-3. Link a phone: in the app, **New Order** -> **Import Purchase Order** ->
-   **Photograph it on a phone**, and scan the QR code shown. Add the page to
-   the phone's home screen and it behaves like an app. Staff sign in with
-   their normal TAF login the first time.
-
-   The QR carries a pairing id, so photos from that phone come back to the PC
-   that showed the code rather than to whichever office PC sweeps first. The
-   plain address `https://<your-project>.supabase.co/functions/v1/po-upload`
-   also works; unpaired photos go to whichever PC picks them up.
-
-The page is only HTML and JavaScript — signing in happens inside it, and
-Storage row-level security governs what a signed-in person may do, so no key
-beyond the public anon key is ever exposed.
+The page is published to Storage rather than served by an Edge Function on
+purpose: Storage returns exactly the content type set at upload, so the page
+always reaches the phone as HTML. Served from a function it arrived labelled
+`text/plain`, which browsers never sniff into HTML, so it showed up as
+unstyled source. The page contains only markup and the anon (publishable) key
+that already ships inside the desktop app; signing in happens inside it and
+row-level security governs what a signed-in person may do.
 
 The office app sweeps for new photos every minute, reads them in the
 background, and shows a **📱 Phone Inbox** button on the New Order tab when
@@ -204,11 +200,12 @@ taf_order_app/
   bag_filler.py            Word worksheet filling (COM)
   updater.py               In-app auto-update (APP_VERSION lives here)
   po_import.py             Purchase-order import + phone inbox
+  phone_page.py            The page phones open (published to Storage)
   user_management.py       Roles & user admin
   models.py / validation.py
 fonts/                     Bundled Public Sans (OFL)
 *.sql                      Schema + migrations
-supabase/functions/        Edge Functions (extract-orders, po-upload)
+supabase/functions/        Edge Functions (extract-orders)
 TAFOrderEntry.spec         PyInstaller build spec
 installer.iss              Inno Setup installer script
 ```

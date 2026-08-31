@@ -854,6 +854,52 @@ def can_manage_stock() -> bool:
     return role_level() >= 3
 
 
+# ── Phone upload page ────────────────────────────────────────────────────────
+# The page phones open lives in a public Storage bucket, not behind an Edge
+# Function: Storage serves exactly the content type set at upload, so the page
+# always arrives as HTML.
+
+PHONE_PAGE_BUCKET = "phone-page"
+PHONE_PAGE_FILE = "index.html"
+
+
+def phone_page_url() -> str:
+    return (f"{SUPABASE_URL}/storage/v1/object/public/"
+            f"{PHONE_PAGE_BUCKET}/{PHONE_PAGE_FILE}")
+
+
+def publish_phone_page(html: str) -> str:
+    """Upload the phone page and return its public URL.
+
+    Raises if the bucket is missing (migrate_phone_page.sql not run) so the
+    caller can say exactly what needs doing.
+    """
+    store = get_client().storage.from_(PHONE_PAGE_BUCKET)
+    data = html.encode("utf-8")
+    try:
+        store.remove([PHONE_PAGE_FILE])
+    except Exception:
+        pass
+    store.upload(
+        PHONE_PAGE_FILE, data,
+        file_options={
+            # The whole point of publishing here: an explicit, unambiguous
+            # content type that reaches the phone intact.
+            "content-type": "text/html; charset=utf-8",
+            "cache-control": "60",
+            "upsert": "true",
+        })
+    return phone_page_url()
+
+
+def current_anon_key() -> str:
+    """The publishable key this app connected with (safe for the page)."""
+    try:
+        return get_client().supabase_key or ""
+    except Exception:
+        return ""
+
+
 # ── Phone photo inbox (purchase orders sent from a phone) ────────────────────
 # Layout in the private `po-inbox` bucket (see migrate_po_inbox.sql):
 #     <batch-id>/01.jpg, 02.jpg, …
