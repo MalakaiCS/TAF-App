@@ -179,6 +179,56 @@ def extract_orders(paths: List[str], timeout: int = 300,
     return [_normalise_order(o) for o in raw_orders if isinstance(o, dict)]
 
 
+def read_job_label(image_bytes: bytes, media_type: str = "image/png",
+                   timeout: int = 120) -> Dict[str, Any]:
+    """Read the wording that introduces a job number out of a highlighted crop.
+
+    Returns {"label", "value", "confidence"}. The label is what gets saved
+    against the customer — matching on wording survives a layout change,
+    which matching on a position on the page would not.
+    """
+    token = _access_token()
+    body = json.dumps({
+        "mode": "label",
+        "files": [{
+            "name": "highlight.png",
+            "media_type": media_type,
+            "data": base64.standard_b64encode(image_bytes).decode("ascii"),
+        }],
+    }).encode("utf-8")
+    req = urllib.request.Request(
+        _function_url(), data=body,
+        headers={"Content-Type": "application/json",
+                 "Authorization": f"Bearer {token}"},
+        method="POST")
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        detail = ""
+        try:
+            detail = (json.loads(exc.read().decode("utf-8")) or {}).get("error", "")
+        except Exception:
+            pass
+        if exc.code == 404:
+            raise POImportError(
+                "The purchase-order reader isn't set up on this Supabase "
+                "project yet — see the README.")
+        raise POImportError(detail or f"The reader returned an error ({exc.code}).")
+    except urllib.error.URLError as exc:
+        raise POImportError(f"Couldn't reach the reader:\n{exc.reason}")
+    except Exception as exc:
+        raise POImportError(f"Couldn't read the highlighted area:\n{exc}")
+
+    if isinstance(data, dict) and data.get("error"):
+        raise POImportError(str(data["error"]))
+    return {
+        "label":      (data.get("label") or "").strip(),
+        "value":      (data.get("value") or "").strip(),
+        "confidence": (data.get("confidence") or "medium").lower(),
+    }
+
+
 def _int(value: Any, default: int = 0) -> int:
     try:
         return int(str(value).strip())

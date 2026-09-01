@@ -155,6 +155,10 @@ Deno.serve(async (req: Request) => {
   let body: {
     files?: Array<{ media_type?: string; data?: string; text?: string; name?: string }>;
     context?: { media_types?: string[]; job_labels?: string[] };
+    // "label" reads a highlighted corner of a purchase order and reports the
+    // wording that precedes the job number, so it can be saved against the
+    // customer and used on every future order from them.
+    mode?: "orders" | "label";
   };
   try {
     body = await req.json();
@@ -215,6 +219,10 @@ Deno.serve(async (req: Request) => {
 
   const client = new Anthropic({ apiKey });
 
+  if (body.mode === "label") {
+    return await readJobLabel(client, content);
+  }
+
   try {
     // Streamed: a multi-page scan at high effort can run past the plain
     // request timeout, and we want the whole response either way.
@@ -262,6 +270,58 @@ Deno.serve(async (req: Request) => {
     return json({ error: `Extraction failed: ${msg}` }, status >= 400 && status < 600 ? status : 500);
   }
 });
+
+// ── Learning where a customer puts their job number ─────────────────────────
+
+const LABEL_SCHEMA = {
+  type: "object",
+  additionalProperties: false,
+  required: ["label", "value", "confidence"],
+  properties: {
+    label: {
+      type: "string",
+      description:
+        "The wording immediately before the job number, without the number " +
+        "itself, e.g. \"Our Reference:\" or \"JOB:\". Empty if none is visible.",
+    },
+    value: {
+      type: "string",
+      description: "The job number itself as printed, for confirmation.",
+    },
+    confidence: { type: "string", enum: ["high", "medium", "low"] },
+  },
+} as const;
+
+const LABEL_SYSTEM = `You are shown a small piece cut out of a purchase order. Somewhere in it is the customer's own job or reference number, and the wording that introduces it.
+
+Report the LABEL - the wording that comes immediately before the number, copied exactly as printed, including its colon if it has one. Examples: "JOB:", "Our Reference:", "Your Ref", "Job No.".
+
+Report the VALUE separately - the number itself, so a person can confirm the right thing was picked up.
+
+The label is what gets saved and looked for on this customer's future orders, so it must be the fixed wording, never the number and never a heading that happens to sit nearby. If the piece shows a number with no label in front of it, return an empty label and still report the value. If there is no job number visible at all, return empty strings and low confidence.`;
+
+async function readJobLabel(client: Anthropic, content: unknown[]): Promise<Response> {
+  try {
+    const response = await client.messages.create({
+      model: MODEL,
+      max_tokens: 2000,
+      system: LABEL_SYSTEM,
+      output_config: { format: { type: "json_schema", schema: LABEL_SCHEMA } },
+      messages: [{ role: "user", content: content as never }],
+    });
+    if (response.stop_reason === "refusal") {
+      return json({ error: "That image could not be processed." }, 422);
+    }
+    const text = response.content
+      .filter((b) => b.type === "text")
+      .map((b) => (b as { text: string }).text)
+      .join("");
+    return json(JSON.parse(text), 200);
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    return json({ error: `Could not read the highlighted area: ${msg}` }, 500);
+  }
+}
 
 function json(payload: unknown, status: number): Response {
   return new Response(JSON.stringify(payload), {

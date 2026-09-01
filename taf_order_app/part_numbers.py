@@ -19,13 +19,27 @@ import math
 import re
 from typing import Any, Dict, Optional
 
-# Filter types that get an automatic part number, and the prefix each uses.
-# Stepped Filter, Flyscreen and Header have no agreed format yet, so they are
-# left blank and flagged rather than given a guessed code.
+# Filter types that build their code from media and thickness:
+#     FPF{MEDIA}{thickness}-{SQM}   /   PPF{MEDIA}{thickness}-{SQM}
 PART_NUMBER_PREFIXES = {
     "flat panel": "FPF",
     "v-form":     "PPF",
 }
+
+# Types whose code is fixed — they are only ever made one way, so neither the
+# media nor the thickness varies and the whole stem is a constant.
+FIXED_PART_NUMBER_STEMS = {
+    "stepped filter": "STPPFW50",   # always 50mm, always 180 media
+    "flyscreen":      "FPF09",      # always the 9mm flyscreen channel
+}
+
+# A header is a standard flat panel made to sit on top of a bag filter. The
+# panel is larger than the bag face it covers:
+HEADER_PANEL_FOR_BAG = {
+    (595, 595): (610, 610),
+    (610, 610): (630, 630),
+}
+HEADER_PANEL_THICKNESS = 25
 
 # Thicknesses flat panels are normally made in. Anything else still produces a
 # part number, but is worth a second look.
@@ -115,7 +129,18 @@ def part_number(item: Dict[str, Any],
     """
     if (item.get("item_kind") or "filter") == "bag":
         return ""          # bag/roll items have their own generator
-    prefix = PART_NUMBER_PREFIXES.get((item.get("Filter Type") or "").strip().lower())
+    ftype = (item.get("Filter Type") or "").strip().lower()
+
+    nominal = nominal_square_metres(effective_area(item))
+    if nominal <= 0:
+        return ""
+
+    # Fixed-stem types first: only made one way, so nothing varies but the area.
+    stem = FIXED_PART_NUMBER_STEMS.get(ftype)
+    if stem:
+        return f"{stem}-{sqm_suffix(nominal)}"
+
+    prefix = PART_NUMBER_PREFIXES.get(ftype)
     if not prefix:
         return ""
 
@@ -130,11 +155,54 @@ def part_number(item: Dict[str, Any],
     if thickness <= 0:
         return ""
 
-    nominal = nominal_square_metres(effective_area(item))
-    if nominal <= 0:
-        return ""
-
     return f"{prefix}{code}{thickness}-{sqm_suffix(nominal)}"
+
+
+def header_panel_for_bag(width, height, half_size: bool = False):
+    """The flat panel a bag filter's header is made from.
+
+    A 595 x 595 bag takes a 610 x 610 x 25 panel, a 610 x 610 bag takes
+    630 x 630 x 25. A half-size bag takes half that panel.
+
+    Returns (width, height, thickness) or None when the bag face isn't one of
+    the sizes we have a header for — better to say nothing than to invent a
+    size for something that gets cut.
+    """
+    try:
+        w, h = int(width or 0), int(height or 0)
+    except (TypeError, ValueError):
+        return None
+    panel = HEADER_PANEL_FOR_BAG.get((w, h)) or HEADER_PANEL_FOR_BAG.get((h, w))
+    if not panel:
+        return None
+    pw, ph = panel
+    if half_size:
+        ph = int(round(ph / 2))
+    return (pw, ph, HEADER_PANEL_THICKNESS)
+
+
+def header_panel_item(bag: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """The flat-panel line a bag's header corresponds to, or None.
+
+    Used to show what the header is and to give it its own part number; the
+    bag itself keeps its own code with the H suffix.
+    """
+    if not bag.get("header"):
+        return None
+    size = header_panel_for_bag(bag.get("width"), bag.get("height"),
+                                half_size=bool(bag.get("half_size")))
+    if not size:
+        return None
+    w, h, t = size
+    return {
+        "item_kind":   "filter",
+        "Filter Type": "Flat Panel",
+        "Media Type":  DEFAULT_MEDIA,
+        "Quantity":    bag.get("quantity", 1),
+        "Short":       min(w, h),
+        "Long":        max(w, h),
+        "Channel":     t,
+    }
 
 
 def effective_area(item: Dict[str, Any]) -> float:

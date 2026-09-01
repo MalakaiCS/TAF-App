@@ -13,6 +13,7 @@ Data model for a single bag line-item (dict keys):
   on_wire       : bool
   gelled        : bool
   special_size  : bool
+  header        : bool  – a flat panel header sits on top (adds H to the code)
   label_suffix  : str   – "LONG" | "SHORT" | ""
   efficiency    : str   – MPHE only: "60-65%" etc.
   roll_width    : str   – e.g. "2100mm"   (Media Roll only)
@@ -192,8 +193,11 @@ def generate_part_number(item: dict) -> str:
     on_wire = bool(item.get("on_wire"))
     gelled  = bool(item.get("gelled"))
     special = bool(item.get("special_size"))
+    header  = bool(item.get("header"))
 
-    bag_sfx  = ("W" if on_wire else "") + ("G" if gelled else "")
+    # H follows the W: on wire with a header is "WH".
+    bag_sfx  = (("W" if on_wire else "") + ("H" if header else "")
+                + ("G" if gelled else ""))
     spec_sfx = " SPEC" if special else ""
 
     # helper
@@ -891,8 +895,20 @@ def _build_bag_options(item: dict) -> str:
     """Options flags for a bag / roll item."""
     opts = []
     if item.get("on_wire"):      opts.append("On Wire")
+    if item.get("half_size"):    opts.append("Half Size")
     if item.get("gelled"):       opts.append("Gelled")
     if item.get("special_size"): opts.append("Special Size")
+    if item.get("header"):
+        # A header is a flat panel made to sit on the bag, so the docket has
+        # to say which panel to cut, not just that there is one.
+        try:
+            from .part_numbers import header_panel_for_bag
+            panel = header_panel_for_bag(item.get("width"), item.get("height"),
+                                         half_size=bool(item.get("half_size")))
+        except Exception:
+            panel = None
+        opts.append(f"Header ({panel[0]}×{panel[1]}×{panel[2]}mm panel)"
+                    if panel else "Header")
     ls = (item.get("label_suffix") or "").strip()
     if ls:                       opts.append(ls)
     return "  ·  ".join(opts)

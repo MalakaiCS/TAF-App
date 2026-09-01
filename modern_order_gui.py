@@ -2382,11 +2382,15 @@ class BagLineItemDialog(tk.Toplevel):
         self.var_wire    = tk.BooleanVar(value=bool(d.get("on_wire")))
         self.var_gelled  = tk.BooleanVar(value=bool(d.get("gelled")))
         self.var_special = tk.BooleanVar(value=bool(d.get("special_size")))
+        self.var_bhdr    = tk.BooleanVar(value=bool(d.get("header")))
+        self.var_half    = tk.BooleanVar(value=bool(d.get("half_size")))
 
         chk_defs = [
             ("On Wire",      self.var_wire,    0, 0),
             ("Gelled",       self.var_gelled,  0, 1),
             ("Special Size", self.var_special, 0, 2),
+            ("Header",       self.var_bhdr,    1, 0),
+            ("Half Size",    self.var_half,    1, 1),
         ]
         for lbl_t, var, row, col in chk_defs:
             tk.Checkbutton(self.opts_frame, text=lbl_t, variable=var,
@@ -2580,6 +2584,8 @@ class BagLineItemDialog(tk.Toplevel):
             "on_wire":      bool(self.var_wire.get()),
             "gelled":       bool(self.var_gelled.get()),
             "special_size": bool(self.var_special.get()),
+            "header":       bool(self.var_bhdr.get()),
+            "half_size":    bool(self.var_half.get()),
             "label_suffix": self.var_lsuffix.get(),
             "roll_width":   self.var_rw.get(),
             "roll_length":  self.var_rl.get(),
@@ -2654,6 +2660,220 @@ def _safe_int(s) -> int:
 # ═══════════════════════════════════════════════════════════════════════════
 # Imported Purchase Order Review
 # ═══════════════════════════════════════════════════════════════════════════
+
+class JobNumberHighlighter(tk.Toplevel):
+    """Teach the app where a customer puts their job number.
+
+    Show one of their purchase orders, drag a box around the job number, and
+    the app reads that piece and keeps the WORDING in front of the number
+    ("Our Reference:") rather than the position on the page — wording survives
+    a layout change, a remembered position does not.
+
+    result = None if cancelled, else the label to save.
+    """
+
+    MAX_W, MAX_H = 900, 620
+
+    def __init__(self, master, image_path=None):
+        super().__init__(master)
+        self.title("Where is the Job Number?")
+        self.transient(master)
+        self.grab_set()
+        self.configure(bg=CBG)
+        self.result = None
+        self._img = None
+        self._photo = None
+        self._scale = 1.0
+        self._start = None
+        self._rect = None
+
+        hdr = tk.Frame(self, bg=CA, padx=16, pady=10)
+        hdr.pack(fill="x")
+        tk.Label(hdr, text="Where is the Job Number?", bg=CA, fg="white",
+                 font=(FAM, 12, "bold")).pack(anchor="w")
+        tk.Label(hdr, text="Open one of this customer's purchase orders and drag a "
+                           "box around their job number — include the words in front of it.",
+                 bg=CA, fg="#A9CCE3", font=F_SM).pack(anchor="w")
+
+        bar = tk.Frame(self, bg=CBG, padx=16, pady=8)
+        bar.pack(fill="x")
+        flat_btn(bar, "📁  Open a Purchase Order", self._pick_image,
+                 bg=CA, pady=6, padx=14, font=F_BODY).pack(side="left")
+        self._status = tk.StringVar(
+            value="Open a photo or scan of one of their purchase orders.")
+        tk.Label(bar, textvariable=self._status, bg=CBG, fg=CMU,
+                 font=F_SM, anchor="w").pack(side="left", padx=(12, 0))
+
+        wrap = tk.Frame(self, bg=CCA, highlightbackground=CSP, highlightthickness=1)
+        wrap.pack(fill="both", expand=True, padx=16)
+        self._canvas = tk.Canvas(wrap, bg="#3A3A3A", highlightthickness=0,
+                                 width=self.MAX_W, height=self.MAX_H, cursor="cross")
+        self._canvas.pack(fill="both", expand=True)
+        self._canvas.bind("<ButtonPress-1>",   self._drag_start)
+        self._canvas.bind("<B1-Motion>",       self._drag_move)
+        self._canvas.bind("<ButtonRelease-1>", self._drag_end)
+
+        res = tk.Frame(self, bg=CBG, padx=16, pady=10)
+        res.pack(fill="x")
+        tk.Label(res, text="Job number appears after:", bg=CBG, fg=CTX,
+                 font=F_BOLD).pack(side="left", padx=(0, 8))
+        self._label_var = tk.StringVar()
+        field_entry(res, textvariable=self._label_var, width=30).pack(side="left")
+        self._found = tk.Label(res, text="", bg=CBG, fg=CMU, font=F_SM)
+        self._found.pack(side="left", padx=(10, 0))
+
+        foot = tk.Frame(self, bg=CBG, padx=16, pady=12)
+        foot.pack(fill="x")
+        flat_btn(foot, "Cancel", self.destroy, bg=CNE, pady=7).pack(side="right", padx=(8, 0))
+        flat_btn(foot, "Save",   self._save,   bg=CGR, pady=7).pack(side="right")
+        tk.Label(foot, text="You can also just type the wording yourself.",
+                 bg=CBG, fg=CMU, font=F_SM).pack(side="left")
+
+        self.update_idletasks()
+        self.geometry(f"+{max(0, master.winfo_rootx() + 20)}"
+                      f"+{max(0, master.winfo_rooty() + 10)}")
+        if image_path:
+            self._load_image(image_path)
+
+    # ── Loading the page ──────────────────────────────────────────────────
+
+    def _pick_image(self):
+        path = filedialog.askopenfilename(
+            title="Open a purchase order",
+            parent=self,
+            filetypes=[("Images", "*.png *.jpg *.jpeg *.gif *.webp *.bmp"),
+                       ("All files", "*.*")])
+        if path:
+            self._load_image(path)
+
+    def _load_image(self, path):
+        try:
+            from PIL import Image, ImageTk
+        except Exception as exc:
+            messagebox.showerror("Can't Show Image",
+                                 f"Image support is unavailable:\n{exc}", parent=self)
+            return
+        if str(path).lower().endswith(".pdf"):
+            messagebox.showinfo(
+                "Use an Image",
+                "Highlighting works on a photo or scan.\n\n"
+                "For a PDF, take a screenshot of the page (or photograph it) "
+                "and open that instead — or just type the wording in below.",
+                parent=self)
+            return
+        try:
+            img = Image.open(path)
+            img.load()
+            img = img.convert("RGB")
+        except Exception as exc:
+            messagebox.showerror("Couldn't Open",
+                                 f"That image couldn't be opened:\n{exc}", parent=self)
+            return
+
+        self._img = img
+        # Fit to the canvas, remembering the scale so the box can be mapped
+        # back to full-resolution pixels before cropping.
+        self._scale = min(self.MAX_W / img.width, self.MAX_H / img.height, 1.0)
+        disp = img.resize((max(1, int(img.width * self._scale)),
+                           max(1, int(img.height * self._scale))), Image.LANCZOS)
+        self._photo = ImageTk.PhotoImage(disp)
+        self._canvas.delete("all")
+        self._canvas.config(width=disp.width, height=disp.height)
+        self._canvas.create_image(0, 0, anchor="nw", image=self._photo)
+        self._rect = None
+        self._status.set("Now drag a box around the job number.")
+
+    # ── Dragging the box ──────────────────────────────────────────────────
+
+    def _drag_start(self, e):
+        if self._img is None:
+            return
+        self._start = (e.x, e.y)
+        if self._rect:
+            self._canvas.delete(self._rect)
+        self._rect = self._canvas.create_rectangle(e.x, e.y, e.x, e.y,
+                                                   outline="#E74C3C", width=2)
+
+    def _drag_move(self, e):
+        if self._start and self._rect:
+            self._canvas.coords(self._rect, self._start[0], self._start[1], e.x, e.y)
+
+    def _drag_end(self, e):
+        if not (self._start and self._img):
+            return
+        x0, y0 = self._start
+        x1, y1 = e.x, e.y
+        self._start = None
+        if abs(x1 - x0) < 8 or abs(y1 - y0) < 8:
+            self._status.set("That box was too small — drag across the job number.")
+            return
+        self._read_region(min(x0, x1), min(y0, y1), max(x0, x1), max(y0, y1))
+
+    def _read_region(self, x0, y0, x1, y1):
+        """Crop what was highlighted and ask what wording introduces it."""
+        from PIL import Image
+        s = self._scale or 1.0
+        # A little margin, so the wording just outside the box still counts.
+        pad = 12
+        box = (max(0, int(x0 / s) - pad), max(0, int(y0 / s) - pad),
+               min(self._img.width,  int(x1 / s) + pad),
+               min(self._img.height, int(y1 / s) + pad))
+        crop = self._img.crop(box)
+        # Upscale a small crop — a few words at screen resolution are easier
+        # to read enlarged.
+        if crop.width < 600:
+            f = min(3.0, 600 / max(1, crop.width))
+            crop = crop.resize((int(crop.width * f), int(crop.height * f)), Image.LANCZOS)
+
+        import io
+        buf = io.BytesIO()
+        crop.save(buf, format="PNG")
+        data = buf.getvalue()
+
+        self._status.set("Reading the highlighted area…")
+        self.update_idletasks()
+
+        def _work():
+            try:
+                got = _po_import.read_job_label(data)
+                err = ""
+            except _po_import.POImportError as exc:
+                got, err = None, str(exc)
+            except Exception as exc:
+                got, err = None, f"Couldn't read that area:\n{exc}"
+
+            def _done():
+                if err:
+                    self._status.set("Couldn't read that area.")
+                    messagebox.showerror("Couldn't Read", err, parent=self)
+                    return
+                label = got.get("label", "")
+                value = got.get("value", "")
+                if label:
+                    self._label_var.set(label)
+                    self._status.set("Check it looks right, then Save.")
+                else:
+                    self._status.set(
+                        "No wording found in front of that number — type it below.")
+                self._found.config(
+                    text=(f'found "{value}"' if value else "") +
+                         ("   (unsure — please check)"
+                          if got.get("confidence") == "low" else ""))
+            self.after(0, _done)
+
+        threading.Thread(target=_work, daemon=True).start()
+
+    def _save(self):
+        label = self._label_var.get().strip()
+        if not label:
+            messagebox.showwarning(
+                "Nothing to Save",
+                "Highlight the job number, or type the wording that comes "
+                "before it.", parent=self)
+            return
+        self.result = label
+        self.destroy()
+
 
 class _UnknownMediaDialog(tk.Toplevel):
     """A purchase order asked for a media grade that isn't on the list.
@@ -4951,10 +5171,30 @@ class ModernOrderApp(tk.Frame):
         _row += 1
 
         v_joblbl = tk.StringVar(value=g.get("job_number_label", ""))
-        _row_f("Job Number After", v_joblbl)
-        tk.Label(body, text='What precedes their job number, e.g. "Our Reference:".',
-                 bg=CBG, fg=CMU, font=(FAM, 7)).grid(
-            row=_row-1, column=2, sticky="w", padx=6)
+        tk.Label(body, text="Job Number After", bg=CBG, fg=CTX, font=F_BODY,
+                 anchor="w").grid(row=_row, column=0, sticky="w", pady=4)
+        _jrow = tk.Frame(body, bg=CBG)
+        _jrow.grid(row=_row, column=1, sticky="ew", pady=4)
+        field_entry(_jrow, textvariable=v_joblbl, width=18).pack(
+            side="left", fill="x", expand=True)
+
+        def _highlight_job():
+            dlg2 = JobNumberHighlighter(dlg)
+            dlg.wait_window(dlg2)
+            try:
+                dlg.grab_set()   # child dialog took the grab — take it back
+            except Exception:
+                pass
+            if dlg2.result:
+                v_joblbl.set(dlg2.result)
+
+        flat_btn(_jrow, "Highlight…", _highlight_job, bg=CA2, pady=3, padx=8,
+                 font=F_SM).pack(side="left", padx=(6, 0))
+        tk.Label(body, text='What precedes their job number, e.g. "Our Reference:".\n'
+                            "Highlight it on one of their orders, or type it.",
+                 bg=CBG, fg=CMU, font=(FAM, 7), justify="left").grid(
+            row=_row, column=2, sticky="w", padx=6)
+        _row += 1
         _row_f("ABN",           v_abn)
         _row_f("Website",       v_web)
 
@@ -7605,6 +7845,8 @@ class ModernOrderApp(tk.Frame):
                     size = f"{item.get('roll_width','')}×{item.get('roll_length','')}"
                 opts = []
                 if item.get("on_wire"):      opts.append("Wire")
+                if item.get("header"):       opts.append("Header")
+                if item.get("half_size"):    opts.append("Half")
                 if item.get("gelled"):       opts.append("Gelled")
                 if item.get("special_size"): opts.append("Special")
                 if item.get("label_suffix"): opts.append(item["label_suffix"])
@@ -7614,6 +7856,13 @@ class ModernOrderApp(tk.Frame):
                 tag      = "bag_e" if i % 2 == 0 else "bag_o"
                 sqm      = "—"
                 partno   = item.get("part_number", "") or "—"
+                # A header is a flat panel made to sit on the bag; show what
+                # it is so the floor knows what to cut.
+                _hp = _pn.header_panel_item(item)
+                if _hp:
+                    _pn.apply_derived_fields(_hp, self._media_codes)
+                    notes = (f"[HEADER {_hp['Short']}×{_hp['Long']}×{_hp['Channel']} "
+                             f"{_hp.get('Part Number','')}] " + notes)[:180]
             else:
                 qty   = item.get("Quantity", "")
                 pt    = item.get("Filter Type", "")
