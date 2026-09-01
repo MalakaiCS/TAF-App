@@ -8319,12 +8319,20 @@ class ModernOrderApp(tk.Frame):
         }
 
         def _saved(cust):
+            # Remember the wording that points at THIS branch. The company
+            # name on the order is deliberately not remembered: every branch
+            # of the company prints it, so recording it against one profile
+            # is what sent a Bells Creek order to the Tweed branch.
+            legal = (cust.get("legal_name") or "").strip()
             for wording in (po_name, po_addr):
-                if wording and cust.get("id"):
-                    try:
-                        _db.add_customer_alias(cust["id"], wording)
-                    except Exception:
-                        pass
+                if not wording or not cust.get("id"):
+                    continue
+                if wording.strip().lower() == legal.lower():
+                    continue
+                try:
+                    _db.add_customer_alias(cust["id"], wording)
+                except Exception:
+                    pass
             order["customer"] = cust
             order["header"]["Customer Name"] = (
                 (cust.get("short_name") or "").strip() or (cust.get("name") or "").strip())

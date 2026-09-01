@@ -716,13 +716,34 @@ def _norm(text: str) -> str:
     return _re.sub(r"[^a-z0-9]+", " ", (text or "").lower()).strip()
 
 
+def is_company_name(value: str, customers: list | None = None) -> bool:
+    """True when `value` is a legal name shared by every branch of a company.
+
+    "Complete Air Supply Pty Ltd" identifies a company; "CAS - Bells Creek"
+    identifies a branch. Only the second is safe to record against a profile
+    or to match an order on.
+    """
+    v = _norm(value)
+    if not v:
+        return False
+    try:
+        people = customers if customers is not None else get_customers(active_only=False)
+    except Exception:
+        return False
+    return any(_norm(c.get("legal_name") or "") == v for c in people)
+
+
 def match_customer(po_name: str, po_address: str = "",
                    customers: list | None = None) -> "dict | None":
     """Find the branch a purchase order belongs to, or None to ask.
 
-    Deliberately conservative: a company with several branches must not be
-    guessed at from the company name alone, because picking the wrong branch
-    sends the order to the wrong place under the wrong short name.
+    The rule throughout: a match has to identify a BRANCH, not just a company.
+    Branches of one company share a legal name, so anything that only proves
+    "this is Complete Air Supply" proves nothing about which depot the order
+    is for — and picking the wrong one sends the work to the wrong place under
+    the wrong short name. Company-level evidence therefore only counts when an
+    address backs it up, and if two branches both look plausible, neither is
+    chosen.
     """
     people = customers if customers is not None else get_customers(active_only=True)
     name_n = _norm(po_name)
@@ -730,48 +751,84 @@ def match_customer(po_name: str, po_address: str = "",
     if not name_n and not addr_n:
         return None
 
-    # 1. Wording we have already been told belongs to this branch.
-    for c in people:
+    # Every legal name on file. A wording that is one of these names a
+    # company, not a branch — whichever profile it happens to sit on. Taking
+    # the whole list, rather than just the profile being tested, catches the
+    # branch whose own legal name was left blank or typed differently.
+    company_names = {_norm(c.get("legal_name") or "") for c in people}
+    company_names.discard("")
+
+    def _company_level(c: dict, value: str) -> bool:
+        """True when `value` is just the company name every branch shares."""
+        return value in company_names
+
+    def _address_agrees(c: dict) -> bool:
+        if not addr_n:
+            return False
+        for part in (c.get("delivery_address1"), c.get("delivery_city"),
+                     c.get("delivery_postcode")):
+            p = _norm(part or "")
+            if p and len(p) > 3 and p in addr_n:
+                return True
+        return False
+
+    def _identifies(c: dict) -> bool:
+        # 1. Wording already recorded against this branch. An alias that is
+        #    only the company name is ignored: earlier versions saved those,
+        #    and acting on one is what matched a Bells Creek order to Tweed.
         for alias in (c.get("po_aliases") or []):
             a = _norm(str(alias))
-            if a and (a == name_n or (addr_n and a in addr_n) or (name_n and a in name_n)):
-                return c
-
-    # 2. An exact short name or trading name.
-    for c in people:
-        for field in ("short_name", "name"):
-            if name_n and _norm(c.get(field) or "") == name_n:
-                return c
-
-    # 3. Same company by legal name — only safe when the address also matches,
-    #    since the whole point is telling branches apart.
-    if addr_n:
-        for c in people:
-            legal_n = _norm(c.get("legal_name") or "")
-            same_company = legal_n and (legal_n == name_n or legal_n in name_n or name_n in legal_n)
-            if not same_company:
+            if not a or _company_level(c, a):
                 continue
-            for part in (c.get("delivery_address1"), c.get("delivery_city"),
-                         c.get("delivery_postcode")):
-                p = _norm(part or "")
-                if p and len(p) > 3 and p in addr_n:
-                    return c
-    return None
+            if a == name_n:
+                return True
+            # Substring only for wordings long enough to mean something: a
+            # three-letter alias would otherwise land inside half the list.
+            if len(a) > 3 and ((addr_n and a in addr_n) or (name_n and a in name_n)):
+                return True
+
+        # 2. Its own short name or trading name — unless that is just the
+        #    company name again.
+        if name_n:
+            for field in ("short_name", "name"):
+                v = _norm(c.get(field) or "")
+                if v and v == name_n and not _company_level(c, v):
+                    return True
+
+        # 3. Same company by legal name, which only counts with an address.
+        if addr_n:
+            legal = _norm(c.get("legal_name") or "")
+            if legal and (legal == name_n or legal in name_n or name_n in legal) \
+                    and _address_agrees(c):
+                return True
+        return False
+
+    matches = [c for c in people if _identifies(c)]
+    # Exactly one branch, or none: two candidates means ask rather than guess.
+    return matches[0] if len(matches) == 1 else None
 
 
 def add_customer_alias(customer_id: str, alias: str) -> None:
-    """Remember a name or address as belonging to this branch."""
+    """Remember a name or address as belonging to this branch.
+
+    Refuses anything that is only the company's legal name: every branch
+    shares it, so recording it would make the next order from any other
+    branch match this one.
+    """
     alias = (alias or "").strip()
     if not alias:
         return
     try:
         resp = (get_client().table("customers")
-                .select("po_aliases").eq("id", customer_id).single().execute())
+                .select("po_aliases").eq("id", customer_id)
+                .single().execute())
         aliases = list((resp.data or {}).get("po_aliases") or [])
     except Exception:
         aliases = []
     if any(_norm(a) == _norm(alias) for a in aliases):
         return
+    if is_company_name(alias):
+        return          # company-wide wording, not this branch
     aliases.append(alias)
     get_client().table("customers").update(
         {"po_aliases": aliases}).eq("id", customer_id).execute()
