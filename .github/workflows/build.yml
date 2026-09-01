@@ -134,14 +134,38 @@ jobs:
         shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Passed through the environment, never interpolated into the script.
+          # Substituting it inline meant notes containing a double quote (or a
+          # newline) broke the shell quoting and the release silently fell back
+          # to auto-generated notes — which is what the app shows as "What's
+          # New", so the actual notes never reached anyone.
+          NOTES: ${{ github.event.inputs.notes }}
         run: |
           TAG="${{ steps.ver.outputs.tag }}"
-          if [ -n "${{ github.event.inputs.notes }}" ]; then
-            gh release create "$TAG" "TAFOrderEntry_Setup.exe" \
-              --title "TAF Order Entry $TAG" --notes "${{ github.event.inputs.notes }}" \
-            || gh release upload "$TAG" "TAFOrderEntry_Setup.exe" --clobber
+          printf '%s' "$NOTES" > release_notes.md
+
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            if [ -s release_notes.md ]; then
+              gh release edit "$TAG" --title "TAF Order Entry $TAG" \
+                --notes-file release_notes.md
+            fi
+          elif [ -s release_notes.md ]; then
+            gh release create "$TAG" --title "TAF Order Entry $TAG" \
+              --notes-file release_notes.md
           else
-            gh release create "$TAG" "TAFOrderEntry_Setup.exe" \
-              --title "TAF Order Entry $TAG" --generate-notes \
-            || gh release upload "$TAG" "TAFOrderEntry_Setup.exe" --clobber
+            gh release create "$TAG" --title "TAF Order Entry $TAG" --generate-notes
+          fi
+
+          gh release upload "$TAG" "TAFOrderEntry_Setup.exe" --clobber
+
+          # The notes are what the app shows after updating, so a release that
+          # lost them is a defect worth failing on rather than shipping quietly.
+          if [ -s release_notes.md ]; then
+            gh release view "$TAG" --json body -q .body > published_notes.txt
+            head -c 60 release_notes.md > expected_head.txt
+            grep -qF "$(cat expected_head.txt)" published_notes.txt || {
+              echo "::error::Release notes were not published correctly."
+              exit 1
+            }
+            echo "Release notes published ($(wc -c < release_notes.md) bytes)."
           fi
