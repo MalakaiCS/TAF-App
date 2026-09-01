@@ -36,12 +36,14 @@ const ORDER_SCHEMA = {
         type: "object",
         additionalProperties: false,
         required: [
-          "customer_name", "order_number", "date_ordered", "date_due",
-          "attention", "job", "location", "notes", "confidence",
-          "warnings", "items",
+          "customer_name", "customer_address", "pickup", "order_number",
+          "date_ordered", "date_due", "attention", "job", "location",
+          "notes", "confidence", "warnings", "items",
         ],
         properties: {
           customer_name: { type: "string" },
+          customer_address: { type: "string" },
+          pickup: { type: "boolean" },
           order_number: { type: "string" },
           // Dates as dd/mm/yyyy — the app parses day-first.
           date_ordered: { type: "string" },
@@ -62,13 +64,17 @@ const ORDER_SCHEMA = {
               type: "object",
               additionalProperties: false,
               required: [
-                "item_kind", "quantity", "short", "long", "channel",
-                "filter_type", "media_type", "notes", "confidence",
+                "item_kind", "quantity", "square_metres", "short", "long",
+                "channel", "filter_type", "media_type", "notes", "confidence",
                 "source_text",
               ],
               properties: {
                 item_kind: { type: "string", enum: ["filter", "bag"] },
                 quantity: { type: "integer" },
+                square_metres: {
+                  type: "number",
+                  description: "Area in square metres if the document states one (e.g. 0.20); 0 if not stated.",
+                },
                 short: { type: "integer", description: "Smaller face dimension in mm; 0 if unknown." },
                 long: { type: "integer", description: "Larger face dimension in mm; 0 if unknown." },
                 channel: { type: "integer", description: "Depth / thickness in mm; 0 if unknown." },
@@ -96,18 +102,22 @@ The documents are customer purchase orders. They arrive as typed PDFs, phone pho
 ONE DOCUMENT MAY CONTAIN SEVERAL SEPARATE PURCHASE ORDERS. Return one entry in "orders" per distinct purchase order — a new order number, a new customer, or a clear page/section break usually marks a new one. Do not merge two orders, and do not split one order across entries.
 
 FIELDS
-- customer_name: the company ordering the filters (not Total Air Filtration itself — TAF is the supplier).
+- customer_name: the company ordering the filters, EXACTLY as printed (not Total Air Filtration itself - TAF is the supplier). Do not shorten, expand or tidy it; the app maps it to its own short name afterwards, and it can only do that if you report what is actually written.
+- customer_address: the delivery or branch address as printed, including any branch wording such as "Bells Creek (MOR)". A company may have several branches that share one legal name, and this is what tells them apart, so include it whenever it appears.
+- pickup: true only if the document says the customer is collecting (e.g. "PICK UP", "collect", "will call"). Otherwise false.
 - order_number: their purchase order / PO / order number.
 - date_ordered, date_due: dd/mm/yyyy. These documents are Australian: 03/04/2026 is 3 April. If a due date is written as "ASAP" or similar, put exactly "ASAP". Leave "" when absent — never invent one.
 - attention: the contact person named on the order.
-- job / location: job name or site/delivery location if stated.
+- job: the customer's own job / reference number for this order. Different companies label it differently - "JOB:", "Our Reference:", "Ref", "Your Order" and so on. If a job-number label is listed under CUSTOMER NOTES below, use the value that follows that exact label in preference to anything else on the page.
+- location: the delivery suburb, town or area as printed. Report what the document says; the app converts it into a delivery region itself.
 - notes: order-level instructions (delivery, packing, urgency). Not line-item detail.
 
 LINE ITEMS
 - One entry per distinct filter line. If a line says "4 off" or "qty 4", quantity is 4 — do not expand it into four entries.
 - Dimensions are millimetres. Filters are described as face size then depth, e.g. "595 x 595 x 48". Put the SMALLER face dimension in "short", the LARGER in "long", and the depth/thickness in "channel". A dimension given in inches or metres must be converted to mm, and you must say so in that item's notes.
 - filter_type: what kind of filter — e.g. V-form, Flat Panel, Stepped Filter, Flyscreen, Header, Pleated Panel, Bag Filter. Use the customer's wording when it is clear; leave "" if you genuinely cannot tell.
-- media_type: the filter media or grade — e.g. G4, F5, F7, 180, WASH, GREY, E-MESH. Leave "" if not stated.
+- media_type: the filter media or grade as written - e.g. G4, F5, F7, 180, WASH, GREY, E-MESH, Carbon. Report exactly what the document says, including a grade TAF may not stock; the app checks it against its own list and asks a human what to do. Leave "" if the document does not state one - do NOT substitute a default, the app applies its own.
+- square_metres: filter sizes are sometimes given as an area instead of dimensions, written as a small decimal like 0.20, 0.30 or 1.5, often with "m2", "sqm", "m^2" or nothing at all. When a line gives an area like that, put it here and leave short/long at 0 unless the dimensions are ALSO given. A bare small decimal next to a filter line is an area, not a dimension - 0.20 is a fifth of a square metre, never 0.2mm.
 - item_kind: "bag" for bag/pocket filters and media rolls, otherwise "filter".
 - notes: anything specific to that line (on wire, gelled, special size, insert).
 - source_text: copy the line verbatim from the document. This is what the operator checks your reading against, so it must be what is actually written, not a tidied version.
@@ -142,7 +152,10 @@ Deno.serve(async (req: Request) => {
     }, 500);
   }
 
-  let body: { files?: Array<{ media_type?: string; data?: string; text?: string; name?: string }> };
+  let body: {
+    files?: Array<{ media_type?: string; data?: string; text?: string; name?: string }>;
+    context?: { media_types?: string[]; job_labels?: string[] };
+  };
   try {
     body = await req.json();
   } catch {
@@ -179,9 +192,25 @@ Deno.serve(async (req: Request) => {
   if (!content.length) {
     return json({ error: "Nothing readable in the supplied files." }, 400);
   }
+  // What this business actually stocks and how its customers label things, so
+  // the reader can flag an unknown grade and find the right job number instead
+  // of guessing at either.
+  const known = (body.context?.media_types ?? []).filter(Boolean);
+  const labels = (body.context?.job_labels ?? []).filter(Boolean);
+  let notes = "";
+  if (known.length) {
+    notes += `\n\nCUSTOMER NOTES\nMedia grades TAF currently stocks: ${known.join(", ")}. ` +
+      "Still report a grade that is not on this list exactly as written - do not " +
+      "silently swap it for one that is.";
+  }
+  if (labels.length) {
+    notes += `${known.length ? "\n" : "\n\nCUSTOMER NOTES\n"}` +
+      `Job numbers on this customer's orders follow: ${labels.join(" | ")}. ` +
+      "Use the value after that label for \"job\".";
+  }
   content.push({
     type: "text",
-    text: "Extract every purchase order in the documents above.",
+    text: "Extract every purchase order in the documents above." + notes,
   });
 
   const client = new Anthropic({ apiKey });

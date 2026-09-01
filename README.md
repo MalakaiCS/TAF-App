@@ -30,8 +30,12 @@ log, stock management and a customer database.
 - **Stock** — items with images, on-hand / minimum levels, adjustments & history.
 - **Customers** — full customer database with delivery/billing details.
 - **Audit Log** — every significant action recorded.
-- **Settings** — media types, custom filter types, low-stock thresholds, user
-  management, light/dark mode, change password, in-app software update.
+- **Part numbers & square metreage** — every flat panel and V-form line gets
+  its area and a part number derived automatically
+  (`FPFCARB25-020`), shown in the app and printed on the worksheet.
+- **Settings** — media types (with their part-number codes), custom filter
+  types, low-stock thresholds, user management, light/dark mode, change
+  password, in-app software update.
 
 ## Tech stack
 
@@ -86,10 +90,12 @@ In the Supabase dashboard → **SQL Editor**, run these once (in order):
 3. `stock_schema.sql`
 4. `extra_columns_migration.sql`
 5. The `migrate_*.sql` files (audit log, media types, stock alerts, updater,
-   user management, catalogue) — run any that apply to bring an existing DB
-   up to date. `migrate_catalog.sql` backs the editable dedicated-filter
-   presets and custom filter types; without it those edits stay on one PC
-   instead of being shared.
+   user management, catalogue, customer profiles) — run any that apply to
+   bring an existing DB up to date. `migrate_catalog.sql` backs the editable
+   dedicated-filter presets and custom filter types; without it those edits
+   stay on one PC instead of being shared. `migrate_customer_profiles.sql`
+   adds customer short names, delivery regions, job-number labels and the
+   part-number code on each media type.
 
 ### Enable purchase-order import (optional)
 

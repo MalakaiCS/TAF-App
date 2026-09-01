@@ -379,9 +379,21 @@ def _fill_vorf(ws, item, pleat=False, header_only=False, use_stock_v=False):
     ftype = item.get("Filter Type", "")
     media = item.get("Media Type", "")
     item_notes = item.get("Notes", "").strip()
-    if item_notes:
+    # Part number and square metreage go on the printed sheet through the
+    # notes line, which is free text — the rest of the template is fixed cells.
+    _stamp = []
+    if item.get("Part Number"):
+        _stamp.append(f"PN: {item['Part Number']}")
+    try:
+        _sqm = float(item.get("Square Metres") or 0)
+    except (TypeError, ValueError):
+        _sqm = 0.0
+    if _sqm > 0:
+        _stamp.append(f"{_sqm:.2f} m2")
+    _line = "  ".join(_stamp + ([item_notes] if item_notes else []))
+    if _line:
         existing = ws["G18"].value or "NOTES:"
-        ws["G18"].value = (existing + " " + item_notes).strip()
+        ws["G18"].value = (existing + " " + _line).strip()
 
     # Basic line item fields
     ws["B6"].value = media
@@ -499,9 +511,21 @@ def _fill_flyscreen(ws, item, stepped=False, use_stock_fs=False):
     long = int(item.get("Long", 0))
     media = item.get("Media Type", "")
     item_notes = item.get("Notes", "").strip()
-    if item_notes:
+    # Part number and square metreage go on the printed sheet through the
+    # notes line, which is free text — the rest of the template is fixed cells.
+    _stamp = []
+    if item.get("Part Number"):
+        _stamp.append(f"PN: {item['Part Number']}")
+    try:
+        _sqm = float(item.get("Square Metres") or 0)
+    except (TypeError, ValueError):
+        _sqm = 0.0
+    if _sqm > 0:
+        _stamp.append(f"{_sqm:.2f} m2")
+    _line = "  ".join(_stamp + ([item_notes] if item_notes else []))
+    if _line:
         existing = ws["G18"].value or "NOTES:"
-        ws["G18"].value = (existing + " " + item_notes).strip()
+        ws["G18"].value = (existing + " " + _line).strip()
 
     ws["B6"].value = "" if stepped and use_stock_fs else media
     ws["C6"].value = qty

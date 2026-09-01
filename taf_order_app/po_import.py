@@ -19,7 +19,7 @@ import mimetypes
 import urllib.error
 import urllib.request
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 from . import db as _db
 
@@ -112,8 +112,14 @@ def prepare_files(paths: List[str]) -> List[Dict[str, Any]]:
     return payload
 
 
-def extract_orders(paths: List[str], timeout: int = 300) -> List[Dict[str, Any]]:
+def extract_orders(paths: List[str], timeout: int = 300,
+                   media_types: Optional[List[str]] = None,
+                   job_labels: Optional[List[str]] = None) -> List[Dict[str, Any]]:
     """Send the documents for reading and return normalised app orders.
+
+    `media_types` and `job_labels` tell the reader what this business stocks
+    and how its customers label job numbers, so it can flag an unknown grade
+    and find the right reference instead of guessing at either.
 
     Blocks for as long as the extraction takes, so call it on a background
     thread. Raises POImportError with a user-facing message on any failure.
@@ -121,7 +127,13 @@ def extract_orders(paths: List[str], timeout: int = 300) -> List[Dict[str, Any]]
     files = prepare_files(paths)
     token = _access_token()
 
-    body = json.dumps({"files": files}).encode("utf-8")
+    body = json.dumps({
+        "files": files,
+        "context": {
+            "media_types": list(media_types or []),
+            "job_labels":  list(job_labels or []),
+        },
+    }).encode("utf-8")
     req = urllib.request.Request(
         _function_url(),
         data=body,
@@ -175,7 +187,12 @@ def _int(value: Any, default: int = 0) -> int:
 
 
 def _normalise_order(raw: Dict[str, Any]) -> Dict[str, Any]:
-    """Map one extracted order onto the app's header / item dictionaries."""
+    """Map one extracted order onto the app's header / item dictionaries.
+
+    The customer name stays exactly as printed here — resolving it to a branch
+    profile (and so to the short name and delivery region that actually go on
+    the order) happens in the review screen, where a human can confirm it.
+    """
     header = {
         "Customer Name": (raw.get("customer_name") or "").strip(),
         "Order Number":  (raw.get("order_number")  or "").strip(),
@@ -193,6 +210,13 @@ def _normalise_order(raw: Dict[str, Any]) -> Dict[str, Any]:
             continue
         short   = _int(it.get("short"))
         long_   = _int(it.get("long"))
+        # A line may give an area (0.20) instead of dimensions. Keep it: the
+        # review screen shows it, and it is what the part number is built from
+        # when no sizes were written down.
+        try:
+            stated_area = float(it.get("square_metres") or 0)
+        except (TypeError, ValueError):
+            stated_area = 0.0
         # The extractor is told smaller-then-larger, but a swapped pair is
         # cheap to correct here and avoids a pointless review flag.
         if short and long_ and short > long_:
@@ -206,6 +230,7 @@ def _normalise_order(raw: Dict[str, Any]) -> Dict[str, Any]:
             "Filter Type":         (it.get("filter_type") or "").strip(),
             "Media Type":          (it.get("media_type")  or "").strip(),
             "Notes":               (it.get("notes")       or "").strip(),
+            "Stated Square Metres": round(stated_area, 4) if stated_area > 0 else 0,
             "Pleat Insert":        False,
             "Header":              False,
             "Use Stock V-form":    False,
@@ -220,6 +245,11 @@ def _normalise_order(raw: Dict[str, Any]) -> Dict[str, Any]:
         "items":      items,
         "confidence": (raw.get("confidence") or "medium").lower(),
         "warnings":   [str(w) for w in (raw.get("warnings") or [])],
+        # Kept out of the header: used to find the customer's branch profile,
+        # not written onto the order itself.
+        "po_customer_name":    (raw.get("customer_name") or "").strip(),
+        "po_customer_address": (raw.get("customer_address") or "").strip(),
+        "pickup":              bool(raw.get("pickup")),
     }
 
 
@@ -240,7 +270,9 @@ def _inbox_dir(app_dir: Path) -> Path:
     return d
 
 
-def fetch_new_batches(app_dir: Path, pair_id: str = "") -> List[str]:
+def fetch_new_batches(app_dir: Path, pair_id: str = "",
+                      media_types: Optional[List[str]] = None,
+                      job_labels: Optional[List[str]] = None) -> List[str]:
     """Download and read any finished phone batches meant for this PC.
 
     A phone paired by QR code stamps its batches with that PC's pairing id, so
@@ -276,7 +308,8 @@ def fetch_new_batches(app_dir: Path, pair_id: str = "") -> List[str]:
                     p.write_bytes(_db.download_po_photo(batch, name))
                 local.append(str(p))
 
-            orders = extract_orders(local)
+            orders = extract_orders(local, media_types=media_types,
+                                    job_labels=job_labels)
 
             manifest = b.get("manifest") or {}
             note = (manifest.get("note") or "").strip()

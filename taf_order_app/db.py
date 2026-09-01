@@ -451,6 +451,25 @@ def can_archive_order() -> bool:
 
 # ── Media Types ───────────────────────────────────────────────────────────────
 
+def get_media_codes() -> dict:
+    """{media name: part-number code} for every custom media type.
+
+    Carbon -> CARB, so a flat panel becomes FPFCARB25-020. Missing codes fall
+    back to a value derived from the name (see part_numbers.default_media_code),
+    and an empty dict is returned if the column hasn't been migrated yet.
+    """
+    try:
+        resp = get_client().table("media_types").select("name, code").execute()
+        return {r["name"]: (r.get("code") or "") for r in (resp.data or [])}
+    except Exception:
+        return {}
+
+
+def set_media_code(name: str, code: str) -> None:
+    get_client().table("media_types").update(
+        {"code": (code or "").strip().upper()}).eq("name", name).execute()
+
+
 def get_custom_media_types() -> list[str]:
     """Return custom media type names in sort order from the DB."""
     try:
@@ -684,6 +703,78 @@ def update_customer(customer_id: str, data: dict) -> None:
 
 def delete_customer(customer_id: str) -> None:
     get_client().table("customers").delete().eq("id", customer_id).execute()
+
+
+# ── Matching a purchase order to a customer branch ───────────────────────────
+# A purchase order says "Complete Air Supply Pty Ltd" at "19-27 Fred Chaplin
+# Circuit, Bells Creek". The order should say "CAS - Bells Creek" in
+# "Sunshine Coast". Each branch is its own profile; these helpers find the
+# right one and remember the wording so the next order matches without asking.
+
+def _norm(text: str) -> str:
+    import re as _re
+    return _re.sub(r"[^a-z0-9]+", " ", (text or "").lower()).strip()
+
+
+def match_customer(po_name: str, po_address: str = "",
+                   customers: list | None = None) -> "dict | None":
+    """Find the branch a purchase order belongs to, or None to ask.
+
+    Deliberately conservative: a company with several branches must not be
+    guessed at from the company name alone, because picking the wrong branch
+    sends the order to the wrong place under the wrong short name.
+    """
+    people = customers if customers is not None else get_customers(active_only=True)
+    name_n = _norm(po_name)
+    addr_n = _norm(po_address)
+    if not name_n and not addr_n:
+        return None
+
+    # 1. Wording we have already been told belongs to this branch.
+    for c in people:
+        for alias in (c.get("po_aliases") or []):
+            a = _norm(str(alias))
+            if a and (a == name_n or (addr_n and a in addr_n) or (name_n and a in name_n)):
+                return c
+
+    # 2. An exact short name or trading name.
+    for c in people:
+        for field in ("short_name", "name"):
+            if name_n and _norm(c.get(field) or "") == name_n:
+                return c
+
+    # 3. Same company by legal name — only safe when the address also matches,
+    #    since the whole point is telling branches apart.
+    if addr_n:
+        for c in people:
+            legal_n = _norm(c.get("legal_name") or "")
+            same_company = legal_n and (legal_n == name_n or legal_n in name_n or name_n in legal_n)
+            if not same_company:
+                continue
+            for part in (c.get("delivery_address1"), c.get("delivery_city"),
+                         c.get("delivery_postcode")):
+                p = _norm(part or "")
+                if p and len(p) > 3 and p in addr_n:
+                    return c
+    return None
+
+
+def add_customer_alias(customer_id: str, alias: str) -> None:
+    """Remember a name or address as belonging to this branch."""
+    alias = (alias or "").strip()
+    if not alias:
+        return
+    try:
+        resp = (get_client().table("customers")
+                .select("po_aliases").eq("id", customer_id).single().execute())
+        aliases = list((resp.data or {}).get("po_aliases") or [])
+    except Exception:
+        aliases = []
+    if any(_norm(a) == _norm(alias) for a in aliases):
+        return
+    aliases.append(alias)
+    get_client().table("customers").update(
+        {"po_aliases": aliases}).eq("id", customer_id).execute()
 
 
 def can_manage_customers() -> bool:

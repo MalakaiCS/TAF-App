@@ -22,6 +22,7 @@ from taf_order_app import OrderService
 from taf_order_app.validation import VALID_FILTER_TYPES, VALID_MEDIA_TYPES
 from taf_order_app import db as _db
 from taf_order_app import po_import as _po_import
+from taf_order_app import part_numbers as _pn
 from taf_order_app.bag_filler import (
     BAG_PRODUCT_TYPES, BAG_MEDIA_TYPES, ROLL_MEDIA_TYPES,
     ROLL_WIDTHS, ROLL_LENGTHS, STANDARD_SIZES,
@@ -2654,6 +2655,75 @@ def _safe_int(s) -> int:
 # Imported Purchase Order Review
 # ═══════════════════════════════════════════════════════════════════════════
 
+class _UnknownMediaDialog(tk.Toplevel):
+    """A purchase order asked for a media grade that isn't on the list.
+
+    Rather than silently substituting one, ask: add it, or use a grade we do
+    stock. result = None if cancelled, else ("create", name) or ("swap", other).
+    """
+
+    def __init__(self, master, name, known):
+        super().__init__(master)
+        self.title("Unknown Media Type")
+        self.transient(master)
+        self.grab_set()
+        self.resizable(False, False)
+        self.configure(bg=CBG)
+        self.result = None
+
+        hdr = tk.Frame(self, bg=CA, padx=16, pady=10)
+        hdr.pack(fill="x")
+        tk.Label(hdr, text=f'Media "{name}" isn\'t on the list',
+                 bg=CA, fg="white", font=(FAM, 12, "bold")).pack(anchor="w")
+        tk.Label(hdr, text="A purchase order asked for it. What should this order use?",
+                 bg=CA, fg="#A9CCE3", font=F_SM).pack(anchor="w")
+
+        body = tk.Frame(self, bg=CBG, padx=18, pady=16)
+        body.pack(fill="both", expand=True)
+
+        choice = tk.StringVar(value="create")
+        tk.Radiobutton(body, text=f'Add "{name}" as a new media type',
+                       variable=choice, value="create", bg=CBG, fg=CTX,
+                       font=F_BODY, activebackground=CBG, selectcolor=CCA,
+                       cursor="hand2").pack(anchor="w")
+        tk.Label(body, text="   Shared with every PC, and usable on future orders.",
+                 bg=CBG, fg=CMU, font=F_SM).pack(anchor="w", pady=(0, 10))
+
+        tk.Radiobutton(body, text="Use a media type we already have:",
+                       variable=choice, value="swap", bg=CBG, fg=CTX,
+                       font=F_BODY, activebackground=CBG, selectcolor=CCA,
+                       cursor="hand2").pack(anchor="w")
+        alt = tk.StringVar(value=(known[0] if known else ""))
+        ttk.Combobox(body, textvariable=alt, state="readonly",
+                     values=list(known), width=26).pack(anchor="w", padx=(24, 0), pady=(4, 0))
+        tk.Label(body, text="   Every line asking for "
+                            f'"{name}" on this import will use it instead.',
+                 bg=CBG, fg=CMU, font=F_SM).pack(anchor="w", pady=(4, 0))
+
+        foot = tk.Frame(self, bg=CBG, padx=18, pady=12)
+        foot.pack(fill="x")
+
+        def _ok():
+            if choice.get() == "create":
+                self.result = ("create", name)
+            else:
+                if not alt.get():
+                    messagebox.showwarning("Pick One",
+                        "Choose a media type to use instead.", parent=self)
+                    return
+                self.result = ("swap", alt.get())
+            self.destroy()
+
+        flat_btn(foot, "Cancel Import", self.destroy, bg=CNE, pady=7).pack(side="right", padx=(8, 0))
+        flat_btn(foot, "Continue",      _ok,          bg=CGR, pady=7).pack(side="right")
+
+        self.update_idletasks()
+        W = max(430, self.winfo_reqwidth())
+        H = self.winfo_reqheight()
+        self.geometry(f"{W}x{H}+{master.winfo_rootx()+master.winfo_width()//2-W//2}"
+                      f"+{max(0, master.winfo_rooty()+140)}")
+
+
 def _int_or_zero(value) -> int:
     """Parse a dimension; 0 for anything unreadable (which is a fault worth
     flagging, never a value to quietly generate a filter from)."""
@@ -2678,7 +2748,8 @@ class POReviewDialog(tk.Toplevel):
         "medium": ("#FFF3CD", "#856404"),
     }
 
-    def __init__(self, master, orders, media_types=None, filter_types=None):
+    def __init__(self, master, orders, media_types=None, filter_types=None,
+                 on_create_customer=None):
         super().__init__(master)
         self.title("Review Imported Purchase Orders")
         self.transient(master)
@@ -2689,6 +2760,7 @@ class POReviewDialog(tk.Toplevel):
         self._media_types  = media_types  or list(DEFAULT_MEDIA_TYPES)
         self._filter_types = filter_types or list(VALID_FILTER_TYPES)
         self._current = None
+        self._on_create_customer = on_create_customer
         for o in self._orders:
             o.setdefault("include", True)
 
@@ -2737,7 +2809,18 @@ class POReviewDialog(tk.Toplevel):
         right = tk.Frame(body, bg=CBG)
         right.grid(row=0, column=1, sticky="nsew")
         right.columnconfigure(0, weight=1)
-        right.rowconfigure(2, weight=1)
+        right.rowconfigure(3, weight=1)
+
+        cust_bar = tk.Frame(right, bg=CCA, highlightbackground=CSP,
+                            highlightthickness=1, padx=10, pady=8)
+        cust_bar.grid(row=0, column=0, sticky="ew", pady=(0, 8))
+        self._cust_lbl = tk.Label(cust_bar, text="", bg=CCA, fg=CTX, font=F_BODY,
+                                  justify="left", anchor="w", wraplength=520)
+        self._cust_lbl.pack(side="left", fill="x", expand=True)
+        self._cust_btn = flat_btn(cust_bar, "Create Profile",
+                                  self._make_customer, bg=CA, pady=5, padx=12,
+                                  font=F_BODY)
+        self._cust_btn.pack(side="right")
 
         self._warn_lbl = tk.Label(right, text="", bg="#FDECEC", fg="#C0392B",
                                   font=F_SM, justify="left", anchor="w",
@@ -2745,7 +2828,7 @@ class POReviewDialog(tk.Toplevel):
 
         hf = tk.LabelFrame(right, text=" Order Details ", bg=CCA, fg=CA,
                            font=F_SEC, bd=1, relief="solid", padx=12, pady=10)
-        hf.grid(row=1, column=0, sticky="ew")
+        hf.grid(row=2, column=0, sticky="ew")
         self._hvars = {}
         fields = [("Customer Name", True), ("Order Number", True),
                   ("Date Ordered", True), ("Date Due", False),
@@ -2765,7 +2848,7 @@ class POReviewDialog(tk.Toplevel):
             field_entry(sub, textvariable=v, width=24).pack(fill="x", pady=(2, 0))
 
         itf = tk.Frame(right, bg=CBG)
-        itf.grid(row=2, column=0, sticky="nsew", pady=(10, 0))
+        itf.grid(row=3, column=0, sticky="nsew", pady=(10, 0))
         itf.rowconfigure(1, weight=1)
         itf.columnconfigure(0, weight=1)
         tk.Label(itf, text="Line items — double-click to correct one",
@@ -2775,17 +2858,19 @@ class POReviewDialog(tk.Toplevel):
         tw.grid(row=1, column=0, sticky="nsew")
         tw.rowconfigure(0, weight=1)
         tw.columnconfigure(0, weight=1)
-        cols = ("qty", "type", "size", "media", "notes", "read")
+        cols = ("qty", "type", "size", "sqm", "media", "partno", "notes", "read")
         self._items_tree = ttk.Treeview(tw, columns=cols, show="headings",
                                         style="TAF.Treeview", height=8)
         self._items_tree.grid(row=0, column=0, sticky="nsew")
         for col, (txt, wd, anc, stretch) in {
-            "qty":   ("Qty",             50,  "center", False),
-            "type":  ("Filter Type",     130, "w",      False),
-            "size":  ("Size (mm)",       150, "center", False),
-            "media": ("Media",           80,  "center", False),
-            "notes": ("Notes",           160, "w",      True),
-            "read":  ("Read from PO",    260, "w",      True),
+            "qty":    ("Qty",            50,  "center", False),
+            "type":   ("Filter Type",    120, "w",      False),
+            "size":   ("Size (mm)",      140, "center", False),
+            "sqm":    ("m²",              58, "center", False),
+            "media":  ("Media",           74, "center", False),
+            "partno": ("Part Number",    140, "w",      False),
+            "notes":  ("Notes",          140, "w",      True),
+            "read":   ("Read from PO",   220, "w",      True),
         }.items():
             self._items_tree.heading(col, text=txt,
                                      anchor="center" if anc == "center" else "w")
@@ -2855,10 +2940,56 @@ class POReviewDialog(tk.Toplevel):
                     "document — check the size against the order.")
         return problems
 
+    def _needs_customer(self, order) -> bool:
+        """True while this order has no customer branch profile.
+
+        Without one the order would be written under the legal name on the
+        purchase order and with no delivery region — exactly the mix-up this
+        is here to prevent — so it blocks.
+        """
+        return not (order.get("customer") or {}).get("id")
+
     def _needs_attention(self, order) -> bool:
         return bool(self._missing_required(order)
                     or not order["items"]
+                    or self._needs_customer(order)
                     or self._item_problems(order))
+
+    def _refresh_customer_bar(self):
+        order = self._orders[self._current] if self._current is not None else None
+        if order is None:
+            return
+        cust = order.get("customer") or {}
+        po_name = order.get("po_customer_name") or "(no name read)"
+        po_addr = order.get("po_customer_address") or ""
+        if cust.get("id"):
+            region = order["header"].get("Location") or "(no region)"
+            self._cust_lbl.config(
+                text=f"Customer:  {order['header'].get('Customer Name','')}"
+                     f"      Region:  {region}\n"
+                     f"Read from the order as: {po_name}"
+                     + (f" — {po_addr}" if po_addr else ""),
+                fg=CTX)
+            self._cust_btn.config(text="Change", command=self._make_customer)
+        else:
+            self._cust_lbl.config(
+                text=f"No customer profile for: {po_name}"
+                     + (f"\n{po_addr}" if po_addr else "")
+                     + "\nCreate one to set the short name and region that go on the order.",
+                fg=CRD)
+            self._cust_btn.config(text="Create Profile", command=self._make_customer)
+
+    def _make_customer(self):
+        if self._current is None or not self._on_create_customer:
+            return
+        order = self._orders[self._current]
+
+        def _after():
+            self._refresh_customer_bar()
+            self._refresh_order_list()
+            self._on_select()
+
+        self._on_create_customer(order, _after)
 
     def _refresh_order_list(self):
         sel = self._order_lb.curselection()
@@ -2909,6 +3040,7 @@ class POReviewDialog(tk.Toplevel):
             var.set(order["header"].get(k, ""))
         self._loading = False
         self._include_var.set(order.get("include", True))
+        self._refresh_customer_bar()
         self._refresh_items()
 
         warns = list(order.get("warnings") or [])
@@ -2917,10 +3049,13 @@ class POReviewDialog(tk.Toplevel):
             warns.insert(0, "Required field(s) still blank: " + ", ".join(missing))
         if not order["items"]:
             warns.insert(0, "This order has no line items.")
+        if self._needs_customer(order):
+            warns.insert(0, "No customer profile — create one so the order gets "
+                            "the right short name and delivery region.")
         warns.extend(self._item_problems(order))
         if warns:
             self._warn_lbl.config(text="⚠  " + "\n⚠  ".join(warns))
-            self._warn_lbl.grid(row=0, column=0, sticky="ew", pady=(0, 8))
+            self._warn_lbl.grid(row=1, column=0, sticky="ew", pady=(0, 8))
         else:
             self._warn_lbl.grid_remove()
 
@@ -2946,13 +3081,16 @@ class POReviewDialog(tk.Toplevel):
         for i, it in enumerate(self._orders[self._current]["items"]):
             conf = (it.get("_confidence") or "high").lower()
             size = f"{it.get('Short','')} × {it.get('Long','')} × {it.get('Channel','')}"
+            area = _pn.effective_area(it)
             self._items_tree.insert(
                 "", "end", iid=str(i),
                 tags=(conf if conf in self.CONF_COLORS else "high",),
                 values=(it.get("Quantity", ""),
                         it.get("Filter Type", "") or "—",
                         size,
+                        _pn.format_sqm(area) if area > 0 else "—",
                         it.get("Media Type", "") or "—",
+                        it.get("Part Number", "") or "—",
                         it.get("Notes", ""),
                         it.get("_source_text", "")))
 
@@ -3056,6 +3194,9 @@ class ModernOrderApp(tk.Frame):
         self._custom_media: list = list(self._settings.get("custom_media_types", []))
         self._custom_filter_types: list = list(
             self._settings.get("custom_filter_types", []))
+        # {media name: part-number code} — Carbon -> CARB, so a flat panel
+        # comes out as FPFCARB25-020.
+        self._media_codes: dict = dict(self._settings.get("media_codes", {}))
         # Presets/filter types come from the shared catalogue; start from the
         # last-known local copy so a slow or offline start still has them.
         _load_catalog_cache()
@@ -3760,7 +3901,7 @@ class ModernOrderApp(tk.Frame):
         tree_wrap.rowconfigure(0, weight=1)
         tree_wrap.columnconfigure(0, weight=1)
 
-        cols = ("qty", "type", "size", "media", "options", "notes")
+        cols = ("qty", "type", "size", "sqm", "media", "partno", "options", "notes")
         self.tree = ttk.Treeview(tree_wrap, columns=cols,
                                   show="tree headings",
                                   style="TAF.Treeview",
@@ -3773,7 +3914,9 @@ class ModernOrderApp(tk.Frame):
             "qty":     ("Qty",          50, "center"),
             "type":    ("Type",        138, "w"),
             "size":    ("Dimensions",  148, "center"),
+            "sqm":     ("m²",           62, "center"),
             "media":   ("Media",        72, "center"),
+            "partno":  ("Part Number", 150, "w"),
             "options": ("Options",     175, "w"),
             "notes":   ("Notes",       999, "w"),
         }
@@ -4697,7 +4840,14 @@ class ModernOrderApp(tk.Frame):
                                            "email", "phone", "abn", "delivery_city"))]
         return shown[idx] if idx < len(shown) else None
 
-    def _open_customer_dialog(self, edit: bool = False):
+    def _open_customer_dialog(self, edit: bool = False, prefill: dict = None,
+                              on_saved=None):
+        """Add or edit a customer.
+
+        `prefill` seeds a new profile from a purchase order, and `on_saved`
+        receives the saved record — that is how the review screen turns an
+        unrecognised branch into a profile without leaving the import.
+        """
         cust      = self._get_selected_customer() if edit else None
         if edit and cust is None:
             messagebox.showinfo("Edit Customer", "Select a customer first.")
@@ -4742,7 +4892,7 @@ class ModernOrderApp(tk.Frame):
         bcan.bind("<Leave>", lambda e: bcan.unbind_all("<MouseWheel>"))
         body.columnconfigure(1, weight=1)
 
-        g = cust or {}
+        g = cust or prefill or {}
 
         def _sec(text):
             """Section heading divider."""
@@ -4782,10 +4932,29 @@ class ModernOrderApp(tk.Frame):
         v_web    = tk.StringVar(value=g.get("website", ""))
         _row_f("Name *",        v_name)
         _row_f("Short Name",    v_short)
-        tk.Label(body, text="Used in dropdowns and short references.",
+        tk.Label(body, text='Goes on the order, e.g. "CAS - Bells Creek". One per branch.',
                  bg=CBG, fg=CMU, font=(FAM, 7)).grid(
             row=_row-1, column=2, sticky="w", padx=6)
         _row_f("Legal Name",    v_legal)
+
+        # Delivery region and job-number wording — both go onto every order
+        # imported for this branch.
+        v_region = tk.StringVar(value=g.get("region", ""))
+        tk.Label(body, text="Region", bg=CBG, fg=CTX, font=F_BODY,
+                 anchor="w").grid(row=_row, column=0, sticky="w", pady=4)
+        _rg = ttk.Combobox(body, textvariable=v_region, state="readonly",
+                           values=[""] + list(_pn.REGION_NAMES))
+        _rg.grid(row=_row, column=1, sticky="ew", pady=4)
+        tk.Label(body, text="Used as Location on their orders.",
+                 bg=CBG, fg=CMU, font=(FAM, 7)).grid(
+            row=_row, column=2, sticky="w", padx=6)
+        _row += 1
+
+        v_joblbl = tk.StringVar(value=g.get("job_number_label", ""))
+        _row_f("Job Number After", v_joblbl)
+        tk.Label(body, text='What precedes their job number, e.g. "Our Reference:".',
+                 bg=CBG, fg=CMU, font=(FAM, 7)).grid(
+            row=_row-1, column=2, sticky="w", padx=6)
         _row_f("ABN",           v_abn)
         _row_f("Website",       v_web)
 
@@ -4915,6 +5084,8 @@ class ModernOrderApp(tk.Frame):
             data = {
                 "name":             name,
                 "short_name":       v_short.get().strip(),
+                "region":           v_region.get().strip(),
+                "job_number_label": v_joblbl.get().strip(),
                 "legal_name":       v_legal.get().strip(),
                 "abn":              v_abn.get().strip(),
                 "website":          v_web.get().strip(),
@@ -4942,15 +5113,21 @@ class ModernOrderApp(tk.Frame):
             }
             try:
                 if is_new:
-                    _db.create_customer(data)
+                    saved  = _db.create_customer(data) or dict(data)
                     action = "customer_created"
                 else:
                     _db.update_customer(cust["id"], data)
+                    saved  = {**cust, **data}
                     action = "customer_updated"
                 _db.log_action(action, f"Customer: {name}  ABN: {v_abn.get().strip()}")
                 self.status_var.set(f"{'Created' if is_new else 'Updated'}: {name}")
                 dlg.destroy()
-                self._refresh_customers_list()
+                try:
+                    self._refresh_customers_list()
+                except Exception:
+                    pass          # Customers tab may not be built yet
+                if on_saved:
+                    on_saved(saved)
             except Exception as exc:
                 err_lbl.config(text=f"Error: {exc}")
 
@@ -5967,7 +6144,9 @@ class ModernOrderApp(tk.Frame):
         flat_btn(tb, "Move Up",     lambda: self._move_media(-1),
                  bg=CNE, pady=5, padx=10, font=F_BODY).pack(side="left", padx=(0, 6))
         flat_btn(tb, "Move Down",   lambda: self._move_media(1),
-                 bg=CNE, pady=5, padx=10, font=F_BODY).pack(side="left")
+                 bg=CNE, pady=5, padx=10, font=F_BODY).pack(side="left", padx=(0, 6))
+        flat_btn(tb, "Part No. Code", self._edit_media_code,
+                 bg=CA2, pady=5, padx=10, font=F_BODY).pack(side="left")
 
         self._refresh_media_list()
 
@@ -6339,10 +6518,13 @@ class ModernOrderApp(tk.Frame):
                 pass  # fall back to locally cached list
 
         self.media_lb.delete(0, "end")
+        def _lbl(mt, suffix=""):
+            code = _pn.media_code(mt, self._media_codes)
+            return f"  {mt}{suffix}   →  {code}" if code else f"  {mt}{suffix}"
         for mt in DEFAULT_MEDIA_TYPES:
-            self.media_lb.insert("end", f"  {mt}  (built-in)")
+            self.media_lb.insert("end", _lbl(mt, "  (built-in)"))
         for mt in self._custom_media:
-            self.media_lb.insert("end", f"  {mt}")
+            self.media_lb.insert("end", _lbl(mt))
         n_default = len(DEFAULT_MEDIA_TYPES)
         for i in range(n_default):
             self.media_lb.itemconfig(i, fg=CMU)
@@ -6497,6 +6679,41 @@ class ModernOrderApp(tk.Frame):
         self._refresh_media_list(_reload_db=False)
         self.status_var.set(f'Media type "{name}" deleted.')
 
+    def _edit_media_code(self):
+        """Set the part-number code for a media type: Carbon -> CARB, so a
+        flat panel comes out as FPFCARB25-020."""
+        idx = self._get_selected_media_index()
+        if idx is None:
+            messagebox.showinfo("Part Number Code",
+                                "Select a media type first.")
+            return
+        names = list(DEFAULT_MEDIA_TYPES) + list(self._custom_media)
+        if idx >= len(names):
+            return
+        name = names[idx]
+        current = _pn.media_code(name, self._media_codes)
+        new = self._prompt_media_name(
+            title=f"Part Number Code for {name}", initial=current)
+        if not new or new == current:
+            return
+        self._media_codes[name] = new
+        self._settings["media_codes"] = self._media_codes
+        _save_settings(self._settings)
+        if _db.is_ready() and _db.current_user() and name in self._custom_media:
+            try:
+                _db.set_media_code(name, new)
+            except Exception as exc:
+                messagebox.showwarning(
+                    "Saved Locally Only",
+                    f'"{name}" now uses code {new} on this PC, but it could '
+                    f"not be shared:\n{exc}\n\n"
+                    "If this mentions a missing column, run "
+                    "migrate_customer_profiles.sql in the Supabase SQL Editor.")
+        self._stamp_all_items()
+        self._refresh_items_tree()
+        self._refresh_media_list(_reload_db=False)
+        self.status_var.set(f'{name} now uses part-number code {new}.')
+
     def _move_media(self, delta: int):
         ci = self._selected_custom_index()
         if ci is None:
@@ -6518,6 +6735,33 @@ class ModernOrderApp(tk.Frame):
         self.media_lb.selection_set(new_lb_idx)
         self.media_lb.see(new_lb_idx)
 
+    # ── Square metreage and part numbers ──────────────────────────────────
+
+    def _stamp_item(self, item: dict) -> dict:
+        """Recalculate a line's square metreage and part number.
+
+        Called wherever an item is created, edited or loaded, so the two can
+        never drift from the dimensions actually on the line.
+        """
+        return _pn.apply_derived_fields(item, self._media_codes)
+
+    def _stamp_all_items(self):
+        for it in self.items:
+            self._stamp_item(it)
+
+    def _refresh_media_codes(self):
+        """Pull the part-number codes for the shared media list."""
+        if not (_db.is_ready() and _db.current_user()):
+            return
+        try:
+            codes = _db.get_media_codes()
+        except Exception:
+            return          # column not migrated yet — defaults still apply
+        if codes:
+            self._media_codes = codes
+            self._settings["media_codes"] = codes
+            _save_settings(self._settings)
+
     def _persist_media(self):
         self._settings["custom_media_types"] = self._custom_media
         _save_settings(self._settings)
@@ -6537,6 +6781,7 @@ class ModernOrderApp(tk.Frame):
                 return   # offline or migration not run — keep cached values
             def _apply():
                 _apply_catalog(data)
+                self._refresh_media_codes()
                 cft = data.get("custom_filter_types")
                 if isinstance(cft, list):
                     self._custom_filter_types = [str(x) for x in cft]
@@ -7238,6 +7483,7 @@ class ModernOrderApp(tk.Frame):
         self.master.wait_window(dlg)
         if dlg.result:
             dlg.result["item_kind"] = "filter"
+            self._stamp_item(dlg.result)
             self.items.append(dlg.result)
             self._refresh_items_tree()
             n = len(self.items)
@@ -7307,6 +7553,7 @@ class ModernOrderApp(tk.Frame):
         self.master.wait_window(dlg)
         if dlg.result:
             dlg.result["item_kind"] = item.get("item_kind", "filter")
+            self._stamp_item(dlg.result)
             self.items[idx] = dlg.result
             self._refresh_items_tree()
             self.tree.selection_set(str(idx))
@@ -7365,6 +7612,8 @@ class ModernOrderApp(tk.Frame):
                 notes    = (item.get("notes", "") or "")[:140]
                 kind_lbl = "Bag/Roll"
                 tag      = "bag_e" if i % 2 == 0 else "bag_o"
+                sqm      = "—"
+                partno   = item.get("part_number", "") or "—"
             else:
                 qty   = item.get("Quantity", "")
                 pt    = item.get("Filter Type", "")
@@ -7385,11 +7634,14 @@ class ModernOrderApp(tk.Frame):
                 notes    = notes[:140]
                 kind_lbl = "Filter"
                 tag      = "even" if i % 2 == 0 else "odd"
+                area     = _pn.effective_area(item)
+                sqm      = _pn.format_sqm(area) if area > 0 else "—"
+                partno   = item.get("Part Number", "") or "—"
 
             _kb = _type_badge(kind_lbl)
             self.tree.insert("", "end", iid=str(i), tags=(tag,),
                 text=("" if _kb else kind_lbl), image=(_kb or ""),
-                values=(qty, pt, size, media, opt_str, notes))
+                values=(qty, pt, size, sqm, media, partno, opt_str, notes))
         n = len(self.items)
         self._items_card.set_header_right(f"{n} item{'s' if n != 1 else ''}")
         self._schedule_draft_save()
@@ -7420,7 +7672,10 @@ class ModernOrderApp(tk.Frame):
 
         def _work():
             try:
-                ready = _po_import.fetch_new_batches(APP_DIR, self._pair_id())
+                ready = _po_import.fetch_new_batches(
+                    APP_DIR, self._pair_id(),
+                    media_types=self.all_media_types,
+                    job_labels=self._job_labels())
             except Exception:
                 ready = []
 
@@ -7632,7 +7887,10 @@ class ModernOrderApp(tk.Frame):
 
             def _work():
                 try:
-                    ready = _po_import.fetch_new_batches(APP_DIR, self._pair_id())
+                    ready = _po_import.fetch_new_batches(
+                    APP_DIR, self._pair_id(),
+                    media_types=self.all_media_types,
+                    job_labels=self._job_labels())
                 except Exception:
                     ready = []
 
@@ -7747,7 +8005,10 @@ class ModernOrderApp(tk.Frame):
 
         def _work():
             try:
-                orders = _po_import.extract_orders(list(paths))
+                orders = _po_import.extract_orders(
+                    list(paths),
+                    media_types=self.all_media_types,
+                    job_labels=self._job_labels())
                 err = ""
             except _po_import.POImportError as exc:
                 orders, err = [], str(exc)
@@ -7775,6 +8036,124 @@ class ModernOrderApp(tk.Frame):
 
         threading.Thread(target=_work, daemon=True).start()
 
+    def _job_labels(self) -> list:
+        """The wordings customers put in front of their job numbers.
+
+        Every company labels it differently — "JOB:", "Our Reference:" — so the
+        reader is told the ones we know rather than left to guess.
+        """
+        labels = []
+        try:
+            for c in _db.get_customers(active_only=True):
+                lbl = (c.get("job_number_label") or "").strip()
+                if lbl and lbl not in labels:
+                    labels.append(lbl)
+        except Exception:
+            pass
+        return labels
+
+    def _create_customer_for_order(self, order, done=None):
+        """Create (or link) the branch profile an imported order needs.
+
+        Seeded from the purchase order, so the legal name and address are
+        already filled in and only the short name and region need choosing.
+        The wording seen on the order is remembered against the profile, so
+        the next order from that branch matches without asking.
+        """
+        po_name = (order.get("po_customer_name") or "").strip()
+        po_addr = (order.get("po_customer_address") or "").strip()
+        prefill = {
+            "legal_name":        po_name,
+            "name":              po_name,
+            "delivery_address1": po_addr,
+            "contact_person":    (order["header"].get("Attention") or "").strip(),
+        }
+
+        def _saved(cust):
+            for wording in (po_name, po_addr):
+                if wording and cust.get("id"):
+                    try:
+                        _db.add_customer_alias(cust["id"], wording)
+                    except Exception:
+                        pass
+            order["customer"] = cust
+            order["header"]["Customer Name"] = (
+                (cust.get("short_name") or "").strip() or (cust.get("name") or "").strip())
+            region = "Pick Up" if order.get("pickup") else (cust.get("region") or "").strip()
+            if region:
+                order["header"]["Location"] = region
+            if done:
+                done()
+
+        self._open_customer_dialog(edit=False, prefill=prefill, on_saved=_saved)
+
+    # ── Turning a read purchase order into a TAF order ────────────────────
+
+    def _resolve_customer(self, order, customers=None) -> bool:
+        """Point an imported order at a customer branch profile.
+
+        The purchase order says "Complete Air Supply Pty Ltd" at a Bells Creek
+        address; the order needs to say "CAS - Bells Creek" in "Sunshine
+        Coast". Both come from the branch's profile, so an order with no
+        profile is held back rather than written under the legal name.
+        """
+        try:
+            people = customers if customers is not None else _db.get_customers(active_only=True)
+            match = _db.match_customer(order.get("po_customer_name", ""),
+                                       order.get("po_customer_address", ""),
+                                       people)
+        except Exception:
+            match = None
+        order["customer"] = match
+        if not match:
+            return False
+        order["header"]["Customer Name"] = (
+            (match.get("short_name") or "").strip() or (match.get("name") or "").strip())
+        # A stated pick-up beats the branch's usual region.
+        region = "Pick Up" if order.get("pickup") else (match.get("region") or "").strip()
+        if region:
+            order["header"]["Location"] = region
+        return True
+
+    def _apply_order_rules(self, order) -> list:
+        """Settle media and derive part numbers. Returns unresolved media."""
+        unknown = []
+        for it in order.get("items", []):
+            miss = _pn.apply_media_rules(it, self.all_media_types)
+            if miss and miss not in unknown:
+                unknown.append(miss)
+            self._stamp_item(it)
+        return unknown
+
+    def _resolve_unknown_media(self, names) -> bool:
+        """Ask what to do about a grade that isn't on the media list.
+
+        Returns False if the user backed out, so the caller can stop rather
+        than generate an order against a media type nobody agreed to.
+        """
+        for name in names:
+            dlg = _UnknownMediaDialog(self.master, name, self.all_media_types)
+            self.master.wait_window(dlg)
+            if not dlg.result:
+                return False
+            action, value = dlg.result
+            if action == "create":
+                if _db.is_ready() and _db.current_user():
+                    try:
+                        _db.add_media_type(name)
+                    except Exception as exc:
+                        messagebox.showerror(
+                            "Couldn't Add Media",
+                            f'"{name}" could not be added to the shared list:\n{exc}')
+                        return False
+                if name not in self._custom_media:
+                    self._custom_media.append(name)
+                self._persist_media()
+                self.status_var.set(f'Media type "{name}" added.')
+            else:
+                self._media_swaps[name] = value
+        return True
+
     def _review_imported_orders(self, orders, on_finish=None):
         """Show the review screen, then generate whatever was approved.
 
@@ -7786,9 +8165,41 @@ class ModernOrderApp(tk.Frame):
         n = len(orders)
         self.status_var.set(
             f"Read {n} purchase order{'s' if n != 1 else ''} — check them before generating.")
+
+        # Settle media grades first: a grade nobody has agreed to must not
+        # reach a part number.
+        self._media_swaps = {}
+        unknown = []
+        for o in orders:
+            for miss in self._apply_order_rules(o):
+                if miss not in unknown:
+                    unknown.append(miss)
+        if unknown and not self._resolve_unknown_media(unknown):
+            self.status_var.set("Import cancelled — media not settled.")
+            if on_finish:
+                on_finish()
+            return
+        if self._media_swaps:
+            for o in orders:
+                for it in o.get("items", []):
+                    swap = self._media_swaps.get((it.get("Media Type") or "").strip())
+                    if swap:
+                        it["Media Type"] = swap
+        for o in orders:
+            self._apply_order_rules(o)
+
+        # Then point each order at its customer branch.
+        try:
+            people = _db.get_customers(active_only=True)
+        except Exception:
+            people = []
+        for o in orders:
+            self._resolve_customer(o, people)
+
         dlg = POReviewDialog(self.master, orders,
                              media_types=self.all_media_types,
-                             filter_types=self.all_filter_types)
+                             filter_types=self.all_filter_types,
+                             on_create_customer=self._create_customer_for_order)
         self.master.wait_window(dlg)
         if not dlg.result:
             self.status_var.set("Purchase order import cancelled.")
@@ -7848,6 +8259,7 @@ class ModernOrderApp(tk.Frame):
         self.items = [dict(i) for i in items]
         for it in self.items:
             it.setdefault("item_kind", "bag" if "product_type" in it else "filter")
+        self._stamp_all_items()
         self._refresh_items_tree()
         self._show_tab("new_order")
         self.master.update_idletasks()
@@ -7918,6 +8330,8 @@ class ModernOrderApp(tk.Frame):
         # (covers items loaded/duplicated from older orders too).
         for _it in self.items:
             apply_stepped_filter_note(_it)
+        # Re-derive square metreage and part numbers from the final dimensions.
+        self._stamp_all_items()
 
         filter_items = [i for i in self.items if i.get("item_kind", "filter") != "bag"]
         bag_items    = [i for i in self.items if i.get("item_kind") == "bag"]
