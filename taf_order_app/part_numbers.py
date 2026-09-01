@@ -33,6 +33,15 @@ FIXED_PART_NUMBER_STEMS = {
     "flyscreen":      "FPF09",      # always the 9mm flyscreen channel
 }
 
+# The one media that changes a fixed-stem code. E-mesh is only ever used on a
+# flyscreen, and a flyscreen made in it takes an -M on the end:
+#     FPF09-040   ->   FPF09-040-M
+# Keyed on the media name with punctuation stripped, so "E-MESH", "E-Mesh" and
+# "EMESH" all match.
+FIXED_STEM_MEDIA_SUFFIX = {
+    ("flyscreen", "EMESH"): "-M",
+}
+
 # A header is a standard flat panel made to sit on top of a bag filter. The
 # panel is larger than the bag face it covers:
 HEADER_PANEL_FOR_BAG = {
@@ -135,10 +144,13 @@ def part_number(item: Dict[str, Any],
     if nominal <= 0:
         return ""
 
-    # Fixed-stem types first: only made one way, so nothing varies but the area.
+    # Fixed-stem types first: only made one way, so nothing varies but the area
+    # (and, for a flyscreen in e-mesh, a trailing -M).
     stem = FIXED_PART_NUMBER_STEMS.get(ftype)
     if stem:
-        return f"{stem}-{sqm_suffix(nominal)}"
+        media_key = re.sub(r"[^A-Za-z0-9]", "", item.get("Media Type") or "").upper()
+        tail = FIXED_STEM_MEDIA_SUFFIX.get((ftype, media_key), "")
+        return f"{stem}-{sqm_suffix(nominal)}{tail}"
 
     prefix = PART_NUMBER_PREFIXES.get(ftype)
     if not prefix:
