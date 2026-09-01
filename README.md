@@ -120,24 +120,27 @@ office app. Requires purchase-order import above.
 
 1. Run `migrate_po_inbox.sql` in the **SQL Editor** — the private bucket the
    photos land in.
-2. Run `migrate_phone_page.sql` in the **SQL Editor** — the public bucket that
-   hosts the page phones open.
+2. Turn on **GitHub Pages** once: repo → **Settings** → **Pages** → Source
+   *Deploy from a branch*, branch `main`, folder **/docs** → Save. This hosts
+   the page phones open, at
+   `https://<owner>.github.io/<repo>/phone/`.
 3. Link a phone: in the app, **New Order** → **Import Purchase Order** →
-   **Photograph it on a phone**. The app publishes the page on first use and
-   shows a QR code; scan it with the phone camera. Add the page to the phone's
-   home screen and it behaves like an app. Staff sign in with their normal TAF
-   login the first time.
+   **Photograph it on a phone**, and scan the QR code. Add the page to the
+   phone's home screen and it behaves like an app. Staff sign in with their
+   normal TAF login the first time.
 
-The QR carries a pairing id, so photos from that phone come back to the PC that
-showed the code rather than to whichever office PC sweeps first.
+The QR carries the project URL, the publishable key and a pairing id, so the
+page itself holds no configuration and photos come back to the PC that showed
+the code rather than to whichever office PC sweeps first. The phone remembers
+all of it, and the app strips the query string from the address bar after the
+first load.
 
-The page is published to Storage rather than served by an Edge Function on
-purpose: Storage returns exactly the content type set at upload, so the page
-always reaches the phone as HTML. Served from a function it arrived labelled
-`text/plain`, which browsers never sniff into HTML, so it showed up as
-unstyled source. The page contains only markup and the anon (publishable) key
-that already ships inside the desktop app; signing in happens inside it and
-row-level security governs what a signed-in person may do.
+**Why GitHub Pages and not Supabase?** Supabase serves anything it hosts as
+`text/plain` with `Content-Security-Policy: default-src 'none'; sandbox` and
+`X-Content-Type-Options: nosniff` — a deliberate anti-XSS policy. A page served
+from an Edge Function or from Storage therefore arrives on the phone as
+unstyled source with every script blocked, whatever content type the upload
+asked for. Pages serves real HTML.
 
 The office app sweeps for new photos every minute, reads them in the
 background, and shows a **📱 Phone Inbox** button on the New Order tab when
@@ -200,11 +203,11 @@ taf_order_app/
   bag_filler.py            Word worksheet filling (COM)
   updater.py               In-app auto-update (APP_VERSION lives here)
   po_import.py             Purchase-order import + phone inbox
-  phone_page.py            The page phones open (published to Storage)
   user_management.py       Roles & user admin
   models.py / validation.py
 fonts/                     Bundled Public Sans (OFL)
 *.sql                      Schema + migrations
+docs/phone/index.html      The page phones open (served by GitHub Pages)
 supabase/functions/        Edge Functions (extract-orders)
 TAFOrderEntry.spec         PyInstaller build spec
 installer.iss              Inno Setup installer script

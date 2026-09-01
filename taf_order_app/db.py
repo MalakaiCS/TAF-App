@@ -855,41 +855,12 @@ def can_manage_stock() -> bool:
 
 
 # ── Phone upload page ────────────────────────────────────────────────────────
-# The page phones open lives in a public Storage bucket, not behind an Edge
-# Function: Storage serves exactly the content type set at upload, so the page
-# always arrives as HTML.
-
-PHONE_PAGE_BUCKET = "phone-page"
-PHONE_PAGE_FILE = "index.html"
-
-
-def phone_page_url() -> str:
-    return (f"{SUPABASE_URL}/storage/v1/object/public/"
-            f"{PHONE_PAGE_BUCKET}/{PHONE_PAGE_FILE}")
-
-
-def publish_phone_page(html: str) -> str:
-    """Upload the phone page and return its public URL.
-
-    Raises if the bucket is missing (migrate_phone_page.sql not run) so the
-    caller can say exactly what needs doing.
-    """
-    store = get_client().storage.from_(PHONE_PAGE_BUCKET)
-    data = html.encode("utf-8")
-    try:
-        store.remove([PHONE_PAGE_FILE])
-    except Exception:
-        pass
-    store.upload(
-        PHONE_PAGE_FILE, data,
-        file_options={
-            # The whole point of publishing here: an explicit, unambiguous
-            # content type that reaches the phone intact.
-            "content-type": "text/html; charset=utf-8",
-            "cache-control": "60",
-            "upsert": "true",
-        })
-    return phone_page_url()
+# The page phones open is NOT hosted on Supabase. Supabase serves anything it
+# hosts as text/plain with "Content-Security-Policy: default-src 'none';
+# sandbox" and X-Content-Type-Options: nosniff -- a deliberate anti-XSS policy
+# -- so a page served from an Edge Function or from Storage arrives on the
+# phone as unstyled source with every script blocked. It lives on GitHub Pages
+# (docs/phone/index.html); the app only supplies the URL and key via the QR.
 
 
 def current_anon_key() -> str:

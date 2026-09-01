@@ -7501,26 +7501,42 @@ class ModernOrderApp(tk.Frame):
         pc = os.environ.get("COMPUTERNAME") or platform.node() or "office PC"
         return f"{who} ({pc})" if who else pc
 
-    def _publish_phone_page(self) -> str:
-        """Make sure the phone page is live, and return the URL to open.
+    def _phone_page_base(self) -> str:
+        """Where the phone page is hosted: GitHub Pages, from this repo.
 
-        Published to public Storage rather than served by an Edge Function:
-        Storage returns exactly the content type set at upload, so the page
-        always reaches the phone as HTML.
+        Not Supabase. Supabase serves anything it hosts as text/plain with
+        "Content-Security-Policy: default-src 'none'; sandbox" and nosniff — a
+        deliberate anti-XSS policy — so a page served from an Edge Function or
+        from Storage arrives on the phone as unstyled source with every script
+        blocked.
         """
-        from taf_order_app import phone_page as _pp
-        want = _pp.PAGE_VERSION
-        if self._settings.get("phone_page_version") != want:
-            html = _pp.render(_db.SUPABASE_URL, _db.current_anon_key())
-            _db.publish_phone_page(html)          # raises → caller explains
-            self._settings["phone_page_version"] = want
-            _save_settings(self._settings)
-        return _db.phone_page_url()
+        override = (self._settings.get("phone_page_url") or "").strip()
+        if override:
+            return override.rstrip("/")
+        try:
+            from taf_order_app.updater import GITHUB_REPO
+            owner, repo = GITHUB_REPO.split("/", 1)
+        except Exception:
+            owner, repo = "MalakaiCS", "TAF-App"
+        return f"https://{owner.lower()}.github.io/{repo}/phone/"
 
     def _pair_url(self) -> str:
+        """The address encoded in the QR code.
+
+        Carries everything the phone needs — project, publishable key and this
+        PC's pairing id — so the page itself holds no configuration and the
+        phone remembers it after the first scan.
+        """
         from urllib.parse import urlencode
-        q = urlencode({"p": self._pair_id(), "n": self._pair_label()})
-        return f"{self._publish_phone_page()}?{q}"
+        q = urlencode({
+            "u": _db.SUPABASE_URL,
+            "k": _db.current_anon_key(),
+            "p": self._pair_id(),
+            "n": self._pair_label(),
+        })
+        base = self._phone_page_base()
+        joiner = "" if base.endswith("/") else "/"
+        return f"{base}{joiner}?{q}"
 
     def _show_phone_qr(self):
         """Show the QR code a phone scans to link to this PC, and wait for
@@ -7534,20 +7550,13 @@ class ModernOrderApp(tk.Frame):
                 f"Couldn't build the QR code:\n{exc}")
             return
 
-        self.status_var.set("Publishing the phone page…")
-        self.master.update_idletasks()
         try:
             url = self._pair_url()
         except Exception as exc:
-            self.status_var.set("Phone page not published.")
             messagebox.showerror(
-                "Phone Page Not Set Up",
-                f"Couldn't publish the page phones open:\n{exc}\n\n"
-                "If this mentions a missing bucket, run "
-                "migrate_phone_page.sql in the Supabase SQL Editor "
-                "(supabase.com → your project → SQL Editor → New query).")
+                "Phone Page Unavailable",
+                f"Couldn't build the phone link:\n{exc}")
             return
-        self.status_var.set("")
         dlg = tk.Toplevel(self.master)
         dlg.title("Send from Phone")
         dlg.transient(self.master)
@@ -7571,6 +7580,10 @@ class ModernOrderApp(tk.Frame):
             # qrcode returns a thin wrapper; unwrap it so ImageTk always gets
             # a real PIL image regardless of the installed version.
             img = (made.get_image() if hasattr(made, "get_image") else made).convert("RGB")
+            # A long publishable key makes a denser code; scale to a fixed size
+            # so the dialog stays the same shape whatever the key's length.
+            from PIL import Image as _PILImage
+            img = img.resize((340, 340), _PILImage.NEAREST)
             photo = ImageTk.PhotoImage(img)
             lbl = tk.Label(body, image=photo, bg=CBG, bd=1, relief="solid")
             lbl.image = photo          # keep a reference or Tk drops it
