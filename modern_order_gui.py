@@ -4673,6 +4673,8 @@ class ModernOrderApp(tk.Frame):
                  bg=CNE, pady=7).pack(side="left", padx=(0, 8))
         flat_btn(bot, "💲 Quote",             self._quote_prev_order,
                  bg=CA2, pady=7).pack(side="left", padx=(0, 8))
+        flat_btn(bot, "🚚 Freight / Delay",   self._edit_order_freight,
+                 bg=CNE, pady=7).pack(side="left", padx=(0, 8))
         flat_btn(bot, "Delete Order",          self._delete_prev_order,
                  bg=CRD, pady=7).pack(side="right", padx=(8, 0))
         flat_btn(bot, "Archive Order",         self._archive_prev_order,
@@ -4754,7 +4756,9 @@ class ModernOrderApp(tk.Frame):
         flat_btn(bot, "✓ Mark Selected Dispatched", self._mark_dispatched,
                  bg=CA, pady=7).pack(side="left", padx=(0, 8))
         flat_btn(bot, "View Items", self._view_delivery_items, bg=CNE,
-                 pady=7).pack(side="left")
+                 pady=7).pack(side="left", padx=(0, 8))
+        flat_btn(bot, "🚚 Freight / Delay", self._edit_delivery_freight,
+                 bg=CA2, pady=7).pack(side="left")
 
     def _refresh_delivery_run(self):
         """Rebuild the run from the orders already loaded, off the main thread."""
@@ -4901,6 +4905,129 @@ class ModernOrderApp(tk.Frame):
                 "until they sync.")
         self.status_var.set(
             f"{done} order{'s' if done != 1 else ''} marked dispatched.")
+
+    def _edit_delivery_freight(self):
+        orders = self._selected_delivery_orders()
+        if not orders:
+            messagebox.showinfo("Freight / Delay", "Select an order first.")
+            return
+        self._freight_dialog(orders[0], on_saved=self._refresh_delivery_run)
+
+    def _edit_order_freight(self):
+        row = self._get_selected_order()
+        if not row:
+            messagebox.showinfo("Freight / Delay", "Select an order first.")
+            return
+        self._freight_dialog(row)
+
+    def _freight_dialog(self, row, on_saved=None):
+        """Record how an order is travelling and anything holding it up.
+
+        All of it shows on the customer's portal. "Where is it" and "why is
+        it late" are the two questions a delivery generates, and both are
+        better answered before they are asked.
+        """
+        order_id = row.get("db_id") or row.get("id")
+        if not order_id:
+            messagebox.showinfo(
+                "Freight / Delay",
+                "This order is only saved on this PC. It needs to reach the "
+                "shared database before freight details can be added.")
+            return
+        try:
+            current = _db.get_order_freight(order_id)
+        except Exception:
+            current = {}
+
+        dlg = tk.Toplevel(self.master)
+        dlg.title("Freight / Delay")
+        dlg.configure(bg=CBG)
+        dlg.transient(self.master)
+        dlg.grab_set()
+
+        hdr = tk.Frame(dlg, bg=CA, padx=16, pady=10)
+        hdr.pack(fill="x")
+        tk.Label(hdr, text=f"Order {row.get('order_no', '')} — "
+                           f"{row.get('customer', '')}",
+                 bg=CA, fg="white", font=F_BOLD).pack(anchor="w")
+        tk.Label(hdr, text="The customer sees all of this on their portal.",
+                 bg=CA, fg="#A9CCE3", font=F_SM).pack(anchor="w")
+
+        body = tk.Frame(dlg, bg=CBG, padx=16, pady=14)
+        body.pack(fill="both", expand=True)
+        body.columnconfigure(1, weight=1)
+
+        v_carrier = tk.StringVar(value=current.get("carrier", ""))
+        v_number = tk.StringVar(value=current.get("number", ""))
+        v_url = tk.StringVar(value=current.get("url", ""))
+        v_expected = tk.StringVar(value=current.get("expected", ""))
+        v_note = current.get("note", "")
+
+        tk.Label(body, text="Carrier", bg=CBG, fg=CTX, font=F_BODY,
+                 anchor="w").grid(row=0, column=0, sticky="w", pady=4)
+        ttk.Combobox(body, textvariable=v_carrier,
+                     values=list(_db.FREIGHT_CARRIERS), state="readonly",
+                     width=22).grid(row=0, column=1, sticky="w", padx=(10, 0))
+
+        for r, (label, var, hint) in enumerate((
+                ("Consignment number", v_number, "As it appears on the connote"),
+                ("Tracking link", v_url,
+                 "Optional — filled in from the carrier if left blank"),
+                ("Now expected", v_expected, "Optional — e.g. 09/09/26")), start=1):
+            tk.Label(body, text=label, bg=CBG, fg=CTX, font=F_BODY,
+                     anchor="w").grid(row=r, column=0, sticky="w", pady=4)
+            field_entry(body, textvariable=var, width=44).grid(
+                row=r, column=1, sticky="ew", padx=(10, 0), pady=4)
+            tk.Label(body, text=hint, bg=CBG, fg=CMU, font=F_SM).grid(
+                row=r, column=2, sticky="w", padx=(10, 0))
+
+        tk.Label(body, text="What to tell them", bg=CBG, fg=CTX, font=F_BODY,
+                 anchor="w").grid(row=4, column=0, sticky="nw", pady=(10, 4))
+        note = tk.Text(body, height=4, wrap="word", font=F_BODY, bg=CFD,
+                       fg=CTX, relief="flat", bd=8, highlightthickness=1,
+                       highlightbackground=CSP)
+        note.grid(row=4, column=1, columnspan=2, sticky="ew",
+                  padx=(10, 0), pady=(10, 4))
+        note.insert("1.0", v_note)
+        tk.Label(body,
+                 text="Written in plain words for the customer — say what is "
+                      "holding it up and when it will be ready. Leave it blank "
+                      "if nothing is wrong.",
+                 bg=CBG, fg=CMU, font=F_SM, justify="left",
+                 wraplength=560).grid(row=5, column=1, columnspan=2,
+                                      sticky="w", padx=(10, 0))
+
+        def _save():
+            try:
+                _db.set_order_freight(
+                    order_id, v_carrier.get(), v_number.get().strip(),
+                    v_url.get().strip(), note.get("1.0", "end").strip(),
+                    v_expected.get().strip())
+                _db.log_action(
+                    "order_freight",
+                    f"O/N {row.get('order_no','')}: "
+                    f"{v_carrier.get()} {v_number.get().strip()}".strip())
+            except Exception as exc:
+                messagebox.showerror("Freight / Delay",
+                                     f"Could not save:\n{exc}", parent=dlg)
+                return
+            self._tab_loaded.pop("prev_orders", None)
+            self._all_orders_data = []
+            dlg.destroy()
+            if on_saved:
+                on_saved()
+            self.status_var.set(
+                f"Freight details saved for {row.get('order_no','')}.")
+
+        foot = tk.Frame(dlg, bg=CBG, padx=16, pady=10)
+        foot.pack(fill="x")
+        flat_btn(foot, "Cancel", dlg.destroy, bg=CNE,
+                 pady=7).pack(side="right", padx=(8, 0))
+        flat_btn(foot, "Save", _save, bg=CGR, pady=7).pack(side="right")
+        dlg.bind("<Escape>", lambda _e: dlg.destroy())
+        W, H = 760, 400
+        dlg.geometry(f"{W}x{H}+{self.master.winfo_rootx() + 90}"
+                     f"+{self.master.winfo_rooty() + 80}")
 
     def _view_delivery_items(self):
         """What's actually in the order about to be loaded."""

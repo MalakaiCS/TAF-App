@@ -46,6 +46,10 @@ log, stock management and a customer database.
 - **Customer portal** — send a customer a link and they see their own orders
   and what stage each is at (received / being made / ready for delivery /
   ready for pick up / delivered), their quotes, and their account details.
+  Opening an order shows what's on it, the consignment number with a tracking
+  link when it's gone out on freight, and anything holding it up. Customers
+  who've lost their link can sign in with their company email plus one of
+  their own order numbers.
 - **Dashboard** — orders-per-week, order-type and busiest-customer charts, low
   stock alerts, and what's due.
 - **Stock** — items with images, on-hand / minimum levels, adjustments &
@@ -259,9 +263,19 @@ page won't change it - that's a phone call.
 
 ### Let customers see their orders online (optional)
 
-1. Run `migrate_staff_access.sql`, then `migrate_customer_portal.sql`.
-2. In the app: **Customers**, pick one, **Customer Portal → Create Link**. The
+1. Run `migrate_staff_access.sql`, `migrate_customer_portal.sql`, then
+   `migrate_portal_signin.sql`.
+2. **Fill in [`docs/company.js`](docs/company.js)** — phone, email, address,
+   ABN, hours, and where customers collect a pick-up. Edit it on github.com
+   and save; the pages pick it up straight away, no release needed. Anything
+   left blank is simply not shown, so a half-filled file still looks right —
+   but a customer asked to accept a quote with no phone number to ring is the
+   thing to fix first.
+3. In the app: **Customers**, pick one, **Customer Portal → Create Link**. The
    link is copied to your clipboard.
+4. Record freight against an order with **🚚 Freight / Delay**, on Previous
+   Orders or the Delivery tab. Carrier and consignment number become a
+   tracking link on their portal; the note is shown to them in your words.
 
 They see their orders with a stage on each — Received, Being made, Ready for
 delivery, Ready for pick up, Delivered, Collected — their quotes (with a link
@@ -272,6 +286,13 @@ straight through to accept one), and their account details.
 `SECURITY DEFINER` functions that take the token and return one customer's
 data. **Turn Off** stops a link working; **New Link** replaces the token,
 which invalidates every link ever sent for that account.
+
+**Signing in without the link.** Company email **plus** one of their own
+purchase order numbers. Both are asked for deliberately: an email address is
+on their letterhead and an order number is short enough to count through, so
+either alone would open an account to a stranger. Failures read the same
+whichever half was wrong, so the form can't be used to discover which emails
+or orders exist, and ten wrong tries in fifteen minutes stops the guessing.
 
 Worth knowing: the link is the credential. Anyone it is forwarded to can see
 that customer's orders — so it goes to the customer and nowhere else, and if
@@ -347,6 +368,8 @@ price_lists/               The priced catalogue (import under Settings)
 *.sql                      Schema + migrations
 docs/phone/index.html      The page phones open (served by GitHub Pages)
 docs/quote/index.html      The quote page customers open
+docs/portal/index.html     The customer portal (orders, quotes, account)
+docs/company.js            Phone, email, address, hours — fill this in
 supabase/functions/        Edge Functions (extract-orders)
 TAFOrderEntry.spec         PyInstaller build spec
 installer.iss              Inno Setup installer script

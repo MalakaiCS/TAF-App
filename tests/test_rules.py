@@ -369,3 +369,32 @@ def test_nearest_pricing_never_crosses_media_or_area():
     it = _item("V-form", "G4", 48, 595, 595)          # 0.4 m2, G4
     pn.apply_derived_fields(it)
     assert pricing.price_for_item(it, prices) == (0.0, "")
+
+
+# ── Freight tracking ────────────────────────────────────────────────────────
+
+def test_a_tracking_link_is_built_from_the_carrier():
+    from taf_order_app import db
+    url = db.tracking_url("TNT", "1234567890")
+    assert "1234567890" in url and url.startswith("https://")
+
+
+def test_a_link_typed_in_by_hand_wins():
+    # Carriers move their tracking pages; what someone actually checked beats
+    # a template that may have gone stale.
+    from taf_order_app import db
+    assert db.tracking_url("TNT", "123", "https://example/track") == \
+        "https://example/track"
+
+
+def test_no_link_rather_than_a_broken_one():
+    from taf_order_app import db
+    assert db.tracking_url("TNT", "") == ""
+    assert db.tracking_url("", "123") == ""
+    assert db.tracking_url("Other", "123") == ""      # no tracking page known
+
+
+def test_a_consignment_number_is_escaped_into_the_url():
+    from taf_order_app import db
+    url = db.tracking_url("Startrack", "AB 12/34")
+    assert " " not in url and "AB%2012%2F34" in url

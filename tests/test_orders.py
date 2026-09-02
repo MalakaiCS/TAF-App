@@ -193,3 +193,82 @@ def test_the_staff_migration_closes_the_open_policies():
     assert "ALTER COLUMN approved SET DEFAULT false" in sql
     assert "is_staff()" in sql and "is_manager()" in sql
     assert sql.count("SET search_path = public, pg_temp") >= 2
+
+
+# ── Trust and comfort on the customer-facing pages ──────────────────────────
+
+def _pages():
+    from pathlib import Path
+    root = Path(__file__).resolve().parent.parent / "docs"
+    return {name: (root / name / "index.html").read_text(encoding="utf-8")
+            for name in ("portal", "quote")}
+
+
+def test_both_pages_show_who_we_are_and_how_to_reach_us():
+    # A page asking someone to act on an emailed link, with no logo and no
+    # phone number, is indistinguishable from a phishing message.
+    for name, html in _pages().items():
+        assert "company.js" in html, name
+        assert "taf-shared.js" in html, name
+        assert 'TAF.footer(' in html, name
+        assert 'TAF.logo(' in html, name
+
+
+def test_the_contact_details_are_baked_in_not_fetched():
+    from pathlib import Path
+    shared = (Path(__file__).resolve().parent.parent / "docs"
+              / "taf-shared.js").read_text(encoding="utf-8")
+    # They must show on a broken link, where there is no token to fetch with.
+    assert "fetch(" not in shared
+    assert "never ask for card or bank details" in shared
+
+
+def test_a_blank_company_detail_is_never_printed_as_a_placeholder():
+    from pathlib import Path
+    shared = (Path(__file__).resolve().parent.parent / "docs"
+              / "taf-shared.js").read_text(encoding="utf-8")
+    # `line()` returns early on an empty value, so half-filled config still
+    # renders correctly rather than showing an empty label.
+    assert "if (!has(text)) { return; }" in shared
+
+
+def test_the_company_file_ships_with_nothing_invented():
+    from pathlib import Path
+    cfg = (Path(__file__).resolve().parent.parent / "docs"
+           / "company.js").read_text(encoding="utf-8")
+    import re
+    # Every contact field must ship empty — a wrong phone number on a
+    # customer page is worse than no phone number.
+    for field in ("phone", "email", "website", "abn", "address"):
+        assert re.search(field + r':\s*"",', cfg), f"{field} must ship blank"
+
+
+def test_an_order_can_be_opened_for_tracking_and_delays():
+    html = _pages()["portal"]
+    assert "portal_order" in html
+    assert "function openOrder" in html
+    assert "Track this consignment" in html
+    assert "class='empty'" in html or 'class="empty"' in html
+
+
+def test_signing_in_needs_both_an_email_and_an_order_number():
+    from pathlib import Path
+    sql = (Path(__file__).resolve().parent.parent
+           / "migrate_portal_signin.sql").read_text(encoding="utf-8")
+    flat = " ".join(sql.split())
+    # Either alone would open an account to a stranger: an email address is on
+    # their letterhead, an order number is short enough to count through.
+    assert "IF v_email = '' OR v_order = '' THEN" in flat
+    assert "portal_enabled = true" in flat
+    # And the failure must not say which half was wrong.
+    assert flat.count("'no_match'") >= 1
+    assert "'wrong_email'" not in flat and "'wrong_order'" not in flat
+    # Guessing has to be slow.
+    assert "portal_signin_attempts" in flat and "interval '15 minutes'" in flat
+    assert "SET search_path = public, pg_temp" in sql
+
+
+def test_the_signin_page_gives_one_answer_for_any_failure():
+    html = _pages()["portal"]
+    assert "could not match those details" in html
+    assert "function doSignIn" in html

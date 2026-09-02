@@ -75,16 +75,57 @@
   .hidden { display:none !important; }
   footer { text-align:center; color:var(--muted); font-size:12px;
            padding:6px 16px 26px; }
+  .taf-logo { display:block; height:34px; width:auto; margin-bottom:10px; }
+  .taf-footer { max-width:900px; margin:0 auto; padding:18px 16px 30px;
+                text-align:center; color:var(--muted); font-size:13px;
+                line-height:1.6; }
+  .taf-footer strong { display:block; color:var(--navy); font-size:14px;
+                       margin-bottom:4px; }
+  .taf-contact { display:flex; flex-wrap:wrap; gap:6px 16px;
+                 justify-content:center; margin-bottom:4px; }
+  .taf-contact a, .taf-contact span { color:var(--blue); font-weight:600;
+                                      text-decoration:none; }
+  .taf-detail { display:flex; flex-wrap:wrap; gap:2px 14px;
+                justify-content:center; }
+  .taf-safety { margin:12px auto 0; max-width:520px; font-size:12px;
+                color:var(--muted); }
+  tbody tr.row { cursor:pointer; }
+  tbody tr.row:hover { background:#EEF4FA; }
+  .chev { color:var(--muted); font-size:12px; }
+  label { display:block; font-size:13px; font-weight:600; color:var(--muted);
+          margin-bottom:5px; text-transform:uppercase; letter-spacing:.02em; }
+  input[type=text], input[type=email] {
+    width:100%; padding:13px; font-size:16px; border:1px solid var(--line);
+    border-radius:9px; background:#fff; color:var(--text); font-family:inherit; }
+  .field { margin-bottom:12px; }
+  button.primary { width:100%; padding:15px; font-size:16px; font-weight:700;
+    color:#fff; background:var(--blue); border:0; border-radius:10px;
+    cursor:pointer; }
+  button.primary:disabled { opacity:.55; cursor:default; }
+  .detail dl { display:grid; grid-template-columns:auto 1fr; gap:6px 16px;
+               font-size:14px; margin:0 0 14px; }
+  .detail dt { color:var(--muted); font-weight:600; }
+  .detail dd { margin:0; }
+  .track { display:inline-block; margin-top:2px; color:var(--blue);
+           font-weight:700; text-decoration:none; }
+  .delay { background:#FEF6E0; border:1px solid #F0E0AE; color:var(--amber);
+           border-radius:9px; padding:11px 13px; font-size:14px;
+           margin-bottom:14px; }
+  .pickup { background:#E8F6EF; border:1px solid #BFE4D4; color:#14663F;
+            border-radius:9px; padding:11px 13px; font-size:14px;
+            margin-bottom:14px; }
+  .back { background:none; border:0; color:var(--blue); font-weight:700;
+          font-size:14px; padding:0 0 10px; cursor:pointer; width:auto; }
 </style>
 </head>
 <body>
 
-<header>
+<header id="masthead">
   <h1 id="who">Total Air Filtration</h1>
   <p id="sub">Your orders, quotes and account</p>
 </header>
 
-<nav id="tabs" role="tablist">
+<nav id="tabs" role="tablist" class="hidden">
   <button role="tab" data-panel="orders"  aria-selected="true">Orders</button>
   <button role="tab" data-panel="quotes"  aria-selected="false">Quotes</button>
   <button role="tab" data-panel="account" aria-selected="false">Account</button>
@@ -93,6 +134,36 @@
 <main>
   <div id="banner" class="msg err hidden"></div>
   <div id="loading" class="card">Loading&hellip;</div>
+
+  <!-- Shown when there is no link to go on. Two ways in, and the second asks
+       for both an email and an order number on purpose: an email address is
+       on their letterhead and an order number is short enough to count
+       through, so either alone would open somebody's account to a stranger. -->
+  <section id="signin" class="card hidden">
+    <h2>Sign in</h2>
+    <p style="margin:0 0 14px;color:var(--muted);font-size:14px">
+      Use the link we emailed you, or sign in below with your company email
+      address and any of your purchase order numbers.
+    </p>
+    <div class="field">
+      <label for="si-email">Company email</label>
+      <input type="email" id="si-email" autocomplete="email"
+             placeholder="The address we send your orders to">
+    </div>
+    <div class="field">
+      <label for="si-order">One of your purchase order numbers</label>
+      <input type="text" id="si-order" autocomplete="off"
+             placeholder="Any order you have placed with us">
+    </div>
+    <button class="primary" id="si-go">Sign in</button>
+    <p style="margin:12px 0 0;color:var(--muted);font-size:13px" id="si-help"></p>
+  </section>
+
+  <section id="panel-detail" class="card hidden">
+    <button class="back" id="detail-back">&larr; Back to orders</button>
+    <h2 id="detail-title">Order</h2>
+    <div id="detail-body" class="detail"></div>
+  </section>
 
   <section id="panel-orders" class="card hidden">
     <h2>Your orders</h2>
@@ -135,7 +206,13 @@
   </section>
 </main>
 
-<footer>Total Air Filtration</footer>
+<footer id="taf-footer"></footer>
+<script src="../company.js"></script>
+<script src="../taf-shared.js"></script>
+<script>
+  TAF.logo(document.getElementById("masthead"), "../");
+  TAF.footer(document.getElementById("taf-footer"));
+</script>
 
 <script>
 "use strict";
@@ -238,6 +315,14 @@ function showOrders(rows) {
   var today = new Date(); today.setHours(0, 0, 0, 0);
   rows.forEach(function (o) {
     var tr = document.createElement("tr");
+    tr.className = "row";
+    tr.tabIndex = 0;
+    tr.addEventListener("click", function () { openOrder(o.order_number); });
+    tr.addEventListener("keydown", function (e) {
+      if (e.key === "Enter" || e.key === " ") {
+        e.preventDefault(); openOrder(o.order_number);
+      }
+    });
     cell(tr, o.order_number || "-");
     cell(tr, o.date_ordered || "-");
 
@@ -324,14 +409,149 @@ function showAccount(a) {
 // ── Tabs ───────────────────────────────────────────────────────────────────
 
 function selectPanel(name) {
-  ["orders", "quotes", "account"].forEach(function (p) {
+  ["orders", "quotes", "account", "detail"].forEach(function (p) {
     el("panel-" + p).classList.toggle("hidden", p !== name);
   });
   Array.prototype.forEach.call(
     el("tabs").querySelectorAll("button"), function (b) {
-      b.setAttribute("aria-selected", String(b.dataset.panel === name));
+      // The order detail belongs to Orders, so that tab stays lit while it
+      // is open rather than nothing being selected.
+      var owner = (name === "detail") ? "orders" : name;
+      b.setAttribute("aria-selected", String(b.dataset.panel === owner));
     });
 }
+
+// ── One order, in full ─────────────────────────────────────────────────────
+
+function openOrder(orderNumber) {
+  if (!orderNumber) { return; }
+  var body = el("detail-body");
+  el("detail-title").textContent = "Order " + orderNumber;
+  body.innerHTML = "<p class='empty'>Loading&hellip;</p>";
+  selectPanel("detail");
+
+  rpc("portal_order", { p_token: TOKEN, p_order_number: orderNumber })
+    .then(function (o) {
+      if (!o) {
+        body.innerHTML = "";
+        var p = document.createElement("p");
+        p.className = "empty";
+        p.textContent = "We could not load that order. Please get in touch.";
+        body.appendChild(p);
+        return;
+      }
+      renderOrder(o);
+    })
+    .catch(function () {
+      body.innerHTML = "";
+      var p = document.createElement("p");
+      p.className = "empty";
+      p.textContent = "We could not load that order just now. Please try again.";
+      body.appendChild(p);
+    });
+}
+
+function renderOrder(o) {
+  var body = el("detail-body");
+  body.innerHTML = "";
+  var f = o.freight || {};
+
+  // Anything holding it up comes first: it is what they opened this for.
+  if (f.note) {
+    var delay = document.createElement("div");
+    delay.className = "delay";
+    delay.textContent = f.note;
+    body.appendChild(delay);
+  }
+
+  if (o.stage === "Ready for pick up") {
+    var note = TAF.pickupNote();
+    if (note) {
+      var pk = document.createElement("div");
+      pk.className = "pickup";
+      pk.textContent = note;
+      body.appendChild(pk);
+    }
+  }
+
+  var dl = document.createElement("dl");
+  function row(label, value, node) {
+    if (!value && !node) { return; }
+    var dt = document.createElement("dt"); dt.textContent = label;
+    var dd = document.createElement("dd");
+    if (node) { dd.appendChild(node); } else { dd.textContent = value; }
+    dl.appendChild(dt); dl.appendChild(dd);
+  }
+
+  var stage = pill(o.stage || "Received", STAGE_CLASS[o.stage] || "s-received");
+  row("Stage", null, stage);
+  row("Ordered", o.date_ordered);
+  row("Due", o.date_due);
+  if (f.expected) { row("Now expected", f.expected); }
+  row("Your job number", o.job);
+  row(o.region === "Pick Up" ? "Collection" : "Delivery region", o.region);
+
+  if (f.carrier || f.number) {
+    row("Freight", [f.carrier, f.number].filter(Boolean).join("  ·  "));
+    if (f.url) {
+      var a = document.createElement("a");
+      a.className = "track";
+      a.href = f.url;
+      a.target = "_blank";
+      a.rel = "noopener noreferrer";
+      a.textContent = "Track this consignment";
+      row("Tracking", null, a);
+    }
+  }
+  body.appendChild(dl);
+
+  // What is on the order. No prices - an order's pricing is an invoice
+  // matter, and their quote already carries what they agreed.
+  var items = o.items || [];
+  if (items.length) {
+    var h = document.createElement("h2");
+    h.textContent = "What's on this order";
+    h.style.marginTop = "4px";
+    body.appendChild(h);
+
+    var wrap = document.createElement("div");
+    wrap.style.overflowX = "auto";
+    var table = document.createElement("table");
+    var thead = document.createElement("thead");
+    thead.innerHTML = "<tr><th class='num'>Qty</th><th>Description</th>" +
+                      "<th>Part number</th></tr>";
+    table.appendChild(thead);
+    var tb = document.createElement("tbody");
+    items.forEach(function (it) {
+      var tr = document.createElement("tr");
+      cell(tr, it.quantity || "", "num");
+      cell(tr, it.description || "");
+      cell(tr, it.part_number || "-");
+      tb.appendChild(tr);
+    });
+    table.appendChild(tb);
+    wrap.appendChild(table);
+    body.appendChild(wrap);
+  }
+
+  var ask = TAF.askUs("Order " + (o.order_number || ""));
+  if (ask) {
+    var p = document.createElement("p");
+    p.className = "empty";
+    p.style.marginTop = "14px";
+    p.appendChild(document.createTextNode("Question about this order? "));
+    var link = document.createElement("a");
+    link.className = "quote";
+    link.href = ask.href;
+    link.textContent = ask.label;
+    p.appendChild(link);
+    body.appendChild(p);
+  }
+}
+
+el("detail-back").addEventListener("click", function () {
+  selectPanel("orders");
+});
 
 Array.prototype.forEach.call(el("tabs").querySelectorAll("button"),
   function (b) {
@@ -340,14 +560,10 @@ Array.prototype.forEach.call(el("tabs").querySelectorAll("button"),
 
 // ── Start ──────────────────────────────────────────────────────────────────
 
-if (!TOKEN || !KEY) {
-  el("loading").classList.add("hidden");
-  banner("This link is incomplete. Please use the full link we sent you, " +
-         "or ask us to send it again.");
-} else {
-  try { history.replaceState({}, "", location.pathname); } catch (e) {}
-
-  Promise.all([
+function loadAccount() {
+  el("loading").classList.remove("hidden");
+  el("signin").classList.add("hidden");
+  return Promise.all([
     rpc("portal_account", { p_token: TOKEN }),
     rpc("portal_orders",  { p_token: TOKEN }),
     rpc("portal_quotes",  { p_token: TOKEN })
@@ -355,12 +571,15 @@ if (!TOKEN || !KEY) {
     var account = res[0];
     el("loading").classList.add("hidden");
     if (!account) {
-      banner("We could not find that account. The link may have been turned " +
-             "off or replaced — please ask us for a new one.");
+      // A token that no longer works: offer the other way in rather than
+      // leaving them at a dead end.
+      showSignIn("That link is no longer active. Sign in below, or ask us " +
+                 "for a new link.");
       return;
     }
     el("who").textContent = account.name || "Your account";
     el("sub").textContent = "Your orders, quotes and account";
+    el("tabs").classList.remove("hidden");
     showOrders(res[1]);
     showQuotes(res[2]);
     showAccount(account);
@@ -370,6 +589,74 @@ if (!TOKEN || !KEY) {
     banner("We could not load your account just now. Please try again " +
            "shortly, or get in touch.");
   });
+}
+
+function showSignIn(message) {
+  el("loading").classList.add("hidden");
+  el("tabs").classList.add("hidden");
+  el("signin").classList.remove("hidden");
+  ["orders", "quotes", "account", "detail"].forEach(function (p) {
+    el("panel-" + p).classList.add("hidden");
+  });
+  if (message) { banner(message); }
+  var ask = TAF.askUs("Portal access");
+  if (ask) {
+    el("si-help").textContent = "Can't get in? Contact us on " + ask.label + ".";
+  }
+}
+
+function doSignIn() {
+  var email = el("si-email").value.trim();
+  var order = el("si-order").value.trim();
+  if (!email || !order) {
+    banner("Please put in both your company email and one of your order numbers.");
+    return;
+  }
+  var btn = el("si-go");
+  btn.disabled = true;
+  btn.textContent = "Signing in\u2026";
+  rpc("portal_sign_in", { p_email: email, p_order_number: order })
+    .then(function (res) {
+      btn.disabled = false;
+      btn.textContent = "Sign in";
+      if (res && res.ok && res.token) {
+        TOKEN = res.token;
+        try { localStorage.setItem("taf_portal_token", TOKEN); } catch (e) {}
+        el("banner").classList.add("hidden");
+        loadAccount();
+        return;
+      }
+      var why = res && res.error;
+      if (why === "too_many") {
+        banner("Too many attempts. Please wait a few minutes and try again, " +
+               "or get in touch and we will send you a link.");
+      } else {
+        // The same answer whichever half was wrong, so the form cannot be
+        // used to find out which emails or order numbers exist.
+        banner("We could not match those details. Check the email address is " +
+               "the one we send your orders to, and that the order number is " +
+               "one of yours.");
+      }
+    })
+    .catch(function () {
+      btn.disabled = false;
+      btn.textContent = "Sign in";
+      banner("We could not reach us just now. Check your connection and try again.");
+    });
+}
+
+el("si-go").addEventListener("click", doSignIn);
+el("si-order").addEventListener("keydown", function (e) {
+  if (e.key === "Enter") { doSignIn(); }
+});
+
+if (!KEY) {
+  el("loading").classList.add("hidden");
+  banner("This link is incomplete. Please use the full link we sent you, " +
+         "or ask us to send it again.");
+} else {
+  try { history.replaceState({}, "", location.pathname); } catch (e) {}
+  if (TOKEN) { loadAccount(); } else { showSignIn(""); }
 }
 </script>
 </body>

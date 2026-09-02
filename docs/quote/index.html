@@ -93,6 +93,29 @@
   .hidden { display:none !important; }
   footer { text-align:center; color:var(--muted); font-size:12px;
            padding:6px 16px 24px; }
+  .taf-logo { display:block; height:34px; width:auto; margin-bottom:10px; }
+  .taf-footer { max-width:760px; margin:0 auto; padding:18px 16px 30px;
+                text-align:center; color:var(--muted); font-size:13px;
+                line-height:1.6; }
+  .taf-footer strong { display:block; color:var(--navy); font-size:14px;
+                       margin-bottom:4px; }
+  .taf-contact { display:flex; flex-wrap:wrap; gap:6px 16px;
+                 justify-content:center; margin-bottom:4px; }
+  .taf-contact a, .taf-contact span { color:var(--blue); font-weight:600;
+                                      text-decoration:none; }
+  .taf-detail { display:flex; flex-wrap:wrap; gap:2px 14px;
+                justify-content:center; }
+  .taf-safety { margin:12px auto 0; max-width:520px; font-size:12px;
+                color:var(--muted); }
+  .confirm { text-align:center; padding:6px 0 2px; }
+  .confirm h3 { margin:0 0 6px; color:var(--green); font-size:17px; }
+  .confirm .ref { font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+                  font-size:15px; color:var(--navy); font-weight:700; }
+  .confirm dl { display:grid; grid-template-columns:auto 1fr; gap:5px 14px;
+                text-align:left; max-width:420px; margin:14px auto 0;
+                font-size:14px; }
+  .confirm dt { color:var(--muted); font-weight:600; }
+  .confirm dd { margin:0; }
   @media print {
     header { background:#fff; color:var(--navy); }
     header p { color:var(--muted); }
@@ -102,7 +125,7 @@
 </head>
 <body>
 
-<header>
+<header id="masthead">
   <h1>Total Air Filtration</h1>
   <p id="subtitle">Quotation</p>
 </header>
@@ -163,9 +186,27 @@
       <button class="ghost" onclick="window.print()">Print or save as PDF</button>
     </div>
   </section>
+
+  <section id="accepted-card" class="card hidden">
+    <div class="confirm">
+      <h3>Accepted</h3>
+      <p style="margin:0;color:var(--muted);font-size:14px">
+        Keep this for your records.
+      </p>
+      <dl id="confirm-detail"></dl>
+    </div>
+    <button class="ghost noprint" style="margin-top:16px"
+            onclick="window.print()">Print or save this confirmation</button>
+  </section>
 </main>
 
-<footer>Total Air Filtration</footer>
+<footer id="taf-footer"></footer>
+<script src="../company.js"></script>
+<script src="../taf-shared.js"></script>
+<script>
+  TAF.logo(document.getElementById("masthead"), "../");
+  TAF.footer(document.getElementById("taf-footer"));
+</script>
 
 <script>
 "use strict";
@@ -190,6 +231,7 @@ var TOKEN = (params.get("t") || "").trim();
 var URLBASE = (params.get("u") || "").trim() || PROJECT_URL;
 
 var el = function (id) { return document.getElementById(id); };
+var LOADED = null;   // the quote as it was shown, for the confirmation
 
 function banner(kind, text) {
   var b = el("banner");
@@ -230,6 +272,7 @@ function rpc(name, body) {
 // ── Drawing the quote ──────────────────────────────────────────────────────
 
 function render(q) {
+  LOADED = q;
   el("loading").classList.add("hidden");
   el("quote").classList.remove("hidden");
   el("subtitle").textContent =
@@ -327,6 +370,32 @@ function render(q) {
 
 // ── Answering ──────────────────────────────────────────────────────────────
 
+/* Something to keep. Someone who accepts a quote has agreed to spend money
+   and should not be left with nothing but a green line on a web page — this
+   is the bit their accounts department will ask them for. */
+function showConfirmation(name) {
+  var q = LOADED || {};
+  var rows = [
+    ["Quote", q.quote_number || "-"],
+    ["Account", q.customer_name || "-"],
+    ["Your reference", el("reference").value.trim() || q.reference || "-"],
+    ["Total (inc GST)", money(q.total)],
+    ["Accepted by", name],
+    ["Accepted on", new Date().toLocaleString("en-AU",
+        { day: "2-digit", month: "short", year: "numeric",
+          hour: "2-digit", minute: "2-digit" })]
+  ];
+  var dl = el("confirm-detail");
+  dl.innerHTML = "";
+  rows.forEach(function (row) {
+    var dt = document.createElement("dt"); dt.textContent = row[0];
+    var dd = document.createElement("dd"); dd.textContent = row[1];
+    dl.appendChild(dt); dl.appendChild(dd);
+  });
+  el("accepted-card").classList.remove("hidden");
+  el("accepted-card").scrollIntoView({ behavior: "smooth", block: "center" });
+}
+
 function respond(decision) {
   var name = el("name").value.trim();
   if (!name) {
@@ -350,6 +419,7 @@ function respond(decision) {
       banner("ok", decision === "accepted"
         ? "Thank you — your acceptance has reached us. We will be in touch to confirm."
         : "Thank you for letting us know. We will not proceed.");
+      if (decision === "accepted") { showConfirmation(name); }
       return;
     }
     var why = res && res.error;

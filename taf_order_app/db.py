@@ -670,6 +670,77 @@ def set_order_status(order_id: str, status: str) -> None:
         pass
 
 
+# Carriers TAF books freight with, and where a consignment can be followed.
+# {number} is replaced with the consignment number.
+FREIGHT_CARRIERS = {
+    "":              "",
+    "TNT":           "https://www.tnt.com/express/en_au/site/tracking.html?searchType=con&cons={number}",
+    "Startrack":     "https://startrack.com.au/track/search?id={number}",
+    "Australia Post": "https://auspost.com.au/mypost/track/#/details/{number}",
+    "Followmont":    "https://www.followmont.com.au/track-and-trace/?consignment={number}",
+    "Border Express": "https://www.borderexpress.com.au/track-and-trace/?connote={number}",
+    "Northline":     "https://www.northline.com.au/track-trace/?con={number}",
+    "Toll":          "https://www.mytoll.com/?externalSearchQuery={number}",
+    "Other":         "",
+}
+
+
+def tracking_url(carrier: str, number: str, custom: str = "") -> str:
+    """Where a customer can follow a consignment, or "" if nowhere.
+
+    A link typed in by hand wins — carriers change their tracking pages, and
+    a stale template should never override what someone has actually checked.
+    """
+    custom = (custom or "").strip()
+    if custom:
+        return custom
+    number = (number or "").strip()
+    template = FREIGHT_CARRIERS.get((carrier or "").strip(), "")
+    if not template or not number:
+        return ""
+    from urllib.parse import quote
+    return template.replace("{number}", quote(number, safe=""))
+
+
+def set_order_freight(order_id: str, carrier: str = "", number: str = "",
+                      url: str = "", note: str = "", expected: str = "") -> None:
+    """Record how an order is travelling, and anything holding it up.
+
+    All of it is shown to the customer on their portal, which is the point:
+    "where is it" and "why is it late" are the two questions a delivery
+    generates, and both are better answered before they are asked.
+    """
+    import datetime as _dt
+    resp = (get_client().table("orders")
+            .select("header").eq("id", order_id).single().execute())
+    header = dict((resp.data or {}).get("header") or {})
+    freight = {
+        "carrier":   (carrier or "").strip(),
+        "number":    (number or "").strip(),
+        "url":       tracking_url(carrier, number, url),
+        "note":      (note or "").strip(),
+        "expected":  (expected or "").strip(),
+        "updated_at": _dt.datetime.utcnow().isoformat(),
+        "updated_by": current_full_name() or current_username(),
+    }
+    if not any((freight["carrier"], freight["number"], freight["note"],
+                freight["expected"])):
+        header.pop("freight", None)          # cleared
+    else:
+        header["freight"] = freight
+    get_client().table("orders").update(
+        {"header": header}).eq("id", order_id).execute()
+
+
+def get_order_freight(order_id: str) -> dict:
+    try:
+        resp = (get_client().table("orders")
+                .select("header").eq("id", order_id).single().execute())
+        return dict(((resp.data or {}).get("header") or {}).get("freight") or {})
+    except Exception:
+        return {}
+
+
 def append_order_note(order_id: str, note_text: str, author: str = "") -> None:
     """Append a timestamped note to the order's header JSON."""
     import datetime as _dt
