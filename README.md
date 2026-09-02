@@ -33,6 +33,10 @@ log, stock management and a customer database.
   it up, and turn an accepted one into an order with the lines already there.
   Print a quote PDF and export a Xero sales-invoice CSV. A line nothing can
   price is shown as "to be confirmed", with the reason, rather than guessed at.
+- **The customer can answer online** — send a link and they read the quote in
+  a browser and press Accept or Decline, giving their name and their own order
+  number. You see who answered and when, and Follow Up lists everything sent
+  that nobody has replied to (and whether they've opened it).
 - **Delivery** — what's finished and where it goes, grouped by region in run
   order. Print a run sheet for the driver (tick box, due date, signature
   column) and mark a whole run dispatched in one go.
@@ -121,7 +125,8 @@ In the Supabase dashboard → **SQL Editor**, run these once (in order):
    adds customer short names, delivery regions, job-number labels and the
    part-number code on each media type. `migrate_pricing.sql` adds the price
    list and the per-m² rates that back quotes and the Xero export.
-   `migrate_quotes.sql` adds saved quotes.
+   `migrate_quotes.sql` adds saved quotes, and `migrate_quote_portal.sql`
+   the customer accept/decline page.
 
 ### Enable purchase-order import (optional)
 
@@ -219,6 +224,28 @@ Anything else is left alone and reported on the order's completion message —
 the app never guesses at a bill of materials. Every movement is recorded as a
 normal stock transaction, so a wrong one can be reversed by hand.
 
+### Let customers accept quotes online (optional)
+
+1. Run `migrate_quotes.sql` then `migrate_quote_portal.sql` in the **SQL
+   Editor**.
+2. GitHub Pages must be on (the same switch as the phone page above). The
+   customer page is served at `https://<owner>.github.io/<repo>/quote/`.
+3. In the app: **Quotes -> Save Quote -> Send to Customer**. The link is copied
+   to your clipboard; paste it into an email.
+
+**How it's kept private.** The link carries a random 64-character token. The
+`quotes` table gives anonymous callers *no* access at all - the page can only
+call two `SECURITY DEFINER` functions that take the token and return one
+quote, so there is no query a visitor can shape and nothing to enumerate.
+Without the token there is nothing to see, and the token can't be guessed. The
+page is `noindex`, and it strips the token out of the address bar after
+loading so it isn't left in a screenshot or a shared browser history.
+
+The customer sees the lines, the totals, and anything not yet priced marked
+"to be confirmed". They don't see internal notes, other quotes, or how a price
+was arrived at. Accepting or declining is a one-way step: once answered, the
+page won't change it - that's a phone call.
+
 ### Create the first admin account
 
 ```bash
@@ -288,6 +315,7 @@ fonts/                     Bundled Public Sans (OFL)
 price_lists/               The priced catalogue (import under Settings)
 *.sql                      Schema + migrations
 docs/phone/index.html      The page phones open (served by GitHub Pages)
+docs/quote/index.html      The quote page customers open
 supabase/functions/        Edge Functions (extract-orders)
 TAFOrderEntry.spec         PyInstaller build spec
 installer.iss              Inno Setup installer script

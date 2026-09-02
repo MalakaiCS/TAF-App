@@ -4952,6 +4952,8 @@ class ModernOrderApp(tk.Frame):
                  pady=6, padx=12, font=F_BODY).pack(side="right")
         flat_btn(top, "📋 Saved Quotes", self._open_saved_quotes, bg=CA2,
                  pady=6, padx=12, font=F_BODY).pack(side="right", padx=(0, 8))
+        flat_btn(top, "⏳ Follow Up", self._follow_up_quotes, bg=CNE,
+                 pady=6, padx=12, font=F_BODY).pack(side="right", padx=(0, 8))
         flat_btn(top, "New", self._new_quote, bg=CMU,
                  pady=6, padx=12, font=F_BODY).pack(side="right", padx=(0, 8))
 
@@ -5041,6 +5043,9 @@ class ModernOrderApp(tk.Frame):
         self._convert_btn = flat_btn(bot, "→ Convert to Order",
                                      self._convert_quote_to_order, bg=CA2, pady=7)
         self._convert_btn.pack(side="right", padx=(0, 8))
+        self._send_btn = flat_btn(bot, "🔗 Send to Customer",
+                                  self._share_quote_link, bg=CA, pady=7)
+        self._send_btn.pack(side="right", padx=(0, 8))
 
         self._quote_totals_var = tk.StringVar(value="No lines yet.")
         tk.Label(frm, textvariable=self._quote_totals_var, bg=CBG, fg=CTX,
@@ -5267,11 +5272,231 @@ class ModernOrderApp(tk.Frame):
         self._update_convert_button()
 
     def _update_convert_button(self):
-        """Convert only means something once a quote has been saved."""
-        btn = getattr(self, "_convert_btn", None)
-        if btn is not None:
-            btn.config(state=("normal" if getattr(self, "_current_quote_id", None)
-                              else "disabled"))
+        """Convert and Send only mean something once a quote has been saved."""
+        state = "normal" if getattr(self, "_current_quote_id", None) else "disabled"
+        for name in ("_convert_btn", "_send_btn"):
+            btn = getattr(self, name, None)
+            if btn is not None:
+                btn.config(state=state)
+
+    # ── The link a customer opens ─────────────────────────────────────────
+
+    def _quote_page_base(self) -> str:
+        """Where the customer quote page is hosted: GitHub Pages, this repo.
+
+        Not Supabase — it serves anything it hosts as text/plain under a
+        sandbox CSP, so the page would arrive as unstyled source with every
+        script blocked. Same reason the phone page lives there.
+        """
+        override = (self._settings.get("quote_page_url") or "").strip()
+        if override:
+            return override.rstrip("/") + "/"
+        try:
+            from taf_order_app.updater import GITHUB_REPO
+            owner, repo = GITHUB_REPO.split("/", 1)
+        except Exception:
+            owner, repo = "MalakaiCS", "TAF-App"
+        return f"https://{owner.lower()}.github.io/{repo}/quote/"
+
+    def _quote_link(self, token: str) -> str:
+        """The address to send a customer.
+
+        Carries the quote's token and the publishable key — the same key that
+        ships in this app. The key opens nothing on its own: the quotes table
+        gives anonymous callers no access, and the page can only call two
+        functions that each take the token.
+        """
+        from urllib.parse import urlencode
+        return (self._quote_page_base() + "?"
+                + urlencode({"t": token, "k": _db.current_anon_key()}))
+
+    def _share_quote_link(self):
+        """Make the customer link, copy it, and mark the quote sent."""
+        quote_id = getattr(self, "_current_quote_id", None)
+        if not quote_id:
+            messagebox.showinfo(
+                "Send to Customer",
+                "Save the quote first — the link points at the saved quote.")
+            return
+        unpriced = _pricing.unpriced(self._quote_current_lines())
+        if unpriced and not messagebox.askyesno(
+                "Unpriced Lines",
+                f"{len(unpriced)} line{'s' if len(unpriced) != 1 else ''} on "
+                "this quote have no price. The customer will see them as "
+                "\"to be confirmed\" and they are left out of the total.\n\n"
+                "Send it anyway?", icon="warning", default="no"):
+            return
+        try:
+            token = _db.ensure_quote_token(quote_id)
+            _db.mark_quote_sent(quote_id)
+        except Exception as exc:
+            messagebox.showerror(
+                "Send to Customer",
+                f"The link could not be made:\n{exc}\n\n"
+                "If this mentions a missing column, run "
+                "migrate_quote_portal.sql in the Supabase SQL Editor.")
+            return
+        link = self._quote_link(token)
+        self._current_quote_status = "sent"
+        try:
+            _db.log_action("quote_sent",
+                           f"{self.quote_number_var.get().strip()} · "
+                           f"{self.quote_customer_var.get().strip()}")
+        except Exception:
+            pass
+        self._show_quote_link(link)
+
+    def _show_quote_link(self, link: str):
+        """Show the link, already copied, with the wording to send with it."""
+        dlg = tk.Toplevel(self.master)
+        dlg.title("Send to Customer")
+        dlg.configure(bg=CBG)
+        dlg.transient(self.master)
+        dlg.grab_set()
+
+        hdr = tk.Frame(dlg, bg=CA, padx=16, pady=10)
+        hdr.pack(fill="x")
+        tk.Label(hdr, text="The customer's link", bg=CA, fg="white",
+                 font=F_BOLD).pack(anchor="w")
+        tk.Label(hdr, text="Copied to the clipboard — paste it into an email.",
+                 bg=CA, fg="#A9CCE3", font=F_SM).pack(anchor="w")
+
+        body = tk.Frame(dlg, bg=CBG, padx=16, pady=14)
+        body.pack(fill="both", expand=True)
+        tk.Label(body,
+                 text="They can read the quote and press Accept or Decline. "
+                      "You'll see their answer here, with who approved it and "
+                      "their order number.",
+                 bg=CBG, fg=CTX, font=F_BODY, justify="left",
+                 wraplength=560, anchor="w").pack(anchor="w", pady=(0, 10))
+
+        box = tk.Text(body, height=4, wrap="char", font=F_SM, bg=CFD, fg=CTX,
+                      relief="flat", bd=8, highlightthickness=1,
+                      highlightbackground=CSP)
+        box.pack(fill="x")
+        box.insert("1.0", link)
+        box.config(state="disabled")
+
+        tk.Label(body,
+                 text="Anyone with this link can see this one quote, so send "
+                      "it to the customer and nobody else. It shows no other "
+                      "quote, customer or price.",
+                 bg=CBG, fg=CMU, font=F_SM, justify="left",
+                 wraplength=560, anchor="w").pack(anchor="w", pady=(10, 0))
+
+        def _copy():
+            self.master.clipboard_clear()
+            self.master.clipboard_append(link)
+            self.status_var.set("Quote link copied.")
+
+        def _open():
+            import webbrowser
+            try:
+                webbrowser.open(link)
+            except Exception:
+                pass
+
+        _copy()
+        foot = tk.Frame(dlg, bg=CBG, padx=16, pady=10)
+        foot.pack(fill="x")
+        flat_btn(foot, "Close", dlg.destroy, bg=CNE,
+                 pady=7).pack(side="right", padx=(8, 0))
+        flat_btn(foot, "Open It Myself", _open, bg=CNE,
+                 pady=7).pack(side="right", padx=(8, 0))
+        flat_btn(foot, "Copy Again", _copy, bg=CGR, pady=7).pack(side="right")
+        dlg.bind("<Escape>", lambda _e: dlg.destroy())
+        W, H = 640, 340
+        dlg.geometry(f"{W}x{H}+{self.master.winfo_rootx() + 120}"
+                     f"+{self.master.winfo_rooty() + 100}")
+
+    def _follow_up_quotes(self):
+        """Quotes sent to a customer that nobody has answered."""
+        try:
+            rows = _db.quotes_awaiting_reply()
+        except Exception as exc:
+            messagebox.showerror("Follow Up", f"Could not read quotes:\n{exc}")
+            return
+        if not rows:
+            messagebox.showinfo(
+                "Follow Up",
+                "Nothing is waiting on a customer.\n\n"
+                "Quotes appear here once you've sent the link and before "
+                "they've accepted or declined.")
+            return
+
+        dlg = tk.Toplevel(self.master)
+        dlg.title("Quotes Awaiting a Reply")
+        dlg.configure(bg=CBG)
+        dlg.transient(self.master)
+        dlg.grab_set()
+        hdr = tk.Frame(dlg, bg=CA, padx=16, pady=10)
+        hdr.pack(fill="x")
+        tk.Label(hdr, text="Waiting on the customer", bg=CA, fg="white",
+                 font=F_BOLD).pack(anchor="w")
+        tk.Label(hdr,
+                 text="Opened means they've read it. Longest wait first.",
+                 bg=CA, fg="#A9CCE3", font=F_SM).pack(anchor="w")
+
+        wrap = tk.Frame(dlg, bg=CCA, highlightbackground=CSP,
+                        highlightthickness=1)
+        wrap.pack(fill="both", expand=True, padx=16, pady=12)
+        cols = ("number", "customer", "total", "sent", "opened")
+        tree = ttk.Treeview(wrap, columns=cols, show="headings",
+                            style="TAF.Treeview", height=13)
+        for col, (hd, wd, anc) in {
+                "number":   ("Quote",     100, "w"),
+                "customer": ("Customer",  240, "w"),
+                "total":    ("Total",     100, "e"),
+                "sent":     ("Sent",      110, "center"),
+                "opened":   ("Opened",    130, "center")}.items():
+            tree.heading(col, text=hd)
+            tree.column(col, width=wd, anchor=anc,
+                        stretch=(col == "customer"))
+        tree.tag_configure("even", background=CRE)
+        tree.tag_configure("odd", background=CCA)
+        tree.tag_configure("stale", background="#FDEBD0", foreground="#7E5109")
+        tree.pack(side="left", fill="both", expand=True)
+        sb = ttk.Scrollbar(wrap, orient="vertical", command=tree.yview)
+        sb.pack(side="right", fill="y")
+        tree.configure(yscrollcommand=sb.set)
+
+        today = datetime.date.today()
+        for i, r in enumerate(rows):
+            sent = (r.get("sent_at") or "")[:10]
+            waited = 0
+            try:
+                waited = (today - datetime.date.fromisoformat(sent)).days
+            except ValueError:
+                pass
+            tree.insert("", "end", iid=str(i),
+                        tags=("stale" if waited >= 7
+                              else ("even" if i % 2 == 0 else "odd"),),
+                        values=(
+                            r.get("quote_number", ""),
+                            r.get("customer_name", ""),
+                            f'{float(r.get("total") or 0):,.2f}',
+                            sent or "—",
+                            (r.get("viewed_at") or "")[:10] or "not yet",
+                        ))
+
+        def _open_selected():
+            sel = tree.selection()
+            if not sel:
+                return
+            row = rows[int(sel[0])]
+            dlg.destroy()
+            self._load_quote(row)
+
+        foot = tk.Frame(dlg, bg=CBG, padx=16, pady=10)
+        foot.pack(fill="x")
+        flat_btn(foot, "Open Quote", _open_selected, bg=CGR,
+                 pady=7).pack(side="left")
+        flat_btn(foot, "Close", dlg.destroy, bg=CNE, pady=7).pack(side="right")
+        tree.bind("<Double-1>", lambda _e: _open_selected())
+        dlg.bind("<Escape>", lambda _e: dlg.destroy())
+        W, H = 740, 470
+        dlg.geometry(f"{W}x{H}+{self.master.winfo_rootx() + 110}"
+                     f"+{self.master.winfo_rooty() + 70}")
 
     def _save_quote(self):
         """Store the quote as it stands, so it can be found and followed up.
@@ -5300,6 +5525,9 @@ class ModernOrderApp(tk.Frame):
             "status":         getattr(self, "_current_quote_status", "draft"),
             "items":          [_po_import.strip_review_fields(dict(i))
                                for i in self.quote_items],
+            # What the customer is shown, frozen at today's prices.
+            "lines":          [{k: v for k, v in line.items() if k != "item"}
+                               for line in lines],
             "subtotal":       totals["subtotal"],
             "gst":            totals["gst"],
             "total":          totals["total"],
@@ -5361,15 +5589,16 @@ class ModernOrderApp(tk.Frame):
         wrap = tk.Frame(dlg, bg=CCA, highlightbackground=CSP,
                         highlightthickness=1)
         wrap.pack(fill="both", expand=True, padx=16, pady=(0, 8))
-        cols = ("number", "customer", "total", "status", "created")
+        cols = ("number", "customer", "total", "status", "answer", "created")
         tree = ttk.Treeview(wrap, columns=cols, show="headings",
                             style="TAF.Treeview", height=14)
         for col, (hd, wd, anc) in {
-                "number":   ("Quote",     110, "w"),
-                "customer": ("Customer",  260, "w"),
-                "total":    ("Total",     100, "e"),
-                "status":   ("Status",    110, "center"),
-                "created":  ("Created",   110, "center")}.items():
+                "number":   ("Quote",       100, "w"),
+                "customer": ("Customer",    220, "w"),
+                "total":    ("Total",        95, "e"),
+                "status":   ("Status",      100, "center"),
+                "answer":   ("Their answer", 200, "w"),
+                "created":  ("Created",     100, "center")}.items():
             tree.heading(col, text=hd)
             tree.column(col, width=wd, anchor=anc,
                         stretch=(col == "customer"))
@@ -5402,11 +5631,27 @@ class ModernOrderApp(tk.Frame):
                 tag = ("accepted" if status == "accepted"
                        else "declined" if status == "declined"
                        else "even" if i % 2 == 0 else "odd")
+                # What the customer actually did, in their own words where
+                # they gave any — the reason for having a portal at all.
+                who = (r.get("response_name") or "").strip()
+                when = (r.get("responded_at") or "")[:10]
+                if who or when:
+                    answer = " ".join(x for x in (who, when) if x)
+                    ref = (r.get("response_reference") or "").strip()
+                    if ref:
+                        answer += f"  ({ref})"
+                elif r.get("viewed_at"):
+                    answer = "opened " + (r.get("viewed_at") or "")[:10]
+                elif r.get("sent_at"):
+                    answer = "sent, not opened"
+                else:
+                    answer = ""
                 tree.insert("", "end", iid=str(i), tags=(tag,), values=(
                     r.get("quote_number", ""),
                     r.get("customer_name", ""),
                     f'{float(r.get("total") or 0):,.2f}',
-                    status + (" ✓" if r.get("converted_order_id") else ""),
+                    status + (" →order" if r.get("converted_order_id") else ""),
+                    answer,
                     (r.get("created_at") or "")[:10],
                 ))
             if not rows:

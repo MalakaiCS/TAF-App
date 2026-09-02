@@ -1,0 +1,406 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#1B3A5C">
+<meta name="robots" content="noindex, nofollow">
+<title>Total Air Filtration &middot; Quotation</title>
+<link rel="apple-touch-icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Crect width='100' height='100' fill='%231B3A5C'/%3E%3Ctext x='50' y='68' font-size='54' font-family='sans-serif' font-weight='bold' fill='white' text-anchor='middle'%3ET%3C/text%3E%3C/svg%3E">
+<!--
+  The page a customer opens to read a quote and accept or decline it.
+
+  Hosted on GitHub Pages rather than Supabase, for the same reason as the
+  phone page: Supabase serves anything it hosts as text/plain with
+  "Content-Security-Policy: default-src 'none'; sandbox" and nosniff, so a
+  page served from there arrives as unstyled source with every script blocked.
+
+  Nothing secret lives here. The link carries a random 64-character token and
+  the project's publishable key - the same key that ships in the desktop app.
+  The key alone opens nothing: the quotes table gives the anonymous role no
+  access at all, and the only two things this page can call are functions that
+  take the token and return one quote. Without the token there is nothing to
+  see, and the token cannot be guessed.
+
+  noindex/nofollow because a quote is a private document, even behind an
+  unguessable address.
+-->
+<style>
+  :root {
+    --navy:#1B3A5C; --blue:#2E6DA4; --bg:#F4F6F8; --card:#FFFFFF;
+    --text:#1F2933; --muted:#6B7A8C; --line:#DCE3EA;
+    --green:#1E8E5A; --red:#C0392B; --amber:#8A6D00;
+    --tint:#F5F8FB;
+  }
+  * { box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
+  body {
+    margin:0; background:var(--bg); color:var(--text);
+    font:16px/1.45 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;
+    padding-bottom:env(safe-area-inset-bottom);
+  }
+  header {
+    background:var(--navy); color:#fff; padding:18px;
+    padding-top:calc(18px + env(safe-area-inset-top));
+  }
+  header h1 { margin:0; font-size:19px; letter-spacing:.02em; }
+  header p  { margin:4px 0 0; font-size:13px; color:#A9CCE3; }
+  main { padding:16px; max-width:760px; margin:0 auto; }
+  .card {
+    background:var(--card); border:1px solid var(--line); border-radius:12px;
+    padding:16px; margin-bottom:14px;
+  }
+  h2 { margin:0 0 12px; font-size:15px; color:var(--navy);
+       text-transform:uppercase; letter-spacing:.04em; }
+  .meta { display:grid; grid-template-columns:auto 1fr; gap:6px 14px;
+          font-size:14px; }
+  .meta dt { color:var(--muted); font-weight:600; }
+  .meta dd { margin:0; }
+  table { width:100%; border-collapse:collapse; font-size:14px; }
+  th, td { padding:10px 8px; text-align:left; border-bottom:1px solid var(--line);
+           vertical-align:top; }
+  th { font-size:12px; text-transform:uppercase; letter-spacing:.03em;
+       color:var(--muted); }
+  td.num, th.num { text-align:right; white-space:nowrap; }
+  tbody tr:nth-child(even) { background:var(--tint); }
+  .part { font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+          font-size:12.5px; color:var(--muted); display:block; }
+  .tbc { color:var(--amber); font-weight:700; font-size:13px; }
+  .totals { margin-top:14px; margin-left:auto; width:min(320px,100%); font-size:15px; }
+  .totals div { display:flex; justify-content:space-between; padding:5px 0; }
+  .totals .grand { border-top:2px solid var(--navy); margin-top:5px; padding-top:9px;
+                   font-weight:700; font-size:17px; }
+  .note { font-size:13px; color:var(--muted); }
+  .msg { padding:12px 14px; border-radius:9px; font-size:14px; margin-bottom:14px; }
+  .msg.err  { background:#FDEDEC; color:var(--red);   border:1px solid #F5C6C2; }
+  .msg.ok   { background:#E8F6EF; color:var(--green); border:1px solid #BFE4D4; }
+  .msg.warn { background:#FEF6E0; color:var(--amber); border:1px solid #F0E0AE; }
+  label { display:block; font-size:13px; font-weight:600; color:var(--muted);
+          margin-bottom:5px; text-transform:uppercase; letter-spacing:.02em; }
+  input[type=text], textarea {
+    width:100%; padding:13px; font-size:16px; border:1px solid var(--line);
+    border-radius:9px; background:#fff; color:var(--text); font-family:inherit;
+  }
+  textarea { resize:vertical; min-height:64px; }
+  .field { margin-bottom:12px; }
+  button {
+    width:100%; padding:15px; font-size:16px; font-weight:700; color:#fff;
+    background:var(--green); border:0; border-radius:10px; cursor:pointer;
+  }
+  button.decline { background:#fff; color:var(--red); border:1.5px solid var(--red); }
+  button.ghost   { background:#fff; color:var(--blue); border:1.5px solid var(--blue); }
+  button:disabled { opacity:.55; cursor:default; }
+  button + button { margin-top:10px; }
+  .hidden { display:none !important; }
+  footer { text-align:center; color:var(--muted); font-size:12px;
+           padding:6px 16px 24px; }
+  @media print {
+    header { background:#fff; color:var(--navy); }
+    header p { color:var(--muted); }
+    .noprint { display:none !important; }
+  }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>Total Air Filtration</h1>
+  <p id="subtitle">Quotation</p>
+</header>
+
+<main>
+  <div id="banner" class="msg hidden"></div>
+
+  <div id="loading" class="card">Loading your quote&hellip;</div>
+
+  <section id="quote" class="hidden">
+    <div class="card">
+      <h2>Quotation</h2>
+      <dl class="meta" id="meta"></dl>
+    </div>
+
+    <div class="card">
+      <h2>What we have quoted</h2>
+      <div style="overflow-x:auto">
+        <table>
+          <thead>
+            <tr>
+              <th>Description</th>
+              <th class="num">Qty</th>
+              <th class="num">Unit</th>
+              <th class="num">Total</th>
+            </tr>
+          </thead>
+          <tbody id="lines"></tbody>
+        </table>
+      </div>
+      <div class="totals" id="totals"></div>
+      <p class="note" id="tbcnote" style="margin-top:14px"></p>
+    </div>
+
+    <div class="card noprint" id="respond">
+      <h2>Your answer</h2>
+      <div class="field">
+        <label for="name">Your name</label>
+        <input type="text" id="name" autocomplete="name" placeholder="Who is approving this">
+      </div>
+      <div class="field">
+        <label for="reference">Your order number <span style="text-transform:none;font-weight:400">(optional)</span></label>
+        <input type="text" id="reference" placeholder="So we can quote it back to you">
+      </div>
+      <div class="field">
+        <label for="note">Anything to add <span style="text-transform:none;font-weight:400">(optional)</span></label>
+        <textarea id="note" placeholder="Delivery instructions, changes, questions"></textarea>
+      </div>
+      <button id="accept">Accept this quote</button>
+      <button id="decline" class="decline">Decline</button>
+      <p class="note" style="margin:12px 0 0">
+        Accepting tells us to make it. We will confirm before anything is
+        built, and you can call us on anything you are unsure about.
+      </p>
+    </div>
+
+    <div class="card noprint">
+      <button class="ghost" onclick="window.print()">Print or save as PDF</button>
+    </div>
+  </section>
+</main>
+
+<footer>Total Air Filtration</footer>
+
+<script>
+"use strict";
+
+// The project this page talks to. Public information - it is in the desktop
+// app and in every request this page makes.
+var PROJECT_URL = "https://djexdkwohkylunnwbxpf.supabase.co";
+
+var params = new URLSearchParams(location.search);
+
+// The publishable key may arrive in the link, and is remembered so a
+// bookmarked or re-opened page keeps working. Same key the desktop app uses;
+// it grants nothing on its own.
+function remembered(param, store) {
+  var fresh = (params.get(param) || "").trim();
+  if (fresh) { try { localStorage.setItem(store, fresh); } catch (e) {} return fresh; }
+  try { return localStorage.getItem(store) || ""; } catch (e) { return ""; }
+}
+
+var KEY   = remembered("k", "taf_quote_key");
+var TOKEN = (params.get("t") || "").trim();
+var URLBASE = (params.get("u") || "").trim() || PROJECT_URL;
+
+var el = function (id) { return document.getElementById(id); };
+
+function banner(kind, text) {
+  var b = el("banner");
+  b.className = "msg " + kind;
+  b.textContent = text;
+  b.classList.remove("hidden");
+}
+
+function money(value) {
+  var n = Number(value || 0);
+  return "$" + n.toLocaleString("en-AU", { minimumFractionDigits: 2,
+                                           maximumFractionDigits: 2 });
+}
+
+function shortDate(value) {
+  if (!value) return "";
+  var d = new Date(value);
+  if (isNaN(d)) return String(value);
+  return d.toLocaleDateString("en-AU", { day: "2-digit", month: "short",
+                                         year: "numeric" });
+}
+
+function rpc(name, body) {
+  return fetch(URLBASE + "/rest/v1/rpc/" + name, {
+    method: "POST",
+    headers: {
+      "apikey": KEY,
+      "Authorization": "Bearer " + KEY,
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify(body)
+  }).then(function (r) {
+    if (!r.ok) { throw new Error("HTTP " + r.status); }
+    return r.json();
+  });
+}
+
+// ── Drawing the quote ──────────────────────────────────────────────────────
+
+function render(q) {
+  el("loading").classList.add("hidden");
+  el("quote").classList.remove("hidden");
+  el("subtitle").textContent =
+    "Quotation " + (q.quote_number || "") + " for " + (q.customer_name || "");
+
+  var meta = [
+    ["Quote number", q.quote_number || "-"],
+    ["Prepared for", q.customer_name || "-"],
+    ["Your reference", q.reference || "-"],
+    ["Date", shortDate(q.created_at)],
+    ["Valid until", q.valid_until ? shortDate(q.valid_until) : "-"]
+  ];
+  // Built as elements rather than markup, so a customer name or a reference
+  // they typed can never be read as HTML.
+  el("meta").innerHTML = "";
+  meta.forEach(function (row) {
+    var dt = document.createElement("dt"); dt.textContent = row[0];
+    var dd = document.createElement("dd"); dd.textContent = row[1];
+    el("meta").appendChild(dt); el("meta").appendChild(dd);
+  });
+
+  var body = el("lines");
+  body.innerHTML = "";
+  var tbc = 0;
+  (q.lines || []).forEach(function (line) {
+    var priced = !!line.source;
+    if (!priced) { tbc += 1; }
+    var tr = document.createElement("tr");
+
+    var d = document.createElement("td");
+    d.textContent = line.description || "";
+    if (line.part_number) {
+      var code = document.createElement("span");
+      code.className = "part";
+      code.textContent = line.part_number;
+      d.appendChild(code);
+    }
+    tr.appendChild(d);
+
+    var qty = document.createElement("td");
+    qty.className = "num";
+    qty.textContent = line.quantity != null ? line.quantity : "";
+    tr.appendChild(qty);
+
+    var unit = document.createElement("td");
+    unit.className = "num";
+    if (priced) { unit.textContent = money(line.unit_price); }
+    else { unit.innerHTML = '<span class="tbc">TO BE CONFIRMED</span>'; }
+    tr.appendChild(unit);
+
+    var total = document.createElement("td");
+    total.className = "num";
+    total.textContent = priced ? money(line.line_total) : "-";
+    tr.appendChild(total);
+
+    body.appendChild(tr);
+  });
+
+  el("totals").innerHTML =
+    '<div><span>Subtotal (ex GST)</span><span>' + money(q.subtotal) + "</span></div>" +
+    '<div><span>GST</span><span>' + money(q.gst) + "</span></div>" +
+    '<div class="grand"><span>Total (inc GST)</span><span>' + money(q.total) + "</span></div>";
+
+  el("tbcnote").textContent = tbc
+    ? (tbc === 1
+        ? "1 line is still to be confirmed and is not included in the total. " +
+          "We will come back to you with it before anything is made."
+        : tbc + " lines are still to be confirmed and are not included in the " +
+          "total. We will come back to you with those before anything is made.")
+    : "";
+
+  // ── Whether they can still answer ────────────────────────────────────
+  if (q.status === "accepted" || q.status === "declined") {
+    var who = q.response_name ? " by " + q.response_name : "";
+    banner(q.status === "accepted" ? "ok" : "warn",
+           "This quote was already " + q.status + who +
+           (q.responded_at ? " on " + shortDate(q.responded_at) : "") +
+           ". Give us a call if that needs to change.");
+    el("respond").classList.add("hidden");
+    return;
+  }
+  if (q.expired) {
+    banner("warn",
+           "This quote expired on " + shortDate(q.valid_until) +
+           ". Get in touch and we will price it again for you.");
+    el("respond").classList.add("hidden");
+    return;
+  }
+  if (tbc) {
+    banner("warn",
+           "Some lines are still to be priced. You can still accept the rest, " +
+           "and we will confirm those separately.");
+  }
+}
+
+// ── Answering ──────────────────────────────────────────────────────────────
+
+function respond(decision) {
+  var name = el("name").value.trim();
+  if (!name) {
+    banner("err", "Please put your name in, so we know who approved it.");
+    el("name").focus();
+    return;
+  }
+  var accept = el("accept"), decline = el("decline");
+  accept.disabled = decline.disabled = true;
+  accept.textContent = decision === "accepted" ? "Sending…" : "Accept this quote";
+
+  rpc("quote_public_respond", {
+    p_token: TOKEN,
+    p_decision: decision,
+    p_name: name,
+    p_reference: el("reference").value.trim(),
+    p_note: el("note").value.trim()
+  }).then(function (res) {
+    if (res && res.ok) {
+      el("respond").classList.add("hidden");
+      banner("ok", decision === "accepted"
+        ? "Thank you — your acceptance has reached us. We will be in touch to confirm."
+        : "Thank you for letting us know. We will not proceed.");
+      return;
+    }
+    var why = res && res.error;
+    if (why === "already") {
+      banner("warn", "This quote has already been answered. Please call us.");
+      el("respond").classList.add("hidden");
+    } else if (why === "expired") {
+      banner("warn", "This quote has expired. Get in touch and we will price it again.");
+      el("respond").classList.add("hidden");
+    } else {
+      banner("err", "That did not go through. Please try again, or call us.");
+      accept.disabled = decline.disabled = false;
+      accept.textContent = "Accept this quote";
+    }
+  }).catch(function () {
+    banner("err", "Could not reach us just now. Check your connection and try again.");
+    accept.disabled = decline.disabled = false;
+    accept.textContent = "Accept this quote";
+  });
+}
+
+el("accept").addEventListener("click", function () { respond("accepted"); });
+el("decline").addEventListener("click", function () {
+  if (confirm("Decline this quote?")) { respond("declined"); }
+});
+
+// ── Start ──────────────────────────────────────────────────────────────────
+
+if (!TOKEN || !KEY) {
+  el("loading").classList.add("hidden");
+  banner("err", "This link is incomplete. Please use the full link from your " +
+                "email, or ask us to send it again.");
+} else {
+  // Keep the token out of the address bar and out of any screenshot, but
+  // leave it in the page's memory for the response.
+  try { history.replaceState({}, "", location.pathname); } catch (e) {}
+
+  rpc("quote_public_view", { p_token: TOKEN }).then(function (q) {
+    if (!q) {
+      el("loading").classList.add("hidden");
+      banner("err", "We could not find that quote. The link may have expired " +
+                    "or been mistyped — please ask us to send it again.");
+      return;
+    }
+    render(q);
+  }).catch(function () {
+    el("loading").classList.add("hidden");
+    banner("err", "We could not load the quote just now. Please try again " +
+                  "shortly, or get in touch.");
+  });
+}
+</script>
+</body>
+</html>

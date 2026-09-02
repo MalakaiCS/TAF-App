@@ -95,3 +95,29 @@ def test_item_count_survives_rubbish():
     assert delivery.item_count({"n_items": 4}) == 4
     assert delivery.item_count({"n_items": None}) == 0
     assert delivery.item_count({"n_items": "x"}) == 0
+
+
+# ── The customer quote link ─────────────────────────────────────────────────
+
+def test_a_quote_link_carries_the_token_and_the_key():
+    from urllib.parse import urlparse, parse_qs
+    base = "https://malakaics.github.io/TAF-App/quote/"
+    token = "a" * 64
+    link = base + "?" + __import__("urllib.parse", fromlist=["urlencode"]).urlencode(
+        {"t": token, "k": "sb_publishable_example"})
+    q = parse_qs(urlparse(link).query)
+    assert q["t"] == [token]
+    assert q["k"] == ["sb_publishable_example"]
+    assert urlparse(link).path.endswith("/quote/")
+
+
+def test_the_portal_page_exists_and_is_not_indexable():
+    from pathlib import Path
+    page = Path(__file__).resolve().parent.parent / "docs" / "quote" / "index.html"
+    assert page.exists(), "docs/quote/index.html is what the link points at"
+    html = page.read_text(encoding="utf-8")
+    # A quote is private even behind an unguessable address.
+    assert 'name="robots"' in html and "noindex" in html
+    # It must talk to the two locked-down functions, never the table.
+    assert "quote_public_view" in html and "quote_public_respond" in html
+    assert "/rest/v1/quotes" not in html

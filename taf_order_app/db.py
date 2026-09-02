@@ -1141,7 +1141,11 @@ def can_manage_prices() -> bool:
 # to today's prices: what a customer was told does not change because the
 # price list did.
 
-QUOTE_STATUSES = ["draft", "sent", "accepted", "declined", "expired"]
+# "viewed" is set by the customer portal when the link is first opened — the
+# difference between "they haven't looked" and "they looked and haven't
+# answered" is most of what following up is about.
+QUOTE_STATUSES = ["draft", "sent", "viewed", "accepted", "declined", "expired"]
+AWAITING_STATUSES = ("sent", "viewed")
 
 
 def next_quote_number() -> str:
@@ -1172,6 +1176,9 @@ def save_quote(data: dict) -> "dict | None":
         "location":       (data.get("location") or "").strip(),
         "status":         (data.get("status") or "draft").strip(),
         "items":          data.get("items") or [],
+        # The priced lines exactly as quoted, kept apart from `items` so what
+        # the customer was shown is never re-rendered at today's prices.
+        "lines":          data.get("lines") or [],
         "subtotal":       round(float(data.get("subtotal") or 0), 2),
         "gst":            round(float(data.get("gst") or 0), 2),
         "total":          round(float(data.get("total") or 0), 2),
@@ -1242,6 +1249,70 @@ def delete_quote(quote_id: str) -> None:
 
 def can_delete_quotes() -> bool:
     return role_level() >= 3
+
+
+# ── The customer quote portal (see migrate_quote_portal.sql) ────────────────
+# A quote gets a random token; the link containing it is the only way in. The
+# quotes table itself gives the anonymous role nothing — the page can call two
+# functions and nothing else.
+
+def ensure_quote_token(quote_id: str) -> str:
+    """The quote's public token, creating one the first time it is shared.
+
+    256 bits from `secrets`, so it cannot be guessed and does not need to be
+    kept anywhere but in the link itself.
+    """
+    import secrets
+    row = get_quote(quote_id) or {}
+    existing = (row.get("public_token") or "").strip()
+    if existing:
+        return existing
+    token = secrets.token_hex(32)
+    get_client().table("quotes").update(
+        {"public_token": token}).eq("id", quote_id).execute()
+    return token
+
+
+def mark_quote_sent(quote_id: str) -> None:
+    """Record that the link went to the customer, so follow-up can start."""
+    import datetime as _dt
+    now = _dt.datetime.utcnow().isoformat()
+    row = get_quote(quote_id) or {}
+    payload = {"sent_at": row.get("sent_at") or now, "updated_at": now}
+    # Only a quote nobody has answered moves to "sent".
+    if (row.get("status") or "draft") in ("draft", "sent"):
+        payload["status"] = "sent"
+    get_client().table("quotes").update(payload).eq("id", quote_id).execute()
+
+
+def quotes_awaiting_reply(days: int = 0) -> list:
+    """Quotes sent to a customer that have had no answer.
+
+    `days` keeps only those sent at least that long ago — the ones actually
+    worth a phone call rather than the ones sent this morning.
+    """
+    import datetime as _dt
+    try:
+        resp = (get_client().table("quotes")
+                .select("*")
+                .in_("status", list(AWAITING_STATUSES))
+                .order("sent_at", desc=False).limit(500).execute())
+        rows = resp.data or []
+    except Exception:
+        return []
+    if days <= 0:
+        return rows
+    cutoff = _dt.datetime.utcnow() - _dt.timedelta(days=days)
+    out = []
+    for r in rows:
+        stamp = (r.get("sent_at") or "")[:19]
+        try:
+            when = _dt.datetime.fromisoformat(stamp)
+        except ValueError:
+            continue          # never actually sent — nothing to chase
+        if when <= cutoff:
+            out.append(r)
+    return out
 
 
 # ── Phone upload page ────────────────────────────────────────────────────────

@@ -242,3 +242,29 @@ def test_version_comparison():
     assert not updater.is_newer("2.13.0", "2.13.0")
     assert not updater.is_newer("2.12.1", "2.13.0")
     assert updater.is_newer("v2.13.0", "2.12.0")
+
+
+# ── The customer quote portal ───────────────────────────────────────────────
+# A stranger with the link may see one quote and answer it. The token is the
+# whole of the security, so it has to be long, random and unique.
+
+def test_a_quote_token_is_unguessable_and_never_repeats():
+    import secrets
+    tokens = {secrets.token_hex(32) for _ in range(200)}
+    assert len(tokens) == 200
+    for t in tokens:
+        assert len(t) == 64                # the SQL refuses anything under 32
+        int(t, 16)                         # hex only — safe in a URL
+
+
+def test_awaiting_statuses_are_the_ones_worth_chasing():
+    # Answered and unsent quotes are not "waiting on the customer".
+    assert set(db.AWAITING_STATUSES) == {"sent", "viewed"}
+    for done in ("accepted", "declined", "expired", "draft"):
+        assert done not in db.AWAITING_STATUSES
+    assert set(db.AWAITING_STATUSES) <= set(db.QUOTE_STATUSES)
+
+
+def test_viewed_is_a_real_status():
+    # The portal sets it when the link is first opened; the app has to know it.
+    assert "viewed" in db.QUOTE_STATUSES
