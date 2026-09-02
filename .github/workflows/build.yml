@@ -75,6 +75,12 @@ jobs:
         shell: bash
         run: python -m compileall -q modern_order_gui.py pdf_generator.py template_filler.py taf_order_app
 
+      # A published release auto-updates every PC immediately and there is no
+      # staging, so this is the only gate between a broken rule and everyone
+      # using it. Needs no dependencies — see tests/run.py.
+      - name: Tests (fail fast before shipping)
+        run: python tests/run.py
+
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip

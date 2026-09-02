@@ -1,0 +1,97 @@
+"""Due dates and delivery runs."""
+import datetime
+
+from taf_order_app import delivery
+
+
+def _order(status="Complete", due="", region="Local", order_no="PO1",
+           customer="CAS - Bells Creek", items=3):
+    return {"status": status, "date_due": due, "location": region,
+            "order_no": order_no, "customer": customer, "n_items": items}
+
+
+def _days(n):
+    return (datetime.date.today() + datetime.timedelta(days=n)).strftime("%d/%m/%Y")
+
+
+# ── What is ready to go out ─────────────────────────────────────────────────
+
+def test_only_completed_work_is_ready_to_load():
+    orders = [_order(status="Complete"), _order(status="Pending"),
+              _order(status="In Production"), _order(status="Dispatched")]
+    ready = delivery.ready_for_delivery(orders)
+    assert len(ready) == 1 and ready[0]["status"] == "Complete"
+
+
+def test_planning_ahead_can_include_work_still_being_made():
+    orders = [_order(status="Complete"), _order(status="In Production"),
+              _order(status="Dispatched")]
+    ready = delivery.ready_for_delivery(orders, include_in_production=True)
+    assert len(ready) == 2
+    assert all(o["status"] != "Dispatched" for o in ready)
+
+
+def test_the_oldest_promise_is_loaded_first():
+    orders = [_order(due=_days(5), order_no="LATER"),
+              _order(due=_days(-3), order_no="OVERDUE"),
+              _order(due="", order_no="NODATE"),
+              _order(due="ASAP", order_no="ASAP")]
+    got = [o["order_no"] for o in delivery.ready_for_delivery(orders)]
+    assert got[0] == "ASAP"          # "now" beats every date
+    assert got[1] == "OVERDUE"
+    assert got[-1] == "NODATE"       # undated sinks to the bottom
+
+
+# ── Grouping a run ──────────────────────────────────────────────────────────
+
+def test_regions_come_out_in_run_order():
+    orders = [_order(region="Freight"), _order(region="Pick Up"),
+              _order(region="Local"), _order(region="Gold Coast")]
+    regions = [name for name, _rows in
+               delivery.group_by_region(delivery.ready_for_delivery(orders))]
+    assert regions == ["Pick Up", "Local", "Gold Coast", "Freight"]
+
+
+def test_an_empty_region_is_not_printed():
+    grouped = delivery.group_by_region([_order(region="Local")])
+    assert [name for name, _ in grouped] == ["Local"]
+
+
+def test_an_order_with_no_region_still_gets_delivered():
+    grouped = delivery.group_by_region([_order(region=""), _order(region="Local")])
+    names = [name for name, _ in grouped]
+    assert "Unassigned" in names and "Local" in names
+
+
+def test_the_region_can_come_from_the_saved_header():
+    order = _order(region="")
+    order["db_header"] = {"Location": "Sunshine Coast"}
+    assert delivery.region_of(order) == "Sunshine Coast"
+
+
+def test_region_matching_ignores_capitals():
+    assert delivery.region_of(_order(region="sunshine coast")) == "Sunshine Coast"
+
+
+# ── Late work ───────────────────────────────────────────────────────────────
+
+def test_overdue_and_asap():
+    assert delivery.is_overdue(_order(due=_days(-1)))
+    assert not delivery.is_overdue(_order(due=_days(1)))
+    assert not delivery.is_overdue(_order(due=_days(0)))
+    assert delivery.is_overdue(_order(due="ASAP"))
+    assert not delivery.is_overdue(_order(due=""))
+    assert not delivery.is_overdue(_order(due="whenever"))
+
+
+def test_run_summary_reads_sensibly():
+    grouped = delivery.group_by_region(
+        [_order(region="Local"), _order(region="Local"), _order(region="North")])
+    assert delivery.run_summary(grouped) == "3 orders across 2 regions"
+    assert delivery.run_summary([]) == "Nothing is ready to go out."
+
+
+def test_item_count_survives_rubbish():
+    assert delivery.item_count({"n_items": 4}) == 4
+    assert delivery.item_count({"n_items": None}) == 0
+    assert delivery.item_count({"n_items": "x"}) == 0

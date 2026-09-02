@@ -27,6 +27,7 @@ from taf_order_app import po_import as _po_import
 from taf_order_app import part_numbers as _pn
 from taf_order_app import stock_usage as _stock_usage
 from taf_order_app import pricing as _pricing
+from taf_order_app import delivery as _delivery
 from taf_order_app.bag_filler import (
     BAG_PRODUCT_TYPES, BAG_MEDIA_TYPES, ROLL_MEDIA_TYPES,
     ROLL_WIDTHS, ROLL_LENGTHS, STANDARD_SIZES,
@@ -136,6 +137,46 @@ def due_sort_key(row: dict):
     if not parsed:
         return (1, datetime.date.max)      # undated sinks to the bottom
     return (0, parsed.date())
+
+
+def _pick_one(parent, title: str, prompt: str, options: list,
+              current: str = "") -> str:
+    """A small "which of these?" dialog. Returns "" if it was closed."""
+    dlg = tk.Toplevel(parent)
+    dlg.title(title)
+    dlg.configure(bg=CBG)
+    dlg.transient(parent)
+    dlg.grab_set()
+    dlg.resizable(False, False)
+    tk.Label(dlg, text=title, bg=CA, fg="white", font=F_BOLD,
+             padx=16, pady=10, anchor="w").pack(fill="x")
+    body = tk.Frame(dlg, bg=CBG, padx=16, pady=14)
+    body.pack(fill="both", expand=True)
+    tk.Label(body, text=prompt, bg=CBG, fg=CTX, font=F_BODY,
+             anchor="w", justify="left").pack(anchor="w", pady=(0, 10))
+    var = tk.StringVar(value=current or (options[0] if options else ""))
+    for opt in options:
+        tk.Radiobutton(body, text=opt, variable=var, value=opt,
+                       bg=CBG, fg=CTX, font=F_BODY, activebackground=CBG,
+                       activeforeground=CTX, selectcolor=CCA, anchor="w",
+                       highlightthickness=0, bd=0).pack(anchor="w")
+    chosen = {"value": ""}
+
+    def _ok():
+        chosen["value"] = var.get()
+        dlg.destroy()
+
+    foot = tk.Frame(dlg, bg=CBG, padx=16, pady=10)
+    foot.pack(fill="x")
+    flat_btn(foot, "Cancel", dlg.destroy, bg=CNE,
+             pady=7).pack(side="right", padx=(8, 0))
+    flat_btn(foot, "OK", _ok, bg=CGR, pady=7).pack(side="right")
+    dlg.bind("<Escape>", lambda _e: dlg.destroy())
+    dlg.bind("<Return>", lambda _e: _ok())
+    dlg.update_idletasks()
+    dlg.geometry(f"+{parent.winfo_rootx() + 160}+{parent.winfo_rooty() + 140}")
+    parent.wait_window(dlg)
+    return chosen["value"]
 
 
 def apply_stepped_filter_note(item: dict) -> dict:
@@ -3626,9 +3667,7 @@ class QuoteDialog(tk.Toplevel):
                             # For a priced line, where the price came from.
                             # For one that found none, why — a gap in the
                             # list reads very differently from a bad line.
-                            {"list": "Price list", "rate": "Rate per m²"}
-                            .get(line.get("source"),
-                                 line.get("reason") or "NOT PRICED"),
+                            _pricing.source_label(line),
                         ))
         tree.pack(side="left", fill="both", expand=True)
         sb = ttk.Scrollbar(wrap, orient="vertical", command=tree.yview)
@@ -4046,6 +4085,7 @@ class ModernOrderApp(tk.Frame):
         self._lazy_tab_builders = {
             "new_order":   self._build_new_order_tab,
             "prev_orders": self._build_prev_orders_tab,
+            "delivery":    self._build_delivery_tab,
             "quotes":      self._build_quotes_tab,
             "products":    self._build_products_tab,
             "customers":   self._build_customers_tab,
@@ -4151,6 +4191,7 @@ class ModernOrderApp(tk.Frame):
             ("dashboard",   "▦  Dashboard"),
             ("new_order",   "＋  New Order"),
             ("prev_orders", "▤  Previous Orders"),
+            ("delivery",    "🚚  Delivery"),
             ("quotes",      "💲  Quotes"),
             ("products",    "🏷  Products"),
             ("customers",   "👥  Customers"),
@@ -4221,6 +4262,8 @@ class ModernOrderApp(tk.Frame):
             self._refresh_stock_list()
         elif key == "products":
             self._refresh_products_list()
+        elif key == "delivery":
+            self._refresh_delivery_run()
         elif key == "quotes":
             self._refresh_quote_prices()
         elif key == "audit_log":
@@ -4635,6 +4678,253 @@ class ModernOrderApp(tk.Frame):
         flat_btn(bot, "Archive Order",         self._archive_prev_order,
                  bg="#7D3C98", pady=7).pack(side="right")
 
+    # ── Delivery tab ──────────────────────────────────────────────────────
+    # What is finished and where it goes. Orders already carry a region and a
+    # due date; this turns them into a run sheet the driver takes with them
+    # and a way to mark a run out the door in one go.
+
+    def _build_delivery_tab(self):
+        frm = tk.Frame(self.content, bg=CBG, padx=14, pady=12)
+        frm.grid(row=0, column=0, sticky="nsew")
+        frm.rowconfigure(2, weight=1)
+        frm.columnconfigure(0, weight=1)
+        self._tab_frames["delivery"] = frm
+
+        top = tk.Frame(frm, bg=CBG)
+        top.grid(row=0, column=0, sticky="ew", pady=(0, 8))
+        tk.Label(top, text="Delivery", bg=CBG, fg=CA,
+                 font=F_TTL).pack(side="left")
+        self._run_summary_var = tk.StringVar(value="")
+        tk.Label(top, textvariable=self._run_summary_var, bg=CBG, fg=CMU,
+                 font=F_BODY).pack(side="left", padx=(14, 0))
+        flat_btn(top, "Refresh", self._refresh_delivery_run, bg=CNE,
+                 pady=6, padx=12, font=F_BODY).pack(side="right")
+
+        opts = tk.Frame(frm, bg=CBG)
+        opts.grid(row=1, column=0, sticky="ew", pady=(0, 8))
+        self._run_include_wip = tk.BooleanVar(value=False)
+        tk.Checkbutton(
+            opts,
+            text="Also show what's still being made (for planning tomorrow)",
+            variable=self._run_include_wip,
+            command=self._refresh_delivery_run,
+            bg=CBG, fg=CTX, font=F_BODY, activebackground=CBG,
+            activeforeground=CTX, selectcolor=CCA, anchor="w",
+            highlightthickness=0, bd=0).pack(side="left")
+        tk.Label(opts, text="Only orders marked Complete are ready to load.",
+                 bg=CBG, fg=CMU, font=F_SM).pack(side="left", padx=(14, 0))
+
+        wrap = tk.Frame(frm, bg=CCA, highlightbackground=CSP,
+                        highlightthickness=1)
+        wrap.grid(row=2, column=0, sticky="nsew")
+        wrap.rowconfigure(0, weight=1)
+        wrap.columnconfigure(0, weight=1)
+        cols = ("order_no", "customer", "items", "due", "status")
+        self.delivery_tree = ttk.Treeview(wrap, columns=cols,
+                                          show="tree headings",
+                                          style="TAF.Treeview",
+                                          selectmode="extended")
+        self.delivery_tree.heading("#0", text="Region / Order", anchor="w")
+        self.delivery_tree.column("#0", width=230, minwidth=160, stretch=False)
+        for col, (hd, wd, anc) in {
+                "order_no": ("Order #",   130, "w"),
+                "customer": ("Customer",  260, "w"),
+                "items":    ("# Items",    70, "center"),
+                "due":      ("Due",       120, "center"),
+                "status":   ("Status",    120, "center")}.items():
+            self.delivery_tree.heading(col, text=hd)
+            self.delivery_tree.column(col, width=wd, anchor=anc,
+                                      stretch=(col == "customer"))
+        self.delivery_tree.tag_configure("region", background=CCA,
+                                         font=(FAM, 10, "bold"))
+        self.delivery_tree.tag_configure("even", background=CRE)
+        self.delivery_tree.tag_configure("odd", background=CCA)
+        self.delivery_tree.tag_configure("overdue", background="#FADBD8",
+                                         foreground="#922B21")
+        self.delivery_tree.grid(row=0, column=0, sticky="nsew")
+        dsb = ttk.Scrollbar(wrap, orient="vertical",
+                            command=self.delivery_tree.yview)
+        dsb.grid(row=0, column=1, sticky="ns")
+        self.delivery_tree.configure(yscrollcommand=dsb.set)
+
+        bot = tk.Frame(frm, bg=CBG, pady=8)
+        bot.grid(row=3, column=0, sticky="ew")
+        flat_btn(bot, "🖨  Print Run Sheet", self._print_run_sheet, bg=CGR,
+                 pady=7).pack(side="left", padx=(0, 8))
+        flat_btn(bot, "✓ Mark Selected Dispatched", self._mark_dispatched,
+                 bg=CA, pady=7).pack(side="left", padx=(0, 8))
+        flat_btn(bot, "View Items", self._view_delivery_items, bg=CNE,
+                 pady=7).pack(side="left")
+
+    def _refresh_delivery_run(self):
+        """Rebuild the run from the orders already loaded, off the main thread."""
+        tree = getattr(self, "delivery_tree", None)
+        if tree is None:
+            return
+
+        def _work():
+            data = getattr(self, "_all_orders_data", None)
+            if not data:
+                try:
+                    data = self._scan_orders()
+                    self._all_orders_data = data
+                except Exception:
+                    data = []
+            self.master.after(0, lambda: _show(data))
+
+        def _show(data):
+            for iid in tree.get_children():
+                tree.delete(iid)
+            ready = _delivery.ready_for_delivery(
+                data, include_in_production=bool(self._run_include_wip.get()))
+            grouped = _delivery.group_by_region(ready)
+            self._run_rows = {}
+            for region, rows in grouped:
+                node = tree.insert(
+                    "", "end", text=f"  {region}  ({len(rows)})",
+                    tags=("region",), open=True, values=("", "", "", "", ""))
+                for i, order in enumerate(rows):
+                    overdue = _delivery.is_overdue(order)
+                    due = (order.get("date_due") or "").strip() or "—"
+                    iid = f"o{len(self._run_rows)}"
+                    self._run_rows[iid] = order
+                    tree.insert(
+                        node, "end", iid=iid, text="",
+                        tags=("overdue" if overdue
+                              else ("even" if i % 2 == 0 else "odd"),),
+                        values=(
+                            order.get("order_no") or "—",
+                            order.get("customer") or "—",
+                            _delivery.item_count(order),
+                            ("⚠ " if overdue else "") + due,
+                            order.get("status") or "Pending",
+                        ))
+            self._run_grouped = grouped
+            self._run_summary_var.set(_delivery.run_summary(grouped))
+
+        self._run_summary_var.set("Loading…")
+        threading.Thread(target=_work, daemon=True).start()
+
+    def _selected_delivery_orders(self) -> list:
+        """The orders selected, ignoring the region headings."""
+        rows = getattr(self, "_run_rows", {})
+        return [rows[iid] for iid in self.delivery_tree.selection()
+                if iid in rows]
+
+    def _print_run_sheet(self):
+        """Build the run sheet and send it to the printer."""
+        grouped = getattr(self, "_run_grouped", None)
+        if not grouped:
+            messagebox.showinfo(
+                "Run Sheet",
+                "Nothing is marked Complete, so there is nothing to load.\n\n"
+                "Mark orders Complete in Previous Orders, then print this.")
+            return
+        ORDERS_DIR.mkdir(parents=True, exist_ok=True)
+        today = datetime.date.today()
+        out = ORDERS_DIR / f"Run_Sheet_{today:%Y-%m-%d}.pdf"
+        try:
+            path = _delivery.build_run_sheet_pdf(
+                out, grouped, today,
+                prepared_by=(_db.current_full_name()
+                             or _db.current_username() or ""))
+        except Exception as exc:
+            messagebox.showerror("Run Sheet",
+                                 f"The run sheet could not be created:\n{exc}")
+            return
+        try:
+            _db.log_action("run_sheet_printed", _delivery.run_summary(grouped))
+        except Exception:
+            pass
+        self.status_var.set(f"Run sheet saved: {Path(path).name} — printing…")
+
+        def _print_worker():
+            err = self._print_file(str(path))
+            def _done():
+                if err:
+                    self.status_var.set("Run sheet saved — printing failed.")
+                    try:
+                        os.startfile(str(path))
+                    except Exception:
+                        messagebox.showinfo("Run Sheet", f"Saved to:\n{path}")
+                else:
+                    self.status_var.set("Run sheet sent to the printer.")
+            self.master.after(0, _done)
+
+        threading.Thread(target=_print_worker, daemon=True).start()
+
+    def _mark_dispatched(self):
+        """Mark a whole run out the door in one go."""
+        orders = self._selected_delivery_orders()
+        if not orders:
+            messagebox.showinfo(
+                "Mark Dispatched",
+                "Select the orders that went out — or click a region and "
+                "select the rows under it.")
+            return
+        n = len(orders)
+        if not messagebox.askyesno(
+                "Mark Dispatched",
+                f"Mark {n} order{'s' if n != 1 else ''} as Dispatched?\n\n"
+                "They come off the run and show as Dispatched in Previous "
+                "Orders."):
+            return
+
+        done, failed = 0, []
+        for order in orders:
+            oid = order.get("db_id") or order.get("id")
+            if not oid:
+                failed.append(order.get("order_no") or "—")
+                continue
+            try:
+                _db.set_order_status(oid, _delivery.DISPATCHED)
+                order["status"] = _delivery.DISPATCHED
+                done += 1
+            except Exception:
+                failed.append(order.get("order_no") or "—")
+
+        if done:
+            try:
+                _db.log_action("orders_dispatched", f"{done} order(s)")
+            except Exception:
+                pass
+        # Previous Orders and the Dashboard both count on status.
+        self._tab_loaded.pop("prev_orders", None)
+        self._tab_loaded.pop("dashboard", None)
+        self._refresh_delivery_run()
+        if failed:
+            messagebox.showwarning(
+                "Mark Dispatched",
+                f"{done} marked dispatched.\n\n"
+                f"{len(failed)} could not be: {', '.join(failed[:6])}. "
+                "Orders only saved on this PC have no shared record to update "
+                "until they sync.")
+        self.status_var.set(
+            f"{done} order{'s' if done != 1 else ''} marked dispatched.")
+
+    def _view_delivery_items(self):
+        """What's actually in the order about to be loaded."""
+        orders = self._selected_delivery_orders()
+        if not orders:
+            messagebox.showinfo("View Items", "Select an order first.")
+            return
+        row = orders[0]
+        header, items = self._order_header_items(row, "View Items")
+        if items is None:
+            return
+        lines = "\n".join(
+            f"  {i}.  {it.get('Quantity', 1)} x "
+            f"{(it.get('Part Number') or '').strip() or '—'}   "
+            f"{(it.get('Filter Type') or '')} "
+            f"{(it.get('Media Type') or '')} "
+            f"{it.get('Short', '')}x{it.get('Long', '')}x{it.get('Channel', '')}"
+            for i, it in enumerate(items, start=1)) or "  (no items)"
+        messagebox.showinfo(
+            f"Order {row.get('order_no', '')}",
+            f"{header.get('Customer Name', '')}  ·  "
+            f"{header.get('Location', '')}\n"
+            f"Due {header.get('Date Due') or '—'}\n\n{lines}")
+
     # ── Quotes tab ────────────────────────────────────────────────────────
     # Build a quote without creating an order: pick the customer, add the
     # lines, and every line is priced as it is added. An order that already
@@ -4647,6 +4937,10 @@ class ModernOrderApp(tk.Frame):
         frm.columnconfigure(0, weight=1)
         self._tab_frames["quotes"] = frm
         self.quote_items: list = []
+        # Set once the quote has been saved — what Convert to Order needs so
+        # the order can be traced back to what was quoted.
+        self._current_quote_id = None
+        self._current_quote_status = "draft"
 
         top = tk.Frame(frm, bg=CBG)
         top.grid(row=0, column=0, sticky="ew", pady=(0, 10))
@@ -4656,6 +4950,10 @@ class ModernOrderApp(tk.Frame):
                  font=F_SM).pack(side="left", padx=(14, 0))
         flat_btn(top, "Load from an Order", self._quote_from_order, bg=CNE,
                  pady=6, padx=12, font=F_BODY).pack(side="right")
+        flat_btn(top, "📋 Saved Quotes", self._open_saved_quotes, bg=CA2,
+                 pady=6, padx=12, font=F_BODY).pack(side="right", padx=(0, 8))
+        flat_btn(top, "New", self._new_quote, bg=CMU,
+                 pady=6, padx=12, font=F_BODY).pack(side="right", padx=(0, 8))
 
         # ── Who it is for ────────────────────────────────────────────────
         det = tk.Frame(frm, bg=CCA, highlightbackground=CSP,
@@ -4736,8 +5034,13 @@ class ModernOrderApp(tk.Frame):
                  pady=7).pack(side="left", padx=(0, 8))
         flat_btn(bot, "Export for Xero", self._quote_tab_xero, bg=CA2,
                  pady=7).pack(side="right")
-        flat_btn(bot, "Save Quote PDF", self._quote_tab_pdf, bg=CGR,
+        flat_btn(bot, "Save Quote PDF", self._quote_tab_pdf, bg=CNE,
                  pady=7).pack(side="right", padx=(0, 8))
+        flat_btn(bot, "💾 Save Quote", self._save_quote, bg=CGR,
+                 pady=7).pack(side="right", padx=(0, 8))
+        self._convert_btn = flat_btn(bot, "→ Convert to Order",
+                                     self._convert_quote_to_order, bg=CA2, pady=7)
+        self._convert_btn.pack(side="right", padx=(0, 8))
 
         self._quote_totals_var = tk.StringVar(value="No lines yet.")
         tk.Label(frm, textvariable=self._quote_totals_var, bg=CBG, fg=CTX,
@@ -4816,9 +5119,7 @@ class ModernOrderApp(tk.Frame):
                             line.get("quantity", 0),
                             f'{line.get("unit_price", 0):,.2f}' if priced else "—",
                             f'{line.get("line_total", 0):,.2f}' if priced else "—",
-                            {"list": "Price list", "rate": "Rate per m²"}
-                            .get(line.get("source"),
-                                 line.get("reason") or "NOT PRICED"),
+                            _pricing.source_label(line),
                         ))
         if not lines:
             self._quote_totals_var.set("No lines yet.")
@@ -4948,6 +5249,330 @@ class ModernOrderApp(tk.Frame):
             messagebox.showinfo("Quote", "Enter who the quote is for.")
             return False
         return True
+
+    # ── Saving a quote, and turning an accepted one into an order ─────────
+
+    def _new_quote(self):
+        """Start a fresh quote, keeping nothing from the last one."""
+        if self.quote_items and not messagebox.askyesno(
+                "New Quote", "Clear this quote and start a new one?"):
+            return
+        self._current_quote_id = None
+        self.quote_items = []
+        self.quote_customer_var.set("")
+        self.quote_ref_var.set("")
+        self.quote_location_var.set("")
+        self.quote_number_var.set("")
+        self._refresh_quote_lines()
+        self._update_convert_button()
+
+    def _update_convert_button(self):
+        """Convert only means something once a quote has been saved."""
+        btn = getattr(self, "_convert_btn", None)
+        if btn is not None:
+            btn.config(state=("normal" if getattr(self, "_current_quote_id", None)
+                              else "disabled"))
+
+    def _save_quote(self):
+        """Store the quote as it stands, so it can be found and followed up.
+
+        The priced lines are saved as quoted, not as a pointer at today's
+        prices — what a customer was told does not change because the price
+        list did.
+        """
+        if not self._quote_tab_ready():
+            return
+        lines = self._quote_current_lines()
+        totals = _pricing.quote_totals(lines)
+        if not self.quote_number_var.get().strip():
+            try:
+                self.quote_number_var.set(_db.next_quote_number())
+            except Exception:
+                pass
+        cust = self._quote_customer or {}
+        payload = {
+            "id":             getattr(self, "_current_quote_id", None),
+            "quote_number":   self.quote_number_var.get().strip(),
+            "customer_id":    cust.get("id"),
+            "customer_name":  self.quote_customer_var.get().strip(),
+            "reference":      self.quote_ref_var.get().strip(),
+            "location":       self.quote_location_var.get().strip(),
+            "status":         getattr(self, "_current_quote_status", "draft"),
+            "items":          [_po_import.strip_review_fields(dict(i))
+                               for i in self.quote_items],
+            "subtotal":       totals["subtotal"],
+            "gst":            totals["gst"],
+            "total":          totals["total"],
+            "unpriced_count": len(_pricing.unpriced(lines)),
+            "valid_until":    (datetime.date.today() +
+                               datetime.timedelta(days=30)).isoformat(),
+        }
+        try:
+            saved = _db.save_quote(payload)
+        except Exception as exc:
+            messagebox.showerror(
+                "Save Quote",
+                f"The quote could not be saved:\n{exc}\n\n"
+                "If this mentions a missing 'quotes' table, run "
+                "migrate_quotes.sql in the Supabase SQL Editor.")
+            return
+        if saved and saved.get("id"):
+            self._current_quote_id = saved["id"]
+        try:
+            _db.log_action("quote_saved",
+                           f"{payload['quote_number']} · "
+                           f"{payload['customer_name']} · "
+                           f"${payload['total']:,.2f}")
+        except Exception:
+            pass
+        self._update_convert_button()
+        self.status_var.set(
+            f"Quote {payload['quote_number']} saved — "
+            f"${payload['total']:,.2f}.")
+
+    def _open_saved_quotes(self):
+        """The quotes already written: find one, reopen it, or set its status."""
+        dlg = tk.Toplevel(self.master)
+        dlg.title("Saved Quotes")
+        dlg.configure(bg=CBG)
+        dlg.transient(self.master)
+        dlg.grab_set()
+
+        hdr = tk.Frame(dlg, bg=CA, padx=16, pady=10)
+        hdr.pack(fill="x")
+        tk.Label(hdr, text="Saved Quotes", bg=CA, fg="white",
+                 font=F_BOLD).pack(anchor="w")
+        tk.Label(hdr, text="Open one to work on it, or mark what happened to it.",
+                 bg=CA, fg="#A9CCE3", font=F_SM).pack(anchor="w")
+
+        bar = tk.Frame(dlg, bg=CBG, padx=16, pady=8)
+        bar.pack(fill="x")
+        status_var = tk.StringVar(value="All")
+        tk.Label(bar, text="Status:", bg=CBG, fg=CTX,
+                 font=F_BOLD).pack(side="left", padx=(0, 6))
+        ttk.Combobox(bar, textvariable=status_var,
+                     values=["All"] + list(_db.QUOTE_STATUSES),
+                     state="readonly", width=12).pack(side="left", padx=(0, 12))
+        search_var = tk.StringVar()
+        tk.Label(bar, text="Search:", bg=CBG, fg=CTX,
+                 font=F_BOLD).pack(side="left", padx=(0, 6))
+        field_entry(bar, textvariable=search_var, width=24).pack(side="left")
+
+        wrap = tk.Frame(dlg, bg=CCA, highlightbackground=CSP,
+                        highlightthickness=1)
+        wrap.pack(fill="both", expand=True, padx=16, pady=(0, 8))
+        cols = ("number", "customer", "total", "status", "created")
+        tree = ttk.Treeview(wrap, columns=cols, show="headings",
+                            style="TAF.Treeview", height=14)
+        for col, (hd, wd, anc) in {
+                "number":   ("Quote",     110, "w"),
+                "customer": ("Customer",  260, "w"),
+                "total":    ("Total",     100, "e"),
+                "status":   ("Status",    110, "center"),
+                "created":  ("Created",   110, "center")}.items():
+            tree.heading(col, text=hd)
+            tree.column(col, width=wd, anchor=anc,
+                        stretch=(col == "customer"))
+        tree.tag_configure("even", background=CRE)
+        tree.tag_configure("odd", background=CCA)
+        tree.tag_configure("accepted", background="#D4EDDA", foreground="#155724")
+        tree.tag_configure("declined", background="#FDEDEC", foreground=CRD)
+        tree.pack(side="left", fill="both", expand=True)
+        sb = ttk.Scrollbar(wrap, orient="vertical", command=tree.yview)
+        sb.pack(side="right", fill="y")
+        tree.configure(yscrollcommand=sb.set)
+
+        rows: list = []
+
+        def _reload(*_):
+            for iid in tree.get_children():
+                tree.delete(iid)
+            rows.clear()
+            try:
+                rows.extend(_db.get_quotes(status_var.get(), search_var.get()))
+            except Exception as exc:
+                messagebox.showerror("Saved Quotes",
+                                     f"Could not read quotes:\n{exc}\n\n"
+                                     "If this mentions a missing 'quotes' "
+                                     "table, run migrate_quotes.sql.",
+                                     parent=dlg)
+                return
+            for i, r in enumerate(rows):
+                status = r.get("status", "draft")
+                tag = ("accepted" if status == "accepted"
+                       else "declined" if status == "declined"
+                       else "even" if i % 2 == 0 else "odd")
+                tree.insert("", "end", iid=str(i), tags=(tag,), values=(
+                    r.get("quote_number", ""),
+                    r.get("customer_name", ""),
+                    f'{float(r.get("total") or 0):,.2f}',
+                    status + (" ✓" if r.get("converted_order_id") else ""),
+                    (r.get("created_at") or "")[:10],
+                ))
+            if not rows:
+                self.status_var.set("No quotes saved yet.")
+
+        status_var.trace_add("write", _reload)
+        search_var.trace_add("write", _reload)
+
+        def _selected():
+            sel = tree.selection()
+            if not sel:
+                messagebox.showinfo("Saved Quotes", "Select a quote first.",
+                                    parent=dlg)
+                return None
+            idx = int(sel[0])
+            return rows[idx] if idx < len(rows) else None
+
+        def _open():
+            row = _selected()
+            if not row:
+                return
+            dlg.destroy()
+            self._load_quote(row)
+
+        def _set_status():
+            row = _selected()
+            if not row:
+                return
+            choice = _pick_one(dlg, "Quote Status",
+                               f"What happened to {row.get('quote_number','')}?",
+                               list(_db.QUOTE_STATUSES),
+                               row.get("status", "draft"))
+            if not choice:
+                return
+            try:
+                _db.set_quote_status(row["id"], choice)
+                _db.log_action("quote_status",
+                               f"{row.get('quote_number','')} → {choice}")
+            except Exception as exc:
+                messagebox.showerror("Saved Quotes",
+                                     f"Could not update:\n{exc}", parent=dlg)
+                return
+            _reload()
+
+        def _delete():
+            row = _selected()
+            if not row:
+                return
+            if not messagebox.askyesno(
+                    "Delete Quote",
+                    f"Delete quote {row.get('quote_number','')} for "
+                    f"{row.get('customer_name','')}?\n\nThis cannot be undone.",
+                    icon="warning", default="no", parent=dlg):
+                return
+            try:
+                _db.delete_quote(row["id"])
+            except Exception as exc:
+                messagebox.showerror("Saved Quotes",
+                                     f"Could not delete:\n{exc}", parent=dlg)
+                return
+            if getattr(self, "_current_quote_id", None) == row["id"]:
+                self._current_quote_id = None
+                self._update_convert_button()
+            _reload()
+
+        foot = tk.Frame(dlg, bg=CBG, padx=16, pady=10)
+        foot.pack(fill="x")
+        flat_btn(foot, "Open", _open, bg=CGR, pady=7).pack(side="left")
+        flat_btn(foot, "Mark Status", _set_status, bg=CA2,
+                 pady=7).pack(side="left", padx=(8, 0))
+        if _db.is_ready() and _db.can_delete_quotes():
+            flat_btn(foot, "Delete", _delete, bg=CRD,
+                     pady=7).pack(side="left", padx=(8, 0))
+        flat_btn(foot, "Close", dlg.destroy, bg=CNE,
+                 pady=7).pack(side="right")
+        tree.bind("<Double-1>", lambda _e: _open())
+        dlg.bind("<Escape>", lambda _e: dlg.destroy())
+        W, H = 780, 520
+        dlg.geometry(f"{W}x{H}+{self.master.winfo_rootx() + 100}"
+                     f"+{self.master.winfo_rooty() + 60}")
+        _reload()
+
+    def _load_quote(self, row):
+        """Reopen a saved quote in the Quotes tab."""
+        self._current_quote_id = row.get("id")
+        self._current_quote_status = row.get("status", "draft")
+        self.quote_number_var.set(row.get("quote_number", ""))
+        self.quote_customer_var.set(row.get("customer_name", ""))
+        self.quote_ref_var.set(row.get("reference", ""))
+        self.quote_location_var.set(row.get("location", ""))
+        self.quote_items = [self._stamp_item(dict(i))
+                            for i in (row.get("items") or [])]
+        self._refresh_quote_lines()
+        self._update_convert_button()
+        self._show_tab("quotes")
+        self.status_var.set(
+            f"Quote {row.get('quote_number','')} opened — "
+            f"{len(self.quote_items)} line"
+            f"{'s' if len(self.quote_items) != 1 else ''}.")
+
+    def _convert_quote_to_order(self):
+        """Turn an accepted quote into an order without re-keying it.
+
+        The lines go straight onto the New Order form, ready to generate. The
+        quote is marked accepted and pointed at the order, so the same quote
+        can't quietly be made twice.
+        """
+        quote_id = getattr(self, "_current_quote_id", None)
+        if not quote_id:
+            messagebox.showinfo(
+                "Convert to Order",
+                "Save the quote first — converting records which quote the "
+                "order came from.")
+            return
+        if not self.quote_items:
+            messagebox.showinfo("Convert to Order", "This quote has no lines.")
+            return
+
+        row = None
+        try:
+            row = _db.get_quote(quote_id)
+        except Exception:
+            pass
+        if row and row.get("converted_order_id"):
+            if not messagebox.askyesno(
+                    "Already Converted",
+                    f"Quote {row.get('quote_number','')} was already made "
+                    "into an order.\n\nMake another one from it?",
+                    icon="warning", default="no"):
+                return
+
+        unpriced = _pricing.unpriced(self._quote_current_lines())
+        if unpriced and not messagebox.askyesno(
+                "Unpriced Lines",
+                f"{len(unpriced)} line{'s' if len(unpriced) != 1 else ''} on "
+                "this quote have no price.\n\nConvert it to an order anyway?",
+                icon="warning", default="yes"):
+            return
+
+        header = {
+            "Customer Name": self.quote_customer_var.get().strip(),
+            "Order Number":  self.quote_ref_var.get().strip(),
+            "Job":           self.quote_ref_var.get().strip(),
+            "Location":      self.quote_location_var.get().strip(),
+            "Date Ordered":  datetime.date.today().strftime("%d/%m/%y"),
+            "Date Due":      "",
+            "Notes":         f"From quote {self.quote_number_var.get().strip()}",
+        }
+        self._load_order_into_form(header, [dict(i) for i in self.quote_items])
+        try:
+            _db.mark_quote_converted(quote_id)
+            _db.log_action("quote_converted",
+                           f"{self.quote_number_var.get().strip()} → order for "
+                           f"{header['Customer Name']}")
+        except Exception:
+            pass          # the order matters more than the bookkeeping
+        self._current_quote_status = "accepted"
+        self._show_tab("new_order")
+        self.status_var.set(
+            f"Quote {self.quote_number_var.get().strip()} loaded into a new "
+            "order — check the order number and due date, then Generate.")
+        messagebox.showinfo(
+            "Converted to Order",
+            "The quote's lines are on the New Order tab and the quote is "
+            "marked accepted.\n\nFill in the customer's order number and the "
+            "due date, then press Generate Output.")
 
     def _quote_tab_pdf(self):
         if self._quote_tab_ready():

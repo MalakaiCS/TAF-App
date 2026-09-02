@@ -29,9 +29,13 @@ log, stock management and a customer database.
   week, with late work coloured and flagged in the list, and a Due panel on
   the Dashboard that opens straight into it.
 - **Quotes** — its own tab. Pick the customer, add the lines (or pull them
-  from a saved order), and each one is priced as it goes in. Print a quote PDF
-  and export a Xero sales-invoice CSV. A line nothing can price is shown as
-  "to be confirmed", with the reason, rather than guessed at.
+  from a saved order), and each one is priced as it goes in. Save it, follow
+  it up, and turn an accepted one into an order with the lines already there.
+  Print a quote PDF and export a Xero sales-invoice CSV. A line nothing can
+  price is shown as "to be confirmed", with the reason, rather than guessed at.
+- **Delivery** — what's finished and where it goes, grouped by region in run
+  order. Print a run sheet for the driver (tick box, due date, signature
+  column) and mark a whole run dispatched in one go.
 - **Products** — the priced catalogue: search it, correct a price, add a
   product, import price spreadsheets. The part numbers here are the item codes
   in Xero.
@@ -117,6 +121,7 @@ In the Supabase dashboard → **SQL Editor**, run these once (in order):
    adds customer short names, delivery regions, job-number labels and the
    part-number code on each media type. `migrate_pricing.sql` adds the price
    list and the per-m² rates that back quotes and the Xero export.
+   `migrate_quotes.sql` adds saved quotes.
 
 ### Enable purchase-order import (optional)
 
@@ -275,6 +280,8 @@ taf_order_app/
   pricing.py               Price lists, quote lines, Xero export
   quote_pdf.py             The quote PDF
   stock_usage.py           What an order takes out of stock
+  delivery.py              Run sheets and what's ready to go out
+tests/                     Rule tests — `python tests/run.py`, run by CI
   user_management.py       Roles & user admin
   models.py / validation.py
 fonts/                     Bundled Public Sans (OFL)
@@ -301,10 +308,20 @@ GitHub bumps the version, builds the Windows installer, and publishes the
 Release. Installed clients then auto-update.
 
 > ⚠️ A published release auto-updates **all** users immediately, and you can't
-> run/test the Windows app on a phone. CI runs a syntax check before building
-> (so a broken commit won't ship), but it can't catch logic bugs — test bigger
-> changes on a Windows PC (install the release's `TAFOrderEntry_Setup.exe`)
-> before relying on them.
+> run/test the Windows app on a phone. CI runs a syntax check **and the test
+> suite** before building, so a broken rule won't ship — but the tests cover
+> the rules (part numbers, prices, stock, due dates, delivery), not the
+> Tkinter screens. Test UI changes on a Windows PC (install the release's
+> `TAFOrderEntry_Setup.exe`) before relying on them.
+
+## Tests
+
+```bash
+python tests/run.py      # no dependencies; pytest also works
+```
+
+Every test is a regression — something that went wrong in a shipped build and
+reached the people using it. Add one whenever a bug gets out.
 
 ## Notes
 

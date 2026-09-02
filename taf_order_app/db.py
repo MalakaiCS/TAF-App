@@ -1136,6 +1136,114 @@ def can_manage_prices() -> bool:
     return role_level() >= 3
 
 
+# ── Quotes (see migrate_quotes.sql) ──────────────────────────────────────────
+# A quote is kept as the lines that were actually quoted, not as a reference
+# to today's prices: what a customer was told does not change because the
+# price list did.
+
+QUOTE_STATUSES = ["draft", "sent", "accepted", "declined", "expired"]
+
+
+def next_quote_number() -> str:
+    """The next quote number, as Q-0001. Falls back to a date-stamped one."""
+    import datetime as _dt
+    try:
+        resp = (get_client().table("quotes")
+                .select("quote_number")
+                .like("quote_number", "Q-%")
+                .order("quote_number", desc=True).limit(1).execute())
+        rows = resp.data or []
+        if rows:
+            last = (rows[0].get("quote_number") or "").split("-")[-1]
+            return f"Q-{int(last) + 1:04d}"
+        return "Q-0001"
+    except Exception:
+        return f"Q-{_dt.datetime.now():%y%m%d-%H%M}"
+
+
+def save_quote(data: dict) -> "dict | None":
+    """Create a quote, or update one when `data` carries an id."""
+    import datetime as _dt
+    payload = {
+        "quote_number":   (data.get("quote_number") or "").strip(),
+        "customer_id":    data.get("customer_id") or None,
+        "customer_name":  (data.get("customer_name") or "").strip(),
+        "reference":      (data.get("reference") or "").strip(),
+        "location":       (data.get("location") or "").strip(),
+        "status":         (data.get("status") or "draft").strip(),
+        "items":          data.get("items") or [],
+        "subtotal":       round(float(data.get("subtotal") or 0), 2),
+        "gst":            round(float(data.get("gst") or 0), 2),
+        "total":          round(float(data.get("total") or 0), 2),
+        "unpriced_count": int(data.get("unpriced_count") or 0),
+        "valid_until":    data.get("valid_until") or None,
+        "notes":          (data.get("notes") or "").strip(),
+        "updated_at":     _dt.datetime.utcnow().isoformat(),
+    }
+    quote_id = data.get("id")
+    if quote_id:
+        get_client().table("quotes").update(payload).eq("id", quote_id).execute()
+        return dict(payload, id=quote_id)
+    payload["created_by_name"] = current_full_name() or current_username()
+    resp = get_client().table("quotes").insert(payload).execute()
+    return resp.data[0] if resp.data else None
+
+
+def get_quotes(status: str = "", search: str = "", limit: int = 500) -> list:
+    try:
+        q = get_client().table("quotes").select("*")
+        if status and status != "All":
+            q = q.eq("status", status)
+        resp = q.order("created_at", desc=True).limit(limit).execute()
+        rows = resp.data or []
+    except Exception:
+        return []
+    if search:
+        s = search.lower()
+        rows = [r for r in rows
+                if s in (r.get("quote_number") or "").lower()
+                or s in (r.get("customer_name") or "").lower()
+                or s in (r.get("reference") or "").lower()]
+    return rows
+
+
+def get_quote(quote_id: str) -> "dict | None":
+    try:
+        resp = (get_client().table("quotes")
+                .select("*").eq("id", quote_id).single().execute())
+        return resp.data
+    except Exception:
+        return None
+
+
+def set_quote_status(quote_id: str, status: str) -> None:
+    import datetime as _dt
+    get_client().table("quotes").update({
+        "status": status,
+        "updated_at": _dt.datetime.utcnow().isoformat(),
+    }).eq("id", quote_id).execute()
+
+
+def mark_quote_converted(quote_id: str, order_id: str = "") -> None:
+    """Record that a quote became an order, so it can't be converted twice."""
+    import datetime as _dt
+    now = _dt.datetime.utcnow().isoformat()
+    get_client().table("quotes").update({
+        "status":             "accepted",
+        "converted_order_id": order_id or None,
+        "converted_at":       now,
+        "updated_at":         now,
+    }).eq("id", quote_id).execute()
+
+
+def delete_quote(quote_id: str) -> None:
+    get_client().table("quotes").delete().eq("id", quote_id).execute()
+
+
+def can_delete_quotes() -> bool:
+    return role_level() >= 3
+
+
 # ── Phone upload page ────────────────────────────────────────────────────────
 # The page phones open is NOT hosted on Supabase. Supabase serves anything it
 # hosts as text/plain with "Content-Security-Policy: default-src 'none';

@@ -111,7 +111,12 @@ def _candidates(row: Iterable[Any]) -> Dict[str, List[int]]:
             ("name",  NAME_HEADINGS,  (), DESC_AVOIDED)):
         scored = [(_score(c, exact, prefer, avoid), i)
                   for i, c in enumerate(cells)]
-        ranked = sorted(((s, i) for s, i in scored if s > 0), reverse=True)
+        # Best score first, and among equal scores the leftmost column. The
+        # score is what decides — leaving ties to fall out of the sort order
+        # once meant the right column was picked by accident, which is not
+        # something to build a price list on.
+        ranked = sorted((si for si in scored if si[0] > 0),
+                        key=lambda si: (-si[0], si[1]))
         if ranked:
             out[field] = [i for _s, i in ranked]
     return out
@@ -266,19 +271,76 @@ def _rate_key(filter_type: str, media: str) -> str:
     return f"{_pn.wording_key(filter_type)}|{_pn.wording_key(media)}"
 
 
+# How far a thickness may be rounded to find a price. The catalogue is priced
+# in 5mm steps, but purchase orders ask for 48mm and 47mm — sizes that are
+# made out of the same materials as the 50mm and cost the same to make.
+# Anything further away than this is a different filter, not a near miss.
+NEAREST_THICKNESS_MM = 4
+
+
+def nearest_priced_part(item: Dict[str, Any],
+                        prices: Dict[str, float]) -> Tuple[str, float]:
+    """A priced part number for a thickness the list doesn't carry.
+
+    A 48mm V-form is not in a catalogue priced in 5mm steps, but it is the
+    same filter as the 50mm to within a couple of millimetres. Returns the
+    part number found and its price, or ("", 0.0).
+
+    Deliberately narrow: same media, same area, same type — only the
+    thickness moves, and only by a few millimetres. And the caller is told
+    this is what happened, so it never reads as a listed price.
+    """
+    ftype = (item.get("Filter Type") or "").strip().lower()
+    prefix = PART_PREFIX_FOR_NEAREST.get(ftype)
+    if not prefix or not prices:
+        return ("", 0.0)
+    try:
+        thickness = int(str(item.get("Channel") or "").strip())
+    except (TypeError, ValueError):
+        return ("", 0.0)
+    if thickness <= 0:
+        return ("", 0.0)
+
+    code = _pn.media_code(item.get("Media Type") or "")
+    nominal = _pn.nominal_square_metres(_pn.effective_area(item))
+    if not code or nominal <= 0:
+        return ("", 0.0)
+    suffix = _pn.sqm_suffix(nominal)
+
+    # Nearest first, so 48 tries 50 before 45 when both are priced.
+    for step in sorted(range(-NEAREST_THICKNESS_MM, NEAREST_THICKNESS_MM + 1),
+                       key=lambda d: (abs(d), -d)):
+        if step == 0:
+            continue
+        candidate = f"{prefix}{code}{thickness + step}-{suffix}"
+        listed = prices.get(candidate)
+        if listed is not None:
+            return (candidate, round(float(listed), 4))
+    return ("", 0.0)
+
+
+PART_PREFIX_FOR_NEAREST = dict(_pn.PART_NUMBER_PREFIXES)
+
+
 def price_for_item(item: Dict[str, Any],
                    prices: Optional[Dict[str, float]] = None,
                    rates: Optional[Dict[str, float]] = None) -> Tuple[float, str]:
     """The unit price for one line, and where it came from.
 
-    Returns ``(unit_price, source)`` where source is "list", "rate" or "" —
-    an empty source means nothing priced it and the line needs a human.
+    Returns ``(unit_price, source)`` where source is "list", "near", "rate"
+    or "" — an empty source means nothing priced it and the line needs a
+    human. "near" is a price taken from the same filter a few millimetres
+    thicker or thinner, and is always shown as such.
     """
     part = (item.get("Part Number") or "").strip().upper()
     if part and prices:
         listed = prices.get(part)
         if listed is not None:
             return (round(float(listed), 4), "list")
+        near_part, near_price = nearest_priced_part(item, prices)
+        if near_part:
+            item["_priced_as"] = near_part      # shown, never silently used
+            return (near_price, "near")
 
     if rates:
         ftype = (item.get("Filter Type") or "").strip()
@@ -361,10 +423,23 @@ def quote_lines(items: Iterable[Dict[str, Any]],
             "unit_price":  unit,
             "line_total":  round(unit * qty, 2),
             "source":      source,
+            "priced_as":   it.get("_priced_as", "") if source == "near" else "",
             "reason":      "" if source else why_unpriced(it, prices),
             "item":        it,
         })
     return out
+
+
+def source_label(line: Dict[str, Any]) -> str:
+    """Where a line's price came from, as shown to whoever reads the quote."""
+    source = line.get("source")
+    if source == "list":
+        return "Price list"
+    if source == "rate":
+        return "Rate per m²"
+    if source == "near":
+        return f"Priced as {line.get('priced_as') or 'nearest size'}"
+    return line.get("reason") or "NOT PRICED"
 
 
 def describe_item(item: Dict[str, Any]) -> str:

@@ -145,14 +145,22 @@ def build_quote_pdf(out_path,
     body = [[Paragraph(h, s_head) for h in head]]
     unpriced_rows: List[int] = []
 
+    near_rows: List[int] = []
     for i, line in enumerate(lines, start=1):
         priced = bool(line.get("source"))
         if not priced:
             unpriced_rows.append(i)
+        description = line.get("description") or ""
+        if line.get("source") == "near" and line.get("priced_as"):
+            # A price borrowed from the next size up or down is said on the
+            # quote itself, not just on the screen it was built on.
+            description += (f'<br/><font size="7" color="#7E5109">'
+                            f'priced as {line["priced_as"]}</font>')
+            near_rows.append(i)
         body.append([
             Paragraph(str(i), s_cell),
             Paragraph(line.get("part_number") or "—", s_cell),
-            Paragraph(line.get("description") or "", s_cell),
+            Paragraph(description, s_cell),
             Paragraph(str(line.get("quantity", 0)), s_cell),
             Paragraph(f'{line.get("unit_price", 0):,.2f}' if priced
                       else "TO BE CONFIRMED", s_cell),
