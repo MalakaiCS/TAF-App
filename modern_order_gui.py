@@ -3926,7 +3926,7 @@ class ModernOrderApp(tk.Frame):
         _start_app()
 
     def _check_update_manual(self):
-        from taf_order_app.updater import check_for_update, get_current_remote_version
+        from taf_order_app.updater import latest_release, UpdateCheckError
         import queue as _q
 
         # Guard against re-entrancy. We keep the button ENABLED and just change
@@ -3941,12 +3941,15 @@ class ModernOrderApp(tk.Frame):
         q = _q.Queue()
 
         def _work():
+            # One request, not two: the check used to ask GitHub twice per
+            # click, which doubled how fast an office connection ran into
+            # GitHub's 60-an-hour limit for the answer it already had.
             try:
-                info   = check_for_update()
-                remote = get_current_remote_version()
-                q.put(("ok", (info, remote)))
-            except Exception as exc:
+                q.put(("ok", latest_release()))
+            except UpdateCheckError as exc:
                 q.put(("error", str(exc)))
+            except Exception as exc:
+                q.put(("error", str(exc) or exc.__class__.__name__))
 
         def _poll():
             try:
@@ -3959,22 +3962,46 @@ class ModernOrderApp(tk.Frame):
             self._upd_checking = False
             self._check_upd_btn.config(state="normal", text="Check for Updates")
             if kind == "ok":
-                info, remote = data
-                if info:
-                    v = info.get("version", "")
+                info = data
+                v = info.get("version", "")
+                if info.get("is_newer"):
                     self._upd_status_var.set(f"v{v} is available.")
                     self._pending_update = info
                     self._install_upd_btn.pack(side="left", padx=(8, 0))
                     self._update_banner_shown = False   # allow re-show
                     self._show_update_banner(info)
+                    self._download_upd_btn.pack_forget()
                 else:
-                    self._upd_status_var.set(f"You're up to date.  (v{remote})")
+                    # Only said when GitHub actually answered the question.
+                    self._upd_status_var.set(
+                        f"You're up to date. This PC is on v{APP_VERSION}, "
+                        f"and the newest release is v{v}.")
                     self._install_upd_btn.pack_forget()
+                    self._download_upd_btn.pack_forget()
             else:
-                self._upd_status_var.set(f"Check failed: {data}")
+                # A failed check is NOT "up to date" — saying so would leave
+                # someone on an old build sure they were on the newest one.
+                self._upd_status_var.set(
+                    f"Couldn't check for updates — {data}. "
+                    f"This PC is on v{APP_VERSION}.")
+                self._install_upd_btn.pack_forget()
+                self._download_upd_btn.pack(side="left", padx=(8, 0))
 
         threading.Thread(target=_work, daemon=True).start()
         self.master.after(150, _poll)
+
+    def _open_releases_page(self):
+        """Open the Releases page so the installer can be downloaded by hand."""
+        import webbrowser
+        from taf_order_app.updater import RELEASES_PAGE
+        try:
+            webbrowser.open(RELEASES_PAGE)
+            self.status_var.set("Opened the Releases page in your browser.")
+        except Exception:
+            messagebox.showinfo(
+                "Download the Update",
+                "Open this page in a browser and download "
+                f"TAFOrderEntry_Setup.exe:\n\n{RELEASES_PAGE}")
 
     def _open_user_management(self):
         from taf_order_app.user_management import UserManagementDialog
@@ -7271,6 +7298,14 @@ class ModernOrderApp(tk.Frame):
                                           bg=CGR, pady=6)
         self._install_upd_btn.pack(side="left", padx=(8, 0))
         self._install_upd_btn.pack_forget()
+        # Shown only when the check itself failed: whatever is blocking the
+        # API, the Releases page and its installer are still reachable in a
+        # browser, so nobody is stuck on an old build waiting for a fix.
+        self._download_upd_btn = flat_btn(btn_row, "Open Releases Page",
+                                          self._open_releases_page,
+                                          bg=CNE, pady=6)
+        self._download_upd_btn.pack(side="left", padx=(8, 0))
+        self._download_upd_btn.pack_forget()
         self._pending_update = None
 
         # row 3 – User Management (Managers and above only)

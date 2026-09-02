@@ -5,16 +5,24 @@ Update source: the latest published GitHub Release of GITHUB_REPO. Each
 release attaches the Inno Setup installer (TAFOrderEntry_Setup.exe); updating
 downloads it and runs it silently, then relaunches the app.
 
-Public API (unchanged for the GUI):
-    check_for_update()            -> dict | None
+Public API:
+    latest_release()              -> dict, or raises UpdateCheckError
+    check_for_update()            -> dict | None   (swallows failures)
     get_current_remote_version()  -> str
     download_and_install(info, progress_cb)
     cleanup_old_exe()
+
+A check that could not be made and a check that found nothing are different
+answers, and only latest_release() can tell them apart. Anything with a
+person waiting on it should use that one: reporting "you're up to date"
+because the request failed leaves someone on an old build certain they are
+on the newest one.
 """
 from __future__ import annotations
 import os, sys, json, subprocess, tempfile
 from pathlib import Path
 import urllib.request
+import urllib.error
 
 APP_VERSION = "2.13.0"
 
@@ -34,40 +42,67 @@ def is_newer(remote: str, local: str = APP_VERSION) -> bool:
     return _parse_version(remote) > _parse_version(local)
 
 
-def _fetch_latest() -> dict | None:
-    """Return the latest-release JSON from the GitHub API, or None on any error."""
+RELEASES_PAGE = f"https://github.com/{GITHUB_REPO}/releases/latest"
+
+
+class UpdateCheckError(Exception):
+    """The check could not be made — which is NOT the same as being up to date.
+
+    Saying "you're up to date" when the question was never actually answered
+    is the worst thing this module can do: it leaves someone on an old build
+    convinced they are on the newest one. Every failure carries a reason a
+    person can act on.
+    """
+
+
+def fetch_latest() -> dict:
+    """The latest-release JSON. Raises UpdateCheckError with a plain reason."""
+    req = urllib.request.Request(_API_LATEST, headers={
+        "Accept":     "application/vnd.github+json",
+        "User-Agent": f"TAFOrderEntry/{APP_VERSION}",
+    })
     try:
-        req = urllib.request.Request(_API_LATEST, headers={
-            "Accept":     "application/vnd.github+json",
-            "User-Agent": f"TAFOrderEntry/{APP_VERSION}",
-        })
-        with urllib.request.urlopen(req, timeout=10) as resp:
+        with urllib.request.urlopen(req, timeout=15) as resp:
             return json.load(resp)
+    except urllib.error.HTTPError as exc:
+        headers = getattr(exc, "headers", None) or {}
+        if exc.code == 403 and str(headers.get("x-ratelimit-remaining")) == "0":
+            raise UpdateCheckError(
+                "GitHub is rate-limiting this network. It allows 60 checks an "
+                f"hour per office connection{_reset_hint(headers)}") from exc
+        if exc.code == 404:
+            raise UpdateCheckError(
+                "GitHub has no published release for this app") from exc
+        raise UpdateCheckError(
+            f"GitHub replied {exc.code} {exc.reason}") from exc
+    except urllib.error.URLError as exc:
+        raise UpdateCheckError(
+            f"couldn't reach GitHub ({exc.reason}). Check the internet "
+            "connection, or whether a firewall is blocking "
+            "api.github.com") from exc
+    except Exception as exc:
+        raise UpdateCheckError(str(exc) or exc.__class__.__name__) from exc
+
+
+def _reset_hint(headers) -> str:
+    """" — try again in N minutes", when GitHub says when the limit resets."""
+    try:
+        import time
+        reset = int(headers.get("x-ratelimit-reset") or 0)
+        mins = max(1, int((reset - time.time()) // 60) + 1)
+        return f" — try again in about {mins} minute{'s' if mins != 1 else ''}"
     except Exception:
-        return None
+        return ""
 
 
-def check_for_update() -> dict | None:
-    """
-    Returns {"version", "download_url", "release_notes"} if the latest GitHub
-    release is newer than APP_VERSION, else None. download_url points at the
-    release's installer (.exe) asset.
-    """
-    data = _fetch_latest()
-    if not data:
-        return None
-    tag = (data.get("tag_name") or "").strip()
-    version = tag.lstrip("vV")
-    if not version or not is_newer(version):
-        return None
-
+def _release_info(data: dict) -> dict:
+    """The bits of a release the app needs, from already-fetched JSON."""
+    version = (data.get("tag_name") or "").strip().lstrip("vV")
     download_url = ""
     for asset in data.get("assets", []):
-        name = (asset.get("name") or "").lower()
-        if name.endswith(".exe"):
+        if (asset.get("name") or "").lower().endswith(".exe"):
             download_url = asset.get("browser_download_url", "")
             break
-
     return {
         "version":       version,
         "download_url":  download_url,
@@ -75,12 +110,42 @@ def check_for_update() -> dict | None:
     }
 
 
+def latest_release() -> dict:
+    """Everything about the newest release, in one request.
+
+    Returns {"version", "download_url", "release_notes", "is_newer"}. Raises
+    UpdateCheckError if the check could not be made.
+    """
+    info = _release_info(fetch_latest())
+    if not info["version"]:
+        raise UpdateCheckError("GitHub returned a release with no version tag")
+    info["is_newer"] = is_newer(info["version"])
+    return info
+
+
+def check_for_update() -> dict | None:
+    """
+    Returns {"version", "download_url", "release_notes"} if the latest GitHub
+    release is newer than APP_VERSION, else None. download_url points at the
+    release's installer (.exe) asset.
+
+    Swallows failures — for the silent check on startup, where there is
+    nobody to tell. Anything with a person watching should use
+    latest_release() so a failed check can say so.
+    """
+    try:
+        info = latest_release()
+    except UpdateCheckError:
+        return None
+    return info if info["is_newer"] else None
+
+
 def get_current_remote_version() -> str:
     """Return the latest release version from GitHub, or APP_VERSION on error."""
-    data = _fetch_latest()
-    if not data:
+    try:
+        return latest_release()["version"] or APP_VERSION
+    except UpdateCheckError:
         return APP_VERSION
-    return (data.get("tag_name") or APP_VERSION).strip().lstrip("vV") or APP_VERSION
 
 
 def get_release_notes(version: str) -> str:
