@@ -24,7 +24,7 @@ from pathlib import Path
 import urllib.request
 import urllib.error
 
-APP_VERSION = "2.15.0"
+APP_VERSION = "2.16.0"
 
 # Public repo whose GitHub Releases drive updates.
 GITHUB_REPO = "MalakaiCS/TAF-App"
