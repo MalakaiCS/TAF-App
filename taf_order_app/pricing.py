@@ -34,6 +34,14 @@ PRICE_HEADINGS = ("price", "unit price", "sell", "sell price", "rate",
                   "unit cost", "cost")
 DESC_HEADINGS = ("description", "desc", "details", "name", "product name")
 
+# What TAF charges, not what TAF pays. A Xero item export carries both a
+# PurchasesUnitPrice and a SalesUnitPrice; picking the first column whose
+# heading merely contains "price" lands on the purchase column, which in an
+# export like that is empty — so every row is dropped and the import looks
+# like it found nothing. Headings are scored instead of taken in order.
+PRICE_PREFERRED = ("sales", "sell", "selling", "list", "retail", "charge")
+PRICE_AVOIDED = ("purchase", "purchases", "cost", "buy", "supplier", "wholesale")
+
 
 def _norm_heading(text: Any) -> str:
     return re.sub(r"[^a-z0-9 ]+", " ", str(text or "").lower()).strip()
@@ -54,49 +62,95 @@ def _money(value: Any) -> Optional[float]:
         return None
 
 
-def _pick_columns(row: Iterable[Any]) -> Optional[Dict[str, int]]:
-    """Which columns of a header row hold the code, price and description."""
+def _score(cell: str, exact: tuple, prefer: tuple = (), avoid: tuple = ()) -> int:
+    """How well a heading matches, or 0 for not at all. Higher is better."""
+    if not cell:
+        return 0
+    base = 0
+    if cell in exact:
+        base = 100
+    elif any(h in cell for h in exact):
+        base = 50
+    if not base:
+        return 0
+    if any(w in cell for w in prefer):
+        base += 30
+    if any(w in cell for w in avoid):
+        base -= 45
+    return max(base, 1)
+
+
+def _candidates(row: Iterable[Any]) -> Dict[str, List[int]]:
+    """Every column a header row offers for each field, best-scoring first."""
     cells = [_norm_heading(c) for c in row]
-    found: Dict[str, int] = {}
-    for idx, cell in enumerate(cells):
-        if not cell:
-            continue
-        if "code" not in found and cell in CODE_HEADINGS:
-            found["code"] = idx
-        elif "price" not in found and cell in PRICE_HEADINGS:
-            found["price"] = idx
-        elif "desc" not in found and cell in DESC_HEADINGS:
-            found["desc"] = idx
-    # Fall back to a looser match so "Sell Price (ex GST)" still lands.
-    if "code" not in found or "price" not in found:
-        for idx, cell in enumerate(cells):
-            if not cell:
-                continue
-            if "code" not in found and any(h in cell for h in CODE_HEADINGS):
-                found["code"] = idx
-            if "price" not in found and any(h in cell for h in PRICE_HEADINGS):
-                found["price"] = idx
-            if "desc" not in found and any(h in cell for h in DESC_HEADINGS):
-                found["desc"] = idx
-    if "code" in found and "price" in found:
-        return found
-    return None
+    out: Dict[str, List[int]] = {}
+    for field, exact, prefer, avoid in (
+            ("code",  CODE_HEADINGS,  (), ()),
+            ("price", PRICE_HEADINGS, PRICE_PREFERRED, PRICE_AVOIDED),
+            ("desc",  DESC_HEADINGS,  (), ())):
+        scored = [(_score(c, exact, prefer, avoid), i)
+                  for i, c in enumerate(cells)]
+        ranked = sorted(((s, i) for s, i in scored if s > 0), reverse=True)
+        if ranked:
+            out[field] = [i for _s, i in ranked]
+    return out
 
 
-def _rows_from_csv(path: Path) -> List[List[Any]]:
+def _pick_columns(row: Iterable[Any]) -> Optional[Dict[str, int]]:
+    """Which columns of a header row hold the code, price and description.
+
+    The best-scoring candidate for each. Where several columns could be the
+    price, ``_best_price_column`` re-checks the choice against the rows that
+    follow — a heading can look right and still be an empty column.
+    """
+    cands = _candidates(row)
+    if "code" not in cands or "price" not in cands:
+        return None
+    return {field: idxs[0] for field, idxs in cands.items()}
+
+
+def _sheets_from_csv(path: Path) -> List[Tuple[str, List[List[Any]]]]:
     with open(path, newline="", encoding="utf-8-sig", errors="replace") as f:
-        return [row for row in csv.reader(f)]
+        return [(path.name, [row for row in csv.reader(f)])]
 
 
-def _rows_from_excel(path: Path) -> List[List[Any]]:
+def _sheets_from_excel(path: Path) -> List[Tuple[str, List[List[Any]]]]:
+    """Each worksheet separately — a heading found on one sheet must not be
+    used to read another. These workbooks carry a Read Me and a working
+    pricing model alongside the catalogue, and both would otherwise be read
+    as if they had the catalogue's columns."""
     from openpyxl import load_workbook
     wb = load_workbook(path, data_only=True, read_only=True)
-    rows: List[List[Any]] = []
-    for ws in wb.worksheets:
-        for row in ws.iter_rows(values_only=True):
-            rows.append(list(row))
-    wb.close()
-    return rows
+    sheets: List[Tuple[str, List[List[Any]]]] = []
+    try:
+        for ws in wb.worksheets:
+            sheets.append((ws.title,
+                           [list(row) for row in ws.iter_rows(values_only=True)]))
+    finally:
+        wb.close()
+    return sheets
+
+
+def _best_price_column(rows: List[List[Any]], start: int,
+                       code_col: int, price_cols: List[int]) -> int:
+    """Of the columns that could be the price, the one that actually is.
+
+    A heading can score well and hold nothing — a Xero item export has both a
+    purchases and a sales unit price, and one of them is usually blank. The
+    column carrying real numbers next to real codes wins; ties go to the
+    better-scoring heading, which is the order they arrive in.
+    """
+    if len(price_cols) < 2:
+        return price_cols[0]
+    filled = {c: 0 for c in price_cols}
+    for row in rows[start:start + 400]:
+        if code_col >= len(row) or not str(row[code_col] or "").strip():
+            continue
+        for c in price_cols:
+            if c < len(row) and _money(row[c]) is not None:
+                filled[c] += 1
+    best = max(price_cols, key=lambda c: filled[c])
+    return best if filled[best] else price_cols[0]
 
 
 def read_price_file(path) -> Tuple[List[Dict[str, Any]], List[str]]:
@@ -109,36 +163,41 @@ def read_price_file(path) -> Tuple[List[Dict[str, Any]], List[str]]:
     path = Path(path)
     problems: List[str] = []
     try:
-        raw = (_rows_from_csv(path) if path.suffix.lower() in (".csv", ".txt")
-               else _rows_from_excel(path))
+        sheets = (_sheets_from_csv(path) if path.suffix.lower() in (".csv", ".txt")
+                  else _sheets_from_excel(path))
     except Exception as exc:
         return [], [f"{path.name}: could not be opened ({exc})"]
 
     out: List[Dict[str, Any]] = []
-    cols: Optional[Dict[str, int]] = None
-    for row in raw:
-        if not row or all(c in (None, "") for c in row):
-            continue
-        maybe = _pick_columns(row)
-        if maybe:
-            cols = maybe          # a new sheet or section starts here
-            continue
-        if not cols:
-            continue
-        def _cell(name):
-            i = cols.get(name)
-            return row[i] if i is not None and i < len(row) else None
-        code = str(_cell("code") or "").strip()
-        price = _money(_cell("price"))
-        if not code or price is None:
-            continue
-        if not re.search(r"[0-9]", code):
-            continue              # a section heading, not a part number
-        out.append({
-            "part_number": code.upper(),
-            "description": str(_cell("desc") or "").strip(),
-            "unit_price":  round(price, 4),
-        })
+    for sheet_name, raw in sheets:
+        cols: Optional[Dict[str, int]] = None
+        for n, row in enumerate(raw):
+            if not row or all(c in (None, "") for c in row):
+                continue
+            if cols is None:
+                cands = _candidates(row)
+                if "code" in cands and "price" in cands:
+                    cols = {f: idxs[0] for f, idxs in cands.items()}
+                    cols["price"] = _best_price_column(
+                        raw, n + 1, cols["code"], cands["price"])
+                continue          # the heading row itself is never data
+
+            def _cell(name, _row=row, _cols=cols):
+                i = _cols.get(name)
+                return _row[i] if i is not None and i < len(_row) else None
+
+            code = str(_cell("code") or "").strip()
+            price = _money(_cell("price"))
+            if not code or price is None:
+                continue
+            if not re.search(r"[0-9]", code):
+                continue          # a section heading, not a part number
+            out.append({
+                "part_number": code.upper(),
+                "description": str(_cell("desc") or "").strip(),
+                "unit_price":  round(price, 4),
+                "sheet":       sheet_name,
+            })
 
     if not out and not problems:
         problems.append(
@@ -196,10 +255,60 @@ def price_for_item(item: Dict[str, Any],
     return (0.0, "")
 
 
+def why_unpriced(item: Dict[str, Any],
+                 prices: Optional[Dict[str, float]] = None) -> str:
+    """Why a line found no price — a gap in the list, or a bad line.
+
+    The difference matters: "this size isn't in the price list" is something
+    to go and add, while "this line has no part number" is something wrong
+    with the line itself. Guessing a nearby price instead would hide both.
+    """
+    part = (item.get("Part Number") or "").strip().upper()
+    if not part:
+        ftype = (item.get("Filter Type") or "").strip()
+        if not ftype:
+            return "the line has no filter type, so it has no part number"
+        return "the line has no part number — check its size and media"
+    if not prices:
+        return "no price list has been imported"
+
+    # Other areas of the same product tell us whether the product is priced
+    # at all, or just not in this size.
+    stem, _, suffix = part.rpartition("-")
+    same = sorted({_suffix_area(p.rpartition("-")[2])
+                   for p in prices if p.rpartition("-")[0] == stem}
+                  - {None})
+    if same:
+        return (f"priced from {same[0]:.1f} to {same[-1]:.1f} m2 — "
+                f"not at {(_suffix_area(suffix) or 0):.1f} m2")
+
+    ftype = (item.get("Filter Type") or "").strip()
+    if ftype.lower() in _pn.FIXED_PART_NUMBER_STEMS:
+        # A stepped filter or flyscreen: its media and thickness are fixed and
+        # not what the code is built from, so naming them would only mislead.
+        return f"{ftype.lower()}s are not in the price list"
+    media = (item.get("Media Type") or "").strip() or "that media"
+    channel = str(item.get("Channel") or "").strip()
+    at = f" at {channel}mm" if channel else ""
+    return f"nothing in the price list for {media}{at}"
+
+
+def _suffix_area(suffix: str) -> Optional[float]:
+    """The area a part-number suffix stands for: '020' -> 0.2, '1.8' -> 1.8."""
+    suffix = (suffix or "").strip()
+    if not suffix:
+        return None
+    try:
+        return float(suffix) if "." in suffix else int(suffix) / 100.0
+    except ValueError:
+        return None
+
+
 def quote_lines(items: Iterable[Dict[str, Any]],
                 prices: Optional[Dict[str, float]] = None,
                 rates: Optional[Dict[str, float]] = None) -> List[Dict[str, Any]]:
-    """Price every line of an order. Unpriced lines are kept, marked."""
+    """Price every line of an order. Unpriced lines are kept, marked and
+    explained rather than dropped or quietly zeroed."""
     out: List[Dict[str, Any]] = []
     for it in items or []:
         try:
@@ -214,6 +323,7 @@ def quote_lines(items: Iterable[Dict[str, Any]],
             "unit_price":  unit,
             "line_total":  round(unit * qty, 2),
             "source":      source,
+            "reason":      "" if source else why_unpriced(it, prices),
             "item":        it,
         })
     return out

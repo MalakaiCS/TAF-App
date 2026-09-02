@@ -3604,7 +3604,7 @@ class QuoteDialog(tk.Toplevel):
                 "qty":   ("Qty",          50, "center"),
                 "unit":  ("Unit Price",   95, "e"),
                 "total": ("Line Total",   95, "e"),
-                "src":   ("Priced from", 110, "center")}.items():
+                "src":   ("Priced from",  240, "w")}.items():
             tree.heading(col, text=hd)
             tree.column(col, width=wd, anchor=anc,
                         stretch=(col == "desc"))
@@ -3623,8 +3623,12 @@ class QuoteDialog(tk.Toplevel):
                             line.get("quantity", 0),
                             f'{line.get("unit_price", 0):,.2f}' if priced else "—",
                             f'{line.get("line_total", 0):,.2f}' if priced else "—",
-                            {"list": "Price list", "rate": "Rate per m2"}
-                            .get(line.get("source"), "NOT PRICED"),
+                            # For a priced line, where the price came from.
+                            # For one that found none, why — a gap in the
+                            # list reads very differently from a bad line.
+                            {"list": "Price list", "rate": "Rate per m²"}
+                            .get(line.get("source"),
+                                 line.get("reason") or "NOT PRICED"),
                         ))
         tree.pack(side="left", fill="both", expand=True)
         sb = ttk.Scrollbar(wrap, orient="vertical", command=tree.yview)
@@ -7483,6 +7487,15 @@ class ModernOrderApp(tk.Frame):
             self.status_var.set("Price import failed.")
             return
 
+        self._finish_price_import(paths, rows, problems)
+
+    def _finish_price_import(self, paths, rows, problems):
+        """Confirm what was read, then save it without freezing the window.
+
+        A full price list is thousands of rows and goes up in batches, which
+        takes long enough that doing it on the main thread would look like the
+        app had hung.
+        """
         if not rows:
             messagebox.showwarning(
                 "Nothing Imported",
@@ -7503,25 +7516,37 @@ class ModernOrderApp(tk.Frame):
             self.status_var.set("Price import cancelled.")
             return
 
-        try:
-            saved = _db.upsert_prices(rows)
-            _db.log_action("prices_imported",
-                           f"{saved} part numbers from {len(paths)} file(s)")
-        except Exception as exc:
-            messagebox.showerror(
-                "Price Import",
-                f"The prices could not be saved:\n{exc}\n\n"
-                "If this mentions a missing 'price_list' table, run "
-                "migrate_pricing.sql in the Supabase SQL Editor.")
-            self.status_var.set("Price import failed.")
-            return
+        self.status_var.set(f"Saving {len(rows):,} prices…")
+        result = {}
 
-        self._refresh_price_count()
-        msg = f"{saved:,} prices imported."
-        if problems:
-            msg += "\n\nSome files had nothing to read:\n" + "\n".join(problems)
-        messagebox.showinfo("Prices Imported", msg)
-        self.status_var.set(f"{saved:,} prices imported.")
+        def _work():
+            try:
+                result["saved"] = _db.upsert_prices(rows)
+                _db.log_action("prices_imported",
+                               f"{result['saved']} part numbers from "
+                               f"{len(paths)} file(s)")
+            except Exception as exc:
+                result["error"] = str(exc)
+            self.master.after(0, _done)
+
+        def _done():
+            if "error" in result:
+                messagebox.showerror(
+                    "Price Import",
+                    f"The prices could not be saved:\n{result['error']}\n\n"
+                    "If this mentions a missing 'price_list' table, run "
+                    "migrate_pricing.sql in the Supabase SQL Editor.")
+                self.status_var.set("Price import failed.")
+                return
+            saved = result.get("saved", 0)
+            self._refresh_price_count()
+            msg = f"{saved:,} prices imported."
+            if problems:
+                msg += "\n\nSome files had nothing to read:\n" + "\n".join(problems)
+            messagebox.showinfo("Prices Imported", msg)
+            self.status_var.set(f"{saved:,} prices imported.")
+
+        threading.Thread(target=_work, daemon=True).start()
 
     def _edit_price_rates(self):
         """Set a fallback price per square metre per filter type and media."""

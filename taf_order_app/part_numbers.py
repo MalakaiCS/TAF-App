@@ -199,14 +199,33 @@ def resolve_filter_type(item: Dict[str, Any], extra_types=None,
     return ftype
 
 
-def default_media_code(media: str) -> str:
-    """A starting part-number code for a media type: letters and digits only,
-    upper case, first four characters. 'Carbon' -> 'CARB', 'G4' -> 'G4'.
+# The codes the priced catalogue actually uses, so a part number the app
+# builds matches the item code in Xero without anything being set by hand.
+# Keyed on the grade with punctuation stripped and upper-cased.
+MEDIA_CODE_SEEDS = {
+    "G4": "G4", "F5": "F5", "F6": "F6", "F7": "F7", "F8": "F8", "F9": "F9",
+    "180": "180",
+    "CARBON": "CARB", "CARB": "CARB",
+    "WASHABLE": "W", "WASH": "W", "W": "W",
+    "EMESH": "EMESH", "GREY": "GREY",
+}
 
-    Only a seed — the real code is whatever is set against the media type, so
-    anything this gets wrong is corrected once in Settings.
+
+def default_media_code(media: str) -> str:
+    """A starting part-number code for a media type.
+
+    The grades in the priced catalogue have their codes set out above, because
+    those are the item codes in Xero and a part number that doesn't match one
+    finds no price. Anything else falls back to letters and digits only, upper
+    case, first four characters: 'Carbon' -> 'CARB'.
+
+    Still only a seed — the real code is whatever is set against the media
+    type in Settings, so anything this gets wrong is corrected once.
     """
     cleaned = re.sub(r"[^A-Za-z0-9]", "", media or "").upper()
+    seeded = MEDIA_CODE_SEEDS.get(cleaned)
+    if seeded:
+        return seeded
     return cleaned[:4]
 
 
@@ -247,8 +266,17 @@ def nominal_square_metres(area: float) -> float:
 
 
 def sqm_suffix(nominal: float) -> str:
-    """The square-metre part of a part number: 0.20 -> '020', 1.5 -> '150'."""
-    return f"{int(round((nominal or 0) * 100)):03d}"
+    """The square-metre part of a part number: 0.20 -> '020', 1.5 -> '1.5'.
+
+    The change of shape at 1 m2 is not a tidy rule, it is what the priced
+    catalogue does — 010 through 090, then 1.0 through 2.0. These part
+    numbers are the item codes in Xero, so they follow the catalogue rather
+    than a rule of our own; a code that doesn't match one finds no price.
+    """
+    value = nominal or 0
+    if value >= 1:
+        return f"{value:.1f}"
+    return f"{int(round(value * 100)):03d}"
 
 
 def format_sqm(area: float) -> str:

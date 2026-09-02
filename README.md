@@ -41,6 +41,8 @@ log, stock management and a customer database.
 - **Part numbers & square metreage** — every filter line gets its area and a
   part number derived automatically (`FPFCARB25-020`, `PPFG495-040`,
   `STPPFW50-030`, `FPF09-040`), shown in the app and printed on the worksheet.
+  These are the same codes as the item codes in Xero, so a quoted line finds
+  its price with nothing matched up by hand.
 - **Job number highlighter** — show the app one of a customer's purchase
   orders, drag a box around their job number, and it learns the wording to
   look for on every future order from them.
@@ -171,13 +173,18 @@ orders are ready to review.
 ### Set up quoting (optional)
 
 1. Run `migrate_pricing.sql` in the **SQL Editor**.
-2. **Settings → Pricing → Import Price Files**, and pick your price
-   spreadsheets. Any sheet works as long as it has a heading row with a
-   part-number column (`Part No`, `Code`, `SKU`, `Item Code`…) and a price
-   column (`Price`, `Sell`, `Unit Price`, `Rate`…). Every sheet in a workbook
-   is read, and several files can be imported at once — later files win.
+2. **Settings → Pricing → Import Price Files**, and select all three files in
+   [`price_lists/`](price_lists/) at once — 12,480 priced part numbers.
 3. Optionally set **Rates per m²** for a filter type and media, used only
    where a part number has no listed price.
+
+Any spreadsheet works, not just those: it needs a heading row with a
+part-number column (`Part No`, `Code`, `SKU`, `ItemCode`…) and a price column
+(`Price`, `Sell`, `SalesUnitPrice`, `Rate`…). Every sheet in a workbook is
+read separately, and where a file has both a sales and a purchases price, the
+sales one is used — the column headings are scored, and the choice is then
+checked against the rows beneath it, because a heading can look right and the
+column still be empty.
 
 Then **Quote** on the New Order tab (or on a saved order in Previous Orders)
 prices the lines, prints a quote PDF, and writes a Xero sales-invoice CSV.
@@ -264,6 +271,7 @@ taf_order_app/
   user_management.py       Roles & user admin
   models.py / validation.py
 fonts/                     Bundled Public Sans (OFL)
+price_lists/               The priced catalogue (import under Settings)
 *.sql                      Schema + migrations
 docs/phone/index.html      The page phones open (served by GitHub Pages)
 supabase/functions/        Edge Functions (extract-orders)
