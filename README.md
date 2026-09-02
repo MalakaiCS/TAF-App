@@ -28,10 +28,13 @@ log, stock management and a customer database.
 - **What's due** — filter the order list by overdue / due today / due this
   week, with late work coloured and flagged in the list, and a Due panel on
   the Dashboard that opens straight into it.
-- **Quotes & Xero** — price an order from the imported price list (or a rate
-  per m² where a part number has no listed price), print a quote PDF, and
-  export a Xero sales-invoice CSV. Lines nothing can price are shown as "to
-  be confirmed" rather than guessed at.
+- **Quotes** — its own tab. Pick the customer, add the lines (or pull them
+  from a saved order), and each one is priced as it goes in. Print a quote PDF
+  and export a Xero sales-invoice CSV. A line nothing can price is shown as
+  "to be confirmed", with the reason, rather than guessed at.
+- **Products** — the priced catalogue: search it, correct a price, add a
+  product, import price spreadsheets. The part numbers here are the item codes
+  in Xero.
 - **Dashboard** — orders-per-week, order-type and busiest-customer charts, low
   stock alerts, and what's due.
 - **Stock** — items with images, on-hand / minimum levels, adjustments &
@@ -172,9 +175,11 @@ orders are ready to review.
 
 ### Set up quoting (optional)
 
-1. Run `migrate_pricing.sql` in the **SQL Editor**.
-2. **Settings → Pricing → Import Price Files**, and select all three files in
-   [`price_lists/`](price_lists/) at once — 12,480 priced part numbers.
+1. Run `migrate_pricing.sql` in the **SQL Editor** (safe to re-run).
+2. **Products → Import Price Files**, and select all three files in
+   [`price_lists/`](price_lists/) at once — 12,480 priced part numbers. The
+   confirmation names the columns it read from; check the price column is the
+   one you expect before saying yes.
 3. Optionally set **Rates per m²** for a filter type and media, used only
    where a part number has no listed price.
 
@@ -182,12 +187,14 @@ Any spreadsheet works, not just those: it needs a heading row with a
 part-number column (`Part No`, `Code`, `SKU`, `ItemCode`…) and a price column
 (`Price`, `Sell`, `SalesUnitPrice`, `Rate`…). Every sheet in a workbook is
 read separately, and where a file has both a sales and a purchases price, the
-sales one is used — the column headings are scored, and the choice is then
+**sales** one is used — the headings are scored, and the choice is then
 checked against the rows beneath it, because a heading can look right and the
-column still be empty.
+column still be empty. Long paragraphs are never treated as headings, so a
+Read Me sheet can't be mistaken for a catalogue.
 
-Then **Quote** on the New Order tab (or on a saved order in Previous Orders)
-prices the lines, prints a quote PDF, and writes a Xero sales-invoice CSV.
+Quote from the **Quotes** tab — add lines, or **Load from an Order** to pull a
+saved one in. **Quote** on the New Order tab and on a saved order in Previous
+Orders does the same for what is already in front of you.
 
 **Why a CSV and not the Xero API?** The CSV import needs no app registration,
 no OAuth callback and no stored credentials, and Xero previews the whole batch

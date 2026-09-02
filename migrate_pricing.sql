@@ -11,11 +11,19 @@
 
 CREATE TABLE IF NOT EXISTS price_list (
     part_number     text        PRIMARY KEY,
+    -- name        what the product is, e.g. "Flat Panel Filter G4 25mm - 0.2m2"
+    -- description what goes on an invoice line in Xero. In a Xero item export
+    --             this is a template ("... Rating / Size:") that reads the same
+    --             on every row, which is why the name is kept as well.
+    name            text        DEFAULT '',
     description     text        DEFAULT '',
     unit_price      numeric(12, 4) NOT NULL DEFAULT 0,
     updated_by_name text        DEFAULT '',
     updated_at      timestamptz DEFAULT now()
 );
+
+-- Safe to re-run on a price_list created before the name column existed.
+ALTER TABLE price_list ADD COLUMN IF NOT EXISTS name text DEFAULT '';
 
 CREATE TABLE IF NOT EXISTS price_rates (
     id              uuid        DEFAULT gen_random_uuid() PRIMARY KEY,

@@ -34,6 +34,18 @@ PRICE_HEADINGS = ("price", "unit price", "sell", "sell price", "rate",
                   "unit cost", "cost")
 DESC_HEADINGS = ("description", "desc", "details", "name", "product name")
 
+# The description that goes on a quote and an invoice is the SALES one, for
+# the same reason as the price: a Xero item export carries a purchases
+# description too, and it is not what a customer should read.
+DESC_PREFERRED = ("sales", "sell")
+DESC_AVOIDED = ("purchase", "purchases", "cost", "supplier")
+
+# The item's own name, kept alongside the sales description. In a Xero export
+# the sales description is a template — "Flat Panel Filter G4 Rating / Size:"
+# on every row, with the size left to be filled in — so it is the wrong thing
+# to show in a product list, while the item name says which product it is.
+NAME_HEADINGS = ("item name", "itemname", "name", "product name", "title")
+
 # What TAF charges, not what TAF pays. A Xero item export carries both a
 # PurchasesUnitPrice and a SalesUnitPrice; picking the first column whose
 # heading merely contains "price" lands on the purchase column, which in an
@@ -43,8 +55,16 @@ PRICE_PREFERRED = ("sales", "sell", "selling", "list", "retail", "charge")
 PRICE_AVOIDED = ("purchase", "purchases", "cost", "buy", "supplier", "wholesale")
 
 
+# A column heading is a label, not a sentence. Without this cap a Read Me
+# paragraph that happens to contain the words "code", "price" and
+# "description" is read as a header row.
+MAX_HEADING_LENGTH = 40
+
+
 def _norm_heading(text: Any) -> str:
-    return re.sub(r"[^a-z0-9 ]+", " ", str(text or "").lower()).strip()
+    cleaned = re.sub(r"[^a-z0-9 ]+", " ", str(text or "").lower()).strip()
+    cleaned = re.sub(r"\s+", " ", cleaned)
+    return cleaned if len(cleaned) <= MAX_HEADING_LENGTH else ""
 
 
 def _money(value: Any) -> Optional[float]:
@@ -87,7 +107,8 @@ def _candidates(row: Iterable[Any]) -> Dict[str, List[int]]:
     for field, exact, prefer, avoid in (
             ("code",  CODE_HEADINGS,  (), ()),
             ("price", PRICE_HEADINGS, PRICE_PREFERRED, PRICE_AVOIDED),
-            ("desc",  DESC_HEADINGS,  (), ())):
+            ("desc",  DESC_HEADINGS,  DESC_PREFERRED, DESC_AVOIDED),
+            ("name",  NAME_HEADINGS,  (), DESC_AVOIDED)):
         scored = [(_score(c, exact, prefer, avoid), i)
                   for i, c in enumerate(cells)]
         ranked = sorted(((s, i) for s, i in scored if s > 0), reverse=True)
@@ -153,20 +174,28 @@ def _best_price_column(rows: List[List[Any]], start: int,
     return best if filled[best] else price_cols[0]
 
 
-def read_price_file(path) -> Tuple[List[Dict[str, Any]], List[str]]:
-    """Read one price spreadsheet. Returns (rows, problems).
+def _heading_of(row: List[Any], idx: int) -> str:
+    """The heading text at a column, for the report."""
+    if idx is None or idx >= len(row):
+        return "?"
+    return str(row[idx] or "?").strip() or "?"
+
+
+def read_price_file(path) -> Tuple[List[Dict[str, Any]], List[str], List[str]]:
+    """Read one price spreadsheet. Returns (rows, problems, report).
 
     Every sheet in a workbook is read, and the header row is found rather
     than assumed to be the first — these files usually open with a title and
-    a blank line or two.
+    a blank line or two. `report` names the columns each sheet was read from.
     """
     path = Path(path)
     problems: List[str] = []
+    report: List[str] = []
     try:
         sheets = (_sheets_from_csv(path) if path.suffix.lower() in (".csv", ".txt")
                   else _sheets_from_excel(path))
     except Exception as exc:
-        return [], [f"{path.name}: could not be opened ({exc})"]
+        return [], [f"{path.name}: could not be opened ({exc})"], []
 
     out: List[Dict[str, Any]] = []
     for sheet_name, raw in sheets:
@@ -180,6 +209,12 @@ def read_price_file(path) -> Tuple[List[Dict[str, Any]], List[str]]:
                     cols = {f: idxs[0] for f, idxs in cands.items()}
                     cols["price"] = _best_price_column(
                         raw, n + 1, cols["code"], cands["price"])
+                    # Say which columns were used. Reading the wrong one is
+                    # the failure that looks like "it imported nothing", and
+                    # it should never again be something you can't see.
+                    report.append(f"{path.name} · {sheet_name}: " + ", ".join(
+                        f"{f} = {_heading_of(row, cols[f])}"
+                        for f in ("code", "price", "desc", "name") if f in cols))
                 continue          # the heading row itself is never data
 
             def _cell(name, _row=row, _cols=cols):
@@ -195,6 +230,7 @@ def read_price_file(path) -> Tuple[List[Dict[str, Any]], List[str]]:
             out.append({
                 "part_number": code.upper(),
                 "description": str(_cell("desc") or "").strip(),
+                "name":        str(_cell("name") or "").strip(),
                 "unit_price":  round(price, 4),
                 "sheet":       sheet_name,
             })
@@ -207,19 +243,21 @@ def read_price_file(path) -> Tuple[List[Dict[str, Any]], List[str]]:
     deduped: Dict[str, Dict[str, Any]] = {}
     for row in out:
         deduped[row["part_number"]] = row
-    return list(deduped.values()), problems
+    return list(deduped.values()), problems, report
 
 
-def read_price_files(paths) -> Tuple[List[Dict[str, Any]], List[str]]:
+def read_price_files(paths) -> Tuple[List[Dict[str, Any]], List[str], List[str]]:
     """Read several price files into one list, later files winning."""
     merged: Dict[str, Dict[str, Any]] = {}
     problems: List[str] = []
+    report: List[str] = []
     for p in paths:
-        rows, probs = read_price_file(p)
+        rows, probs, rep = read_price_file(p)
         problems.extend(probs)
+        report.extend(rep)
         for row in rows:
             merged[row["part_number"]] = row
-    return list(merged.values()), problems
+    return list(merged.values()), problems, report
 
 
 # ── Pricing a line ───────────────────────────────────────────────────────────

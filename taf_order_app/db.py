@@ -1011,14 +1011,40 @@ def can_manage_stock() -> bool:
 # spreadsheets. price_rates is a fallback per square metre, used only where a
 # part number has no listed price.
 
-def get_price_rows() -> list:
-    """Every priced part number. Empty if pricing isn't set up yet."""
+def get_price_rows(search: str = "", limit: int = 0) -> list:
+    """Every priced part number, or those matching `search`.
+
+    Paged through in batches: PostgREST caps a response at 1000 rows, so a
+    12,000-row price list would otherwise come back looking like 1,000.
+    """
+    out: list = []
+    step = 1000
+    try:
+        while True:
+            q = get_client().table("price_list").select("*")
+            if search:
+                s = search.replace(",", " ").strip()
+                q = q.or_(f"part_number.ilike.%{s}%,name.ilike.%{s}%,"
+                          f"description.ilike.%{s}%")
+            resp = (q.order("part_number")
+                    .range(len(out), len(out) + step - 1).execute())
+            batch = resp.data or []
+            out.extend(batch)
+            if len(batch) < step or (limit and len(out) >= limit):
+                break
+    except Exception:
+        pass
+    return out[:limit] if limit else out
+
+
+def count_prices() -> int:
+    """How many part numbers are priced, without fetching them all."""
     try:
         resp = (get_client().table("price_list")
-                .select("*").order("part_number").execute())
-        return resp.data or []
+                .select("part_number", count="exact").limit(1).execute())
+        return int(resp.count or 0)
     except Exception:
-        return []
+        return 0
 
 
 def get_price_list() -> dict:
@@ -1049,6 +1075,7 @@ def upsert_prices(rows: list) -> int:
             continue
         payload.append({
             "part_number":     part,
+            "name":            (row.get("name") or "")[:300],
             "description":     (row.get("description") or "")[:500],
             "unit_price":      round(float(row.get("unit_price") or 0), 4),
             "updated_by_name": who,
@@ -1061,6 +1088,13 @@ def upsert_prices(rows: list) -> int:
             chunk, on_conflict="part_number").execute()
         saved += len(chunk)
     return saved
+
+
+def set_price(part_number: str, unit_price: float, name: str = "",
+              description: str = "") -> None:
+    """Add or correct one priced part number."""
+    upsert_prices([{"part_number": part_number, "unit_price": unit_price,
+                    "name": name, "description": description}])
 
 
 def delete_price(part_number: str) -> None:

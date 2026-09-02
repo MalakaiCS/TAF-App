@@ -4012,23 +4012,26 @@ class ModernOrderApp(tk.Frame):
         self.content.columnconfigure(0, weight=1)
 
         # Build the landing tab + status bar now so "home" paints immediately.
-        # The other six tabs are constructed lazily — a cold start shouldn't be
+        # The other tabs are constructed lazily — a cold start shouldn't be
         # blocked building screens (and their date pickers / babel locale data)
         # the user hasn't opened yet. They warm up during idle time below, and
         # _show_tab builds any tab on demand if it's clicked first.
         self._lazy_tab_builders = {
+            "new_order":   self._build_new_order_tab,
             "prev_orders": self._build_prev_orders_tab,
+            "quotes":      self._build_quotes_tab,
+            "products":    self._build_products_tab,
             "customers":   self._build_customers_tab,
-            "dashboard":   self._build_dashboard_tab,
             "stock":       self._build_stock_tab,
             "audit_log":   self._build_audit_log_tab,
             "settings":    self._build_settings_tab,
         }
-        self._build_new_order_tab()
+        self._build_dashboard_tab()
         self._build_status_bar()
 
-        # Land on New Order at startup — it's the tab staff use most.
-        self._show_tab("new_order")
+        # Land on the Dashboard: what's due and what's low is the first thing
+        # worth seeing, and it's the leftmost tab.
+        self._show_tab("dashboard")
 
         # Warm the remaining tabs one-per-idle-tick so later switches are
         # instant, without delaying the first paint of the home screen.
@@ -4118,10 +4121,12 @@ class ModernOrderApp(tk.Frame):
         self._tab_bar_inner.pack(fill="x")
 
         tabs = [
+            ("dashboard",   "▦  Dashboard"),
             ("new_order",   "＋  New Order"),
             ("prev_orders", "▤  Previous Orders"),
+            ("quotes",      "💲  Quotes"),
+            ("products",    "🏷  Products"),
             ("customers",   "👥  Customers"),
-            ("dashboard",   "▦  Dashboard"),
             ("stock",       "📦  Stock"),
             ("audit_log",   "☰  Audit Log"),
             ("settings",    "⚙  Settings"),
@@ -4187,6 +4192,10 @@ class ModernOrderApp(tk.Frame):
             self._refresh_customers_list()
         elif key == "stock":
             self._refresh_stock_list()
+        elif key == "products":
+            self._refresh_products_list()
+        elif key == "quotes":
+            self._refresh_quote_prices()
         elif key == "audit_log":
             self._refresh_audit_log()
         elif key == "settings":
@@ -4598,6 +4607,603 @@ class ModernOrderApp(tk.Frame):
                  bg=CRD, pady=7).pack(side="right", padx=(8, 0))
         flat_btn(bot, "Archive Order",         self._archive_prev_order,
                  bg="#7D3C98", pady=7).pack(side="right")
+
+    # ── Quotes tab ────────────────────────────────────────────────────────
+    # Build a quote without creating an order: pick the customer, add the
+    # lines, and every line is priced as it is added. An order that already
+    # exists can be pulled in rather than re-keyed.
+
+    def _build_quotes_tab(self):
+        frm = tk.Frame(self.content, bg=CBG, padx=14, pady=12)
+        frm.grid(row=0, column=0, sticky="nsew")
+        frm.rowconfigure(2, weight=1)
+        frm.columnconfigure(0, weight=1)
+        self._tab_frames["quotes"] = frm
+        self.quote_items: list = []
+
+        top = tk.Frame(frm, bg=CBG)
+        top.grid(row=0, column=0, sticky="ew", pady=(0, 10))
+        tk.Label(top, text="Quotes", bg=CBG, fg=CA, font=F_TTL).pack(side="left")
+        self._quote_price_state = tk.StringVar(value="")
+        tk.Label(top, textvariable=self._quote_price_state, bg=CBG, fg=CMU,
+                 font=F_SM).pack(side="left", padx=(14, 0))
+        flat_btn(top, "Load from an Order", self._quote_from_order, bg=CNE,
+                 pady=6, padx=12, font=F_BODY).pack(side="right")
+
+        # ── Who it is for ────────────────────────────────────────────────
+        det = tk.Frame(frm, bg=CCA, highlightbackground=CSP,
+                       highlightthickness=1, padx=14, pady=10)
+        det.grid(row=1, column=0, sticky="ew", pady=(0, 10))
+        det.columnconfigure(1, weight=1)
+        det.columnconfigure(3, weight=1)
+
+        self.quote_customer_var = tk.StringVar()
+        self.quote_ref_var = tk.StringVar()
+        self.quote_number_var = tk.StringVar()
+        self.quote_location_var = tk.StringVar()
+        self._quote_customer = None
+
+        tk.Label(det, text="CUSTOMER", bg=CCA, fg=CMU,
+                 font=F_BOLD).grid(row=0, column=0, sticky="w")
+        self.quote_customer_cb = ttk.Combobox(
+            det, textvariable=self.quote_customer_var, width=32)
+        self.quote_customer_cb.grid(row=1, column=0, sticky="ew", padx=(0, 14))
+        self.quote_customer_var.trace_add(
+            "write", lambda *_: self._on_quote_customer())
+
+        tk.Label(det, text="QUOTE NUMBER", bg=CCA, fg=CMU,
+                 font=F_BOLD).grid(row=0, column=1, sticky="w")
+        field_entry(det, textvariable=self.quote_number_var, width=18
+                    ).grid(row=1, column=1, sticky="ew", padx=(0, 14))
+
+        tk.Label(det, text="THEIR REFERENCE", bg=CCA, fg=CMU,
+                 font=F_BOLD).grid(row=0, column=2, sticky="w")
+        field_entry(det, textvariable=self.quote_ref_var, width=18
+                    ).grid(row=1, column=2, sticky="ew", padx=(0, 14))
+
+        tk.Label(det, text="REGION", bg=CCA, fg=CMU,
+                 font=F_BOLD).grid(row=0, column=3, sticky="w")
+        ttk.Combobox(det, textvariable=self.quote_location_var,
+                     values=list(_pn.REGION_NAMES), state="readonly", width=16
+                     ).grid(row=1, column=3, sticky="ew")
+
+        # ── The lines ────────────────────────────────────────────────────
+        wrap = tk.Frame(frm, bg=CCA, highlightbackground=CSP,
+                        highlightthickness=1)
+        wrap.grid(row=2, column=0, sticky="nsew")
+        wrap.rowconfigure(0, weight=1)
+        wrap.columnconfigure(0, weight=1)
+        cols = ("part", "desc", "qty", "unit", "total", "src")
+        self.quote_tree = ttk.Treeview(wrap, columns=cols, show="headings",
+                                       style="TAF.Treeview")
+        for col, (hd, wd, anc, stretch) in {
+                "part":  ("Part Number", 140, "w", False),
+                "desc":  ("Description", 360, "w", True),
+                "qty":   ("Qty",          50, "center", False),
+                "unit":  ("Unit Price",   95, "e", False),
+                "total": ("Line Total",   95, "e", False),
+                "src":   ("Priced from", 260, "w", False)}.items():
+            self.quote_tree.heading(col, text=hd)
+            self.quote_tree.column(col, width=wd, anchor=anc, stretch=stretch)
+        self.quote_tree.tag_configure("even", background=CRE)
+        self.quote_tree.tag_configure("odd", background=CCA)
+        self.quote_tree.tag_configure("missing", background="#FDEDEC",
+                                      foreground=CRD)
+        self.quote_tree.grid(row=0, column=0, sticky="nsew")
+        qsb = ttk.Scrollbar(wrap, orient="vertical",
+                            command=self.quote_tree.yview)
+        qsb.grid(row=0, column=1, sticky="ns")
+        self.quote_tree.configure(yscrollcommand=qsb.set)
+        self.quote_tree.bind("<Double-1>", lambda _e: self._edit_quote_item())
+
+        # ── Actions and totals ───────────────────────────────────────────
+        bot = tk.Frame(frm, bg=CBG, pady=8)
+        bot.grid(row=3, column=0, sticky="ew")
+        flat_btn(bot, "＋ Add Line", self._add_quote_item, bg=CA,
+                 pady=7).pack(side="left", padx=(0, 8))
+        flat_btn(bot, "Edit", self._edit_quote_item, bg=CNE,
+                 pady=7).pack(side="left", padx=(0, 8))
+        flat_btn(bot, "Remove", self._remove_quote_item, bg=CRD,
+                 pady=7).pack(side="left", padx=(0, 8))
+        flat_btn(bot, "Clear", self._clear_quote, bg=CMU,
+                 pady=7).pack(side="left", padx=(0, 8))
+        flat_btn(bot, "Export for Xero", self._quote_tab_xero, bg=CA2,
+                 pady=7).pack(side="right")
+        flat_btn(bot, "Save Quote PDF", self._quote_tab_pdf, bg=CGR,
+                 pady=7).pack(side="right", padx=(0, 8))
+
+        self._quote_totals_var = tk.StringVar(value="No lines yet.")
+        tk.Label(frm, textvariable=self._quote_totals_var, bg=CBG, fg=CTX,
+                 font=F_BOLD, anchor="w").grid(row=4, column=0, sticky="w")
+        self._quote_warn_var = tk.StringVar(value="")
+        tk.Label(frm, textvariable=self._quote_warn_var, bg=CBG, fg=CRD,
+                 font=F_SM, anchor="w", justify="left", wraplength=1000
+                 ).grid(row=5, column=0, sticky="w", pady=(2, 0))
+
+    def _refresh_quote_prices(self):
+        """Load the price list for the Quotes tab and say what it found."""
+        def _work():
+            prices, rates = self._load_prices(force=True)
+            def _done():
+                if prices or rates:
+                    self._quote_price_state.set(
+                        f"{len(prices):,} priced part numbers"
+                        + (f" · {len(rates)} rate(s) per m²" if rates else ""))
+                else:
+                    self._quote_price_state.set(
+                        "No prices loaded — import them on the Products tab.")
+                self._refresh_quote_lines()
+            self.master.after(0, _done)
+
+        self._quote_price_state.set("Checking prices…")
+        threading.Thread(target=_work, daemon=True).start()
+        try:
+            names = _db.get_customers(active_only=True)
+            self._quote_customers = names
+            self.quote_customer_cb["values"] = [
+                (c.get("short_name") or c.get("name") or "").strip()
+                for c in names if (c.get("short_name") or c.get("name"))]
+        except Exception:
+            self._quote_customers = []
+
+    def _on_quote_customer(self):
+        """Remember which branch profile the typed name belongs to."""
+        typed = self.quote_customer_var.get().strip().lower()
+        self._quote_customer = next(
+            (c for c in getattr(self, "_quote_customers", [])
+             if (c.get("short_name") or "").strip().lower() == typed
+             or (c.get("name") or "").strip().lower() == typed), None)
+        if self._quote_customer and not self.quote_location_var.get().strip():
+            self.quote_location_var.set(
+                (self._quote_customer.get("region") or "").strip())
+
+    def _quote_header(self) -> dict:
+        return {
+            "Customer Name": self.quote_customer_var.get().strip(),
+            "Order Number":  self.quote_number_var.get().strip(),
+            "Job":           self.quote_ref_var.get().strip(),
+            "Location":      self.quote_location_var.get().strip(),
+            "Date Ordered":  datetime.date.today().strftime("%d/%m/%y"),
+            "Date Due":      "",
+        }
+
+    def _quote_current_lines(self):
+        prices, rates = self._load_prices()
+        return _pricing.quote_lines(self.quote_items, prices, rates)
+
+    def _refresh_quote_lines(self):
+        tree = getattr(self, "quote_tree", None)
+        if tree is None:
+            return
+        for iid in tree.get_children():
+            tree.delete(iid)
+        lines = self._quote_current_lines()
+        for i, line in enumerate(lines):
+            priced = bool(line.get("source"))
+            tree.insert("", "end", iid=str(i),
+                        tags=("missing" if not priced
+                              else ("even" if i % 2 == 0 else "odd"),),
+                        values=(
+                            line.get("part_number") or "—",
+                            line.get("description") or "",
+                            line.get("quantity", 0),
+                            f'{line.get("unit_price", 0):,.2f}' if priced else "—",
+                            f'{line.get("line_total", 0):,.2f}' if priced else "—",
+                            {"list": "Price list", "rate": "Rate per m²"}
+                            .get(line.get("source"),
+                                 line.get("reason") or "NOT PRICED"),
+                        ))
+        if not lines:
+            self._quote_totals_var.set("No lines yet.")
+            self._quote_warn_var.set("")
+            return
+        t = _pricing.quote_totals(lines)
+        self._quote_totals_var.set(
+            f"Subtotal  ${t['subtotal']:,.2f}      GST  ${t['gst']:,.2f}      "
+            f"Total  ${t['total']:,.2f}")
+        missing = _pricing.unpriced(lines)
+        self._quote_warn_var.set(
+            f"⚠  {len(missing)} line{'s' if len(missing) != 1 else ''} "
+            f"{'have' if len(missing) != 1 else 'has'} no price and "
+            f"{'are' if len(missing) != 1 else 'is'} excluded from the totals. "
+            "Price them on the Products tab before sending this out."
+            if missing else "")
+
+    def _add_quote_item(self):
+        dlg = LineItemDialog(self.master, title="Add Quote Line",
+                             media_types=self.all_media_types,
+                             filter_types=self.all_filter_types)
+        self.master.wait_window(dlg)
+        if dlg.result:
+            self.quote_items.append(self._stamp_item(dict(dlg.result)))
+            self._refresh_quote_lines()
+
+    def _edit_quote_item(self):
+        sel = self.quote_tree.selection()
+        if not sel:
+            messagebox.showinfo("Edit Line", "Select a line first.")
+            return
+        idx = int(sel[0])
+        dlg = LineItemDialog(self.master, title="Edit Quote Line",
+                             initial=self.quote_items[idx],
+                             media_types=self.all_media_types,
+                             filter_types=self.all_filter_types)
+        self.master.wait_window(dlg)
+        if dlg.result:
+            self.quote_items[idx] = self._stamp_item(dict(dlg.result))
+            self._refresh_quote_lines()
+
+    def _remove_quote_item(self):
+        sel = self.quote_tree.selection()
+        if not sel:
+            messagebox.showinfo("Remove Line", "Select a line first.")
+            return
+        self.quote_items.pop(int(sel[0]))
+        self._refresh_quote_lines()
+
+    def _clear_quote(self):
+        if self.quote_items and not messagebox.askyesno(
+                "Clear Quote", "Remove every line from this quote?"):
+            return
+        self.quote_items = []
+        self._refresh_quote_lines()
+
+    def _quote_from_order(self):
+        """Pull a saved order's lines into the quote rather than re-keying."""
+        rows = getattr(self, "_all_orders_data", None)
+        if not rows:
+            self.status_var.set("Loading orders…")
+            self.master.update_idletasks()
+            try:
+                rows = self._scan_orders()
+                self._all_orders_data = rows
+            except Exception as exc:
+                messagebox.showerror("Load from an Order",
+                                     f"Could not read orders:\n{exc}")
+                return
+        if not rows:
+            messagebox.showinfo("Load from an Order", "There are no orders yet.")
+            return
+
+        dlg = tk.Toplevel(self.master)
+        dlg.title("Load from an Order")
+        dlg.configure(bg=CBG)
+        dlg.transient(self.master)
+        dlg.grab_set()
+        tk.Label(dlg, text="Pick the order to quote", bg=CA, fg="white",
+                 font=F_BOLD, padx=16, pady=10, anchor="w").pack(fill="x")
+        lb = tk.Listbox(dlg, font=F_BODY, bg=CCA, fg=CTX, activestyle="none",
+                        selectbackground=CA, selectforeground="white",
+                        relief="flat", highlightthickness=1,
+                        highlightbackground=CSP)
+        lb.pack(fill="both", expand=True, padx=16, pady=12)
+        recent = rows[:300]
+        for r in recent:
+            lb.insert("end", f"  {r.get('date_ordered',''):10}  "
+                             f"{r.get('order_no','') or '—':14}  "
+                             f"{r.get('customer','')}")
+
+        def _ok():
+            sel = lb.curselection()
+            if not sel:
+                return
+            row = recent[sel[0]]
+            header, items = self._order_header_items(row, "Load from an Order")
+            if items is None:
+                return
+            dlg.destroy()
+            self.quote_customer_var.set(header.get("Customer Name", ""))
+            self.quote_number_var.set(header.get("Order Number", ""))
+            self.quote_ref_var.set(header.get("Job", ""))
+            self.quote_location_var.set(header.get("Location", ""))
+            self.quote_items = [self._stamp_item(dict(i)) for i in items]
+            self._refresh_quote_lines()
+            self.status_var.set(
+                f"Loaded {len(self.quote_items)} line"
+                f"{'s' if len(self.quote_items) != 1 else ''} into the quote.")
+
+        foot = tk.Frame(dlg, bg=CBG, padx=16, pady=10)
+        foot.pack(fill="x")
+        flat_btn(foot, "Cancel", dlg.destroy, bg=CNE,
+                 pady=7).pack(side="right", padx=(8, 0))
+        flat_btn(foot, "Load", _ok, bg=CGR, pady=7).pack(side="right")
+        lb.bind("<Double-1>", lambda _e: _ok())
+        dlg.bind("<Escape>", lambda _e: dlg.destroy())
+        W, H = 620, 460
+        dlg.geometry(f"{W}x{H}+{self.master.winfo_rootx() + 120}"
+                     f"+{self.master.winfo_rooty() + 70}")
+
+    def _quote_tab_ready(self) -> bool:
+        if not self.quote_items:
+            messagebox.showinfo("Quote", "Add at least one line first.")
+            return False
+        if not self.quote_customer_var.get().strip():
+            messagebox.showinfo("Quote", "Enter who the quote is for.")
+            return False
+        return True
+
+    def _quote_tab_pdf(self):
+        if self._quote_tab_ready():
+            self._save_quote_pdf(self._quote_header(),
+                                 self._quote_current_lines(),
+                                 self._quote_customer)
+
+    def _quote_tab_xero(self):
+        if self._quote_tab_ready():
+            self._export_quote_xero(self._quote_header(),
+                                    self._quote_current_lines(),
+                                    self._quote_customer)
+
+    # ── Products tab ──────────────────────────────────────────────────────
+    # The priced catalogue: one row per part number. This is what a quote
+    # looks a line up in, and the part numbers are the item codes in Xero.
+
+    def _build_products_tab(self):
+        frm = tk.Frame(self.content, bg=CBG, padx=14, pady=12)
+        frm.grid(row=0, column=0, sticky="nsew")
+        frm.rowconfigure(2, weight=1)
+        frm.columnconfigure(0, weight=1)
+        self._tab_frames["products"] = frm
+
+        top = tk.Frame(frm, bg=CBG)
+        top.grid(row=0, column=0, sticky="ew", pady=(0, 8))
+        tk.Label(top, text="Products & Prices", bg=CBG, fg=CA,
+                 font=F_TTL).pack(side="left")
+        self._products_count = tk.StringVar(value="")
+        tk.Label(top, textvariable=self._products_count, bg=CBG, fg=CMU,
+                 font=F_BODY).pack(side="left", padx=(14, 0))
+
+        srch = tk.Frame(frm, bg=CBG)
+        srch.grid(row=1, column=0, sticky="ew", pady=(0, 8))
+        tk.Label(srch, text="Search:", bg=CBG, fg=CTX,
+                 font=F_BOLD).pack(side="left", padx=(0, 6))
+        self.product_search_var = tk.StringVar()
+        e = field_entry(srch, textvariable=self.product_search_var, width=34)
+        e.pack(side="left", padx=(0, 8))
+        e.bind("<Return>", lambda _e: self._refresh_products_list())
+        flat_btn(srch, "Search", self._refresh_products_list, bg=CA,
+                 pady=5, padx=12, font=F_BODY).pack(side="left", padx=(0, 6))
+        flat_btn(srch, "Clear", lambda: (self.product_search_var.set(""),
+                                         self._refresh_products_list()),
+                 bg=CMU, pady=5, padx=10, font=F_BODY).pack(side="left")
+        tk.Label(srch, text="Part number, name or description.",
+                 bg=CBG, fg=CMU, font=F_SM).pack(side="left", padx=(12, 0))
+
+        wrap = tk.Frame(frm, bg=CCA, highlightbackground=CSP,
+                        highlightthickness=1)
+        wrap.grid(row=2, column=0, sticky="nsew")
+        wrap.rowconfigure(0, weight=1)
+        wrap.columnconfigure(0, weight=1)
+        cols = ("part", "name", "price", "updated")
+        self.products_tree = ttk.Treeview(wrap, columns=cols, show="headings",
+                                          style="TAF.Treeview")
+        for col, (hd, wd, anc, stretch) in {
+                "part":    ("Part Number", 160, "w", False),
+                "name":    ("Product",     460, "w", True),
+                "price":   ("Price ex GST", 110, "e", False),
+                "updated": ("Updated",     150, "center", False)}.items():
+            self.products_tree.heading(col, text=hd)
+            self.products_tree.column(col, width=wd, anchor=anc, stretch=stretch)
+        self.products_tree.tag_configure("even", background=CRE)
+        self.products_tree.tag_configure("odd", background=CCA)
+        self.products_tree.grid(row=0, column=0, sticky="nsew")
+        sb = ttk.Scrollbar(wrap, orient="vertical",
+                           command=self.products_tree.yview)
+        sb.grid(row=0, column=1, sticky="ns")
+        self.products_tree.configure(yscrollcommand=sb.set)
+        self.products_tree.bind("<Double-1>", lambda _e: self._edit_product())
+
+        bot = tk.Frame(frm, bg=CBG, pady=8)
+        bot.grid(row=3, column=0, sticky="ew")
+        can = _db.is_ready() and _db.can_manage_prices()
+        for label, cmd, colour, rights in (
+                ("＋ Add Product",        self._add_product,        CA,  True),
+                ("Edit",                  self._edit_product,       CNE, True),
+                ("Delete",                self._delete_product,     CRD, True),
+                ("📥 Import Price Files", self._import_price_files, CA2, True),
+                ("Rates per m²",          self._edit_price_rates,   CNE, True),
+                ("Refresh",               self._refresh_products_list, CNE, False)):
+            b = flat_btn(bot, label, cmd, bg=colour, pady=7)
+            b.pack(side="left", padx=(0, 8))
+            if rights and not can:
+                b.config(state="disabled")
+        b = flat_btn(bot, "Clear Price List", self._clear_price_list,
+                     bg=CRD, pady=7)
+        b.pack(side="right")
+        if not can:
+            b.config(state="disabled")
+
+    def _refresh_products_list(self):
+        """Load the price list, off the main thread — it is a long list."""
+        tree = getattr(self, "products_tree", None)
+        if tree is None:
+            return
+        search = self.product_search_var.get().strip()
+        self._products_count.set("Loading…")
+
+        def _work():
+            try:
+                # A search can legitimately match everything, so it is capped
+                # at what a person can actually scroll through.
+                rows = _db.get_price_rows(search, limit=3000)
+                total = _db.count_prices()
+            except Exception as exc:
+                rows, total = [], -1
+                self._products_error = str(exc)
+            self.master.after(0, lambda: _show(rows, total))
+
+        def _show(rows, total):
+            for iid in tree.get_children():
+                tree.delete(iid)
+            self._products_rows = rows
+            for i, r in enumerate(rows):
+                tree.insert("", "end", iid=str(i),
+                            tags=("even" if i % 2 == 0 else "odd",),
+                            values=(
+                                r.get("part_number", ""),
+                                (r.get("name") or r.get("description") or "")
+                                .replace("\n", " · "),
+                                f'{float(r.get("unit_price") or 0):,.2f}',
+                                (r.get("updated_at") or "")[:10],
+                            ))
+            if total < 0:
+                self._products_count.set(
+                    "Couldn't read the price list — run migrate_pricing.sql "
+                    "in the Supabase SQL Editor.")
+            elif search:
+                self._products_count.set(
+                    f"{len(rows):,} matching · {total:,} priced in total")
+            elif not total:
+                self._products_count.set(
+                    "Nothing priced yet — Import Price Files to load them.")
+            else:
+                shown = f" (showing {len(rows):,})" if len(rows) < total else ""
+                self._products_count.set(f"{total:,} part numbers priced{shown}")
+
+        threading.Thread(target=_work, daemon=True).start()
+
+    def _selected_product(self):
+        sel = self.products_tree.selection()
+        rows = getattr(self, "_products_rows", [])
+        if not sel:
+            return None
+        idx = int(sel[0])
+        return rows[idx] if idx < len(rows) else None
+
+    def _add_product(self):
+        self._product_dialog(None)
+
+    def _edit_product(self):
+        row = self._selected_product()
+        if not row:
+            messagebox.showinfo("Edit Product", "Select a product first.")
+            return
+        self._product_dialog(row)
+
+    def _product_dialog(self, row):
+        """Add or correct one priced part number."""
+        editing = row is not None
+        dlg = tk.Toplevel(self.master)
+        dlg.title("Edit Product" if editing else "Add Product")
+        dlg.configure(bg=CBG)
+        dlg.transient(self.master)
+        dlg.grab_set()
+
+        hdr = tk.Frame(dlg, bg=CA, padx=16, pady=10)
+        hdr.pack(fill="x")
+        tk.Label(hdr, text="Edit Product" if editing else "Add Product",
+                 bg=CA, fg="white", font=F_BOLD).pack(anchor="w")
+        tk.Label(hdr, text="The part number is the item code in Xero — it has "
+                           "to match exactly for a quote to find this price.",
+                 bg=CA, fg="#A9CCE3", font=F_SM).pack(anchor="w")
+
+        body = tk.Frame(dlg, bg=CBG, padx=16, pady=14)
+        body.pack(fill="both", expand=True)
+        body.columnconfigure(1, weight=1)
+        v_part = tk.StringVar(value=(row or {}).get("part_number", ""))
+        v_name = tk.StringVar(value=(row or {}).get("name", ""))
+        v_desc = tk.StringVar(value=(row or {}).get("description", ""))
+        v_price = tk.StringVar(
+            value=f'{float((row or {}).get("unit_price") or 0):.2f}'
+            if editing else "")
+        for r, (label, var, hint) in enumerate((
+                ("Part number", v_part, "e.g. FPFG425-020"),
+                ("Product",     v_name, "What it is, for this list"),
+                ("Invoice text", v_desc, "What Xero puts on the line (optional)"),
+                ("Price ex GST", v_price, "e.g. 27.00"))):
+            tk.Label(body, text=label, bg=CBG, fg=CTX, font=F_BODY,
+                     anchor="w").grid(row=r, column=0, sticky="w", pady=4)
+            ent = field_entry(body, textvariable=var, width=40)
+            ent.grid(row=r, column=1, sticky="ew", padx=(10, 0), pady=4)
+            if editing and label == "Part number":
+                ent.config(state="readonly")   # renaming would orphan the row
+            tk.Label(body, text=hint, bg=CBG, fg=CMU,
+                     font=F_SM).grid(row=r, column=2, sticky="w", padx=(10, 0))
+
+        foot = tk.Frame(dlg, bg=CBG, padx=16, pady=10)
+        foot.pack(fill="x")
+
+        def _save():
+            part = v_part.get().strip().upper()
+            if not part:
+                messagebox.showerror("Product", "A part number is required.",
+                                     parent=dlg)
+                return
+            try:
+                price = float(v_price.get().strip().lstrip("$") or 0)
+            except ValueError:
+                messagebox.showerror("Product",
+                                     "Enter the price as a number, e.g. 27.00.",
+                                     parent=dlg)
+                return
+            try:
+                _db.set_price(part, price, v_name.get().strip(),
+                              v_desc.get().strip())
+            except Exception as exc:
+                messagebox.showerror("Product", f"Could not save:\n{exc}",
+                                     parent=dlg)
+                return
+            self._load_prices(force=True)
+            dlg.destroy()
+            self._refresh_products_list()
+            self.status_var.set(f"{part} saved at ${price:,.2f}.")
+
+        flat_btn(foot, "Cancel", dlg.destroy, bg=CNE,
+                 pady=7).pack(side="right", padx=(8, 0))
+        flat_btn(foot, "Save", _save, bg=CGR, pady=7).pack(side="right")
+        dlg.bind("<Escape>", lambda _e: dlg.destroy())
+        dlg.bind("<Return>", lambda _e: _save())
+        W, H = 620, 260
+        dlg.geometry(f"{W}x{H}+{self.master.winfo_rootx() + 140}"
+                     f"+{self.master.winfo_rooty() + 110}")
+
+    def _delete_product(self):
+        row = self._selected_product()
+        if not row:
+            messagebox.showinfo("Delete Product", "Select a product first.")
+            return
+        part = row.get("part_number", "")
+        if not messagebox.askyesno(
+                "Delete Product",
+                f"Remove {part} from the price list?\n\n"
+                "Quotes will show it as \"to be confirmed\" until it is "
+                "priced again."):
+            return
+        try:
+            _db.delete_price(part)
+        except Exception as exc:
+            messagebox.showerror("Delete Product", f"Could not delete:\n{exc}")
+            return
+        self._load_prices(force=True)
+        self._refresh_products_list()
+        self.status_var.set(f"{part} removed from the price list.")
+
+    def _clear_price_list(self):
+        """Empty the price list — for starting a re-import from scratch."""
+        try:
+            total = _db.count_prices()
+        except Exception:
+            total = 0
+        if not total:
+            messagebox.showinfo("Clear Price List", "The price list is empty.")
+            return
+        if not messagebox.askyesno(
+                "Clear Price List",
+                f"Delete all {total:,} priced part numbers?\n\n"
+                "Nothing else is touched — orders, customers and stock are "
+                "unaffected — but every quote will show as unpriced until "
+                "prices are imported again.\n\nThis cannot be undone.",
+                icon="warning", default="no"):
+            return
+        try:
+            _db.clear_price_list()
+            _db.log_action("prices_cleared", f"{total} part numbers")
+        except Exception as exc:
+            messagebox.showerror("Clear Price List", f"Could not clear:\n{exc}")
+            return
+        self._load_prices(force=True)
+        self._refresh_products_list()
+        self.status_var.set("Price list cleared.")
 
     # ── Dashboard tab ─────────────────────────────────────────────────────
 
@@ -7480,16 +8086,16 @@ class ModernOrderApp(tk.Frame):
                             f"{'s' if len(paths) != 1 else ''}…")
         self.master.update_idletasks()
         try:
-            rows, problems = _pricing.read_price_files(paths)
+            rows, problems, report = _pricing.read_price_files(paths)
         except Exception as exc:
             messagebox.showerror("Price Import",
                                  f"The files could not be read:\n{exc}")
             self.status_var.set("Price import failed.")
             return
 
-        self._finish_price_import(paths, rows, problems)
+        self._finish_price_import(paths, rows, problems, report)
 
-    def _finish_price_import(self, paths, rows, problems):
+    def _finish_price_import(self, paths, rows, problems, report):
         """Confirm what was read, then save it without freezing the window.
 
         A full price list is thousands of rows and goes up in batches, which
@@ -7505,13 +8111,21 @@ class ModernOrderApp(tk.Frame):
             self.status_var.set("Price import found nothing.")
             return
 
-        sample = ", ".join(r["part_number"] for r in rows[:4])
+        # Show the columns it read from. Reading the wrong column is the
+        # failure that looks like "it imported but ignored all the prices",
+        # so it is put in front of the user before anything is saved.
+        sample = "\n".join(
+            f"    {r['part_number']}   ${r['unit_price']:,.2f}   "
+            f"{(r.get('name') or r.get('description') or '')[:40]}"
+            for r in rows[:3])
+        cols = "\n".join(f"    {line}" for line in report[:6])
         if not messagebox.askyesno(
                 "Import Prices",
-                f"{len(rows):,} priced part numbers were read "
-                f"(for example: {sample}).\n\n"
-                "Part numbers already in the list will be updated to these "
-                "prices; anything not in these files is left as it is.\n\n"
+                f"{len(rows):,} priced part numbers were read.\n\n"
+                f"Columns used:\n{cols}\n\nFirst rows:\n{sample}\n\n"
+                "Check the price column is the right one. Part numbers "
+                "already in the list will be updated to these prices; "
+                "anything not in these files is left as it is.\n\n"
                 "Import them?"):
             self.status_var.set("Price import cancelled.")
             return
@@ -7540,6 +8154,8 @@ class ModernOrderApp(tk.Frame):
                 return
             saved = result.get("saved", 0)
             self._refresh_price_count()
+            if hasattr(self, "products_tree"):
+                self._refresh_products_list()
             msg = f"{saved:,} prices imported."
             if problems:
                 msg += "\n\nSome files had nothing to read:\n" + "\n".join(problems)
