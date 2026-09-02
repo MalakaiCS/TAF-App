@@ -288,6 +288,11 @@ def _normalise_order(raw: Dict[str, Any]) -> Dict[str, Any]:
             # Review-only metadata — stripped before the order is generated.
             "_confidence":         (it.get("confidence") or "medium").lower(),
             "_source_text":        (it.get("source_text") or "").strip(),
+            # The wording the document actually used, kept as read. If someone
+            # corrects the line in review, the app compares against these to
+            # learn what that wording meant.
+            "_read_filter_type":   (it.get("filter_type") or "").strip(),
+            "_read_media_type":    (it.get("media_type")  or "").strip(),
         })
 
     return {

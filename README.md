@@ -25,9 +25,17 @@ log, stock management and a customer database.
   anywhere.
 - **Previous Orders** — search / filter, view items, reload, duplicate,
   regenerate, status tracking, priority flags, notes, per-order history.
+- **What's due** — filter the order list by overdue / due today / due this
+  week, with late work coloured and flagged in the list, and a Due panel on
+  the Dashboard that opens straight into it.
+- **Quotes & Xero** — price an order from the imported price list (or a rate
+  per m² where a part number has no listed price), print a quote PDF, and
+  export a Xero sales-invoice CSV. Lines nothing can price are shown as "to
+  be confirmed" rather than guessed at.
 - **Dashboard** — orders-per-week, order-type and busiest-customer charts, low
-  stock alerts.
-- **Stock** — items with images, on-hand / minimum levels, adjustments & history.
+  stock alerts, and what's due.
+- **Stock** — items with images, on-hand / minimum levels, adjustments &
+  history, and optional automatic deduction as orders are generated.
 - **Customers** — full customer database with delivery/billing details.
 - **Audit Log** — every significant action recorded.
 - **Part numbers & square metreage** — every filter line gets its area and a
@@ -36,6 +44,10 @@ log, stock management and a customer database.
 - **Job number highlighter** — show the app one of a customer's purchase
   orders, drag a box around their job number, and it learns the wording to
   look for on every future order from them.
+- **Learns from corrections** — when someone fixes a line in the import review
+  screen ("V Filter" was read as unknown and they picked V-form; "MERV 8" was
+  swapped for G4), the wording and what it meant are remembered and shared
+  with every PC, so the next order that says the same thing is read correctly.
 - **Settings** — media types (with their part-number codes), custom filter
   types, low-stock thresholds, user management, light/dark mode, change
   password, in-app software update.
@@ -98,7 +110,8 @@ In the Supabase dashboard → **SQL Editor**, run these once (in order):
    dedicated-filter presets and custom filter types; without it those edits
    stay on one PC instead of being shared. `migrate_customer_profiles.sql`
    adds customer short names, delivery regions, job-number labels and the
-   part-number code on each media type.
+   part-number code on each media type. `migrate_pricing.sql` adds the price
+   list and the per-m² rates that back quotes and the Xero export.
 
 ### Enable purchase-order import (optional)
 
@@ -154,6 +167,38 @@ asked for. Pages serves real HTML.
 The office app sweeps for new photos every minute, reads them in the
 background, and shows a **📱 Phone Inbox** button on the New Order tab when
 orders are ready to review.
+
+### Set up quoting (optional)
+
+1. Run `migrate_pricing.sql` in the **SQL Editor**.
+2. **Settings → Pricing → Import Price Files**, and pick your price
+   spreadsheets. Any sheet works as long as it has a heading row with a
+   part-number column (`Part No`, `Code`, `SKU`, `Item Code`…) and a price
+   column (`Price`, `Sell`, `Unit Price`, `Rate`…). Every sheet in a workbook
+   is read, and several files can be imported at once — later files win.
+3. Optionally set **Rates per m²** for a filter type and media, used only
+   where a part number has no listed price.
+
+Then **Quote** on the New Order tab (or on a saved order in Previous Orders)
+prices the lines, prints a quote PDF, and writes a Xero sales-invoice CSV.
+
+**Why a CSV and not the Xero API?** The CSV import needs no app registration,
+no OAuth callback and no stored credentials, and Xero previews the whole batch
+for approval before creating anything. Import it in Xero under
+**Business → Invoices → Import**, and check the account code and tax rate on
+the preview.
+
+### Turn on automatic stock deduction (optional)
+
+**Settings → Stock** has a switch, off by default so stock can be counted
+first. With it on, generating an order deducts:
+
+- a stock item whose **SKU is the line's part number**, by the line quantity;
+- **media kept in m²**, by the line's area.
+
+Anything else is left alone and reported on the order's completion message —
+the app never guesses at a bill of materials. Every movement is recorded as a
+normal stock transaction, so a wrong one can be reversed by hand.
 
 ### Create the first admin account
 
@@ -212,6 +257,10 @@ taf_order_app/
   bag_filler.py            Word worksheet filling (COM)
   updater.py               In-app auto-update (APP_VERSION lives here)
   po_import.py             Purchase-order import + phone inbox
+  part_numbers.py          Part numbers, square metres, filter-type rules
+  pricing.py               Price lists, quote lines, Xero export
+  quote_pdf.py             The quote PDF
+  stock_usage.py           What an order takes out of stock
   user_management.py       Roles & user admin
   models.py / validation.py
 fonts/                     Bundled Public Sans (OFL)

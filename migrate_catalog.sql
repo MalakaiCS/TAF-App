@@ -6,6 +6,10 @@
 --   key = 'sigrist_pack'        → Sigrist preset spec
 --   key = 'stepped_packs'       → Stepped Filter size presets
 --   key = 'custom_filter_types' → extra Filter Type names beyond the built-ins
+--   key = 'po_corrections'      → what purchase-order wordings turned out to
+--                                 mean, learned from corrections made in the
+--                                 import review screen
+--   key = 'stock_settings'      → whether orders deduct stock automatically
 
 create table if not exists catalog_lists (
   key        text primary key,

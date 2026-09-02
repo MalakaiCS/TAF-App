@@ -24,6 +24,9 @@ from typing import Any, Dict, Optional
 PART_NUMBER_PREFIXES = {
     "flat panel": "FPF",
     "v-form":     "PPF",
+    # A header IS a flat panel — one made to sit on top of a bag filter — so
+    # it is coded as one rather than left without a part number.
+    "header":     "FPF",
 }
 
 # Types whose code is fixed — they are only ever made one way, so neither the
@@ -70,6 +73,130 @@ REGION_NAMES = list(REGIONS)
 
 DEFAULT_MEDIA = "G4"
 STEPPED_MEDIA = "180"
+
+# ── Filter types ─────────────────────────────────────────────────────────────
+# A purchase order calls a V-form whatever the person writing it calls one:
+# "V Filter", "Vee bank", "pleated panel". They all mean the same thing on the
+# bench, so they are all read as the same thing here. Keys are the wording with
+# punctuation and spaces stripped, so "V-Filter", "v filter" and "VFILTER" all
+# land on the same entry.
+FILTER_TYPE_WORDINGS = {
+    # V-form / pleated panel
+    "vform": "V-form",          "vfilter": "V-form",       "vfilters": "V-form",
+    "veeform": "V-form",        "veefilter": "V-form",     "vbank": "V-form",
+    "veebank": "V-form",        "vtype": "V-form",         "vpleat": "V-form",
+    "vpanel": "V-form",         "vcell": "V-form",
+    "pleatedpanel": "V-form",   "pleatedpanelfilter": "V-form",
+    "pleatedfilter": "V-form",  "pleated": "V-form",       "pleat": "V-form",
+    "ppf": "V-form",            "pleatpack": "V-form",
+    # Flat panel
+    "flatpanel": "Flat Panel",      "flatpanelfilter": "Flat Panel",
+    "panel": "Flat Panel",          "panelfilter": "Flat Panel",
+    "flatfilter": "Flat Panel",     "flat": "Flat Panel",
+    "fpf": "Flat Panel",            "filterpad": "Flat Panel",
+    "pad": "Flat Panel",            "padfilter": "Flat Panel",
+    "washablepanel": "Flat Panel",
+    # Stepped
+    "stepped": "Stepped Filter",    "steppedfilter": "Stepped Filter",
+    "stepfilter": "Stepped Filter", "step": "Stepped Filter",
+    "stppf": "Stepped Filter",      "stppfw50": "Stepped Filter",
+    # Flyscreen
+    "flyscreen": "Flyscreen",       "flyscreens": "Flyscreen",
+    "flyscren": "Flyscreen",        "insectscreen": "Flyscreen",
+    "meshscreen": "Flyscreen",      "screen": "Flyscreen",
+    "emesh": "Flyscreen",           "expandedmesh": "Flyscreen",
+    # Header
+    "header": "Header",             "headerpanel": "Header",
+}
+
+# A stepped filter is a 40mm V-form with a 9mm flyscreen fixed to it, and it is
+# only ever made that way — so it is always 50mm overall, whatever a purchase
+# order says. That 50 is the 50 in STPPFW50.
+STEPPED_THICKNESS = 50
+
+# Thicknesses that mean a V-form even when the document didn't say so. 45 and
+# 50 are only ever V-form; anything thicker is too deep for a flat panel.
+VFORM_THICKNESSES = (45, 50)
+
+
+def wording_key(text: str) -> str:
+    return re.sub(r"[^a-z0-9]", "", (text or "").lower())
+
+
+def canonical_filter_type(written: str, extra_types=None, learned=None) -> str:
+    """The filter type a document's wording means, or "" if it means nothing.
+
+    Anything already spelled the way the app spells it — including a filter
+    type someone added themselves — comes straight back. `learned` holds the
+    wordings staff have corrected before, keyed the same way, and is consulted
+    ahead of the built-in table so a correction always wins.
+    """
+    written = (written or "").strip()
+    if not written:
+        return ""
+    for name in list(extra_types or []) + ["V-form", "Flat Panel",
+                                           "Stepped Filter", "Flyscreen", "Header"]:
+        if written.lower() == str(name).lower():
+            return str(name)
+    key = wording_key(written)
+    if learned:
+        taught = learned.get(key)
+        if taught:
+            return str(taught)
+    hit = FILTER_TYPE_WORDINGS.get(key)
+    if hit:
+        return hit
+    # A custom type someone added, written with different punctuation.
+    for name in (extra_types or []):
+        if wording_key(str(name)) == key:
+            return str(name)
+    return ""
+
+
+def filter_type_for_thickness(channel) -> str:
+    """The filter type a thickness on its own implies, or "".
+
+        9-11 mm   Flyscreen
+        12-29 mm  Flat Panel
+        45, 50 mm V-form  — only ever made as a V-form
+        30 mm +   V-form
+    """
+    try:
+        ch = int(str(channel).strip())
+    except (TypeError, ValueError):
+        return ""
+    if ch in VFORM_THICKNESSES:
+        return "V-form"
+    if 9 <= ch <= 11:
+        return "Flyscreen"
+    if 12 <= ch <= 29:
+        return "Flat Panel"
+    if ch >= 30:
+        return "V-form"
+    return ""
+
+
+def resolve_filter_type(item: Dict[str, Any], extra_types=None,
+                        learned=None) -> str:
+    """Settle a line's filter type, in place. Returns the type, or "".
+
+    The wording on the order is trusted first, then the thickness. A line that
+    says nothing recognisable and gives no usable thickness is left blank for
+    someone to fill in, rather than guessed at.
+    """
+    if (item.get("item_kind") or "filter") == "bag":
+        return ""
+    written = (item.get("Filter Type") or "").strip()
+    ftype = canonical_filter_type(written, extra_types, learned)
+    if not ftype:
+        ftype = filter_type_for_thickness(item.get("Channel"))
+    if ftype:
+        item["Filter Type"] = ftype
+    # A stepped filter is always 50mm overall — the 40mm V-form plus its 9mm
+    # flyscreen. Orders quote it as 40, 45 or 50; the worksheet wants 50.
+    if ftype == "Stepped Filter":
+        item["Channel"] = STEPPED_THICKNESS
+    return ftype
 
 
 def default_media_code(media: str) -> str:
@@ -229,12 +356,15 @@ def effective_area(item: Dict[str, Any]) -> float:
         return 0.0
 
 
-def apply_media_rules(item: Dict[str, Any], known_media) -> str:
+def apply_media_rules(item: Dict[str, Any], known_media, learned=None) -> str:
     """Settle a line's media, and say whether a human still needs to decide.
 
     Returns "" when the media is settled, or the unrecognised grade as written
     when it is not on the list — the caller asks whether to add it or swap it
     for one that is, rather than quietly picking either.
+
+    `learned` holds grades staff have already swapped, keyed by wording. A
+    grade that has been decided once is not asked about again.
     """
     if (item.get("item_kind") or "filter") == "bag":
         return ""
@@ -250,6 +380,10 @@ def apply_media_rules(item: Dict[str, Any], known_media) -> str:
 
     allowed = {str(m).strip().lower() for m in (known_media or [])}
     if allowed and media.lower() not in allowed:
+        taught = (learned or {}).get(wording_key(media))
+        if taught and str(taught).strip().lower() in allowed:
+            item["Media Type"] = str(taught).strip()
+            return ""
         return media                            # e.g. F9 — ask the user
     return ""
 

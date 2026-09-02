@@ -857,7 +857,11 @@ STOCK_PRODUCT_TYPES = [
     "Other",
 ]
 
-STOCK_UNITS = ["each", "metre", "roll", "kg", "box", "pack", "sheet", "pair", "set"]
+# "m2" is what media has to be kept in for an order to deduct it by area —
+# see stock_usage.py. A roll kept in metres can't be reduced by an area
+# without knowing the roll's width.
+STOCK_UNITS = ["each", "m2", "metre", "roll", "kg", "box", "pack", "sheet",
+               "pair", "set"]
 
 
 def get_stock_items(search: str = "", product_type: str = "") -> list:
@@ -999,6 +1003,102 @@ def upload_stock_image(item_id: str, image_path: str) -> str:
 
 def can_manage_stock() -> bool:
     """Managers and above can create / edit / delete stock items."""
+    return role_level() >= 3
+
+
+# ── Pricing (see migrate_pricing.sql) ────────────────────────────────────────
+# price_list is one price per part number, imported from the price
+# spreadsheets. price_rates is a fallback per square metre, used only where a
+# part number has no listed price.
+
+def get_price_rows() -> list:
+    """Every priced part number. Empty if pricing isn't set up yet."""
+    try:
+        resp = (get_client().table("price_list")
+                .select("*").order("part_number").execute())
+        return resp.data or []
+    except Exception:
+        return []
+
+
+def get_price_list() -> dict:
+    """Part number → unit price."""
+    out = {}
+    for row in get_price_rows():
+        part = (row.get("part_number") or "").strip().upper()
+        if part:
+            try:
+                out[part] = float(row.get("unit_price") or 0)
+            except (TypeError, ValueError):
+                continue
+    return out
+
+
+def upsert_prices(rows: list) -> int:
+    """Save priced part numbers, replacing any that are already there.
+
+    Sent in batches: a full price list runs to thousands of rows and a single
+    request that size times out.
+    """
+    import datetime as _dt
+    who, now = current_username(), _dt.datetime.utcnow().isoformat()
+    payload = []
+    for row in rows or []:
+        part = (row.get("part_number") or "").strip().upper()
+        if not part:
+            continue
+        payload.append({
+            "part_number":     part,
+            "description":     (row.get("description") or "")[:500],
+            "unit_price":      round(float(row.get("unit_price") or 0), 4),
+            "updated_by_name": who,
+            "updated_at":      now,
+        })
+    saved = 0
+    for i in range(0, len(payload), 500):
+        chunk = payload[i:i + 500]
+        get_client().table("price_list").upsert(
+            chunk, on_conflict="part_number").execute()
+        saved += len(chunk)
+    return saved
+
+
+def delete_price(part_number: str) -> None:
+    get_client().table("price_list").delete().eq(
+        "part_number", (part_number or "").strip().upper()).execute()
+
+
+def clear_price_list() -> None:
+    """Remove every listed price. Used before a full re-import."""
+    get_client().table("price_list").delete().neq("part_number", "").execute()
+
+
+def get_price_rate_rows() -> list:
+    try:
+        resp = (get_client().table("price_rates")
+                .select("*").order("filter_type").execute())
+        return resp.data or []
+    except Exception:
+        return []
+
+
+def set_price_rate(filter_type: str, media_type: str, rate: float) -> None:
+    import datetime as _dt
+    get_client().table("price_rates").upsert({
+        "filter_type":     (filter_type or "").strip(),
+        "media_type":      (media_type or "").strip(),
+        "rate_per_sqm":    round(float(rate or 0), 4),
+        "updated_by_name": current_username(),
+        "updated_at":      _dt.datetime.utcnow().isoformat(),
+    }, on_conflict="filter_type,media_type").execute()
+
+
+def delete_price_rate(rate_id: str) -> None:
+    get_client().table("price_rates").delete().eq("id", rate_id).execute()
+
+
+def can_manage_prices() -> bool:
+    """Managers and above. A wrong price goes out to a customer."""
     return role_level() >= 3
 
 

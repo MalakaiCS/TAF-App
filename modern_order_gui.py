@@ -15,14 +15,18 @@ import platform
 import os
 import calendar as _cal
 import datetime
+import re
 import threading
 from concurrent.futures import ThreadPoolExecutor
 
 from taf_order_app import OrderService
-from taf_order_app.validation import VALID_FILTER_TYPES, VALID_MEDIA_TYPES
+from taf_order_app.validation import (VALID_FILTER_TYPES, VALID_MEDIA_TYPES,
+                                      parse_date)
 from taf_order_app import db as _db
 from taf_order_app import po_import as _po_import
 from taf_order_app import part_numbers as _pn
+from taf_order_app import stock_usage as _stock_usage
+from taf_order_app import pricing as _pricing
 from taf_order_app.bag_filler import (
     BAG_PRODUCT_TYPES, BAG_MEDIA_TYPES, ROLL_MEDIA_TYPES,
     ROLL_WIDTHS, ROLL_LENGTHS, STANDARD_SIZES,
@@ -75,19 +79,63 @@ def classify_by_channel(channel) -> "tuple[str | None, str | None]":
 
       •  9–11 mm  → Flyscreen, GREY media
       • 12–29 mm  → Flat Panel  (media left as-is)
+      • 45, 50 mm → V-form — those depths are only ever made as a V-form
       • 30 mm +   → V-form / pleated panel filter (media left as-is)
+
+    The thickness table itself lives in ``part_numbers`` so the import path
+    reads a purchase order the same way this form reads a typed thickness.
     """
-    try:
-        ch = int(str(channel).strip())
-    except (TypeError, ValueError):
+    ft = _pn.filter_type_for_thickness(channel)
+    if not ft:
         return (None, None)
-    if 9 <= ch <= 11:
-        return ("Flyscreen", "GREY")
-    if 12 <= ch <= 29:
-        return ("Flat Panel", None)
-    if ch >= 30:
-        return ("V-form", None)
-    return (None, None)
+    return (ft, "GREY" if ft == "Flyscreen" else None)
+
+
+# ── When work is due ─────────────────────────────────────────────────────────
+# An order that is finished or gone is not due, whatever its date says, so the
+# buckets below are only ever about work still in the shop.
+
+DONE_STATUSES = ("Complete", "Dispatched")
+DUE_FILTERS = ["All", "Overdue", "Due today", "Due this week", "No due date"]
+
+
+def due_bucket(row: dict, today=None) -> str:
+    """Where an order sits against its due date.
+
+    One of "overdue", "today", "week" (the next seven days), "later",
+    "none" (no date given) or "done". "ASAP" with no date counts as due today
+    — it is the one wording that means "now" rather than "sometime".
+    """
+    if (row.get("status") or "Pending") in DONE_STATUSES:
+        return "done"
+    raw = (row.get("date_due") or "").strip()
+    if not raw:
+        return "none"
+    if raw.lower() == "asap":
+        return "today"
+    parsed = parse_date(raw)
+    if not parsed:
+        return "none"
+    today = today or datetime.date.today()
+    days = (parsed.date() - today).days
+    if days < 0:
+        return "overdue"
+    if days == 0:
+        return "today"
+    if days <= 7:
+        return "week"
+    return "later"
+
+
+def due_sort_key(row: dict):
+    """Sort orders by when they are due, soonest first, undated last."""
+    raw = (row.get("date_due") or "").strip()
+    if raw.lower() == "asap":
+        return (0, datetime.date.min)
+    parsed = parse_date(raw)
+    if not parsed:
+        return (1, datetime.date.max)      # undated sinks to the bottom
+    return (0, parsed.date())
 
 
 def apply_stepped_filter_note(item: dict) -> dict:
@@ -334,6 +382,33 @@ DEFAULT_STEPPED_PACKS = _copy.deepcopy(STEPPED_PACKS)
 
 CATALOG_CACHE_FILE = APP_DIR / "catalog_cache.json"
 
+# ── What the app has learned from corrections ────────────────────────────────
+# When someone fixes a line in the purchase-order review screen — the document
+# said "V Filter" and they picked V-form, or it said "MERV 8" and they swapped
+# it for G4 — the wording and what it turned out to mean are kept here. The
+# next order that says the same thing is read correctly without asking.
+# Shared through the catalogue table so one person's correction teaches every
+# PC, and cached locally so it survives a start with no connection.
+PO_CORRECTIONS = {"filter_types": {}, "media_types": {}}
+
+# ── Stock behaviour ──────────────────────────────────────────────────────────
+# Off until someone turns it on, deliberately: stock has to be counted before
+# automatic deduction means anything, and a figure that started from a guess
+# never recovers. Shared through the catalogue, so it is switched on once for
+# the company rather than on each PC.
+STOCK_SETTINGS = {"auto_deduct": False}
+
+
+def _merge_corrections(data) -> None:
+    """Fold a stored corrections map into the live one."""
+    if not isinstance(data, dict):
+        return
+    for bucket in ("filter_types", "media_types"):
+        got = data.get(bucket)
+        if isinstance(got, dict):
+            PO_CORRECTIONS[bucket].update(
+                {str(k): str(v) for k, v in got.items() if k and v})
+
 
 def _apply_catalog(data: dict) -> None:
     """Overwrite the in-memory preset tables from a catalogue dict."""
@@ -349,6 +424,10 @@ def _apply_catalog(data: dict) -> None:
     if isinstance(st, dict) and st:
         STEPPED_PACKS.clear()
         STEPPED_PACKS.update(st)
+    _merge_corrections(data.get("po_corrections"))
+    stock = data.get("stock_settings")
+    if isinstance(stock, dict) and "auto_deduct" in stock:
+        STOCK_SETTINGS["auto_deduct"] = bool(stock["auto_deduct"])
 
 
 def _load_catalog_cache() -> None:
@@ -362,17 +441,22 @@ def _load_catalog_cache() -> None:
 def _save_catalog_cache() -> None:
     try:
         CATALOG_CACHE_FILE.write_text(json.dumps({
-            "gd_packs":      DEDICATED_FILTER_PACKS,
-            "sigrist_pack":  SIGRIST_PACK,
-            "stepped_packs": STEPPED_PACKS,
+            "gd_packs":        DEDICATED_FILTER_PACKS,
+            "sigrist_pack":    SIGRIST_PACK,
+            "stepped_packs":   STEPPED_PACKS,
+            "po_corrections":  PO_CORRECTIONS,
+            "stock_settings":  STOCK_SETTINGS,
         }, indent=2), encoding="utf-8")
     except Exception:
         pass
 
 
-def _persist_catalog_key(key: str, value, parent=None) -> bool:
+def _persist_catalog_key(key: str, value, parent=None, quiet: bool = False) -> bool:
     """Save one catalogue list to the shared DB (+ local cache). Returns
-    True if the shared save worked; shows a helpful error if not."""
+    True if the shared save worked; shows a helpful error if not.
+
+    `quiet` is for saves the user didn't ask for — the local cache still keeps
+    the change, and a dialog would only interrupt whatever they were doing."""
     _save_catalog_cache()
     if not (_db.is_ready() and _db.current_user()):
         return False
@@ -381,6 +465,8 @@ def _persist_catalog_key(key: str, value, parent=None) -> bool:
         _db.log_action("catalog_changed", f"Updated {key}")
         return True
     except Exception as exc:
+        if quiet:
+            return False
         try:
             messagebox.showerror(
                 "Database Error",
@@ -1588,7 +1674,7 @@ class CompressorFilterDialog(tk.Toplevel):
         tk.Frame(frm, bg=CSP, height=1).pack(fill="x", pady=(12, 10))
 
         specs = [
-            ("Filter Type", "Stepped Filter (40mm V-form + 10mm flyscreen)"),
+            ("Filter Type", "Stepped Filter — 50mm (40mm V-form + 9mm flyscreen)"),
             ("Media",       "G4  +  180 Media"),
             ("Note",        "180 Media included"),
         ]
@@ -2039,7 +2125,7 @@ class LineItemDialog(tk.Toplevel):
         self._auto_hint = tk.Label(
             dim_f,
             text="Channel 9–11 → Flyscreen (Grey)   ·   12–29 → Flat Panel   "
-                 "·   30+ → V-form / Pleated",
+                 "·   30+ (45 & 50 included) → V-form / Pleated",
             bg=CCA, fg=CMU, font=F_SM, anchor="w")
         self._auto_hint.grid(row=1, column=0, columnspan=4, sticky="w", pady=(10, 0))
 
@@ -2074,6 +2160,9 @@ class LineItemDialog(tk.Toplevel):
         # types. Attached AFTER the initial values are set so editing an
         # existing item does not clobber its saved classification on open.
         self.vars["Channel"].trace_add("write", self._on_channel_change)
+        # A stepped filter is always 50mm overall, so choosing it fills the
+        # thickness in rather than leaving it to be typed (and mistyped).
+        self.vars["Filter Type"].trace_add("write", self._on_filter_type_change)
 
         # ── Options ───────────────────────────────────────────────────────
         opt_f = tk.LabelFrame(body, text=" Options ",
@@ -2136,7 +2225,12 @@ class LineItemDialog(tk.Toplevel):
         out of that range, the auto-Grey is undone back to the default G4 so a
         mistaken 9 mm entry doesn't leave Grey stuck on a Flat Panel / V-form.
         A media type the user picked themselves (anything but Grey) is kept.
+
+        A stepped filter is left alone: it is 50mm by definition, and 50mm
+        would otherwise read as a plain V-form and overwrite the choice.
         """
+        if self.vars["Filter Type"].get().strip() == "Stepped Filter":
+            return
         ft, mt = classify_by_channel(self.vars["Channel"].get())
         if ft:
             self.vars["Filter Type"].set(ft)
@@ -2144,6 +2238,17 @@ class LineItemDialog(tk.Toplevel):
             self.vars["Media Type"].set(mt)
         elif ft and self.vars["Media Type"].get().strip().upper() == "GREY":
             self.vars["Media Type"].set("G4")
+
+    def _on_filter_type_change(self, *_):
+        """A stepped filter is a 40mm V-form plus its 9mm flyscreen — 50mm
+        overall, and 180 media, every time. Both are filled in on choosing it
+        so neither has to be remembered."""
+        if self.vars["Filter Type"].get().strip() != "Stepped Filter":
+            return
+        if self.vars["Channel"].get().strip() != str(_pn.STEPPED_THICKNESS):
+            self.vars["Channel"].set(str(_pn.STEPPED_THICKNESS))
+        if self.vars["Media Type"].get().strip() != _pn.STEPPED_MEDIA:
+            self.vars["Media Type"].set(_pn.STEPPED_MEDIA)
 
     def _cancel(self):
         self.result = None
@@ -2976,6 +3081,9 @@ class POReviewDialog(tk.Toplevel):
         self.grab_set()
         self.configure(bg=CBG)
         self.result = None
+        # What the corrections made in here taught the app; read by the caller
+        # after the dialog closes.
+        self.learned = {"filter_types": {}, "media_types": {}}
         self._orders = orders
         self._media_types  = media_types  or list(DEFAULT_MEDIA_TYPES)
         self._filter_types = filter_types or list(VALID_FILTER_TYPES)
@@ -3334,10 +3442,12 @@ class POReviewDialog(tk.Toplevel):
             pass
         if dlg.result:
             # A human has now confirmed this line, so it stops being flagged.
-            src = items[idx].get("_source_text", "")
+            # The review metadata is carried across the replacement — the
+            # wording the document used is what a correction is learned from.
+            keep = {k: v for k, v in items[idx].items() if k.startswith("_")}
             items[idx] = dict(dlg.result)
-            items[idx]["_confidence"]  = "high"
-            items[idx]["_source_text"] = src
+            items[idx].update(keep)
+            items[idx]["_confidence"] = "high"
             self._refresh_items()
             self._on_select()
 
@@ -3383,11 +3493,158 @@ class POReviewDialog(tk.Toplevel):
                 "one.", parent=self):
             return
 
+        self.learned = self._collect_corrections(approved)
         self.result = [{
             "header": dict(o["header"]),
             "items":  [_po_import.strip_review_fields(i) for i in o["items"]],
         } for o in approved]
         self.destroy()
+
+    def _collect_corrections(self, approved) -> dict:
+        """What the wordings on these orders turned out to mean.
+
+        Only wordings the app read differently from what was approved are
+        recorded, so confirming a line the app already got right teaches it
+        nothing new. Keyed by wording with punctuation stripped, so "V Filter"
+        and "v-filter" are the same lesson.
+        """
+        learned = {"filter_types": {}, "media_types": {}}
+        pairs = (("_read_filter_type", "Filter Type", "filter_types"),
+                 ("_read_media_type",  "Media Type",  "media_types"))
+        for o in approved:
+            for it in o["items"]:
+                for read_key, final_key, bucket in pairs:
+                    written = (it.get(read_key) or "").strip()
+                    final = (it.get(final_key) or "").strip()
+                    if not written or not final:
+                        continue
+                    if written.lower() == final.lower():
+                        continue        # read correctly — nothing to learn
+                    key = _pn.wording_key(written)
+                    if key:
+                        learned[bucket][key] = final
+        return learned
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Quote
+# ═══════════════════════════════════════════════════════════════════════════
+
+class QuoteDialog(tk.Toplevel):
+    """What an order comes to, line by line, before anything is sent out.
+
+    Unpriced lines are shown in red rather than hidden or zeroed quietly:
+    they are the reason a quote would go out wrong, so they are the thing the
+    screen is loudest about.
+    """
+
+    def __init__(self, master, header, lines, customer=None,
+                 prepared_by="", on_pdf=None, on_xero=None):
+        super().__init__(master)
+        self.title("Quote")
+        self.configure(bg=CBG)
+        self.transient(master)
+        self.grab_set()
+        self._lines = list(lines)
+        self._header = header
+        self._customer = customer or {}
+        self._on_pdf = on_pdf
+        self._on_xero = on_xero
+
+        missing = _pricing.unpriced(self._lines)
+        totals = _pricing.quote_totals(self._lines)
+
+        hdr = tk.Frame(self, bg=CA, padx=16, pady=10)
+        hdr.pack(fill="x")
+        who = ((self._customer.get("short_name") or "").strip()
+               or (header.get("Customer Name") or "").strip() or "—")
+        tk.Label(hdr, text=f"Quote — {who}", bg=CA, fg="white",
+                 font=(FAM, 12, "bold")).pack(anchor="w")
+        tk.Label(hdr, text=f"Order {header.get('Order Number') or '—'}  ·  "
+                           f"{len(self._lines)} line"
+                           f"{'s' if len(self._lines) != 1 else ''}",
+                 bg=CA, fg="#A9CCE3", font=F_SM).pack(anchor="w")
+
+        foot = tk.Frame(self, bg=CBG, padx=16, pady=10)
+        foot.pack(fill="x", side="bottom")
+        flat_btn(foot, "Close", self.destroy, bg=CNE,
+                 pady=8).pack(side="right", padx=(8, 0))
+        flat_btn(foot, "Export for Xero", self._xero, bg=CA2,
+                 pady=8).pack(side="right", padx=(8, 0))
+        flat_btn(foot, "Save Quote PDF", self._pdf, bg=CGR,
+                 pady=8).pack(side="right")
+
+        tot_txt = (f"Subtotal  ${totals['subtotal']:,.2f}      "
+                   f"GST  ${totals['gst']:,.2f}      "
+                   f"Total  ${totals['total']:,.2f}")
+        tk.Label(foot, text=tot_txt, bg=CBG, fg=CTX,
+                 font=F_BOLD).pack(side="left")
+
+        if missing:
+            warn = tk.Frame(self, bg="#FDEDEC", padx=16, pady=8)
+            warn.pack(fill="x", side="bottom")
+            tk.Label(warn,
+                     text=f"⚠  {len(missing)} line"
+                          f"{'s have' if len(missing) != 1 else ' has'} no price. "
+                          "The totals exclude them — add the part number to the "
+                          "price list, or set a rate per m2, before sending "
+                          "this out.",
+                     bg="#FDEDEC", fg=CRD, font=F_SM,
+                     justify="left", wraplength=760).pack(anchor="w")
+
+        wrap = tk.Frame(self, bg=CCA, highlightbackground=CSP,
+                        highlightthickness=1)
+        wrap.pack(fill="both", expand=True, padx=16, pady=(12, 0))
+        cols = ("part", "desc", "qty", "unit", "total", "src")
+        tree = ttk.Treeview(wrap, columns=cols, show="headings",
+                            style="TAF.Treeview", height=14)
+        for col, (hd, wd, anc) in {
+                "part":  ("Part Number", 130, "w"),
+                "desc":  ("Description", 330, "w"),
+                "qty":   ("Qty",          50, "center"),
+                "unit":  ("Unit Price",   95, "e"),
+                "total": ("Line Total",   95, "e"),
+                "src":   ("Priced from", 110, "center")}.items():
+            tree.heading(col, text=hd)
+            tree.column(col, width=wd, anchor=anc,
+                        stretch=(col == "desc"))
+        tree.tag_configure("even", background=CRE)
+        tree.tag_configure("odd", background=CCA)
+        tree.tag_configure("missing", background="#FDEDEC", foreground=CRD)
+
+        for i, line in enumerate(self._lines):
+            priced = bool(line.get("source"))
+            tree.insert("", "end",
+                        tags=("missing" if not priced
+                              else ("even" if i % 2 == 0 else "odd"),),
+                        values=(
+                            line.get("part_number") or "—",
+                            line.get("description") or "",
+                            line.get("quantity", 0),
+                            f'{line.get("unit_price", 0):,.2f}' if priced else "—",
+                            f'{line.get("line_total", 0):,.2f}' if priced else "—",
+                            {"list": "Price list", "rate": "Rate per m2"}
+                            .get(line.get("source"), "NOT PRICED"),
+                        ))
+        tree.pack(side="left", fill="both", expand=True)
+        sb = ttk.Scrollbar(wrap, orient="vertical", command=tree.yview)
+        sb.pack(side="right", fill="y")
+        tree.configure(yscrollcommand=sb.set)
+
+        self.bind("<Escape>", lambda e: self.destroy())
+        self.update_idletasks()
+        W, H = 900, 560
+        self.geometry(f"{W}x{H}+{max(0, master.winfo_rootx() + 60)}"
+                      f"+{max(0, master.winfo_rooty() + 40)}")
+        self.minsize(720, 420)
+
+    def _pdf(self):
+        if self._on_pdf:
+            self._on_pdf(self._header, self._lines, self._customer)
+
+    def _xero(self):
+        if self._on_xero:
+            self._on_xero(self._header, self._lines, self._customer)
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -4162,6 +4419,9 @@ class ModernOrderApp(tk.Frame):
         flat_btn(gen_row, "Generate Output",
                  self._generate, bg=CGR,
                  pady=10, padx=22, font=F_BOLD).pack(side="right")
+        flat_btn(gen_row, "💲  Quote",
+                 self._quote_current_order, bg=CA2,
+                 pady=10, padx=18, font=F_BOLD).pack(side="right", padx=(0, 8))
         flat_btn(gen_row, "📄  Import Purchase Order",
                  self._import_purchase_orders, bg=CA,
                  pady=10, padx=18, font=F_BOLD).pack(side="left")
@@ -4213,6 +4473,16 @@ class ModernOrderApp(tk.Frame):
         status_cb.pack(side="left", padx=(0, 14))
         self.filter_status_var.trace_add("write", lambda *_: self._filter_orders_list())
 
+        # Due filter — what still has to be made, and by when. Picking
+        # anything but "All" also sorts the list by due date, soonest first.
+        tk.Label(srch, text="Due:", bg=CBG, fg=CTX,
+                 font=F_BOLD).pack(side="left", padx=(0, 6))
+        self.filter_due_var = tk.StringVar(value="All")
+        due_cb = ttk.Combobox(srch, textvariable=self.filter_due_var,
+                              values=DUE_FILTERS, state="readonly", width=13)
+        due_cb.pack(side="left", padx=(0, 14))
+        self.filter_due_var.trace_add("write", lambda *_: self._filter_orders_list())
+
         # Date from
         tk.Label(srch, text="From:", bg=CBG, fg=CTX,
                  font=F_BOLD).pack(side="left", padx=(0, 6))
@@ -4236,6 +4506,7 @@ class ModernOrderApp(tk.Frame):
             self.search_var.set("")
             self.filter_type_var.set("All")
             self.filter_status_var.set("All")
+            self.filter_due_var.set("All")
             self.filter_date_from.set("")
             self.filter_date_to.set("")
         flat_btn(srch, "Clear", _clear_filters,
@@ -4279,6 +4550,8 @@ class ModernOrderApp(tk.Frame):
         self.orders_tree.tag_configure("even",        background=CRE)
         self.orders_tree.tag_configure("odd",         background=CCA)
         self.orders_tree.tag_configure("priority",    background="#FDECEC", foreground="#D33A3F")
+        self.orders_tree.tag_configure("overdue",     background="#FADBD8", foreground="#922B21")
+        self.orders_tree.tag_configure("due_today",   background="#FDEBD0", foreground="#7E5109")
         self.orders_tree.tag_configure("in_prod",     background="#FFF3CD", foreground="#856404")
         self.orders_tree.tag_configure("complete",    background="#D4EDDA", foreground="#155724")
         self.orders_tree.tag_configure("dispatched",  background="#CCE5FF", foreground="#004085")
@@ -4315,6 +4588,8 @@ class ModernOrderApp(tk.Frame):
                  bg=CA2, pady=7).pack(side="left", padx=(0, 8))
         flat_btn(bot, "🖨 Print",             self._print_prev_order,
                  bg=CNE, pady=7).pack(side="left", padx=(0, 8))
+        flat_btn(bot, "💲 Quote",             self._quote_prev_order,
+                 bg=CA2, pady=7).pack(side="left", padx=(0, 8))
         flat_btn(bot, "Delete Order",          self._delete_prev_order,
                  bg=CRD, pady=7).pack(side="right", padx=(8, 0))
         flat_btn(bot, "Archive Order",         self._archive_prev_order,
@@ -4331,8 +4606,10 @@ class ModernOrderApp(tk.Frame):
         frm.rowconfigure(2, weight=1)
         self._tab_frames["dashboard"] = frm
 
-        tk.Label(frm, text="Dashboard", bg=CBG, fg=CA,
-                 font=F_TTL).grid(row=0, column=0, sticky="w", pady=(0, 10))
+        head = tk.Frame(frm, bg=CBG)
+        head.grid(row=0, column=0, sticky="ew", pady=(0, 10))
+        tk.Label(head, text="Dashboard", bg=CBG, fg=CA,
+                 font=F_TTL).pack(side="left", anchor="n")
 
         # Alerts panel top-right
         alert_outer = tk.Frame(frm, bg=CCA, relief="flat", bd=1,
@@ -4342,6 +4619,16 @@ class ModernOrderApp(tk.Frame):
                  font=F_SEC).pack(anchor="w", padx=8, pady=(6, 2))
         self._alert_list_frame = tk.Frame(alert_outer, bg=CCA)
         self._alert_list_frame.pack(fill="x", padx=8, pady=(0, 6))
+
+        # What's due — the first thing worth knowing on opening the app.
+        # Each line opens Previous Orders already filtered to it.
+        due_outer = tk.Frame(head, bg=CCA, relief="flat", bd=1,
+                             highlightbackground=CSP, highlightthickness=1)
+        due_outer.pack(side="left", padx=(24, 0))
+        tk.Label(due_outer, text="🗓  Due", bg=CCA, fg=CA,
+                 font=F_SEC).pack(anchor="w", padx=8, pady=(6, 2))
+        self._due_list_frame = tk.Frame(due_outer, bg=CCA)
+        self._due_list_frame.pack(fill="x", padx=8, pady=(0, 6))
 
         def _make_chart_card(row, col, title, colspan=1):
             outer = tk.Frame(frm, bg=CCA, highlightbackground=CSP, highlightthickness=1)
@@ -4375,6 +4662,7 @@ class ModernOrderApp(tk.Frame):
         if data:
             self._refresh_charts()
             self._refresh_alerts(data)
+            self._refresh_due_panel(data)
             return
 
         import queue as _q
@@ -4395,6 +4683,7 @@ class ModernOrderApp(tk.Frame):
             self._all_orders_data = data
             self._refresh_charts()
             self._refresh_alerts(data)
+            self._refresh_due_panel(data)
 
         threading.Thread(target=_work, daemon=True).start()
         self.master.after(60, _poll)
@@ -4730,6 +5019,56 @@ class ModernOrderApp(tk.Frame):
 
         self.status_var.set(f"Monthly summary saved: {out_path.name}")
         os.startfile(str(out_path))
+
+    def _refresh_due_panel(self, data=None):
+        """Counts of what is late, due today and due this week.
+
+        Finished and dispatched orders are not counted — the panel is about
+        work still in the shop. Each line opens the list filtered to it, so
+        the number is a way in rather than just a number.
+        """
+        frame = getattr(self, "_due_list_frame", None)
+        if frame is None:
+            return
+        for w in frame.winfo_children():
+            w.destroy()
+        if data is None:
+            data = getattr(self, "_all_orders_data", [])
+
+        counts = {"overdue": 0, "today": 0, "week": 0}
+        for row in data:
+            bucket = due_bucket(row)
+            if bucket in counts:
+                counts[bucket] += 1
+
+        rows = [
+            ("Overdue",       counts["overdue"], "#FADBD8", "#922B21"),
+            ("Due today",     counts["today"],   "#FDEBD0", "#7E5109"),
+            ("Due this week", counts["overdue"] + counts["today"] + counts["week"],
+             CCA, CTX),
+        ]
+        if not any(c for _, c, _, _ in rows):
+            tk.Label(frame, text="✔  Nothing outstanding",
+                     bg=CCA, fg=CMU, font=F_SM).pack(anchor="w")
+            return
+        for label, count, bg, fg in rows:
+            lbl = tk.Label(frame, text=f"  {label}:  {count}  ",
+                           bg=bg, fg=fg if count else CMU,
+                           font=F_BODY if count else F_SM,
+                           anchor="w", cursor="hand2")
+            lbl.pack(fill="x", pady=1)
+            lbl.bind("<Button-1>",
+                     lambda _e, f=label: self._show_orders_due(f))
+
+    def _show_orders_due(self, due_filter: str):
+        """Open Previous Orders showing just that slice of the due list."""
+        self._show_tab("prev_orders")
+        try:
+            self.filter_due_var.set(due_filter)
+            self.filter_status_var.set("All")
+            self.search_var.set("")
+        except Exception:
+            pass
 
     def _refresh_alerts(self, data=None):
         for w in self._alert_list_frame.winfo_children():
@@ -6427,6 +6766,70 @@ class ModernOrderApp(tk.Frame):
 
         self._refresh_filter_types_list()
 
+        # ── Stock ─────────────────────────────────────────────────────────
+        st_card = tk.Frame(frm, bg=CCA, bd=1, relief="solid", padx=16, pady=12)
+        st_card.grid(row=11, column=0, sticky="ew", pady=(12, 0))
+        tk.Label(st_card, text="Stock", bg=CCA, fg=CA,
+                 font=F_SEC, anchor="w").pack(anchor="w")
+        tk.Label(st_card,
+                 text="Take materials out of stock as orders are generated.\n"
+                      "Leave this off until stock has been counted — figures "
+                      "that start from a guess never come right.\n"
+                      "A line is deducted when a stock item's SKU matches its "
+                      "part number, or when its media is kept in m2.",
+                 bg=CCA, fg=CMU, font=F_SM, justify="left",
+                 anchor="w").pack(anchor="w", pady=(2, 8))
+        self._auto_deduct_var = tk.BooleanVar(
+            value=bool(STOCK_SETTINGS.get("auto_deduct")))
+        can_stock = _db.is_ready() and _db.can_manage_stock()
+        tk.Checkbutton(
+            st_card, text="Deduct stock automatically when an order is generated",
+            variable=self._auto_deduct_var, command=self._toggle_auto_deduct,
+            bg=CCA, fg=CTX, font=F_BODY, activebackground=CCA,
+            activeforeground=CTX, selectcolor=CBG, anchor="w",
+            highlightthickness=0, bd=0,
+            state=("normal" if can_stock else "disabled")).pack(anchor="w")
+        self._auto_deduct_status = tk.StringVar(
+            value="" if can_stock else "Only Managers and above can change this.")
+        tk.Label(st_card, textvariable=self._auto_deduct_status,
+                 bg=CCA, fg=CMU, font=F_SM, anchor="w").pack(anchor="w", pady=(6, 0))
+
+        # ── Pricing ───────────────────────────────────────────────────────
+        pc_card = tk.Frame(frm, bg=CCA, bd=1, relief="solid", padx=16, pady=12)
+        pc_card.grid(row=12, column=0, sticky="ew", pady=(12, 0))
+        tk.Label(pc_card, text="Pricing", bg=CCA, fg=CA,
+                 font=F_SEC, anchor="w").pack(anchor="w")
+        tk.Label(pc_card,
+                 text="Import your price spreadsheets — one price per part "
+                      "number. Any sheet works as long as it has a heading "
+                      "row with a part-number column and a price column.\n"
+                      "Where a part number has no listed price, a rate per m2 "
+                      "for that filter type and media is used instead. A line "
+                      "with neither is quoted as \"to be confirmed\", never "
+                      "guessed at.",
+                 bg=CCA, fg=CMU, font=F_SM, justify="left",
+                 anchor="w").pack(anchor="w", pady=(2, 8))
+        self._price_count_var = tk.StringVar(value="Prices loaded: checking…")
+        tk.Label(pc_card, textvariable=self._price_count_var,
+                 bg=CCA, fg=CTX, font=F_BODY).pack(anchor="w", pady=(0, 8))
+        pc_tb = tk.Frame(pc_card, bg=CCA)
+        pc_tb.pack(anchor="w")
+        can_price = _db.is_ready() and _db.can_manage_prices()
+        for label, cmd, colour, needs_rights in (
+                ("📥  Import Price Files", self._import_price_files, CA,  True),
+                ("Rates per m²",           self._edit_price_rates,   CNE, True),
+                ("Refresh",                self._refresh_price_count, CNE, False)):
+            b = flat_btn(pc_tb, label, cmd, bg=colour, pady=5, padx=10,
+                         font=F_BODY)
+            b.pack(side="left", padx=(0, 6))
+            if needs_rights and not can_price:
+                b.config(state="disabled")
+        if not can_price:
+            tk.Label(pc_card,
+                     text="Only Managers and above can change prices.",
+                     bg=CCA, fg=CMU, font=F_SM).pack(anchor="w", pady=(6, 0))
+        self.master.after(400, self._refresh_price_count)
+
         # ── Local Storage ─────────────────────────────────────────────────
         ls_card = tk.Frame(frm, bg=CCA, bd=1, relief="solid", padx=16, pady=12)
         ls_card.grid(row=7, column=0, sticky="ew", pady=(12, 0))
@@ -6470,7 +6873,9 @@ class ModernOrderApp(tk.Frame):
 
         # ── PDF File Naming ───────────────────────────────────────────────
         pn_card = tk.Frame(frm, bg=CCA, bd=1, relief="solid", padx=16, pady=12)
-        pn_card.grid(row=9, column=0, sticky="ew", pady=(12, 0))
+        # row 10 — not 9: the Filter Types card already owns row 9, and two
+        # cards in one grid cell draw on top of each other.
+        pn_card.grid(row=10, column=0, sticky="ew", pady=(12, 0))
         tk.Label(pn_card, text="PDF File Naming",
                  bg=CCA, fg=CA, font=F_SEC, anchor="w").pack(anchor="w")
         tk.Label(pn_card,
@@ -7033,6 +7438,222 @@ class ModernOrderApp(tk.Frame):
             self.master.after(0, _apply)
 
         threading.Thread(target=_work, daemon=True).start()
+
+    # ── Pricing settings ──────────────────────────────────────────────────
+
+    def _refresh_price_count(self):
+        """Show how many prices and rates are loaded, off the main thread."""
+        var = getattr(self, "_price_count_var", None)
+        if var is None:
+            return
+
+        def _work():
+            try:
+                prices, rates = self._load_prices(force=True)
+                text = (f"Prices loaded: {len(prices):,} part numbers"
+                        f"  ·  {len(rates)} rate{'s' if len(rates) != 1 else ''} per m²")
+                if not prices and not rates:
+                    text = ("No prices loaded yet — import your price "
+                            "spreadsheets, or run migrate_pricing.sql if "
+                            "pricing has never been set up.")
+            except Exception as exc:
+                text = f"Couldn't read prices: {exc}"
+            self.master.after(0, lambda: var.set(text))
+
+        var.set("Prices loaded: checking…")
+        threading.Thread(target=_work, daemon=True).start()
+
+    def _import_price_files(self):
+        """Read one or more price spreadsheets into the shared price list."""
+        paths = filedialog.askopenfilenames(
+            title="Select price spreadsheets",
+            filetypes=[("Spreadsheets", "*.xlsx *.xlsm *.xls *.csv"),
+                       ("Excel", "*.xlsx *.xlsm *.xls"),
+                       ("CSV", "*.csv"), ("All files", "*.*")])
+        if not paths:
+            return
+        self.status_var.set(f"Reading {len(paths)} price file"
+                            f"{'s' if len(paths) != 1 else ''}…")
+        self.master.update_idletasks()
+        try:
+            rows, problems = _pricing.read_price_files(paths)
+        except Exception as exc:
+            messagebox.showerror("Price Import",
+                                 f"The files could not be read:\n{exc}")
+            self.status_var.set("Price import failed.")
+            return
+
+        if not rows:
+            messagebox.showwarning(
+                "Nothing Imported",
+                "No priced rows were found.\n\n" + ("\n".join(problems) or
+                "Each sheet needs a heading row with a part-number column "
+                "and a price column."))
+            self.status_var.set("Price import found nothing.")
+            return
+
+        sample = ", ".join(r["part_number"] for r in rows[:4])
+        if not messagebox.askyesno(
+                "Import Prices",
+                f"{len(rows):,} priced part numbers were read "
+                f"(for example: {sample}).\n\n"
+                "Part numbers already in the list will be updated to these "
+                "prices; anything not in these files is left as it is.\n\n"
+                "Import them?"):
+            self.status_var.set("Price import cancelled.")
+            return
+
+        try:
+            saved = _db.upsert_prices(rows)
+            _db.log_action("prices_imported",
+                           f"{saved} part numbers from {len(paths)} file(s)")
+        except Exception as exc:
+            messagebox.showerror(
+                "Price Import",
+                f"The prices could not be saved:\n{exc}\n\n"
+                "If this mentions a missing 'price_list' table, run "
+                "migrate_pricing.sql in the Supabase SQL Editor.")
+            self.status_var.set("Price import failed.")
+            return
+
+        self._refresh_price_count()
+        msg = f"{saved:,} prices imported."
+        if problems:
+            msg += "\n\nSome files had nothing to read:\n" + "\n".join(problems)
+        messagebox.showinfo("Prices Imported", msg)
+        self.status_var.set(f"{saved:,} prices imported.")
+
+    def _edit_price_rates(self):
+        """Set a fallback price per square metre per filter type and media."""
+        dlg = tk.Toplevel(self.master)
+        dlg.title("Rates per m²")
+        dlg.configure(bg=CBG)
+        dlg.transient(self.master)
+        dlg.grab_set()
+
+        hdr = tk.Frame(dlg, bg=CA, padx=16, pady=10)
+        hdr.pack(fill="x")
+        tk.Label(hdr, text="Rates per square metre", bg=CA, fg="white",
+                 font=F_BOLD).pack(anchor="w")
+        tk.Label(hdr, text="Used only where a part number has no listed price. "
+                           "Leave the media blank to cover every grade.",
+                 bg=CA, fg="#A9CCE3", font=F_SM).pack(anchor="w")
+
+        body = tk.Frame(dlg, bg=CBG, padx=16, pady=12)
+        body.pack(fill="both", expand=True)
+
+        lb = tk.Listbox(body, font=F_BODY, bg=CCA, fg=CTX, height=9,
+                        selectbackground=CA, selectforeground="white",
+                        activestyle="none", relief="flat",
+                        highlightthickness=1, highlightbackground=CSP)
+        lb.pack(fill="both", expand=True)
+
+        rows = []
+
+        def _reload():
+            lb.delete(0, "end")
+            rows.clear()
+            try:
+                rows.extend(_db.get_price_rate_rows())
+            except Exception:
+                pass
+            for r in rows:
+                media = (r.get("media_type") or "").strip() or "any media"
+                lb.insert("end", f"  {r.get('filter_type') or '—'}  ·  {media}"
+                                 f"   —   ${float(r.get('rate_per_sqm') or 0):,.2f} / m²")
+            if not rows:
+                lb.insert("end", "  No rates set.")
+
+        entry = tk.Frame(body, bg=CBG)
+        entry.pack(fill="x", pady=(10, 0))
+        tk.Label(entry, text="Filter type", bg=CBG, fg=CTX,
+                 font=F_SM).grid(row=0, column=0, sticky="w")
+        tk.Label(entry, text="Media (blank = any)", bg=CBG, fg=CTX,
+                 font=F_SM).grid(row=0, column=1, sticky="w", padx=(8, 0))
+        tk.Label(entry, text="$ per m²", bg=CBG, fg=CTX,
+                 font=F_SM).grid(row=0, column=2, sticky="w", padx=(8, 0))
+        ft_var = tk.StringVar(value=self.all_filter_types[0])
+        mt_var = tk.StringVar(value="")
+        rate_var = tk.StringVar(value="")
+        ttk.Combobox(entry, textvariable=ft_var, values=self.all_filter_types,
+                     state="readonly", width=16).grid(row=1, column=0, sticky="w")
+        ttk.Combobox(entry, textvariable=mt_var,
+                     values=[""] + list(self.all_media_types),
+                     state="readonly", width=16
+                     ).grid(row=1, column=1, sticky="w", padx=(8, 0))
+        field_entry(entry, textvariable=rate_var, width=10
+                    ).grid(row=1, column=2, sticky="w", padx=(8, 0))
+
+        def _save():
+            try:
+                rate = float(str(rate_var.get()).strip().lstrip("$"))
+            except ValueError:
+                messagebox.showerror("Rate", "Enter the rate as a number, "
+                                             "e.g. 34.50.", parent=dlg)
+                return
+            try:
+                _db.set_price_rate(ft_var.get(), mt_var.get(), rate)
+            except Exception as exc:
+                messagebox.showerror("Rate", f"Could not save:\n{exc}", parent=dlg)
+                return
+            rate_var.set("")
+            _reload()
+            self._load_prices(force=True)
+
+        def _delete():
+            sel = lb.curselection()
+            if not sel or sel[0] >= len(rows):
+                return
+            row = rows[sel[0]]
+            if not messagebox.askyesno(
+                    "Delete Rate",
+                    f"Remove the rate for {row.get('filter_type')}?",
+                    parent=dlg):
+                return
+            try:
+                _db.delete_price_rate(row["id"])
+            except Exception as exc:
+                messagebox.showerror("Rate", f"Could not delete:\n{exc}", parent=dlg)
+                return
+            _reload()
+            self._load_prices(force=True)
+
+        btns = tk.Frame(body, bg=CBG)
+        btns.pack(fill="x", pady=(10, 0))
+        flat_btn(btns, "Save Rate", _save, bg=CGR, pady=6,
+                 padx=12).pack(side="left")
+        flat_btn(btns, "Delete Selected", _delete, bg=CRD, pady=6,
+                 padx=12).pack(side="left", padx=(8, 0))
+        flat_btn(btns, "Close", lambda: (self._refresh_price_count(), dlg.destroy()),
+                 bg=CNE, pady=6, padx=12).pack(side="right")
+
+        _reload()
+        dlg.bind("<Escape>", lambda e: dlg.destroy())
+        W, H = 520, 430
+        dlg.geometry(f"{W}x{H}+{self.master.winfo_rootx() + 120}"
+                     f"+{self.master.winfo_rooty() + 80}")
+
+    def _toggle_auto_deduct(self):
+        """Turn automatic stock deduction on or off for the whole company."""
+        on = bool(self._auto_deduct_var.get())
+        STOCK_SETTINGS["auto_deduct"] = on
+        saved = _persist_catalog_key("stock_settings", dict(STOCK_SETTINGS),
+                                     parent=self.master)
+        if on:
+            warn = ""
+            try:
+                warn = _stock_usage.find_unit_problem(_db.get_stock_items()) or ""
+            except Exception:
+                pass
+            msg = "On — orders will take their materials out of stock."
+            if not saved:
+                msg += " (This PC only; the shared save didn't go through.)"
+            self._auto_deduct_status.set(msg)
+            if warn:
+                messagebox.showinfo("Stock Units", warn, parent=self.master)
+        else:
+            self._auto_deduct_status.set(
+                "Off — stock is only changed by hand.")
 
     def _refresh_filter_types_list(self):
         self.filter_types_lb.delete(0, "end")
@@ -8373,10 +8994,18 @@ class ModernOrderApp(tk.Frame):
         return True
 
     def _apply_order_rules(self, order) -> list:
-        """Settle media and derive part numbers. Returns unresolved media."""
+        """Settle filter type and media, then derive part numbers.
+
+        The filter type is settled first: a stepped filter's 180 media and a
+        flyscreen's part number both depend on knowing what the line is.
+        Returns the media grades nobody has agreed to yet.
+        """
         unknown = []
         for it in order.get("items", []):
-            miss = _pn.apply_media_rules(it, self.all_media_types)
+            _pn.resolve_filter_type(it, self.all_filter_types,
+                                    PO_CORRECTIONS["filter_types"])
+            miss = _pn.apply_media_rules(it, self.all_media_types,
+                                         PO_CORRECTIONS["media_types"])
             if miss and miss not in unknown:
                 unknown.append(miss)
             self._stamp_item(it)
@@ -8442,6 +9071,9 @@ class ModernOrderApp(tk.Frame):
                     swap = self._media_swaps.get((it.get("Media Type") or "").strip())
                     if swap:
                         it["Media Type"] = swap
+            # A grade swapped once is swapped from now on, rather than asked
+            # about on every order that mentions it.
+            self._learn_corrections({"media_types": dict(self._media_swaps)})
         for o in orders:
             self._apply_order_rules(o)
 
@@ -8463,7 +9095,35 @@ class ModernOrderApp(tk.Frame):
             if on_finish:
                 on_finish()
             return
+        self._learn_corrections(dlg.learned)
         self._generate_imported_orders(dlg.result, on_finish=on_finish)
+
+    def _learn_corrections(self, learned) -> None:
+        """Keep what a review taught, and share it with the other PCs.
+
+        Failing to save is not worth interrupting an import over — the lesson
+        still applies on this PC for the rest of the session and is written to
+        the local cache, so the next start keeps it.
+        """
+        if not isinstance(learned, dict):
+            return
+        added = 0
+        for bucket in ("filter_types", "media_types"):
+            for written, meaning in (learned.get(bucket) or {}).items():
+                key = _pn.wording_key(str(written))
+                meaning = str(meaning).strip()
+                if not key or not meaning:
+                    continue
+                if PO_CORRECTIONS[bucket].get(key) == meaning:
+                    continue
+                PO_CORRECTIONS[bucket][key] = meaning
+                added += 1
+        if not added:
+            return
+        _persist_catalog_key("po_corrections", PO_CORRECTIONS, quiet=True)
+        self.status_var.set(
+            f"Learned {added} correction{'s' if added != 1 else ''} — "
+            "the next order using that wording is read the same way.")
 
     def _generate_imported_orders(self, orders, on_finish=None):
         """Generate, save and print each approved order in turn.
@@ -8520,6 +9180,187 @@ class ModernOrderApp(tk.Frame):
         self._refresh_items_tree()
         self._show_tab("new_order")
         self.master.update_idletasks()
+
+    # ── Quotes ────────────────────────────────────────────────────────────
+
+    def _load_prices(self, force=False):
+        """The price list and the per-m2 rates, fetched once per session."""
+        if force or not hasattr(self, "_price_cache"):
+            prices, rates = {}, {}
+            try:
+                prices = _db.get_price_list()
+                for row in _db.get_price_rate_rows():
+                    key = _pricing._rate_key(row.get("filter_type") or "",
+                                             row.get("media_type") or "")
+                    try:
+                        rates[key] = float(row.get("rate_per_sqm") or 0)
+                    except (TypeError, ValueError):
+                        continue
+            except Exception:
+                pass
+            self._price_cache = (prices, rates)
+        return self._price_cache
+
+    def _open_quote(self, header, items, customer=None):
+        """Price a set of items and show the quote."""
+        items = [i for i in items if i]
+        if not items:
+            messagebox.showinfo("Nothing to Quote",
+                                "This order has no line items.")
+            return
+        prices, rates = self._load_prices()
+        if not prices and not rates:
+            if not messagebox.askyesno(
+                    "No Prices Loaded",
+                    "No price list has been imported yet, so every line will "
+                    "come out unpriced.\n\n"
+                    "Import your price spreadsheets under Settings → Pricing "
+                    "first.\n\nShow the quote anyway?",
+                    icon="warning", default="no"):
+                return
+        lines = _pricing.quote_lines(items, prices, rates)
+        QuoteDialog(self.master, header, lines, customer,
+                    prepared_by=(_db.current_full_name()
+                                 or _db.current_username() or ""),
+                    on_pdf=self._save_quote_pdf,
+                    on_xero=self._export_quote_xero)
+
+    def _quote_current_order(self):
+        """Quote what is on the New Order form right now."""
+        if not self.items:
+            messagebox.showinfo("Nothing to Quote",
+                                "Add at least one line item first.")
+            return
+        self._stamp_all_items()
+        header = self._collect_header()
+        customer = None
+        try:
+            customer = _db.match_customer(header.get("Customer Name", ""))
+        except Exception:
+            pass
+        self._open_quote(header, list(self.items), customer)
+
+    def _quote_prev_order(self):
+        """Quote a saved order from the Previous Orders list."""
+        row = self._get_selected_order()
+        if not row:
+            messagebox.showinfo("Quote", "Select an order first.")
+            return
+        header, items = self._order_header_items(row, "Quote")
+        if items is None:
+            return
+        for it in items:
+            self._stamp_item(it)
+        customer = None
+        try:
+            customer = _db.match_customer(header.get("Customer Name", ""))
+        except Exception:
+            pass
+        self._open_quote(header, items, customer)
+
+    def _quote_filename(self, header, suffix: str) -> Path:
+        order_no = re.sub(r"[^A-Za-z0-9_-]+", "_",
+                          (header.get("Order Number") or "quote")).strip("_")
+        cust = re.sub(r"[^A-Za-z0-9_-]+", "_",
+                      (header.get("Customer Name") or "")).strip("_")
+        stem = "_".join(x for x in ("Quote", cust, order_no) if x)
+        return ORDERS_DIR / f"{stem}{suffix}"
+
+    def _save_quote_pdf(self, header, lines, customer):
+        from taf_order_app import quote_pdf as _quote_pdf
+        ORDERS_DIR.mkdir(parents=True, exist_ok=True)
+        out = self._quote_filename(header, ".pdf")
+        try:
+            path = _quote_pdf.build_quote_pdf(
+                out, header, lines, customer,
+                quote_number=(header.get("Order Number") or ""),
+                prepared_by=(_db.current_full_name()
+                             or _db.current_username() or ""))
+        except Exception as exc:
+            messagebox.showerror("Quote PDF",
+                                 f"The quote could not be created:\n{exc}")
+            return
+        self.status_var.set(f"Quote saved: {Path(path).name}")
+        try:
+            _db.log_action("quote_created",
+                           f"O/N: {header.get('Order Number','')}  "
+                           f"{len(lines)} lines")
+        except Exception:
+            pass
+        try:
+            os.startfile(str(path))
+        except Exception:
+            messagebox.showinfo("Quote Saved", f"Saved to:\n{path}")
+
+    def _export_quote_xero(self, header, lines, customer):
+        """Write the quote as a Xero sales-invoice import file.
+
+        A CSV import rather than the API on purpose: it needs no credentials,
+        no app registration and no connection, and Xero shows the whole batch
+        for approval before anything is created.
+        """
+        priced = [l for l in lines if l.get("source")]
+        if not priced:
+            messagebox.showwarning(
+                "Nothing Priced",
+                "None of these lines have a price, so there is nothing to "
+                "send to Xero.")
+            return
+        skipped = len(lines) - len(priced)
+        if skipped and not messagebox.askyesno(
+                "Unpriced Lines",
+                f"{skipped} line{'s' if skipped != 1 else ''} "
+                f"{'have' if skipped != 1 else 'has'} no price and will be "
+                "left out of the Xero file.\n\nExport the rest?",
+                icon="warning", default="no"):
+            return
+        out = self._quote_filename(header, "_xero.csv")
+        try:
+            rows = _pricing.xero_rows(header, priced, customer)
+            path = _pricing.write_xero_csv(out, rows)
+        except Exception as exc:
+            messagebox.showerror("Xero Export",
+                                 f"The file could not be written:\n{exc}")
+            return
+        self.status_var.set(f"Xero file saved: {Path(path).name}")
+        messagebox.showinfo(
+            "Ready for Xero",
+            f"{len(rows)} line{'s' if len(rows) != 1 else ''} written to:\n"
+            f"{path}\n\n"
+            "In Xero: Business → Invoices → Import, choose this file, and "
+            "match the account code and tax rate on the preview before "
+            "confirming.")
+        try:
+            os.startfile(str(Path(path).parent))
+        except Exception:
+            pass
+
+    def _deduct_stock_for_order(self, header, items) -> str:
+        """Take an order's materials out of stock. Returns a line to show.
+
+        Runs on the generating thread, straight after the order is saved, and
+        never raises: an order that has been made and printed must not be held
+        up by the stock count, and every movement is recorded as a stock
+        transaction that can be reversed by hand if it turns out to be wrong.
+        """
+        if not STOCK_SETTINGS.get("auto_deduct"):
+            return ""
+        try:
+            stock = _db.get_stock_items()
+            if not stock:
+                return ""
+            plan = _stock_usage.plan_deductions(
+                items, stock, header.get("Order Number", ""))
+            moved = _stock_usage.apply_plan(plan, _db.adjust_stock)
+            note = _stock_usage.describe(plan)
+            if moved or plan.get("unmatched"):
+                _db.log_action(
+                    "stock_deducted",
+                    f"O/N: {header.get('Order Number','')}  {note}")
+            return note
+        except Exception:
+            # Offline, or the stock tables aren't set up. The order stands.
+            return ""
 
     def _generate(self, on_done=None, quiet=False):
         """Generate, save and print the current order.
@@ -8609,6 +9450,7 @@ class ModernOrderApp(tk.Frame):
 
         prog = _ProgressDialog(self.master, order_type)
         self.status_var.set("Generating output…")
+        self._last_stock_note = ""
 
         # Snapshot of items captured now (immutable inside thread)
         all_items        = list(self.items)
@@ -8725,6 +9567,8 @@ class ModernOrderApp(tk.Frame):
                         f"Customer: {header.get('Customer Name','')}  "
                         f"O/N: {header.get('Order Number','')}  "
                         f"Type: {order_type}  Items: {len(all_items)}")
+                    self._last_stock_note = self._deduct_stock_for_order(
+                        header, all_items)
                 except Exception as exc:
                     # Couldn't reach the shared database — queue the order
                     # locally and let the background sync push it through
@@ -8773,6 +9617,9 @@ class ModernOrderApp(tk.Frame):
                 msg = f"Order PDF:\n  {opened}" if opened else ""
                 if json_path:
                     msg += (("\n\n" if msg else "") + f"Order saved:\n  {json_path}")
+                stock_note = getattr(self, "_last_stock_note", "")
+                if stock_note:
+                    msg += (("\n\n" if msg else "") + f"Stock:\n  {stock_note}")
 
                 # Send to the printer on a background thread so the UI stays
                 # responsive while the job spools (printing can take seconds).
@@ -8973,8 +9820,10 @@ class ModernOrderApp(tk.Frame):
         status_sel  = getattr(self, "filter_status_var", None)
         date_from   = getattr(self, "filter_date_from",  None)
         date_to     = getattr(self, "filter_date_to",    None)
+        due_sel     = getattr(self, "filter_due_var",    None)
         type_val    = type_sel.get()   if type_sel   else "All"
         status_val  = status_sel.get() if status_sel else "All"
+        due_val     = due_sel.get()    if due_sel    else "All"
         df_str      = date_from.get().strip() if date_from else ""
         dt_str      = date_to.get().strip()   if date_to   else ""
 
@@ -9016,6 +9865,19 @@ class ModernOrderApp(tk.Frame):
                 row_status = r.get("status", "Pending") or "Pending"
                 if row_status != status_val:
                     continue
+            # Due filter — what still has to be made, and by when
+            if due_val != "All":
+                bucket = due_bucket(r)
+                keep = {
+                    "Overdue":       bucket == "overdue",
+                    "Due today":     bucket == "today",
+                    # "This week" includes what is already late: an overdue
+                    # order is the most this-week thing there is.
+                    "Due this week": bucket in ("overdue", "today", "week"),
+                    "No due date":   bucket == "none",
+                }.get(due_val, True)
+                if not keep:
+                    continue
             # Date range filter
             rd = _row_date(r)
             if d_from and rd and rd < d_from:
@@ -9023,6 +9885,10 @@ class ModernOrderApp(tk.Frame):
             if d_to and rd and rd > d_to:
                 continue
             displayed.append(r)
+
+        # Looking at what's due means looking at it in due order.
+        if due_val != "All":
+            displayed.sort(key=due_sort_key)
 
         # Cache the displayed list so _get_selected_order() stays in sync
         self._displayed_orders = displayed
@@ -9033,8 +9899,15 @@ class ModernOrderApp(tk.Frame):
             notes_cnt   = row.get("notes_count", 0) or 0
             status_lbl  = f"📝 {status}" if notes_cnt else status
 
+            # Late work outranks the status colours: an order that is "In
+            # Production" and three days late needs to read as late.
+            bucket = due_bucket(row)
             if is_priority:
                 tag = "priority"
+            elif bucket == "overdue":
+                tag = "overdue"
+            elif bucket == "today":
+                tag = "due_today"
             elif status == "In Production":
                 tag = "in_prod"
             elif status == "Complete":
@@ -9049,6 +9922,13 @@ class ModernOrderApp(tk.Frame):
             src_label   = "Database" if row.get("source") == "db" else row.get("filename", "")
             cust_display = ("🚨 " + row["customer"]) if is_priority else row["customer"]
             printed_lbl  = "🖨 Printed" if row.get("printed") else "—"
+            # Say it in the column as well as in the colour — the list gets
+            # read over someone's shoulder and printed out.
+            due_lbl = row["date_due"] or "—"
+            if bucket == "overdue":
+                due_lbl = f"⚠ {due_lbl}"
+            elif bucket == "today":
+                due_lbl = f"● {due_lbl}"
             _badge = _type_badge(otype_label)
             self.orders_tree.insert("", "end", iid=str(i), tags=(tag,),
                 text=("" if _badge else otype_label), image=(_badge or ""),
@@ -9056,7 +9936,7 @@ class ModernOrderApp(tk.Frame):
                 cust_display,
                 row["order_no"],
                 row["date_ordered"],
-                row["date_due"],
+                due_lbl,
                 status_lbl,
                 printed_lbl,
                 row["n_items"],
@@ -10010,6 +10890,21 @@ class ModernOrderApp(tk.Frame):
             except Exception:
                 pass
 
+    def _order_header_items(self, row, what: str = "Order"):
+        """An order-list row's header and items, wherever it came from.
+
+        Returns ``(header, items)``, or ``({}, None)`` after reporting why the
+        local file couldn't be read — callers check for ``None``.
+        """
+        if row.get("source") == "db":
+            return dict(row.get("db_header") or {}), list(row.get("db_items") or [])
+        try:
+            payload = json.loads(Path(row["path"]).read_text(encoding="utf-8"))
+            return payload.get("header", {}), payload.get("items", [])
+        except Exception as exc:
+            messagebox.showerror(what, f"Could not read order file:\n{exc}")
+            return {}, None
+
     def _view_order_items(self):
         """Popup listing the selected order's line items — see what's in an
         order without loading it into the New Order tab."""
@@ -10018,18 +10913,9 @@ class ModernOrderApp(tk.Frame):
             messagebox.showinfo("View Items", "Select an order from the list first.")
             return
 
-        # Header + items straight from the DB row or the local JSON file
-        if row.get("source") == "db":
-            header = dict(row.get("db_header") or {})
-            items  = list(row.get("db_items") or [])
-        else:
-            try:
-                payload = json.loads(Path(row["path"]).read_text(encoding="utf-8"))
-                header  = payload.get("header", {})
-                items   = payload.get("items", [])
-            except Exception as exc:
-                messagebox.showerror("View Items", f"Could not read order file:\n{exc}")
-                return
+        header, items = self._order_header_items(row, "View Items")
+        if items is None:
+            return
 
         order_no = row.get("order_no", "")
         dlg = tk.Toplevel(self.master)
