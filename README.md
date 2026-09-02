@@ -43,6 +43,9 @@ log, stock management and a customer database.
 - **Products** — the priced catalogue: search it, correct a price, add a
   product, import price spreadsheets. The part numbers here are the item codes
   in Xero.
+- **Customer portal** — send a customer a link and they see their own orders
+  and what stage each is at (received / being made / ready for delivery /
+  ready for pick up / delivered), their quotes, and their account details.
 - **Dashboard** — orders-per-week, order-type and busiest-customer charts, low
   stock alerts, and what's due.
 - **Stock** — items with images, on-hand / minimum levels, adjustments &
@@ -117,8 +120,16 @@ In the Supabase dashboard → **SQL Editor**, run these once (in order):
 2. `customers_schema.sql`
 3. `stock_schema.sql`
 4. `extra_columns_migration.sql`
-5. The `migrate_*.sql` files (audit log, media types, stock alerts, updater,
-   user management, catalogue, customer profiles) — run any that apply to
+5. **`migrate_staff_access.sql` — run this one.** Every policy in the older
+   scripts is `TO authenticated USING (true)`, meaning *anyone Supabase counts
+   as signed in*. The publishable key is public (it ships in the installer),
+   and the login window offers Create Account — so without this migration
+   anyone holding that key can register and read every order, customer, quote
+   and price. It closes that: staff means "has an **approved** profile", and
+   every profile that already exists is approved automatically, so nobody
+   working today is locked out.
+6. The other `migrate_*.sql` files (audit log, media types, stock alerts,
+   updater, user management, catalogue, customer profiles) — run any that apply to
    bring an existing DB up to date. `migrate_catalog.sql` backs the editable
    dedicated-filter presets and custom filter types; without it those edits
    stay on one PC instead of being shared. `migrate_customer_profiles.sql`
@@ -245,6 +256,26 @@ The customer sees the lines, the totals, and anything not yet priced marked
 "to be confirmed". They don't see internal notes, other quotes, or how a price
 was arrived at. Accepting or declining is a one-way step: once answered, the
 page won't change it - that's a phone call.
+
+### Let customers see their orders online (optional)
+
+1. Run `migrate_staff_access.sql`, then `migrate_customer_portal.sql`.
+2. In the app: **Customers**, pick one, **Customer Portal → Create Link**. The
+   link is copied to your clipboard.
+
+They see their orders with a stage on each — Received, Being made, Ready for
+delivery, Ready for pick up, Delivered, Collected — their quotes (with a link
+straight through to accept one), and their account details.
+
+**How it's kept private.** Same shape as the quote page: a random
+64-character token, no anonymous access to any table, and three
+`SECURITY DEFINER` functions that take the token and return one customer's
+data. **Turn Off** stops a link working; **New Link** replaces the token,
+which invalidates every link ever sent for that account.
+
+Worth knowing: the link is the credential. Anyone it is forwarded to can see
+that customer's orders — so it goes to the customer and nowhere else, and if
+it goes astray you issue a new one.
 
 ### Create the first admin account
 

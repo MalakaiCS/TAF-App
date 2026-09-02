@@ -95,6 +95,23 @@ def current_profile() -> dict:
     return _current_profile or {}
 
 
+def is_approved() -> bool:
+    """Whether this account has been approved as staff.
+
+    Being signed in is not the same as being staff: the publishable key is
+    public, so anyone holding it can create an account. Approval is what
+    actually grants access, and the database enforces it — this only decides
+    what the app says rather than letting it fail with empty screens.
+
+    A database that predates migrate_staff_access.sql has no `approved`
+    column; there, everyone signed in is treated as staff, exactly as before.
+    """
+    profile = current_profile() or {}
+    if "approved" not in profile:
+        return True
+    return bool(profile.get("approved"))
+
+
 def current_role() -> str:
     return current_profile().get("role", "Employee")
 
@@ -192,6 +209,27 @@ def delete_user_account(target_user_id: str) -> None:
         }).execute()
     except Exception:
         get_client().table("profiles").delete().eq("id", target_user_id).execute()
+
+
+def set_user_approved(target_user_id: str, approved: bool) -> None:
+    """Let a new account in, or shut one out.
+
+    Approval is the whole of the staff boundary: an unapproved account can
+    sign in and see nothing. Directors and Admins decide.
+    """
+    get_client().table("profiles").update(
+        {"approved": bool(approved)}).eq("id", target_user_id).execute()
+
+
+def pending_staff_count() -> int:
+    """Accounts waiting to be approved."""
+    try:
+        resp = (get_client().table("profiles")
+                .select("id", count="exact").eq("approved", False)
+                .limit(1).execute())
+        return int(resp.count or 0)
+    except Exception:
+        return 0          # column not there yet — nothing is pending
 
 
 def update_user_role(target_user_id: str, new_role: str) -> None:
@@ -832,6 +870,39 @@ def add_customer_alias(customer_id: str, alias: str) -> None:
     aliases.append(alias)
     get_client().table("customers").update(
         {"po_aliases": aliases}).eq("id", customer_id).execute()
+
+
+# ── The customer portal (see migrate_customer_portal.sql) ───────────────────
+# A customer follows a link with a random token and sees their own orders,
+# quotes and account. The token belongs to the customer rather than to a
+# person, so it can be turned off or replaced — which invalidates every link
+# ever sent for that account.
+
+def customer_portal_token(customer_id: str, rotate: bool = False) -> str:
+    """The customer's portal token, creating or replacing it as asked.
+
+    `rotate` issues a new one, which is how a link that has gone somewhere it
+    shouldn't is dealt with: every old link stops working at once.
+    """
+    import secrets
+    row = get_customer(customer_id) or {}
+    token = (row.get("portal_token") or "").strip()
+    if token and not rotate:
+        if not row.get("portal_enabled"):
+            get_client().table("customers").update(
+                {"portal_enabled": True}).eq("id", customer_id).execute()
+        return token
+    token = secrets.token_hex(32)
+    get_client().table("customers").update({
+        "portal_token": token, "portal_enabled": True,
+    }).eq("id", customer_id).execute()
+    return token
+
+
+def set_customer_portal(customer_id: str, enabled: bool) -> None:
+    """Turn a customer's portal on or off without changing their link."""
+    get_client().table("customers").update(
+        {"portal_enabled": bool(enabled)}).eq("id", customer_id).execute()
 
 
 def can_manage_customers() -> bool:

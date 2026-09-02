@@ -1,0 +1,376 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#1B3A5C">
+<meta name="robots" content="noindex, nofollow">
+<title>Total Air Filtration &middot; Your Account</title>
+<link rel="apple-touch-icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Crect width='100' height='100' fill='%231B3A5C'/%3E%3Ctext x='50' y='68' font-size='54' font-family='sans-serif' font-weight='bold' fill='white' text-anchor='middle'%3ET%3C/text%3E%3C/svg%3E">
+<!--
+  What a customer sees: their orders and what stage each is at, their quotes,
+  and their account details.
+
+  They are never signed in. The link carries a random 64-character token; the
+  anonymous role has no access to any table, and this page can only call three
+  functions that take the token and return one customer's data. Without the
+  token there is nothing, and it cannot be guessed. Staff can turn a
+  customer's portal off or issue a new token at any time, which invalidates
+  every link ever sent.
+
+  On GitHub Pages, not Supabase: Supabase serves what it hosts as text/plain
+  under a sandbox CSP, so this would arrive as unstyled source with every
+  script blocked.
+-->
+<style>
+  :root {
+    --navy:#1B3A5C; --blue:#2E6DA4; --bg:#F4F6F8; --card:#FFFFFF;
+    --text:#1F2933; --muted:#6B7A8C; --line:#DCE3EA; --tint:#F5F8FB;
+    --green:#1E8E5A; --red:#C0392B; --amber:#8A6D00;
+  }
+  * { box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
+  body { margin:0; background:var(--bg); color:var(--text);
+         font:16px/1.45 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;
+         padding-bottom:env(safe-area-inset-bottom); }
+  header { background:var(--navy); color:#fff; padding:18px;
+           padding-top:calc(18px + env(safe-area-inset-top)); }
+  header h1 { margin:0; font-size:19px; }
+  header p  { margin:4px 0 0; font-size:13px; color:#A9CCE3; }
+  nav { background:var(--navy); display:flex; gap:2px; padding:0 10px;
+        overflow-x:auto; }
+  nav button { flex:0 0 auto; background:transparent; border:0; color:#A9CCE3;
+               font:600 14px/1 inherit; padding:13px 16px; cursor:pointer;
+               border-bottom:3px solid transparent; width:auto; }
+  nav button[aria-selected="true"] { color:#fff; border-bottom-color:#fff; }
+  main { padding:16px; max-width:900px; margin:0 auto; }
+  .card { background:var(--card); border:1px solid var(--line);
+          border-radius:12px; padding:16px; margin-bottom:14px; }
+  h2 { margin:0 0 12px; font-size:15px; color:var(--navy);
+       text-transform:uppercase; letter-spacing:.04em; }
+  table { width:100%; border-collapse:collapse; font-size:14px; }
+  th, td { padding:11px 8px; text-align:left; border-bottom:1px solid var(--line);
+           vertical-align:top; }
+  th { font-size:12px; text-transform:uppercase; letter-spacing:.03em;
+       color:var(--muted); }
+  td.num, th.num { text-align:right; white-space:nowrap; }
+  tbody tr:nth-child(even) { background:var(--tint); }
+  .pill { display:inline-block; padding:4px 10px; border-radius:999px;
+          font-size:12px; font-weight:700; white-space:nowrap; }
+  .s-received { background:#EAEEF2; color:#48576A; }
+  .s-making   { background:#FEF6E0; color:var(--amber); }
+  .s-ready    { background:#E8F6EF; color:var(--green); }
+  .s-gone     { background:#E7F0F8; color:var(--blue); }
+  .s-accepted { background:#E8F6EF; color:var(--green); }
+  .s-declined { background:#FDEDEC; color:var(--red); }
+  .s-waiting  { background:#FEF6E0; color:var(--amber); }
+  .late { color:var(--red); font-weight:700; }
+  .msg { padding:12px 14px; border-radius:9px; font-size:14px; margin-bottom:14px; }
+  .msg.err { background:#FDEDEC; color:var(--red); border:1px solid #F5C6C2; }
+  .empty { color:var(--muted); font-size:14px; padding:6px 0; }
+  .meta { display:grid; grid-template-columns:auto 1fr; gap:7px 16px; font-size:14px; }
+  .meta dt { color:var(--muted); font-weight:600; }
+  .meta dd { margin:0; }
+  a.quote { color:var(--blue); font-weight:600; text-decoration:none; }
+  a.quote:hover { text-decoration:underline; }
+  .hidden { display:none !important; }
+  footer { text-align:center; color:var(--muted); font-size:12px;
+           padding:6px 16px 26px; }
+</style>
+</head>
+<body>
+
+<header>
+  <h1 id="who">Total Air Filtration</h1>
+  <p id="sub">Your orders, quotes and account</p>
+</header>
+
+<nav id="tabs" role="tablist">
+  <button role="tab" data-panel="orders"  aria-selected="true">Orders</button>
+  <button role="tab" data-panel="quotes"  aria-selected="false">Quotes</button>
+  <button role="tab" data-panel="account" aria-selected="false">Account</button>
+</nav>
+
+<main>
+  <div id="banner" class="msg err hidden"></div>
+  <div id="loading" class="card">Loading&hellip;</div>
+
+  <section id="panel-orders" class="card hidden">
+    <h2>Your orders</h2>
+    <div style="overflow-x:auto">
+      <table>
+        <thead><tr>
+          <th>Order</th><th>Ordered</th><th>Due</th>
+          <th class="num">Items</th><th>Stage</th>
+        </tr></thead>
+        <tbody id="orders"></tbody>
+      </table>
+    </div>
+    <p class="empty hidden" id="orders-empty">
+      Nothing here yet. Orders appear as soon as we book them in.
+    </p>
+  </section>
+
+  <section id="panel-quotes" class="card hidden">
+    <h2>Your quotes</h2>
+    <div style="overflow-x:auto">
+      <table>
+        <thead><tr>
+          <th>Quote</th><th>Your reference</th><th class="num">Total</th>
+          <th>Valid until</th><th>Status</th>
+        </tr></thead>
+        <tbody id="quotes"></tbody>
+      </table>
+    </div>
+    <p class="empty hidden" id="quotes-empty">
+      No quotes at the moment.
+    </p>
+  </section>
+
+  <section id="panel-account" class="card hidden">
+    <h2>Your account</h2>
+    <dl class="meta" id="account"></dl>
+    <p class="empty" style="margin-top:14px">
+      Anything not right? Let us know and we will correct it.
+    </p>
+  </section>
+</main>
+
+<footer>Total Air Filtration</footer>
+
+<script>
+"use strict";
+
+var PROJECT_URL = "https://djexdkwohkylunnwbxpf.supabase.co";
+var params = new URLSearchParams(location.search);
+
+function remembered(param, store) {
+  var fresh = (params.get(param) || "").trim();
+  if (fresh) { try { localStorage.setItem(store, fresh); } catch (e) {} return fresh; }
+  try { return localStorage.getItem(store) || ""; } catch (e) { return ""; }
+}
+
+// The token is remembered so a customer can bookmark the page, and taken out
+// of the address bar so it is not left in a screenshot or a shared history.
+var KEY     = remembered("k", "taf_portal_key");
+var TOKEN   = remembered("t", "taf_portal_token");
+var URLBASE = (params.get("u") || "").trim() || PROJECT_URL;
+
+var el = function (id) { return document.getElementById(id); };
+
+function banner(text) {
+  var b = el("banner");
+  b.textContent = text;
+  b.classList.remove("hidden");
+}
+
+function money(v) {
+  return "$" + Number(v || 0).toLocaleString("en-AU",
+    { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+}
+
+function shortDate(v) {
+  if (!v) return "";
+  var d = new Date(v);
+  if (isNaN(d)) return String(v);
+  return d.toLocaleDateString("en-AU",
+    { day: "2-digit", month: "short", year: "numeric" });
+}
+
+// Dates on orders are written dd/mm/yy by the office app, which Date() reads
+// as American. Parsed by hand so "05/09/26" is September, not May.
+function auDate(v) {
+  if (!v) return null;
+  var m = String(v).match(/^(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{2,4})$/);
+  if (!m) return null;
+  var year = Number(m[3]);
+  if (year < 100) { year += 2000; }
+  return new Date(year, Number(m[2]) - 1, Number(m[1]));
+}
+
+function cell(row, text, cls) {
+  var td = document.createElement("td");
+  td.textContent = text == null ? "" : String(text);
+  if (cls) { td.className = cls; }
+  row.appendChild(td);
+  return td;
+}
+
+function pill(text, cls) {
+  var s = document.createElement("span");
+  s.className = "pill " + cls;
+  s.textContent = text;
+  return s;
+}
+
+var STAGE_CLASS = {
+  "Received": "s-received",
+  "Being made": "s-making",
+  "Ready for delivery": "s-ready",
+  "Ready for pick up": "s-ready",
+  "Delivered": "s-gone",
+  "Collected": "s-gone"
+};
+
+function rpc(name, body) {
+  return fetch(URLBASE + "/rest/v1/rpc/" + name, {
+    method: "POST",
+    headers: {
+      "apikey": KEY,
+      "Authorization": "Bearer " + KEY,
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify(body)
+  }).then(function (r) {
+    if (!r.ok) { throw new Error("HTTP " + r.status); }
+    return r.json();
+  });
+}
+
+// ── Sections ───────────────────────────────────────────────────────────────
+
+function showOrders(rows) {
+  var body = el("orders");
+  body.innerHTML = "";
+  if (!rows || !rows.length) {
+    el("orders-empty").classList.remove("hidden");
+    return;
+  }
+  var today = new Date(); today.setHours(0, 0, 0, 0);
+  rows.forEach(function (o) {
+    var tr = document.createElement("tr");
+    cell(tr, o.order_number || "-");
+    cell(tr, o.date_ordered || "-");
+
+    var due = cell(tr, o.date_due || "-");
+    var d = auDate(o.date_due);
+    var done = o.stage === "Delivered" || o.stage === "Collected";
+    if (!done && ((d && d < today) ||
+                  String(o.date_due || "").toUpperCase() === "ASAP")) {
+      due.className = "late";
+    }
+
+    cell(tr, o.item_count == null ? "" : o.item_count, "num");
+
+    var stage = document.createElement("td");
+    stage.appendChild(pill(o.stage || "Received",
+                           STAGE_CLASS[o.stage] || "s-received"));
+    tr.appendChild(stage);
+    body.appendChild(tr);
+  });
+}
+
+function showQuotes(rows) {
+  var body = el("quotes");
+  body.innerHTML = "";
+  if (!rows || !rows.length) {
+    el("quotes-empty").classList.remove("hidden");
+    return;
+  }
+  rows.forEach(function (q) {
+    var tr = document.createElement("tr");
+
+    var first = document.createElement("td");
+    if (q.token) {
+      // Straight through to the quote itself, where they can accept it.
+      var a = document.createElement("a");
+      a.className = "quote";
+      a.href = "../quote/?t=" + encodeURIComponent(q.token) +
+               "&k=" + encodeURIComponent(KEY);
+      a.textContent = q.quote_number || "View";
+      first.appendChild(a);
+    } else {
+      first.textContent = q.quote_number || "-";
+    }
+    tr.appendChild(first);
+
+    cell(tr, q.reference || "-");
+    cell(tr, money(q.total), "num");
+    cell(tr, q.valid_until ? shortDate(q.valid_until) : "-");
+
+    var status = document.createElement("td");
+    var label = q.status || "sent";
+    var cls = label === "accepted" ? "s-accepted"
+            : label === "declined" ? "s-declined"
+            : label === "expired"  ? "s-received" : "s-waiting";
+    if (label === "sent" || label === "viewed") { label = "awaiting your answer"; }
+    status.appendChild(pill(label, cls));
+    tr.appendChild(status);
+    body.appendChild(tr);
+  });
+}
+
+function showAccount(a) {
+  var dl = el("account");
+  dl.innerHTML = "";
+  var d = a.delivery || {};
+  var address = [d.address1, d.address2, d.city, d.state, d.postcode]
+      .filter(Boolean).join(", ");
+  var rows = [
+    ["Account", a.name || "-"],
+    ["Registered name", a.legal_name || "-"],
+    ["Contact", a.contact_person || "-"],
+    ["Email", a.email || "-"],
+    ["Phone", a.phone || "-"],
+    ["Delivery address", address || "-"],
+    ["Delivery region", a.region || "-"]
+  ];
+  rows.forEach(function (row) {
+    var dt = document.createElement("dt"); dt.textContent = row[0];
+    var dd = document.createElement("dd"); dd.textContent = row[1];
+    dl.appendChild(dt); dl.appendChild(dd);
+  });
+}
+
+// ── Tabs ───────────────────────────────────────────────────────────────────
+
+function selectPanel(name) {
+  ["orders", "quotes", "account"].forEach(function (p) {
+    el("panel-" + p).classList.toggle("hidden", p !== name);
+  });
+  Array.prototype.forEach.call(
+    el("tabs").querySelectorAll("button"), function (b) {
+      b.setAttribute("aria-selected", String(b.dataset.panel === name));
+    });
+}
+
+Array.prototype.forEach.call(el("tabs").querySelectorAll("button"),
+  function (b) {
+    b.addEventListener("click", function () { selectPanel(b.dataset.panel); });
+  });
+
+// ── Start ──────────────────────────────────────────────────────────────────
+
+if (!TOKEN || !KEY) {
+  el("loading").classList.add("hidden");
+  banner("This link is incomplete. Please use the full link we sent you, " +
+         "or ask us to send it again.");
+} else {
+  try { history.replaceState({}, "", location.pathname); } catch (e) {}
+
+  Promise.all([
+    rpc("portal_account", { p_token: TOKEN }),
+    rpc("portal_orders",  { p_token: TOKEN }),
+    rpc("portal_quotes",  { p_token: TOKEN })
+  ]).then(function (res) {
+    var account = res[0];
+    el("loading").classList.add("hidden");
+    if (!account) {
+      banner("We could not find that account. The link may have been turned " +
+             "off or replaced — please ask us for a new one.");
+      return;
+    }
+    el("who").textContent = account.name || "Your account";
+    el("sub").textContent = "Your orders, quotes and account";
+    showOrders(res[1]);
+    showQuotes(res[2]);
+    showAccount(account);
+    selectPanel("orders");
+  }).catch(function () {
+    el("loading").classList.add("hidden");
+    banner("We could not load your account just now. Please try again " +
+           "shortly, or get in touch.");
+  });
+}
+</script>
+</body>
+</html>

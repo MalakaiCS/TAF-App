@@ -121,3 +121,75 @@ def test_the_portal_page_exists_and_is_not_indexable():
     # It must talk to the two locked-down functions, never the table.
     assert "quote_public_view" in html and "quote_public_respond" in html
     assert "/rest/v1/quotes" not in html
+
+
+# ── The customer portal ─────────────────────────────────────────────────────
+
+def _portal_page():
+    from pathlib import Path
+    return (Path(__file__).resolve().parent.parent / "docs" / "portal"
+            / "index.html").read_text(encoding="utf-8")
+
+
+def test_the_portal_page_exists_and_is_locked_down():
+    html = _portal_page()
+    assert 'name="robots"' in html and "noindex" in html
+    # It may only call the three functions written for it, never a table.
+    for fn in ("portal_account", "portal_orders", "portal_quotes"):
+        assert fn in html
+    assert "/rest/v1/orders" not in html
+    assert "/rest/v1/customers" not in html
+    assert "/rest/v1/quotes" not in html
+    # The token must not be left sitting in the address bar.
+    assert "history.replaceState" in html
+
+
+def test_the_portal_reads_australian_dates():
+    # Orders carry dd/mm/yy, which Date() would read as American - 05/09/26 is
+    # September, not May, and getting it backwards mislabels work as late.
+    html = _portal_page()
+    assert "function auDate" in html
+    assert "auDate(o.date_due)" in html
+
+
+def test_every_order_stage_the_database_can_return_has_a_colour():
+    """The SQL and the page have to agree on the stage wording."""
+    from pathlib import Path
+    root = Path(__file__).resolve().parent.parent
+    sql = (root / "migrate_customer_portal.sql").read_text(encoding="utf-8")
+    html = _portal_page()
+    import re
+    # Every stage the CASE can yield, whether it follows THEN or ELSE.
+    stages = {s for s in re.findall(r"(?:THEN|ELSE)\s+'([^']+)'", sql)
+              if s[:1].isupper()}
+    assert {"Received", "Being made", "Ready for delivery",
+            "Ready for pick up", "Delivered", "Collected"} <= stages, stages
+    for stage in stages:
+        assert '"' + stage + '"' in html, f"{stage} has no colour on the page"
+
+
+def test_the_portal_sql_never_opens_a_table_to_anonymous():
+    from pathlib import Path
+    sql = (Path(__file__).resolve().parent.parent
+           / "migrate_customer_portal.sql").read_text(encoding="utf-8")
+    # Access is via functions only; no policy should hand anon a table.
+    assert "CREATE POLICY" not in sql.upper()
+    # The row-returning helper must not be callable by a visitor directly.
+    assert "GRANT EXECUTE ON FUNCTION public.portal_customer" not in sql
+    flat = " ".join(sql.split())          # the SQL pads columns to line up
+    for fn in ("portal_account", "portal_orders", "portal_quotes"):
+        assert f"REVOKE ALL ON FUNCTION public.{fn}(text) FROM public;" in flat
+    # Definer-rights functions must pin their search_path.
+    assert sql.count("SET search_path = public, pg_temp") >= 4
+
+
+def test_the_staff_migration_closes_the_open_policies():
+    from pathlib import Path
+    sql = (Path(__file__).resolve().parent.parent
+           / "migrate_staff_access.sql").read_text(encoding="utf-8")
+    # Existing staff must not be locked out by running it.
+    assert "UPDATE profiles SET approved = true" in sql
+    # New accounts must not be staff by default.
+    assert "ALTER COLUMN approved SET DEFAULT false" in sql
+    assert "is_staff()" in sql and "is_manager()" in sql
+    assert sql.count("SET search_path = public, pg_temp") >= 2

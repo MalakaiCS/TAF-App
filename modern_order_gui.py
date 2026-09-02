@@ -5281,6 +5281,153 @@ class ModernOrderApp(tk.Frame):
 
     # ── The link a customer opens ─────────────────────────────────────────
 
+    # ── The customer's own portal ─────────────────────────────────────────
+
+    def _portal_page_base(self) -> str:
+        override = (self._settings.get("portal_page_url") or "").strip()
+        if override:
+            return override.rstrip("/") + "/"
+        try:
+            from taf_order_app.updater import GITHUB_REPO
+            owner, repo = GITHUB_REPO.split("/", 1)
+        except Exception:
+            owner, repo = "MalakaiCS", "TAF-App"
+        return f"https://{owner.lower()}.github.io/{repo}/portal/"
+
+    def _portal_link(self, token: str) -> str:
+        from urllib.parse import urlencode
+        return (self._portal_page_base() + "?"
+                + urlencode({"t": token, "k": _db.current_anon_key()}))
+
+    def _customer_portal_link(self):
+        """Give a customer a link to their orders, quotes and account."""
+        cust = self._get_selected_customer()
+        if not cust:
+            messagebox.showinfo("Customer Portal", "Select a customer first.")
+            return
+        name = (cust.get("short_name") or cust.get("name")
+                or cust.get("legal_name") or "this customer")
+        try:
+            row = _db.get_customer(cust["id"]) or {}
+        except Exception:
+            row = cust
+        has_link = bool((row.get("portal_token") or "").strip())
+        enabled = bool(row.get("portal_enabled"))
+
+        dlg = tk.Toplevel(self.master)
+        dlg.title("Customer Portal")
+        dlg.configure(bg=CBG)
+        dlg.transient(self.master)
+        dlg.grab_set()
+
+        hdr = tk.Frame(dlg, bg=CA, padx=16, pady=10)
+        hdr.pack(fill="x")
+        tk.Label(hdr, text=f"Portal for {name}", bg=CA, fg="white",
+                 font=F_BOLD).pack(anchor="w")
+        tk.Label(hdr,
+                 text="They see their own orders and what stage each is at, "
+                      "their quotes, and their account details.",
+                 bg=CA, fg="#A9CCE3", font=F_SM,
+                 wraplength=560, justify="left").pack(anchor="w")
+
+        body = tk.Frame(dlg, bg=CBG, padx=16, pady=14)
+        body.pack(fill="both", expand=True)
+
+        state = tk.StringVar()
+        tk.Label(body, textvariable=state, bg=CBG, fg=CTX, font=F_BODY,
+                 anchor="w").pack(anchor="w", pady=(0, 8))
+
+        box = tk.Text(body, height=4, wrap="char", font=F_SM, bg=CFD, fg=CTX,
+                      relief="flat", bd=8, highlightthickness=1,
+                      highlightbackground=CSP)
+        box.pack(fill="x")
+
+        tk.Label(body,
+                 text="Anyone with this link can see this customer's orders, "
+                      "quotes and account — so send it to them and nobody "
+                      "else. It shows no other customer, no prices beyond "
+                      "their own quotes, and nothing internal.\n"
+                      "If it ever goes astray, New Link replaces it and every "
+                      "old link stops working immediately.",
+                 bg=CBG, fg=CMU, font=F_SM, justify="left",
+                 wraplength=580, anchor="w").pack(anchor="w", pady=(10, 0))
+
+        holder = {"link": ""}
+
+        def _set_link(token):
+            holder["link"] = self._portal_link(token)
+            box.config(state="normal")
+            box.delete("1.0", "end")
+            box.insert("1.0", holder["link"])
+            box.config(state="disabled")
+            state.set("Portal is on. The link is copied to your clipboard.")
+            self.master.clipboard_clear()
+            self.master.clipboard_append(holder["link"])
+
+        def _issue(rotate=False):
+            try:
+                token = _db.customer_portal_token(cust["id"], rotate=rotate)
+            except Exception as exc:
+                messagebox.showerror(
+                    "Customer Portal",
+                    f"The link could not be made:\n{exc}\n\n"
+                    "If this mentions a missing column, run "
+                    "migrate_customer_portal.sql in the Supabase SQL Editor.",
+                    parent=dlg)
+                return
+            try:
+                _db.log_action("customer_portal",
+                               f"{'New link for' if rotate else 'Link for'} {name}")
+            except Exception:
+                pass
+            _set_link(token)
+
+        def _turn_off():
+            if not messagebox.askyesno(
+                    "Turn Off Portal",
+                    f"Turn the portal off for {name}?\n\n"
+                    "Their link stops working. Turning it back on later uses "
+                    "the same link unless you issue a new one.", parent=dlg):
+                return
+            try:
+                _db.set_customer_portal(cust["id"], False)
+                _db.log_action("customer_portal", f"Turned off for {name}")
+            except Exception as exc:
+                messagebox.showerror("Customer Portal",
+                                     f"Could not turn it off:\n{exc}", parent=dlg)
+                return
+            state.set("Portal is off. Their link no longer works.")
+            box.config(state="normal")
+            box.delete("1.0", "end")
+            box.config(state="disabled")
+
+        if has_link and enabled:
+            _set_link(row.get("portal_token"))
+        elif has_link:
+            state.set("Portal is off for this customer.")
+            box.config(state="disabled")
+        else:
+            state.set("No link yet — Create Link makes one.")
+            box.config(state="disabled")
+
+        foot = tk.Frame(dlg, bg=CBG, padx=16, pady=10)
+        foot.pack(fill="x")
+        flat_btn(foot, "Close", dlg.destroy, bg=CNE,
+                 pady=7).pack(side="right", padx=(8, 0))
+        if has_link:
+            flat_btn(foot, "New Link", lambda: _issue(rotate=True), bg=CRD,
+                     pady=7).pack(side="right", padx=(8, 0))
+            if enabled:
+                flat_btn(foot, "Turn Off", _turn_off, bg=CMU,
+                         pady=7).pack(side="right", padx=(8, 0))
+        flat_btn(foot, "Create Link" if not has_link else "Copy Link",
+                 lambda: _issue(rotate=False), bg=CGR,
+                 pady=7).pack(side="right")
+        dlg.bind("<Escape>", lambda _e: dlg.destroy())
+        W, H = 660, 400
+        dlg.geometry(f"{W}x{H}+{self.master.winfo_rootx() + 110}"
+                     f"+{self.master.winfo_rooty() + 90}")
+
     def _quote_page_base(self) -> str:
         """Where the customer quote page is hosted: GitHub Pages, this repo.
 
@@ -6714,6 +6861,9 @@ class ModernOrderApp(tk.Frame):
         flat_btn(bot, "+ New Order for Customer",
                  self._new_order_for_customer,
                  bg=CGR, pady=7).pack(side="left", padx=(0, 8))
+        flat_btn(bot, "🌐 Customer Portal",
+                 self._customer_portal_link,
+                 bg=CNE, pady=7).pack(side="left", padx=(0, 8))
 
         flat_btn(bot, "🗑 Delete",
                  self._delete_customer,
