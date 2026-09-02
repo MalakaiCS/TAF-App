@@ -272,3 +272,47 @@ def test_the_signin_page_gives_one_answer_for_any_failure():
     html = _pages()["portal"]
     assert "could not match those details" in html
     assert "function doSignIn" in html
+
+
+# ── Our own order numbers ───────────────────────────────────────────────────
+
+def _supplied_sql():
+    from pathlib import Path
+    return (Path(__file__).resolve().parent.parent
+            / "migrate_supplied_order_numbers.sql").read_text(encoding="utf-8")
+
+
+def test_the_counter_is_a_sequence_not_read_then_increment():
+    """Two PCs pressing the button at once must not get the same number.
+
+    Reading the highest and adding one hands them both the same answer; a
+    sequence cannot, even under load.
+    """
+    sql = _supplied_sql()
+    assert "CREATE SEQUENCE IF NOT EXISTS taf_order_number_seq" in sql
+    assert "nextval('public.taf_order_number_seq')" in sql
+    assert "max(" not in sql.split("Catching up")[0]   # not in the allocator
+
+
+def test_the_number_function_checks_the_caller_is_staff():
+    # SECURITY DEFINER bypasses row-level security, so the check that every
+    # table gets from its policies has to be made inside the function.
+    sql = _supplied_sql()
+    assert "SECURITY DEFINER" in sql
+    assert "SET search_path = public, pg_temp" in sql
+    assert "is_staff()" in sql
+    assert "RAISE EXCEPTION 'not permitted'" in sql
+    assert "GRANT EXECUTE ON FUNCTION public.next_taf_order_number() TO authenticated;" in sql
+    assert "TO anon" not in sql
+
+
+def test_the_migration_starts_above_any_numbers_already_in_use():
+    sql = _supplied_sql()
+    assert "setval('public.taf_order_number_seq'" in sql
+    assert "'^TAF-ON-[0-9]+$'" in sql
+
+
+def test_the_padding_matches_what_was_asked_for():
+    sql = _supplied_sql()
+    assert "lpad(n::text, 4, '0')" in sql
+    assert "'TAF-ON-'" in sql

@@ -119,6 +119,57 @@ STEPPED_THICKNESS = 50
 VFORM_THICKNESSES = (45, 50)
 
 
+# ── Our own order numbers ────────────────────────────────────────────────────
+# A customer who rings up without a purchase order number still needs the job
+# identified, so it gets one of ours: TAF-ON-0001 and up. Nothing to do with
+# invoice numbers — an order number names a job in the shop, an invoice number
+# is an accounting record, and tying them together means neither can be
+# changed without disturbing the other.
+
+SUPPLIED_ORDER_PREFIX = "TAF-ON-"
+SUPPLIED_ORDER_DIGITS = 4
+SUPPLIED_ORDER_RE = re.compile(r"^TAF-ON-(\d{3,})$", re.IGNORECASE)
+
+
+def supplied_order_number(n) -> str:
+    """Our order number for counter value `n`: 1 -> 'TAF-ON-0001'.
+
+    Past 9999 it simply gets longer rather than wrapping or truncating —
+    a number that repeats would be worse than one that is five digits.
+    """
+    try:
+        value = int(n)
+    except (TypeError, ValueError):
+        return ""
+    if value <= 0:
+        return ""
+    return f"{SUPPLIED_ORDER_PREFIX}{value:0{SUPPLIED_ORDER_DIGITS}d}"
+
+
+def is_supplied_order_number(text: str) -> bool:
+    """True for one of ours, whatever case it was typed in."""
+    return bool(SUPPLIED_ORDER_RE.match((text or "").strip()))
+
+
+def supplied_order_value(text: str) -> int:
+    """The counter behind one of our order numbers, or 0."""
+    match = SUPPLIED_ORDER_RE.match((text or "").strip())
+    return int(match.group(1)) if match else 0
+
+
+def normalise_order_number(text: str) -> str:
+    """Tidy an order number without changing what it says.
+
+    Ours are upper-cased so TAF-ON-0007 and taf-on-0007 are recognisably the
+    same order; a customer's own number is left exactly as they wrote it,
+    because theirs is their reference and not ours to reformat.
+    """
+    text = (text or "").strip()
+    if is_supplied_order_number(text):
+        return f"{SUPPLIED_ORDER_PREFIX}{supplied_order_value(text):0{SUPPLIED_ORDER_DIGITS}d}"
+    return text
+
+
 def wording_key(text: str) -> str:
     return re.sub(r"[^a-z0-9]", "", (text or "").lower())
 

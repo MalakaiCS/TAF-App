@@ -139,6 +139,61 @@ def due_sort_key(row: dict):
     return (0, parsed.date())
 
 
+class _Tooltip:
+    """A small label that appears under a widget on hover.
+
+    For controls whose name has to be short enough to fit but is too short to
+    explain itself.
+    """
+
+    def __init__(self, widget, text: str, delay: int = 450):
+        self._widget = widget
+        self._text = text
+        self._delay = delay
+        self._after = None
+        self._window = None
+        widget.bind("<Enter>", self._schedule, add="+")
+        widget.bind("<Leave>", self._hide, add="+")
+        widget.bind("<ButtonPress>", self._hide, add="+")
+
+    def _schedule(self, _event=None):
+        self._cancel()
+        self._after = self._widget.after(self._delay, self._show)
+
+    def _cancel(self):
+        if self._after is not None:
+            try:
+                self._widget.after_cancel(self._after)
+            except Exception:
+                pass
+            self._after = None
+
+    def _show(self):
+        if self._window is not None:
+            return
+        try:
+            x = self._widget.winfo_rootx()
+            y = self._widget.winfo_rooty() + self._widget.winfo_height() + 4
+        except Exception:
+            return
+        self._window = tk.Toplevel(self._widget)
+        self._window.wm_overrideredirect(True)
+        self._window.configure(bg=CTX)
+        tk.Label(self._window, text=self._text, bg=CTX, fg="white",
+                 font=F_SM, justify="left", wraplength=260,
+                 padx=8, pady=5).pack()
+        self._window.wm_geometry(f"+{x}+{y}")
+
+    def _hide(self, _event=None):
+        self._cancel()
+        if self._window is not None:
+            try:
+                self._window.destroy()
+            except Exception:
+                pass
+            self._window = None
+
+
 def _pick_one(parent, title: str, prompt: str, options: list,
               current: str = "") -> str:
     """A small "which of these?" dialog. Returns "" if it was closed."""
@@ -3214,7 +3269,25 @@ class POReviewDialog(tk.Toplevel):
             v = tk.StringVar()
             self._hvars[key] = v
             v.trace_add("write", lambda *_a, k=key: self._on_header_edit(k))
-            field_entry(sub, textvariable=v, width=24).pack(fill="x", pady=(2, 0))
+            if key == "Order Number":
+                # The commonest reason a read order is blocked: the document
+                # never carried a number. Fixing it should be one click.
+                row_f = tk.Frame(sub, bg=CCA)
+                row_f.pack(fill="x", pady=(2, 0))
+                field_entry(row_f, textvariable=v, width=18).pack(
+                    side="left", fill="x", expand=True)
+                btn = tk.Button(row_f, text="TAF #",
+                                command=self._supplied_number_for_current,
+                                bg=CA, fg="white", relief="flat", bd=0,
+                                font=(FAM, 8, "bold"), padx=7, pady=2,
+                                cursor="hand2", activebackground=_dk(CA),
+                                activeforeground="white")
+                btn.pack(side="left", padx=(4, 0))
+                _Tooltip(btn, "No purchase order number on the document? "
+                              "Give it one of ours.")
+            else:
+                field_entry(sub, textvariable=v, width=24).pack(fill="x",
+                                                                pady=(2, 0))
 
         itf = tk.Frame(right, bg=CBG)
         itf.grid(row=3, column=0, sticky="nsew", pady=(10, 0))
@@ -3540,6 +3613,32 @@ class POReviewDialog(tk.Toplevel):
             "items":  [_po_import.strip_review_fields(i) for i in o["items"]],
         } for o in approved]
         self.destroy()
+
+    def _supplied_number_for_current(self):
+        """Give the order being reviewed one of our own numbers."""
+        var = self._hvars.get("Order Number")
+        if var is None:
+            return
+        existing = var.get().strip()
+        if _pn.is_supplied_order_number(existing):
+            messagebox.showinfo(
+                "TAF Order Number",
+                f"This order already has {existing}.", parent=self)
+            return
+        if existing and not messagebox.askyesno(
+                "TAF Order Number",
+                f'This order already has the number "{existing}".\n\n'
+                "Replace it with one of ours?", default="no", parent=self):
+            return
+        try:
+            var.set(_db.next_supplied_order_number())
+        except Exception as exc:
+            messagebox.showerror(
+                "TAF Order Number",
+                f"The next number could not be taken:\n{exc}\n\n"
+                "If this mentions a missing function, run "
+                "migrate_supplied_order_numbers.sql in the Supabase SQL "
+                "Editor.", parent=self)
 
     def _collect_corrections(self, approved) -> dict:
         """What the wordings on these orders turned out to mean.
@@ -4355,6 +4454,24 @@ class ModernOrderApp(tk.Frame):
 
                 if key == "Date Due":
                     self.hvars[key].set("ASAP")
+            elif key == "Order Number":
+                # A customer who rings up without a purchase order number
+                # still needs the job identified, so we can issue one.
+                wrap = tk.Frame(card_body, bg=CCA)
+                wrap.grid(row=row, column=1, sticky="we", pady=4)
+                wrap.columnconfigure(0, weight=1)
+                e = field_entry(wrap, textvariable=self.hvars[key])
+                e.grid(row=0, column=0, sticky="we")
+                self._hentries[key] = e
+                self._taf_on_btn = tk.Button(
+                    wrap, text="TAF #", command=self._use_supplied_order_number,
+                    bg=CA, fg="white", relief="flat", bd=0,
+                    font=(FAM, 8, "bold"), padx=7, pady=2, cursor="hand2",
+                    activebackground=_dk(CA), activeforeground="white")
+                self._taf_on_btn.grid(row=0, column=1, padx=(3, 0))
+                _Tooltip(self._taf_on_btn,
+                         "No purchase order number? Give this order one of "
+                         "ours — TAF-ON-0001 and up.")
             else:
                 e = field_entry(card_body, textvariable=self.hvars[key])
                 e.grid(row=row, column=1, sticky="we", pady=4)
@@ -9590,6 +9707,49 @@ class ModernOrderApp(tk.Frame):
     _LABEL_WRAP_NOTE = "BLANK LABELS & Wrap in Clear Plastic"
     _LABEL_WRAP_TRIGGERS = {"JAF", "AES"}
 
+    def _use_supplied_order_number(self):
+        """Give this order one of ours, for a customer with no PO number."""
+        existing = self.hvars["Order Number"].get().strip()
+        if existing and not _pn.is_supplied_order_number(existing):
+            if not messagebox.askyesno(
+                    "Use a TAF Order Number",
+                    f'This order already has the number "{existing}".\n\n'
+                    "Replace it with one of ours?", default="no"):
+                return
+        if _pn.is_supplied_order_number(existing):
+            messagebox.showinfo(
+                "Use a TAF Order Number",
+                f"This order already has {existing}.\n\n"
+                "Each one is only handed out once, so it keeps the number it "
+                "has.")
+            return
+        if not (_db.is_ready() and _db.current_user()):
+            messagebox.showerror(
+                "Use a TAF Order Number",
+                "A connection to the shared database is needed to take the "
+                "next number.\n\nWithout it two PCs could be given the same "
+                "one, so it isn't guessed at locally. Type the customer's own "
+                "reference for now, or try again when you're back online.")
+            return
+        try:
+            number = _db.next_supplied_order_number()
+        except Exception as exc:
+            messagebox.showerror(
+                "Use a TAF Order Number",
+                f"The next number could not be taken:\n{exc}\n\n"
+                "If this mentions a missing function, run "
+                "migrate_supplied_order_numbers.sql in the Supabase SQL "
+                "Editor.")
+            return
+        self.hvars["Order Number"].set(number)
+        try:
+            _db.log_action("supplied_order_number",
+                           f"{number} for "
+                           f"{self.hvars['Customer Name'].get().strip()}")
+        except Exception:
+            pass
+        self.status_var.set(f"{number} — our order number for this job.")
+
     def _check_customer_note(self):
         """If customer name contains JAF or AES, auto-add the label/wrap note."""
         name = self.hvars["Customer Name"].get().upper()
@@ -10341,6 +10501,11 @@ class ModernOrderApp(tk.Frame):
 
     def _collect_header(self) -> dict:
         header = {k: v.get().strip() for k, v in self.hvars.items()}
+        # One of ours is tidied so TAF-ON-7 and taf-on-0007 are recognisably
+        # the same order; a customer's own reference is left exactly as they
+        # wrote it, because theirs is not ours to reformat.
+        header["Order Number"] = _pn.normalise_order_number(
+            header.get("Order Number", ""))
         header["Notes"]       = self.txt_header_notes.get("1.0", "end").strip()
         header["customer_id"] = getattr(self, "_selected_customer_id", "")
         return header

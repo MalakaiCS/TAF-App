@@ -1290,6 +1290,24 @@ QUOTE_STATUSES = ["draft", "sent", "viewed", "accepted", "declined", "expired"]
 AWAITING_STATUSES = ("sent", "viewed")
 
 
+def next_supplied_order_number() -> str:
+    """Take the next TAF-ON- number from the shared counter.
+
+    Straight to a Postgres sequence, so two people pressing the button at the
+    same moment on different PCs cannot be handed the same number. Raises if
+    the database is unreachable rather than inventing one locally: a
+    duplicate order number is a worse problem than a delayed one.
+    """
+    resp = get_client().rpc("next_taf_order_number").execute()
+    number = (resp.data or "")
+    if isinstance(number, list):          # some clients wrap a scalar
+        number = number[0] if number else ""
+    number = str(number or "").strip()
+    if not number:
+        raise RuntimeError("The shared counter returned nothing.")
+    return number
+
+
 def next_quote_number() -> str:
     """The next quote number, as Q-0001. Falls back to a date-stamped one."""
     import datetime as _dt

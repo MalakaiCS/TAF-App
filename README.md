@@ -17,6 +17,10 @@ log, stock management and a customer database.
 - **New Order** — filter & bag/roll line items, dedicated compressor-filter
   presets (add / edit / remove your own), duplicate-order warning, live
   worksheet + order-PDF generation.
+- **Our own order numbers** — a customer with no purchase order number gets
+  one of ours: `TAF-ON-0001` and up, from a shared counter, with nothing to do
+  with invoice numbering. The **TAF #** button is next to Order Number on New
+  Order and in the purchase-order review screen.
 - **Import Purchase Order** — upload a PDF, photo, scan or emailed order and
   the app reads it, shows what it found for checking, then generates and
   prints the worksheets. Handles several purchase orders in one file.
@@ -141,7 +145,8 @@ In the Supabase dashboard → **SQL Editor**, run these once (in order):
    part-number code on each media type. `migrate_pricing.sql` adds the price
    list and the per-m² rates that back quotes and the Xero export.
    `migrate_quotes.sql` adds saved quotes, and `migrate_quote_portal.sql`
-   the customer accept/decline page.
+   the customer accept/decline page. `migrate_supplied_order_numbers.sql`
+   adds the TAF-ON- order-number counter.
 
 ### Enable purchase-order import (optional)
 
@@ -395,6 +400,33 @@ Release. Installed clients then auto-update.
 > the rules (part numbers, prices, stock, due dates, delivery), not the
 > Tkinter screens. Test UI changes on a Windows PC (install the release's
 > `TAFOrderEntry_Setup.exe`) before relying on them.
+
+## Our own order numbers
+
+A customer who rings up without a purchase order number still needs the job
+identified, so the **TAF #** button gives the order one of ours —
+`TAF-ON-0001`, `TAF-ON-0002`, and so on. It sits beside Order Number on the
+New Order tab and in the review screen when an imported document carried no
+number.
+
+Run `migrate_supplied_order_numbers.sql` once. It creates a Postgres
+**sequence**, not a "find the highest and add one" query: two people on two
+PCs press that button at the same moment often enough to matter, and
+read-then-write hands them both the same number. The trade is gaps — a number
+taken and then abandoned is not reissued — which is right for an order number,
+where being unique matters far more than being consecutive.
+
+That is also why it is **kept apart from invoice numbering**. An order number
+names a job in the shop; an invoice number is an accounting record where a
+missing number is a question from an auditor. Tying them together means
+neither can change without disturbing the other.
+
+Numbers already typed in by hand are picked up: the migration starts the
+counter above the highest `TAF-ON-` number already on an order.
+
+Taking a number needs a connection. Offline it says so rather than guessing
+locally, because a duplicate order number is a worse problem than a delayed
+one.
 
 ## Tests
 

@@ -398,3 +398,52 @@ def test_a_consignment_number_is_escaped_into_the_url():
     from taf_order_app import db
     url = db.tracking_url("Startrack", "AB 12/34")
     assert " " not in url and "AB%2012%2F34" in url
+
+
+# ── Our own order numbers ───────────────────────────────────────────────────
+# For customers who ring up without a purchase order number. Kept apart from
+# invoice numbering on purpose.
+
+def test_our_order_numbers_look_the_way_they_should():
+    assert pn.supplied_order_number(1) == "TAF-ON-0001"
+    assert pn.supplied_order_number(42) == "TAF-ON-0042"
+    assert pn.supplied_order_number(9999) == "TAF-ON-9999"
+
+
+def test_they_get_longer_rather_than_wrapping():
+    # A number that repeats would be far worse than a five-digit one.
+    assert pn.supplied_order_number(10000) == "TAF-ON-10000"
+    assert pn.supplied_order_number(123456) == "TAF-ON-123456"
+
+
+def test_a_bad_counter_value_produces_nothing():
+    for bad in (0, -1, None, "", "x"):
+        assert pn.supplied_order_number(bad) == ""
+
+
+def test_ours_are_recognised_however_they_are_typed():
+    for text in ("TAF-ON-0001", "taf-on-0001", " TAF-ON-0001 ", "Taf-On-0042"):
+        assert pn.is_supplied_order_number(text), text
+    for text in ("PO1234", "TAF-0001", "TAF-ON-", "TAFON0001", "", "TAF-ON-AB"):
+        assert not pn.is_supplied_order_number(text), text
+
+
+def test_the_counter_can_be_read_back_out():
+    assert pn.supplied_order_value("TAF-ON-0042") == 42
+    assert pn.supplied_order_value("taf-on-10000") == 10000
+    assert pn.supplied_order_value("PO1234") == 0
+
+
+def test_ours_are_tidied_and_a_customers_is_left_alone():
+    # Ours are normalised so TAF-ON-7 and taf-on-0007 are the same order.
+    assert pn.normalise_order_number("taf-on-0007") == "TAF-ON-0007"
+    assert pn.normalise_order_number("  TAF-ON-0007 ") == "TAF-ON-0007"
+    # Theirs is their reference, not ours to reformat.
+    for theirs in ("po 1234", "4500/A", "j-99  b", "0001"):
+        assert pn.normalise_order_number(theirs) == theirs.strip()
+
+
+def test_our_numbers_never_collide_with_a_part_number():
+    # Both appear on a worksheet; neither format may be mistaken for the other.
+    assert not pn.is_supplied_order_number("FPFG425-020")
+    assert pn.canonical_filter_type("TAF-ON-0001") == ""
