@@ -364,6 +364,72 @@ def _steps(app, gui, root):
         app._account_menu()
     add("menu: account", _account)
 
+    def _pills(widget, found):
+        if isinstance(widget, gui.PillButton):
+            found.append((widget.cget("text"), str(widget.cget("bg")).upper()))
+        for child in widget.winfo_children():
+            _pills(child, found)
+        return found
+
+    def _button_weights():
+        """Supporting actions are quiet, and each row of buttons has a point.
+
+        Slate was the colour a button got when it wasn't the main action.
+        There were over a hundred of them, so "not the main action" was as
+        loud as "the main action" and no screen had any shape.
+
+        Counting per row rather than per tab is the honest measure: Settings
+        is six sections and each may fairly have its own Save, but a single
+        row of six saturated buttons tells you nothing about what to press.
+        """
+        slate = gui.CNE.upper()
+        loud = {gui.CA.upper(), gui.CGR.upper(), gui.CRD.upper(),
+                gui.CA2.upper(), gui.CMU.upper()}
+        left_slate, crowded = [], []
+        frames = getattr(app, "_tab_frames", {})
+        if not frames:
+            raise AssertionError("no tabs to look at")
+
+        def rows(widget, tab):
+            here = [(str(c.cget("text")), str(c.cget("bg")).upper())
+                    for c in widget.winfo_children()
+                    if isinstance(c, gui.PillButton)]
+            shouting = [t for t, bg in here if bg in loud]
+            if len(shouting) > 2:
+                crowded.append(f"{tab}: {shouting}")
+            for child in widget.winfo_children():
+                rows(child, tab)
+
+        for key, frame in frames.items():
+            left_slate += [t for t, bg in _pills(frame, []) if bg == slate]
+            rows(frame, key)
+        if left_slate:
+            raise AssertionError(f"still slate: {left_slate}")
+        if crowded:
+            raise AssertionError("too many loud buttons in one row:\n  "
+                                 + "\n  ".join(crowded))
+    add("button weights", _button_weights)
+
+    def _dark_mode_keeps_up():
+        """The quiet weights are mixed from two palette colours, so they are
+        not palette colours themselves and the theme walk used to skip them —
+        a pale blue button stayed pale blue on a dark card."""
+        light = gui._button_variants()["secondary"][0].upper()
+        # Toggling writes the preference to the settings file. Don't touch a
+        # real one just to look at some colours.
+        saved, gui._save_settings = gui._save_settings, lambda *a, **k: None
+        app._settings["dark_mode"] = False
+        try:
+            app._toggle_dark_mode()
+            stranded = [t for t, bg in _pills(root, []) if bg == light]
+            if stranded:
+                raise AssertionError(
+                    f"still on the light-mode colour after the switch: {stranded}")
+        finally:
+            app._toggle_dark_mode()          # put it back for the steps after
+            gui._save_settings = saved
+    add("dark mode: every button follows", _dark_mode_keeps_up)
+
     add("banner: exports", lambda: print("Exporting…"))
     for label, call in _exports(app, gui):
         add(label, call)

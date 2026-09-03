@@ -877,6 +877,11 @@ class PillButton(tk.Canvas):
             return self._text
         if key in ("bg", "background"):
             return self._bg
+        # The pill's text is drawn as a canvas item, so a Canvas has no "fg"
+        # to report. Without this, the dark-mode walk skips every button's
+        # label and a quiet button keeps its light-mode text colour.
+        if key in ("fg", "foreground"):
+            return self._fg
         if key == "state":
             return self._state
         return super().cget(key)
@@ -969,16 +974,23 @@ def flat_btn(parent, text, command, bg=CA, fg="white",
         "ghost"     text only until hovered — the least important
         "danger"    filled red — deleting things
 
-    Callers that pass an explicit `bg` keep exactly what they asked for, so
-    every existing button is untouched.
+    Neutral slate (CNE) was what a button got when it was not the main action
+    on its screen — Cancel, Refresh, Clear, Edit, Remove. There were over a
+    hundred of them, and a hundred dark slate rectangles is not a quiet
+    button, it is a second loud colour. Asking for slate now gets the
+    secondary weight, so every one of them goes quiet at once rather than
+    only the ones somebody remembered to convert by hand. Pass
+    variant="primary" if a particular slate button really was the main one.
     """
+    if not variant and bg == CNE:
+        variant = "secondary"
     if variant:
         bg, fg = _BUTTON_VARIANTS.get(variant, (bg, fg))
     return PillButton(parent, text, command=command, bg=bg, fg=fg,
                       font=font, h=px(pady * 2 + 24), padx=px(padx))
 
 
-def menu_btn(parent, text, items, bg=CNE, fg="white", pady=6,
+def menu_btn(parent, text, items, bg=None, fg="white", pady=6,
              padx=14, variant=None):
     """A button that drops a menu, for the actions that don't earn a place.
 
@@ -1013,8 +1025,10 @@ def menu_btn(parent, text, items, bg=CNE, fg="white", pady=6,
         finally:
             menu.grab_release()
 
-    btn = flat_btn(parent, text, popup, bg=bg, fg=fg, pady=pady,
-                   padx=padx, variant=variant)
+    # Read the slate default now rather than at import, so it still matches
+    # the live palette after a switch to dark mode.
+    btn = flat_btn(parent, text, popup, bg=CNE if bg is None else bg,
+                   fg=fg, pady=pady, padx=padx, variant=variant)
     return btn
 
 
@@ -5427,7 +5441,11 @@ class ModernOrderApp(tk.Frame):
             card_body, height=5, width=24, wrap="word",
             font=F_BODY, relief="flat", bd=0, highlightthickness=1, highlightbackground=CBR,
             bg=CCA, fg=CTX, insertbackground=CTX)
-        self.txt_header_notes.grid(row=r, column=1, sticky="we", pady=(8, 4))
+        # The card fills the column, so the fields left a hand's width of
+        # blank white under them. Notes takes it — the one field here with no
+        # natural length.
+        self.txt_header_notes.grid(row=r, column=1, sticky="nsew", pady=(8, 4))
+        card_body.rowconfigure(r, weight=1)
         self.txt_header_notes.bind("<<Modified>>",
             lambda e: (self.txt_header_notes.edit_modified(False),
                        self._schedule_draft_save()))
@@ -5557,14 +5575,16 @@ class ModernOrderApp(tk.Frame):
                  self._generate, bg=CGR,
                  pady=10, padx=22, font=F_BOLD).pack(side="right")
         flat_btn(gen_row, "💲  Quote",
-                 self._quote_current_order, bg=CA2,
+                 self._quote_current_order, variant="secondary",
                  pady=10, padx=18, font=F_BOLD).pack(side="right", padx=(0, 8))
         flat_btn(gen_row, "📄  Import Purchase Order",
                  self._import_purchase_orders, variant="secondary",
                  pady=10, padx=18, font=F_BOLD).pack(side="left")
         # Only shown once photos sent from a phone are read and waiting.
+        # Green is what you press to finish something. This is a "there is
+        # work waiting" badge, so it gets the brand blue instead.
         self._inbox_btn = flat_btn(gen_row, "📱  Phone Inbox",
-                                   self._open_phone_inbox, bg=CGR,
+                                   self._open_phone_inbox, bg=CA,
                                    pady=10, padx=18, font=F_BOLD)
         self._refresh_inbox_badge()
 
@@ -5646,8 +5666,11 @@ class ModernOrderApp(tk.Frame):
             self.filter_due_var.set("All")
             self.filter_date_from.set("")
             self.filter_date_to.set("")
+        # Ghost put grey text on a white bar, which reads as disabled. It sits
+        # next to Refresh, so it may as well match it.
         flat_btn(srch, "Clear", _clear_filters,
-                 bg=CMU, pady=5, padx=8, font=F_BODY).pack(side="left", padx=(0, 8))
+                 variant="secondary", pady=5, padx=8,
+                 font=F_BODY).pack(side="left", padx=(0, 8))
 
         flat_btn(srch, "Refresh", self._refresh_orders_list,
                  bg=CNE, pady=5, padx=10, font=F_BODY).pack(side="right")
@@ -5717,7 +5740,7 @@ class ModernOrderApp(tk.Frame):
         flat_btn(bot, "👁  View Order", self._view_order,
                  bg=CA, pady=7).pack(side="left", padx=(0, 8))
         flat_btn(bot, "Open in New Order", self._load_prev_order,
-                 bg=CA2, pady=7).pack(side="left", padx=(0, 8))
+                 variant="secondary", pady=7).pack(side="left", padx=(0, 8))
         flat_btn(bot, "🖨  Print", self._print_prev_order,
                  variant="secondary", pady=7).pack(side="left", padx=(0, 8))
         menu_btn(bot, "Order  ▾", [
@@ -5740,7 +5763,7 @@ class ModernOrderApp(tk.Frame):
             ("Archive this order", self._archive_prev_order),
             None,
             ("Delete this order…", self._delete_prev_order),
-        ], bg=CMU, pady=7, padx=12).pack(side="right")
+        ], variant="secondary", pady=7, padx=12).pack(side="right")
 
     # ── Delivery tab ──────────────────────────────────────────────────────
     # What is finished and where it goes. Orders already carry a region and a
@@ -5817,8 +5840,8 @@ class ModernOrderApp(tk.Frame):
 
         bot = tk.Frame(frm, bg=CBG, pady=8)
         bot.grid(row=3, column=0, sticky="ew")
-        flat_btn(bot, "🖨  Print Run Sheet", self._print_run_sheet, bg=CGR,
-                 pady=7).pack(side="left", padx=(0, 8))
+        flat_btn(bot, "🖨  Print Run Sheet", self._print_run_sheet,
+                 variant="secondary", pady=7).pack(side="left", padx=(0, 8))
         flat_btn(bot, "✓  Mark Dispatched", self._mark_dispatched,
                  bg=CA, pady=7).pack(side="left", padx=(0, 8))
         menu_btn(bot, "Run  ▾", [
@@ -6149,7 +6172,7 @@ class ModernOrderApp(tk.Frame):
             None,
             ("Start one from an order…",    self._quote_from_order),
         ], bg=CNE, pady=6, padx=12).pack(side="right")
-        flat_btn(top, "New", self._new_quote, bg=CMU,
+        flat_btn(top, "New", self._new_quote, bg=CA,
                  pady=6, padx=12, font=F_BODY).pack(side="right", padx=(0, 8))
 
         # ── Who it is for ────────────────────────────────────────────────
@@ -6236,7 +6259,9 @@ class ModernOrderApp(tk.Frame):
         self._quote_add_btn.pack(side="left", padx=(0, 8))
         flat_btn(bot, "Edit", self._edit_quote_item, variant="secondary",
                  pady=7).pack(side="left", padx=(0, 8))
-        flat_btn(bot, "Remove", self._remove_quote_item, bg=CRD,
+        # Taking a line off a quote you have not sent yet is an edit, not a
+        # deletion. Red is saved for the things that don't come back.
+        flat_btn(bot, "Remove", self._remove_quote_item, variant="secondary",
                  pady=7).pack(side="left", padx=(0, 8))
 
         # Saving is the thing you do here; everything you can then do WITH the
@@ -7435,18 +7460,21 @@ class ModernOrderApp(tk.Frame):
                 ("＋ Add Product",        self._add_product,        CA,  True),
                 ("Edit",                  self._edit_product,       CNE, True),
                 ("Delete",                self._delete_product,     CRD, True),
-                ("📥 Import Price Files", self._import_price_files, CA2, True),
-                ("Rates per m²",          self._edit_price_rates,   CNE, True),
+                ("📥 Import Price Files", self._import_price_files, None, True),
                 ("Refresh",               self._refresh_products_list, CNE, False)):
-            b = flat_btn(bot, label, cmd, bg=colour, pady=7)
+            b = (flat_btn(bot, label, cmd, variant="secondary", pady=7)
+                 if colour is None else
+                 flat_btn(bot, label, cmd, bg=colour, pady=7))
             b.pack(side="left", padx=(0, 8))
             if rights and not can:
                 b.config(state="disabled")
-        b = flat_btn(bot, "Clear Price List", self._clear_price_list,
-                     bg=CRD, pady=7)
-        b.pack(side="right")
-        if not can:
-            b.config(state="disabled")
+        # Setting the rates is a once-a-year job and emptying the price list
+        # is a once-ever one. Neither earns a place on the bar.
+        menu_btn(bot, "Price List  ▾", lambda: [
+            ("Rates per m²…",   self._edit_price_rates if can else None),
+            None,
+            ("Clear price list…", self._clear_price_list if can else None),
+        ], variant="secondary", pady=7).pack(side="right")
 
     def _refresh_products_list(self):
         """Load the price list, off the main thread — it is a long list."""
@@ -8291,7 +8319,8 @@ class ModernOrderApp(tk.Frame):
                  bg=CNE, pady=5, padx=10, font=F_BODY).pack(side="right", padx=(8, 0))
         flat_btn(top, "⇩ Import from Orders",
                  self._import_customers_from_orders,
-                 bg=CGR, pady=5, padx=12, font=F_BODY).pack(side="right", padx=(8, 0))
+                 variant="secondary", pady=5, padx=12,
+                 font=F_BODY).pack(side="right", padx=(8, 0))
         flat_btn(top, "+ Add Customer",
                  lambda: self._open_customer_dialog(),
                  bg=CA, pady=5, padx=12, font=F_BOLD).pack(side="right")
@@ -8344,7 +8373,7 @@ class ModernOrderApp(tk.Frame):
                  lambda: self._open_customer_dialog(edit=True),
                  bg=CA, pady=7).pack(side="left", padx=(0, 8))
         flat_btn(bot, "＋  New Order", self._new_order_for_customer,
-                 bg=CGR, pady=7).pack(side="left", padx=(0, 8))
+                 variant="secondary", pady=7).pack(side="left", padx=(0, 8))
         menu_btn(bot, "Customer  ▾", [
             ("View their orders",     self._view_customer_orders),
             ("Their portal link…",    self._customer_portal_link),
@@ -9020,7 +9049,7 @@ class ModernOrderApp(tk.Frame):
                  lambda: self._open_stock_item_dialog(edit=True),
                  bg=CA, pady=7).pack(side="left", padx=(0, 8))
         flat_btn(bot, "±  Adjust Stock", self._adjust_stock_dialog,
-                 bg=CA2, pady=7).pack(side="left", padx=(0, 8))
+                 variant="secondary", pady=7).pack(side="left", padx=(0, 8))
 
         def _stock_actions():
             can = _db.is_ready() and _db.can_manage_stock()
@@ -10019,7 +10048,8 @@ class ModernOrderApp(tk.Frame):
         flat_btn(tb, "Move Down",   lambda: self._move_media(1),
                  bg=CNE, pady=5, padx=10, font=F_BODY).pack(side="left", padx=(0, 6))
         flat_btn(tb, "Part No. Code", self._edit_media_code,
-                 bg=CA2, pady=5, padx=10, font=F_BODY).pack(side="left")
+                 variant="secondary", pady=5, padx=10,
+                 font=F_BODY).pack(side="left")
 
         self._refresh_media_list()
 
@@ -13993,12 +14023,23 @@ class ModernOrderApp(tk.Frame):
         new_dark = not is_dark
 
         # Build color swap map before updating globals
+        was = _button_variants()
         if new_dark:
             color_map = {v.upper(): _DARK_COLORS[k] for k, v in _LIGHT_COLORS.items()}
             _set_dark_mode()
         else:
             color_map = {v.upper(): _LIGHT_COLORS[k] for k, v in _DARK_COLORS.items()}
             _set_light_mode()
+
+        # The quiet button weights are mixed from two palette colours, so the
+        # result is not itself a palette colour and the walk below would not
+        # know what to do with it — a pale blue button would stay pale blue on
+        # a dark card. Add what each weight was, and what it now is.
+        now = _button_variants()
+        for name, (old_bg, old_fg) in was.items():
+            new_bg, new_fg = now[name]
+            color_map.setdefault(old_bg.upper(), new_bg)
+            color_map.setdefault(old_fg.upper(), new_fg)
 
         # Save preference
         self._settings["dark_mode"] = new_dark
@@ -14023,8 +14064,10 @@ class ModernOrderApp(tk.Frame):
         # Update the toggle button label
         if hasattr(self, "_dark_mode_btn") and self._dark_mode_btn.winfo_exists():
             lbl = "☀  Switch to Light Mode" if new_dark else "🌙  Switch to Dark Mode"
-            self._dark_mode_btn.config(text=lbl, bg=CNE,
-                                       activebackground=_dk(CNE))
+            # Only the label changes here — the colour walk above has already
+            # moved the button to the new palette. Setting bg back to slate
+            # would undo that, and a Canvas has no activebackground to set.
+            self._dark_mode_btn.config(text=lbl)
         if hasattr(self, "_dark_mode_cur_lbl") and self._dark_mode_cur_lbl.winfo_exists():
             self._dark_mode_cur_lbl.config(text=f"  Current: {'Dark' if new_dark else 'Light'} Mode",
                                             bg=CCA, fg=CMU)

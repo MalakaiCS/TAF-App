@@ -544,3 +544,44 @@ def test_a_menu_button_can_be_quiet_too():
     src = _gui_source()
     sig = src.split("def menu_btn")[1].split("\n")[0:2]
     assert "variant" in "".join(sig)
+
+
+def test_asking_for_slate_gets_the_quiet_weight():
+    """Slate was what a button got for not being the main action. Converting
+    them one at a time left most of them behind, so the rule lives in
+    flat_btn instead of in a hundred call sites."""
+    src = _gui_source()
+    fn = src.split("def flat_btn")[1].split("\ndef ")[0]
+    assert 'if not variant and bg == CNE:' in fn
+    assert 'variant = "secondary"' in fn
+
+
+def test_the_slate_default_is_read_when_the_button_is_made():
+    """A default argument is evaluated once, at import. Frozen to the light
+    palette, it stops matching the moment someone switches to dark."""
+    src = _gui_source()
+    sig = src.split("def menu_btn")[1].split("):")[0]
+    assert "bg=None" in sig, "menu_btn froze the slate default at import"
+    body = src.split("def menu_btn")[1].split("\ndef ")[0]
+    assert "CNE if bg is None else bg" in body
+
+
+def test_a_pill_button_reports_its_text_colour():
+    """The label is a canvas item, so a Canvas has no fg to report and the
+    dark-mode walk skipped every button's text."""
+    src = _gui_source()
+    cget = src.split("class PillButton")[1].split("def cget")[1].split("\n\n")[0]
+    assert '"fg"' in cget and "self._fg" in cget
+
+
+def test_the_theme_switch_knows_about_the_quiet_weights():
+    """They are mixed from two palette colours, so they are not palette
+    colours and the colour walk had nothing to map them to — forty-one
+    buttons stayed pale blue on a dark card."""
+    src = _gui_source()
+    fn = src.split("def _toggle_dark_mode")[1].split("\n    def ")[0]
+    assert "was = _button_variants()" in fn
+    assert "now = _button_variants()" in fn
+    assert "color_map.setdefault" in fn
+    # And it must not put the toggle's own button back to slate afterwards.
+    assert "bg=CNE" not in fn
