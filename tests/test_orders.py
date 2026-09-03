@@ -232,15 +232,66 @@ def test_a_blank_company_detail_is_never_printed_as_a_placeholder():
     assert "if (!has(text)) { return; }" in shared
 
 
-def test_the_company_file_ships_with_nothing_invented():
+def _company_values() -> dict:
+    """The filled-in values from docs/company.js, ignoring the examples.
+
+    The file is JavaScript, not JSON, and every line carries an `// e.g. ...`
+    comment showing the shape. Stripping those by cutting at `//` would also
+    cut `https://` in half, so instead this only matches a `name: "value"`
+    pair — which the examples inside the comments are not.
+    """
     from pathlib import Path
+    import re
     cfg = (Path(__file__).resolve().parent.parent / "docs"
            / "company.js").read_text(encoding="utf-8")
-    import re
-    # Every contact field must ship empty — a wrong phone number on a
-    # customer page is worse than no phone number.
-    for field in ("phone", "email", "website", "abn", "address"):
-        assert re.search(field + r':\s*"",', cfg), f"{field} must ship blank"
+    body = cfg.split("window.TAF_COMPANY")[1]
+    return {k: v for k, v in re.findall(r'(\w+):\s*"([^"]*)"', body)}
+
+
+def test_no_customer_facing_detail_is_a_placeholder():
+    """A page never prints an empty label, so a blank field is safe. An
+    example left in place is not — it would put a made-up phone number in
+    front of a customer."""
+    values = _company_values()
+    for field, value in values.items():
+        assert "e.g." not in value, f"{field} still holds the example text"
+        assert "xxxx" not in value.lower(), f"{field} still holds a placeholder"
+    assert values.get("name"), "the company name is what every page is headed with"
+
+
+def test_a_contact_detail_is_not_in_the_wrong_field():
+    """The ABN once held the website address, so every customer page read
+    'ABN https://...'. Each field goes somewhere specific on the page and a
+    value of the wrong shape is visible to whoever reads it."""
+    v = _company_values()
+    if v.get("abn"):
+        assert not v["abn"].lower().startswith(("http", "www")), \
+            "the ABN field holds a web address"
+        assert "@" not in v["abn"], "the ABN field holds an email address"
+        assert any(c.isdigit() for c in v["abn"]), "an ABN is a number"
+    if v.get("email"):
+        assert "@" in v["email"] and " " not in v["email"].strip(), \
+            "the email field does not hold an email address"
+    if v.get("website"):
+        assert v["website"].lower().startswith(("http://", "https://")), \
+            "the website needs the https:// or the link will not work"
+    if v.get("phone"):
+        assert "@" not in v["phone"], "the phone field holds an email address"
+
+
+def test_the_days_of_the_week_are_spelled_correctly():
+    """Opening hours sit on the quote page and the portal, under the company
+    name. A typo there is read by every customer."""
+    days = ("Monday", "Tuesday", "Wednesday", "Thursday", "Friday",
+            "Saturday", "Sunday")
+    misspelt = {"Thusday": "Thursday", "Tuseday": "Tuesday",
+                "Wendsday": "Wednesday", "Wedneday": "Wednesday",
+                "Thurday": "Thursday", "Satuday": "Saturday",
+                "Mondey": "Monday", "Firday": "Friday"}
+    for field, value in _company_values().items():
+        for wrong, right in misspelt.items():
+            assert wrong.lower() not in value.lower(), \
+                f"{field}: '{wrong}' should be '{right}'"
 
 
 def test_an_order_can_be_opened_for_tracking_and_delays():

@@ -22,7 +22,7 @@ window.TAF_COMPANY = {
   phone:   "07 3800 3448",              // e.g. "07 3800 0000"
   email:   "sales@totalairfiltration.com.au",              // e.g. "sales@totalairfiltration.com.au"
   website: "https://totalairfiltration.com.au",              // e.g. "https://totalairfiltration.com.au"
-  abn:     "https://totalairfiltration.com.au",              // e.g. "12 345 678 901"
+  abn:     "",              // e.g. "12 345 678 901"
 
   // Where post goes.
   address: "Unit 1/19 Tradelink Road, hillcrest QLD 4118",              // e.g. "19 Trade Link Road, Hillcrest QLD 4118"
@@ -31,10 +31,10 @@ window.TAF_COMPANY = {
   // Shown on exactly those orders, which is where it is actually needed.
   pickup: {
     address: "Unit 1/19 Tradelink Road, hillcrest QLD 4118",            // e.g. "19 Trade Link Road, Hillcrest QLD 4118"
-    hours:   "Monday to Thusday 7am to 3:30pm & Friday 7am to 12:30pm",            // e.g. "Monday to Friday, 7am - 3.30pm"
+    hours:   "Monday to Thursday 7am to 3:30pm & Friday 7am to 12:30pm",            // e.g. "Monday to Friday, 7am - 3.30pm"
     note:    "Ask at the front office and quote your order number."             // e.g. "Ask at the front office and quote your order number."
   },
 
   // Trading hours shown in the footer.
-  hours: "Monday to Thusday 7am to 3:30pm & Friday 7am to 12:30pm"                 // e.g. "Monday to Friday, 7am - 4pm"
+  hours: "Monday to Thursday 7am to 3:30pm & Friday 7am to 12:30pm"                 // e.g. "Monday to Friday, 7am - 4pm"
 };
