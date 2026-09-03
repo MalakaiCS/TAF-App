@@ -280,7 +280,7 @@ CNH  = "#44525C"   # neutral hover (must differ from CTX so dark-mode swap works
 CRE  = "#FAFCFD"   # zebra / even row tint
 CSL  = "#E5F4FC"   # selected row
 CNV  = "#16384B"   # navy header (card / section / table headers, title bar)
-CFD  = "#F4F8FA"   # field background
+CFD  = "#E7EEF4"   # field fill — fields are filled, not outlined
 CHD  = "#F7FAFC"   # table heading fill — a label, not a heavy navy bar
 CHT  = "#40525F"   # table heading text
 CBR  = "#E3EAEF"   # hairline border: card edges, dividers, input outlines
@@ -332,7 +332,7 @@ def _set_light_mode():
     CRD = "#E5484D";  CRH = "#D23A3F"
     CNE = "#546572";  CNH = "#44525C"
     CRE = "#FAFCFD";  CSL = "#E5F4FC"
-    CNV = "#16384B";  CFD = "#F4F8FA"
+    CNV = "#16384B";  CFD = "#E7EEF4"
     CHD = "#F7FAFC";  CHT = "#40525F";  CBR = "#E3EAEF"
 
 def _restyle_widget_tree(widget, color_map: dict):
@@ -1091,7 +1091,7 @@ def field_entry(parent, textvariable=None, width=None, **kw) -> tk.Entry:
     """Brand input: field-bg fill, 1px border that turns brand-blue on focus."""
     e = tk.Entry(parent,
                  relief="flat", bd=8, highlightthickness=1,
-                 highlightbackground=CSP, highlightcolor=CA,
+                 highlightbackground=CFD, highlightcolor=CA,
                  font=F_BODY, bg=CFD, fg=CTX, insertbackground=CTX,
                  **kw)
     if textvariable is not None:
@@ -1230,11 +1230,17 @@ def _configure_ttk_style():
     except Exception:
         pass
 
+    # clam draws the arrow as a raised button in its own box, with a divider
+    # between it and the text — which is what made a dropdown look like it
+    # came from a different decade than the plain field beside it. Setting the
+    # light and dark edges to the fill colour removes the 3D box, leaving one
+    # flat surface with a quiet arrow sitting in it; the padding matches
+    # field_entry's so a dropdown and a text box are the same height in a row.
     style.configure("TCombobox",
                     fieldbackground=CFD, background=CFD, foreground=CTX,
-                    bordercolor=CSP, lightcolor=CSP, darkcolor=CSP,
-                    arrowcolor=CMU, arrowsize=13,
-                    padding=(8, 5), relief="flat")
+                    bordercolor=CFD, lightcolor=CFD, darkcolor=CFD,
+                    arrowcolor=CMU, arrowsize=13, borderwidth=1,
+                    padding=(8, 7), relief="flat")
     style.map("TCombobox",
               fieldbackground=[("readonly", CFD), ("disabled", CBG)],
               foreground=[("readonly", CTX)],
@@ -2550,12 +2556,8 @@ class LineItemDialog(tk.Toplevel):
             self.vars[key] = v
             # Use tk.OptionMenu instead of ttk.Combobox — always renders cleanly
             v.set(v.get() or vals[0])
-            om = tk.OptionMenu(sub, v, *vals)
-            om.config(relief="flat", bd=0, highlightthickness=1, highlightbackground=CBR, bg=CBG, fg=CTX,
-                      font=F_BODY, anchor="w",
-                      activebackground=CRE, activeforeground=CTX, cursor="hand2", padx=8, pady=4)
-            om["menu"].config(bg=CCA, fg=CTX, font=F_BODY,
-                              activebackground=CA, activeforeground="white")
+            om = ttk.Combobox(sub, textvariable=v, values=list(vals),
+                              state="readonly", font=F_BODY)
             om.pack(fill="x", pady=(3, 0))
 
         # Auto-set Filter/Media Type from the channel thickness as the user
@@ -3009,13 +3011,10 @@ class BagLineItemDialog(tk.Toplevel):
         pt_col.pack(side="left", padx=(0, 28))
         tk.Label(pt_col, text="Product Type", bg=CBG, fg=CTX, font=F_BODY).pack(anchor="w")
         self.var_pt = tk.StringVar(value=d.get("product_type", BAG_PRODUCT_TYPES[0]))
-        om_pt = tk.OptionMenu(pt_col, self.var_pt, *BAG_PRODUCT_TYPES,
-                              command=lambda _: self._on_type_change())
-        om_pt.config(relief="flat", bd=0, highlightthickness=1, highlightbackground=CBR, bg=CCA, fg=CTX, font=F_BODY,
-                     width=16, anchor="w", activebackground=CRE,
-                     activeforeground=CTX, cursor="hand2")
-        om_pt["menu"].config(bg=CCA, fg=CTX, font=F_BODY,
-                             activebackground=CA, activeforeground="white")
+        om_pt = ttk.Combobox(pt_col, textvariable=self.var_pt,
+                             values=list(BAG_PRODUCT_TYPES),
+                             state="readonly", width=18, font=F_BODY)
+        om_pt.bind("<<ComboboxSelected>>", lambda _e: self._on_type_change())
         om_pt.pack()
 
         # Quantity
@@ -3034,13 +3033,12 @@ class BagLineItemDialog(tk.Toplevel):
         tk.Label(self.preset_frame, text="Preset:", bg=CBG, fg=CTX,
                  font=F_BODY).pack(side="left", padx=(0, 8))
         self.var_preset = tk.StringVar(value="Custom")
-        self.om_preset  = tk.OptionMenu(self.preset_frame, self.var_preset, "Custom",
-                                        command=lambda _: self._on_preset_change())
-        self.om_preset.config(relief="flat", bd=0, highlightthickness=1, highlightbackground=CBR, bg=CCA, fg=CTX, font=F_BODY,
-                              width=28, anchor="w", activebackground=CRE,
-                              activeforeground=CTX, cursor="hand2")
-        self.om_preset["menu"].config(bg=CCA, fg=CTX, font=F_BODY,
-                                       activebackground=CA, activeforeground="white")
+        self.om_preset = ttk.Combobox(self.preset_frame,
+                                      textvariable=self.var_preset,
+                                      values=["Custom"], state="readonly",
+                                      width=30, font=F_BODY)
+        self.om_preset.bind("<<ComboboxSelected>>",
+                            lambda _e: self._on_preset_change())
         self.om_preset.pack(side="left")
 
         # ── Dimensions (W × H × D) ─────────────────────────────────────────
@@ -3104,12 +3102,10 @@ class BagLineItemDialog(tk.Toplevel):
         m_col.grid(row=0, column=0, padx=(0, 28))
         tk.Label(m_col, text="Media Type", bg=CBG, fg=CTX, font=F_BODY).pack(anchor="w")
         self.var_media = tk.StringVar(value=d.get("media", BAG_MEDIA_TYPES[0]))
-        self.om_media  = tk.OptionMenu(m_col, self.var_media, *BAG_MEDIA_TYPES,
-                                       command=lambda _: self._auto_pn())
-        self.om_media.config(relief="flat", bd=0, highlightthickness=1, highlightbackground=CBR, bg=CCA, fg=CTX, font=F_BODY,
-                             width=10, anchor="w", activebackground=CRE, cursor="hand2")
-        self.om_media["menu"].config(bg=CCA, fg=CTX, font=F_BODY,
-                                      activebackground=CA, activeforeground="white")
+        self.om_media = ttk.Combobox(m_col, textvariable=self.var_media,
+                                     values=list(BAG_MEDIA_TYPES),
+                                     state="readonly", width=12, font=F_BODY)
+        self.om_media.bind("<<ComboboxSelected>>", lambda _e: self._auto_pn())
         self.om_media.pack()
 
         self.media_frame.pack(fill="x", pady=(0, 8))
@@ -3204,12 +3200,7 @@ class BagLineItemDialog(tk.Toplevel):
 
         # Rebuild preset menu for this product type
         presets = STANDARD_SIZES.get(pt, [])
-        menu = self.om_preset["menu"]
-        menu.delete(0, "end")
-        for label, *_ in presets:
-            menu.add_command(label=label,
-                             command=lambda l=label: (self.var_preset.set(l),
-                                                      self._on_preset_change()))
+        self.om_preset["values"] = [label for label, *_ in presets] or ["Custom"]
         if presets:
             # Default to first preset unless restoring an existing item
             first_label = presets[0][0]
@@ -3235,11 +3226,7 @@ class BagLineItemDialog(tk.Toplevel):
             media_list = BAG_MEDIA_TYPES
             default    = "G4"
 
-        menu_m = self.om_media["menu"]
-        menu_m.delete(0, "end")
-        for m in media_list:
-            menu_m.add_command(label=m, command=lambda v=m: (
-                self.var_media.set(v), self._auto_pn()))
+        self.om_media["values"] = list(media_list)
         if self.var_media.get() not in media_list:
             self.var_media.set(default)
 

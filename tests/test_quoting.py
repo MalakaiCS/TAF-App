@@ -345,3 +345,47 @@ def test_an_empty_quote_does_not_say_so_twice():
     src = _gui_source()
     assert "No lines yet." not in src, \
         "the table's own empty state already says this"
+
+
+# ── Dropdowns ────────────────────────────────────────────────────────────────
+
+def test_there_is_only_one_kind_of_dropdown():
+    """tk.OptionMenu draws a raised 3D dash for its indicator and cannot be
+    styled to match anything. Every dropdown is a ttk.Combobox now."""
+    src = _gui_source()
+    assert "tk.OptionMenu(" not in src
+
+
+def test_a_dropdown_has_no_border_to_break_around_its_arrow():
+    """clam draws the arrow outside the field, so a bordered field shows a
+    divider between the text and the arrow — which is what made these look
+    like they came from a different decade than the box beside them."""
+    src = _gui_source()
+    cfg = src.split('style.configure("TCombobox"')[1].split(")")[0]
+    assert "bordercolor=CFD" in cfg and "lightcolor=CFD" in cfg \
+        and "darkcolor=CFD" in cfg, "the resting border is back"
+    # The blue ring on focus is what replaces it.
+    mp = src.split('style.map("TCombobox"')[1].split("selectforeground")[0]
+    assert '("focus", CA)' in mp
+
+
+def test_a_dropdown_and_a_text_box_are_the_same_shape():
+    """They sit next to each other in a row; different heights or fills read
+    as a mistake."""
+    src = _gui_source()
+    cfg = src.split('style.configure("TCombobox"')[1].split(")")[0]
+    assert "fieldbackground=CFD" in cfg and "background=CFD" in cfg
+    entry = src.split("def field_entry")[1].split("\ndef ")[0]
+    assert "bg=CFD" in entry
+    assert "highlightbackground=CFD" in entry, \
+        "the text box has an outline the dropdown cannot have"
+
+
+def test_the_bag_dialog_still_repopulates_its_choices():
+    """Preset and media used to be rebuilt by replacing menu entries; as
+    comboboxes they are a list of values, and that swap is easy to half-do."""
+    src = _gui_source()
+    fn = src.split("def _on_type_change")[1].split("\n    def ")[0]
+    assert 'self.om_preset["values"]' in fn
+    assert 'self.om_media["values"]' in fn
+    assert '["menu"]' not in fn, "still driving a menu that no longer exists"
