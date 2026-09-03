@@ -20,10 +20,12 @@ create table if not exists catalog_lists (
 alter table catalog_lists enable row level security;
 
 -- All authenticated users can read
+drop policy if exists "Authenticated users can view catalog lists" on catalog_lists;
 create policy "Authenticated users can view catalog lists"
   on catalog_lists for select to authenticated using (true);
 
 -- Managers and above can insert/update/delete
+drop policy if exists "Managers can insert catalog lists" on catalog_lists;
 create policy "Managers can insert catalog lists"
   on catalog_lists for insert to authenticated
   with check (
@@ -34,6 +36,7 @@ create policy "Managers can insert catalog lists"
     )
   );
 
+drop policy if exists "Managers can update catalog lists" on catalog_lists;
 create policy "Managers can update catalog lists"
   on catalog_lists for update to authenticated
   using (
@@ -44,6 +47,7 @@ create policy "Managers can update catalog lists"
     )
   );
 
+drop policy if exists "Managers can delete catalog lists" on catalog_lists;
 create policy "Managers can delete catalog lists"
   on catalog_lists for delete to authenticated
   using (

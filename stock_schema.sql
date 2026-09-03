@@ -39,21 +39,27 @@ ALTER TABLE stock_items       ENABLE ROW LEVEL SECURITY;
 ALTER TABLE stock_transactions ENABLE ROW LEVEL SECURITY;
 
 -- All authenticated users can read
+drop policy if exists "stock_items_select" on stock_items;
 CREATE POLICY "stock_items_select"
     ON stock_items FOR SELECT TO authenticated USING (true);
 
+drop policy if exists "stock_items_insert" on stock_items;
 CREATE POLICY "stock_items_insert"
     ON stock_items FOR INSERT TO authenticated WITH CHECK (true);
 
+drop policy if exists "stock_items_update" on stock_items;
 CREATE POLICY "stock_items_update"
     ON stock_items FOR UPDATE TO authenticated USING (true);
 
+drop policy if exists "stock_items_delete" on stock_items;
 CREATE POLICY "stock_items_delete"
     ON stock_items FOR DELETE TO authenticated USING (true);
 
+drop policy if exists "stock_tx_select" on stock_transactions;
 CREATE POLICY "stock_tx_select"
     ON stock_transactions FOR SELECT TO authenticated USING (true);
 
+drop policy if exists "stock_tx_insert" on stock_transactions;
 CREATE POLICY "stock_tx_insert"
     ON stock_transactions FOR INSERT TO authenticated WITH CHECK (true);
 

@@ -137,50 +137,63 @@ pip install -r requirements.txt
 
 ### Create the database tables
 
-In the Supabase dashboard → **SQL Editor**, run these once (in order):
+**Not sure what you've already run?** Paste
+[`check_migrations.sql`](check_migrations.sql) into the Supabase **SQL Editor**
+and run it. It changes nothing — it reads what your project has and lists what
+is still outstanding, most urgent first.
 
-1. `setup_database.sql` — profiles + orders + core RPCs
-2. `customers_schema.sql`
-3. `stock_schema.sql`
-4. `extra_columns_migration.sql`
-5. **`migrate_staff_access.sql` — run this one.** Every policy in the older
-   scripts is `TO authenticated USING (true)`, meaning *anyone Supabase counts
-   as signed in*. The publishable key is public (it ships in the installer),
-   and the login window offers Create Account — so without this migration
-   anyone holding that key can register and read every order, customer, quote
-   and price. It closes that: staff means "has an **approved** profile", and
-   every profile that already exists is approved automatically, so nobody
-   working today is locked out.
-6. The other `migrate_*.sql` files (audit log, media types, stock alerts,
-   updater, user management, catalogue, customer profiles) — run any that apply to
-   bring an existing DB up to date. `migrate_catalog.sql` backs the editable
-   dedicated-filter presets and custom filter types; without it those edits
-   stay on one PC instead of being shared. `migrate_customer_profiles.sql`
-   adds customer short names, delivery regions, job-number labels and the
-   part-number code on each media type. `migrate_pricing.sql` adds the price
-   list and the per-m² rates that back quotes and the Xero export.
-   `migrate_quotes.sql` adds saved quotes, and `migrate_quote_portal.sql`
-   the customer accept/decline page. `migrate_supplied_order_numbers.sql`
-   adds the TAF-ON- order-number counter.
-7. **`migrate_performance.sql` — worth running.** The order list was doing
-   `select *` on `orders`, which pulls every line of every order ever placed
-   every time Previous Orders, the Dashboard or Delivery is opened. This adds
-   a view that gives the list a line count instead, plus indexes for the
-   lookups that got slower as features were added. It also fixes a silent
-   bug: that query had no paging and PostgREST stops at 1000 rows, so past a
-   thousand orders the oldest simply stopped appearing.
-8. **`migrate_scanning.sql` — run this before anyone scans anything.** Stock
-   adjustments used to be read-modify-write: two people counting the same rack
-   at once both read the old figure and both wrote their own answer, and one
-   count vanished with nothing in the log to show it. This moves the
-   arithmetic into the database, onto a locked row. It also makes a movement
-   idempotent on a caller-supplied reference — a handheld that loses signal
-   after the write lands but before the reply arrives cannot tell "it failed"
-   from "it worked and I didn't hear", so it retries, and without this the
-   stock moves twice. Finally it makes SKUs unique so a scan finds exactly one
-   item, and adds `resolve_scan()` so an app can ask what a code is instead of
-   guessing. Safe to run on a database that already has duplicate SKUs: it
-   names them and installs everything else.
+Otherwise, in the Supabase dashboard → **SQL Editor**, run these in this order.
+Every one is safe to run again, so if you are unsure whether you did one,
+just run it — nothing is lost and nothing is duplicated.
+
+| # | File | What it gives you | |
+|---|------|-------------------|---|
+| 1 | `setup_database.sql` | Accounts and orders — the base tables | essential |
+| 2 | `customers_schema.sql` | The customer list | essential |
+| 3 | `stock_schema.sql` | Stock items and their movements | essential |
+| 4 | `extra_columns_migration.sql` | Supplier email, short name | optional |
+| 5 | `migrate_orders.sql` | Archiving, and delete by role | essential |
+| 6 | `migrate_audit_log.sql` | Who did what, and when | recommended |
+| 7 | `migrate_media_types.sql` | Media types shared between PCs | recommended |
+| 8 | `migrate_stock_alerts.sql` | Low-stock thresholds on the Dashboard | optional |
+| 9 | `migrate_user_management.sql` | Directors and Admins managing accounts | recommended |
+| 10 | `migrate_catalog.sql` | Filter presets shared between PCs | recommended |
+| 11 | `migrate_customer_profiles.sql` | Short names, regions, job-number rules | recommended |
+| 12 | `migrate_po_inbox.sql` | Photos sent from a phone | optional |
+| 13 | `migrate_pricing.sql` | Price list and rates per m² | recommended |
+| 14 | `migrate_quotes.sql` | Saved quotes | recommended |
+| 15 | `migrate_quote_portal.sql` | Customers accepting a quote online | optional |
+| 16 | **`migrate_staff_access.sql`** | **Security — read this one** | **ESSENTIAL** |
+| 17 | `migrate_customer_portal.sql` | Customers seeing their orders online | optional |
+| 18 | `migrate_portal_signin.sql` | Signing in by email or PO number | optional |
+| 19 | `migrate_supplied_order_numbers.sql` | Our own TAF-ON- order numbers | recommended |
+| 20 | `migrate_performance.sql` | Speed, and orders past the thousandth | recommended |
+| 21 | `migrate_scanning.sql` | Stock counts that can't be lost | recommended |
+
+**Step 16 is the one that matters most.** Every policy in the older scripts is
+`TO authenticated USING (true)` — meaning *anyone Supabase counts as signed
+in*. The publishable key is public (it ships in the installer) and the login
+window offers Create Account, so without this migration anyone holding that
+key can register and read every order, customer, quote and price. It closes
+that: staff means "has an **approved** profile", and every profile that
+already exists is approved automatically, so nobody working today is locked
+out.
+
+A few notes on the rest:
+
+- **20 (`migrate_performance.sql`)** also fixes a silent bug: the order list
+  had no paging and PostgREST stops at 1000 rows, so past a thousand orders
+  the oldest simply stopped appearing.
+- **21 (`migrate_scanning.sql`)** must be run before anyone scans anything.
+  Stock adjustments used to be read-modify-write, so two people counting the
+  same rack at once lost a count. It also makes SKUs unique — if you already
+  have duplicates it names them and installs everything else, so run it, read
+  the warning, fix those SKUs and run it again.
+- **12 (`migrate_po_inbox.sql`)** also needs the `po-inbox` Storage bucket,
+  which the file creates.
+- Order in the table is order of dependency — later files assume tables the
+  earlier ones create. Running all 21 top to bottom on a fresh project, and
+  again on one that already has them, is verified by `tests/test_migrations.py`.
 
 ### Enable purchase-order import (optional)
 
