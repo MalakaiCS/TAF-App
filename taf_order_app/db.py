@@ -440,29 +440,82 @@ def tables_exist() -> tuple[bool, bool]:
     return p, o
 
 
-def get_all_orders() -> list:
+def _page_through(build_query, step: int = 1000, limit: int = 0) -> list:
+    """Read every row a query matches, a page at a time.
+
+    PostgREST returns at most 1000 rows and says nothing about the rest, so a
+    single request silently truncates — which is how the price list came back
+    as its first thousand entries, and how orders past the thousandth stopped
+    appearing in Previous Orders.
+    """
+    out: list = []
+    while True:
+        resp = build_query().range(len(out), len(out) + step - 1).execute()
+        batch = resp.data or []
+        out.extend(batch)
+        if len(batch) < step or (limit and len(out) >= limit):
+            break
+    return out[:limit] if limit else out
+
+
+def get_order_list(limit: int = 0) -> list:
+    """Orders for a list screen: everything except the line items.
+
+    The lines are the bulk of an order and no list shows them — only a count —
+    so they stay in the database until something opens one. Falls back to the
+    old whole-row query when migrate_performance.sql hasn't been run.
+    """
     try:
-        resp = (
-            get_client()
-            .table("orders")
-            .select("*")
-            .eq("archived", False)
-            .order("created_at", desc=True)
-            .execute()
-        )
+        rows = _page_through(
+            lambda: (get_client().table("orders_list").select("*")
+                     .eq("archived", False).order("created_at", desc=True)),
+            limit=limit)
+        for r in rows:
+            r["items"] = None          # not fetched; ask for them if needed
+        return rows
+    except Exception:
+        return get_all_orders(limit=limit)
+
+
+def get_order_items(order_id: str) -> list:
+    """One order's line items, fetched when something actually needs them."""
+    try:
+        resp = (get_client().table("orders")
+                .select("items").eq("id", order_id).single().execute())
+        return (resp.data or {}).get("items") or []
+    except Exception:
+        return []
+
+
+def media_usage_since(since) -> dict:
+    """How much of each media grade has been used since a date.
+
+    Counted in the database. The Dashboard used to do it by walking every
+    line of every order it had already downloaded.
+    """
+    try:
+        resp = get_client().rpc(
+            "media_usage_since", {"p_since": str(since)}).execute()
+        return {r["media_type"]: int(r["used"] or 0)
+                for r in (resp.data or []) if r.get("media_type")}
+    except Exception:
+        return {}
+
+
+def get_all_orders(limit: int = 0) -> list:
+    try:
+        return _page_through(
+            lambda: (get_client().table("orders").select("*")
+                     .eq("archived", False).order("created_at", desc=True)),
+            limit=limit)
     except Exception as exc:
         if "archived" in str(exc):
             # Migration not yet run — fetch without archived filter
-            resp = (
-                get_client()
-                .table("orders")
-                .select("*")
-                .order("created_at", desc=True)
-                .execute()
-            )
-        else:
-            raise
-    return resp.data or []
+            return _page_through(
+                lambda: (get_client().table("orders").select("*")
+                         .order("created_at", desc=True)),
+                limit=limit)
+        raise
 
 
 def delete_order(order_id: str) -> None:
@@ -1159,24 +1212,18 @@ def get_price_rows(search: str = "", limit: int = 0) -> list:
     Paged through in batches: PostgREST caps a response at 1000 rows, so a
     12,000-row price list would otherwise come back looking like 1,000.
     """
-    out: list = []
-    step = 1000
+    def build():
+        q = get_client().table("price_list").select("*")
+        if search:
+            s = search.replace(",", " ").strip()
+            q = q.or_(f"part_number.ilike.%{s}%,name.ilike.%{s}%,"
+                      f"description.ilike.%{s}%")
+        return q.order("part_number")
+
     try:
-        while True:
-            q = get_client().table("price_list").select("*")
-            if search:
-                s = search.replace(",", " ").strip()
-                q = q.or_(f"part_number.ilike.%{s}%,name.ilike.%{s}%,"
-                          f"description.ilike.%{s}%")
-            resp = (q.order("part_number")
-                    .range(len(out), len(out) + step - 1).execute())
-            batch = resp.data or []
-            out.extend(batch)
-            if len(batch) < step or (limit and len(out) >= limit):
-                break
+        return _page_through(build, limit=limit)
     except Exception:
-        pass
-    return out[:limit] if limit else out
+        return []
 
 
 def count_prices() -> int:
@@ -1502,19 +1549,24 @@ PO_INBOX_BUCKET = "po-inbox"
 _PO_MARKER = "_complete.json"
 
 
-def list_po_inbox_batches() -> list:
+def list_po_inbox_batches(skip: "set[str] | None" = None) -> list:
     """Return finished batches waiting to be read, oldest first.
 
     Each entry is {"batch", "photos": [names], "manifest": {...}}. Raises on a
     connection failure so the caller can stay quiet and retry later.
+
+    `skip` names batches this PC has already read. Checking a batch costs a
+    listing call plus a manifest download, and this runs on a timer, so a
+    batch we are only going to discard is dropped before either of those.
     """
+    skip = skip or set()
     store = get_client().storage.from_(PO_INBOX_BUCKET)
     folders = store.list("") or []
     batches = []
     for entry in folders:
         name = entry.get("name") or ""
         # Storage lists folders as entries with no id / metadata.
-        if not name or entry.get("id"):
+        if not name or entry.get("id") or name in skip:
             continue
         files = store.list(name) or []
         filenames = [f.get("name") or "" for f in files]

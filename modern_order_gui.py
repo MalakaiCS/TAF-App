@@ -28,6 +28,7 @@ from taf_order_app import part_numbers as _pn
 from taf_order_app import stock_usage as _stock_usage
 from taf_order_app import pricing as _pricing
 from taf_order_app import delivery as _delivery
+from taf_order_app import backup as _backup
 from taf_order_app.bag_filler import (
     BAG_PRODUCT_TYPES, BAG_MEDIA_TYPES, ROLL_MEDIA_TYPES,
     ROLL_WIDTHS, ROLL_LENGTHS, STANDARD_SIZES,
@@ -660,9 +661,27 @@ def _draw_bar_chart(canvas, values, labels, W, H, PAD=40,
                                    anchor="w", fill=CMU)
 
 
+# Tk accepts colour names as well as hex, and the app uses "white" for button
+# text in about fifty places. Blending one of those — which is what disabling
+# a button does — used to try to read "wh" as a hexadecimal number and crash
+# the screen being built.
+_NAMED_COLOURS = {
+    "white": "#FFFFFF", "black": "#000000", "red": "#FF0000",
+    "green": "#008000", "blue": "#0000FF", "grey": "#808080",
+    "gray": "#808080", "yellow": "#FFFF00", "orange": "#FFA500",
+}
+
+
 def _rgb(c: str):
-    h = c.lstrip("#")
-    return int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16)
+    h = _NAMED_COLOURS.get(str(c).strip().lower(), str(c)).lstrip("#")
+    if len(h) == 3:                       # #abc is shorthand for #aabbcc
+        h = "".join(ch * 2 for ch in h)
+    try:
+        return int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16)
+    except ValueError:
+        # An unrecognised colour name. Mid-grey blends to something sane and
+        # keeps the window up, which beats a half-drawn tab.
+        return 128, 128, 128
 
 
 def _blend(c1: str, c2: str, t: float) -> str:
@@ -4332,6 +4351,10 @@ class ModernOrderApp(tk.Frame):
     # Seconds a tab's data stays "fresh" — bouncing between tabs within this
     # window skips the re-fetch + treeview rebuild, so switching is instant.
     _TAB_TTL = 60
+    # A few tabs hold things that barely move between visits. Re-reading the
+    # whole price list because someone looked at Products two minutes ago is
+    # a wait for no new information.
+    _TAB_TTLS = {"products": 900, "customers": 300, "audit_log": 120}
 
     def _maybe_refresh(self, key: str):
         """Load a tab's data on show, but skip if it was loaded recently.
@@ -4345,7 +4368,8 @@ class ModernOrderApp(tk.Frame):
         if key == "settings" and hasattr(self, "_local_storage_lbl"):
             self._local_storage_lbl.set(self._local_storage_info())
 
-        if time.monotonic() - self._tab_loaded.get(key, 0.0) < self._TAB_TTL:
+        ttl = self._TAB_TTLS.get(key, self._TAB_TTL)
+        if time.monotonic() - self._tab_loaded.get(key, 0.0) < ttl:
             return  # still fresh — instant switch, no network / rebuild
         self._tab_loaded[key] = time.monotonic()
 
@@ -4381,6 +4405,9 @@ class ModernOrderApp(tk.Frame):
 
         self._build_order_details_panel(frm)
         self._build_line_items_panel(frm)
+        # Lines added before this tab existed — a restored draft, a purchase
+        # order read from a photo — go into the table now that there is one.
+        self._refresh_items_tree()
 
     def _build_order_details_panel(self, parent):
         left = tk.Frame(parent, bg=CBG, padx=14, pady=12)
@@ -4792,6 +4819,8 @@ class ModernOrderApp(tk.Frame):
                  bg=CA2, pady=7).pack(side="left", padx=(0, 8))
         flat_btn(bot, "🚚 Freight / Delay",   self._edit_order_freight,
                  bg=CNE, pady=7).pack(side="left", padx=(0, 8))
+        flat_btn(bot, "🧾 Invoice to Xero",   self._invoice_selected_orders,
+                 bg=CGR, pady=7).pack(side="left", padx=(0, 8))
         flat_btn(bot, "Delete Order",          self._delete_prev_order,
                  bg=CRD, pady=7).pack(side="right", padx=(8, 0))
         flat_btn(bot, "Archive Order",         self._archive_prev_order,
@@ -4875,7 +4904,9 @@ class ModernOrderApp(tk.Frame):
         flat_btn(bot, "View Items", self._view_delivery_items, bg=CNE,
                  pady=7).pack(side="left", padx=(0, 8))
         flat_btn(bot, "🚚 Freight / Delay", self._edit_delivery_freight,
-                 bg=CA2, pady=7).pack(side="left")
+                 bg=CA2, pady=7).pack(side="left", padx=(0, 8))
+        flat_btn(bot, "🧾 Invoice Run to Xero", self._invoice_delivery_run,
+                 bg=CNE, pady=7).pack(side="left")
 
     def _refresh_delivery_run(self):
         """Rebuild the run from the orders already loaded, off the main thread."""
@@ -5302,7 +5333,7 @@ class ModernOrderApp(tk.Frame):
     def _refresh_quote_prices(self):
         """Load the price list for the Quotes tab and say what it found."""
         def _work():
-            prices, rates = self._load_prices(force=True)
+            prices, rates = self._load_prices()
             def _done():
                 if prices or rates:
                     self._quote_price_state.set(
@@ -6311,9 +6342,12 @@ class ModernOrderApp(tk.Frame):
 
         def _work():
             try:
-                # A search can legitimately match everything, so it is capped
-                # at what a person can actually scroll through.
-                rows = _db.get_price_rows(search, limit=3000)
+                # Nobody scrolls twelve thousand part numbers looking for one.
+                # An unfiltered view is a sample to confirm the list loaded;
+                # a search is what actually finds a product, and gets more
+                # room. Both are capped — filling the table is the slow part,
+                # not the query.
+                rows = _db.get_price_rows(search, limit=1500 if search else 400)
                 total = _db.count_prices()
             except Exception as exc:
                 rows, total = [], -1
@@ -6339,14 +6373,18 @@ class ModernOrderApp(tk.Frame):
                     "Couldn't read the price list — run migrate_pricing.sql "
                     "in the Supabase SQL Editor.")
             elif search:
+                more = " — narrow the search to see the rest" if len(rows) >= 1500 else ""
                 self._products_count.set(
-                    f"{len(rows):,} matching · {total:,} priced in total")
+                    f"{len(rows):,} matching · {total:,} priced in total{more}")
             elif not total:
                 self._products_count.set(
                     "Nothing priced yet — Import Price Files to load them.")
+            elif len(rows) < total:
+                self._products_count.set(
+                    f"{total:,} part numbers priced · showing the first "
+                    f"{len(rows):,} — search to find one")
             else:
-                shown = f" (showing {len(rows):,})" if len(rows) < total else ""
-                self._products_count.set(f"{total:,} part numbers priced{shown}")
+                self._products_count.set(f"{total:,} part numbers priced")
 
         threading.Thread(target=_work, daemon=True).start()
 
@@ -6978,24 +7016,12 @@ class ModernOrderApp(tk.Frame):
         if data is None:
             data = getattr(self, "_all_orders_data", [])
 
-        # Count media usage this month from db_items
+        # How much of each grade has gone out this month, counted in the
+        # database. This used to walk every line of every order the app had
+        # downloaded — which is most of the reason it downloaded them.
         today = _dt_module.date.today()
         month_start = today.replace(day=1)
-        media_usage = {}
-        for row in data:
-            def _parse_d2(s):
-                for fmt in ("%d/%m/%y", "%d/%m/%Y"):
-                    try:
-                        return _dt_module.datetime.strptime(s, fmt).date()
-                    except Exception:
-                        pass
-                return None
-            d = _parse_d2(row.get("date_ordered", ""))
-            if d and d >= month_start:
-                for item in (row.get("db_items") or []):
-                    mt = item.get("Media Type") or item.get("media") or item.get("media_type")
-                    if mt:
-                        media_usage[mt] = media_usage.get(mt, 0) + 1
+        media_usage = _db.media_usage_since(month_start)
 
         try:
             alerts = _db.get_stock_alerts()
@@ -8928,6 +8954,29 @@ class ModernOrderApp(tk.Frame):
             self._alert_thresh_frame.pack(fill="x")
             self._refresh_alert_thresholds_ui()
 
+        # ── Backup ────────────────────────────────────────────────────────
+        bk_card = tk.Frame(frm, bg=CCA, bd=1, relief="solid", padx=16, pady=12)
+        bk_card.grid(row=13, column=0, sticky="ew", pady=(12, 0))
+        tk.Label(bk_card, text="Backup & Export",
+                 bg=CCA, fg=CA, font=F_SEC, anchor="w").pack(anchor="w")
+        tk.Label(bk_card,
+                 text="Save every order, line item, customer, quote, stock item\n"
+                      "and price as spreadsheets in one dated zip file.\n\n"
+                      "They open in Excel and need nothing else — not this app,\n"
+                      "not an account, not the internet. Put a copy somewhere\n"
+                      "that isn't the office PC.",
+                 bg=CCA, fg=CMU, font=F_SM, justify="left").pack(anchor="w", pady=(2, 8))
+        self._backup_status = tk.StringVar(value="")
+        bk_row = tk.Frame(bk_card, bg=CCA)
+        bk_row.pack(anchor="w", fill="x")
+        self._backup_btn = flat_btn(bk_row, "💾  Back Up Everything",
+                                    self._run_backup, bg=CGR, pady=7)
+        self._backup_btn.pack(side="left", padx=(0, 8))
+        flat_btn(bk_row, "Open Backups Folder", self._open_backup_folder,
+                 bg=CNE, pady=7).pack(side="left", padx=(0, 8))
+        tk.Label(bk_row, textvariable=self._backup_status,
+                 bg=CCA, fg=CMU, font=F_SM).pack(side="left")
+
     def _local_storage_info(self) -> str:
         """Return a human-readable summary of what's in the local orders folder."""
         try:
@@ -9030,7 +9079,11 @@ class ModernOrderApp(tk.Frame):
         self.master.after(50, _poll)
 
     def _refresh_alert_thresholds_ui(self):
-        frm = self._alert_thresh_frame
+        # Only a manager gets this card, so on anyone else's screen there is
+        # nothing to redraw.
+        frm = getattr(self, "_alert_thresh_frame", None)
+        if frm is None:
+            return
         for w in frm.winfo_children():
             w.destroy()
         try:
@@ -10436,6 +10489,13 @@ class ModernOrderApp(tk.Frame):
         self.tree.selection_set(str(new_idx))
 
     def _refresh_items_tree(self):
+        # New Order is built the first time it is opened, not at start-up, so
+        # anything that touches the lines before then — a restored draft, an
+        # imported purchase order — has no tree to draw into yet. The lines
+        # are already in self.items; _build_new_order_tab draws them when it
+        # builds the table.
+        if getattr(self, "tree", None) is None:
+            return
         for iid in self.tree.get_children():
             self.tree.delete(iid)
         for i, item in enumerate(self.items):
@@ -11171,9 +11231,21 @@ class ModernOrderApp(tk.Frame):
 
     # ── Quotes ────────────────────────────────────────────────────────────
 
+    # How long a fetched price list is treated as current. Long enough that
+    # moving between tabs never re-downloads twelve thousand rows, short
+    # enough that a price someone else corrected turns up the same morning.
+    _PRICE_TTL = 600
+
     def _load_prices(self, force=False):
-        """The price list and the per-m2 rates, fetched once per session."""
-        if force or not hasattr(self, "_price_cache"):
+        """The price list and the per-m2 rates, cached between uses.
+
+        A full list is thousands of rows and a dozen round trips. Opening the
+        Quotes tab used to force a re-fetch every single time.
+        """
+        import time
+        fresh = (time.monotonic() - getattr(self, "_price_cache_at", 0)
+                 < self._PRICE_TTL)
+        if force or not hasattr(self, "_price_cache") or not fresh:
             prices, rates = {}, {}
             try:
                 prices = _db.get_price_list()
@@ -11186,7 +11258,9 @@ class ModernOrderApp(tk.Frame):
                         continue
             except Exception:
                 pass
+            import time as _time
             self._price_cache = (prices, rates)
+            self._price_cache_at = _time.monotonic()
         return self._price_cache
 
     def _open_quote(self, header, items, customer=None):
@@ -11279,6 +11353,230 @@ class ModernOrderApp(tk.Frame):
             os.startfile(str(path))
         except Exception:
             messagebox.showinfo("Quote Saved", f"Saved to:\n{path}")
+
+    # ── Backup ────────────────────────────────────────────────────────────
+
+    def _backup_dir(self) -> Path:
+        d = APP_DIR / "backups"
+        d.mkdir(parents=True, exist_ok=True)
+        return d
+
+    def _open_backup_folder(self):
+        try:
+            os.startfile(str(self._backup_dir()))
+        except Exception as exc:
+            messagebox.showinfo("Backups", f"The folder is at:\n"
+                                           f"{self._backup_dir()}\n\n({exc})")
+
+    def _run_backup(self):
+        """Write a dated zip of everything, off the main thread.
+
+        A full backup is a few thousand rows over the network; on the main
+        thread that is a frozen window and someone deciding the app crashed.
+        """
+        if not (_db.is_ready() and _db.current_user()):
+            messagebox.showwarning(
+                "Back Up Everything",
+                "Sign in first — the backup reads from the shared database.")
+            return
+        if getattr(self, "_backup_running", False):
+            return
+        self._backup_running = True
+        self._backup_btn.config(state="disabled")
+        self._backup_status.set("Starting…")
+
+        def _note(label):
+            self.master.after(0, lambda: self._backup_status.set(f"{label}…"))
+
+        def _work():
+            try:
+                path, problems = _backup.build_backup(self._backup_dir(),
+                                                      progress=_note)
+            except Exception as exc:
+                self.master.after(0, lambda: _failed(str(exc)))
+                return
+            self.master.after(0, lambda: _done(path, problems))
+
+        def _failed(msg):
+            self._backup_running = False
+            self._backup_btn.config(state="normal")
+            self._backup_status.set("")
+            messagebox.showerror("Back Up Everything",
+                                 f"The backup could not be written:\n{msg}")
+
+        def _done(path, problems):
+            self._backup_running = False
+            self._backup_btn.config(state="normal")
+            size = 0
+            try:
+                size = Path(path).stat().st_size
+            except OSError:
+                pass
+            self._backup_status.set(
+                f"Saved {Path(path).name} ({size / 1024:,.0f} KB)")
+            self.status_var.set(f"Backup saved: {Path(path).name}")
+            try:
+                _db.log_action("backup_exported", Path(path).name)
+            except Exception:
+                pass
+            if problems:
+                messagebox.showwarning(
+                    "Backup Incomplete",
+                    f"Saved to:\n{path}\n\n"
+                    "These could not be read and are NOT in the file:\n"
+                    + "\n".join(f"  • {p}" for p in problems))
+            else:
+                messagebox.showinfo(
+                    "Backup Saved",
+                    f"Saved to:\n{path}\n\n"
+                    "Copy it somewhere off this PC — a cloud drive or a USB "
+                    "stick. Everything inside is a plain spreadsheet.")
+            try:
+                os.startfile(str(Path(path).parent))
+            except Exception:
+                pass
+
+        threading.Thread(target=_work, daemon=True).start()
+
+    # ── Invoicing a finished order ────────────────────────────────────────
+
+    def _customer_record(self, name: str):
+        """The customer card behind an order, for the address on an invoice."""
+        name = (name or "").strip()
+        if not name:
+            return {}
+        cache = getattr(self, "_invoice_cust_cache", None)
+        if cache is None:
+            cache = self._invoice_cust_cache = {}
+        key = name.upper()
+        if key not in cache:
+            try:
+                match = _db.match_customer(name)
+            except Exception:
+                match = None
+            cache[key] = match or {}
+        return cache[key]
+
+    def _invoice_orders(self, rows, what: str):
+        """Write one Xero import file covering the given orders.
+
+        Xero takes many invoices in one file — it groups the lines by invoice
+        number — so a whole delivery run is invoiced in a single import rather
+        than one file per drop.
+        """
+        if not rows:
+            messagebox.showinfo("Invoice to Xero", f"Select {what} first.")
+            return
+        prices, rates = self._load_prices()
+        if not prices and not rates:
+            messagebox.showwarning(
+                "No Prices",
+                "There are no prices loaded, so nothing can be invoiced.\n\n"
+                "Import Price Files on the Products tab first.")
+            return
+
+        out_rows, missing, empty = [], [], []
+        seen_numbers = set()
+        for row in rows:
+            header, items = self._order_header_items(row, "Invoice")
+            if items is None:
+                continue
+            number = (header.get("Order Number")
+                      or row.get("order_no") or "").strip()
+            if number in seen_numbers:
+                continue          # the same order picked twice in a selection
+            seen_numbers.add(number)
+            header = dict(header)
+            header.setdefault("Customer Name", row.get("customer", ""))
+            header.setdefault("Order Number", number)
+            customer = self._customer_record(header.get("Customer Name", ""))
+            lines, unpriced = _pricing.invoice_for_order(
+                header, items, customer=customer, prices=prices, rates=rates)
+            if not lines:
+                empty.append(number or "—")
+            out_rows.extend(lines)
+            for line in unpriced:
+                missing.append(f"{number or '—'}: {line.get('description') or line.get('part_number') or '?'}")
+
+        if not out_rows:
+            messagebox.showwarning(
+                "Nothing to Invoice",
+                "None of the lines on "
+                + ("this order" if len(rows) == 1 else "these orders")
+                + " could be priced, so there is nothing to send to Xero.\n\n"
+                "Check the part numbers against the Products tab.")
+            return
+        if missing:
+            shown = "\n".join(f"  • {m}" for m in missing[:10])
+            more = f"\n  … and {len(missing) - 10} more" if len(missing) > 10 else ""
+            if not messagebox.askyesno(
+                    "Unpriced Lines",
+                    f"{len(missing)} line{'s' if len(missing) != 1 else ''} "
+                    f"{'have' if len(missing) != 1 else 'has'} no price and "
+                    f"will be left off the invoice:\n\n{shown}{more}\n\n"
+                    "Export the rest anyway?",
+                    icon="warning", default="no"):
+                return
+
+        stamp = datetime.datetime.now().strftime("%Y-%m-%d_%H%M")
+        if len(seen_numbers) == 1:
+            label = re.sub(r"[^A-Za-z0-9._-]+", "_",
+                           next(iter(seen_numbers)) or "order")
+            name = f"invoice_{label}_{stamp}.csv"
+        else:
+            name = f"invoices_{len(seen_numbers)}_orders_{stamp}.csv"
+        out = Path(self._invoice_dir()) / name
+        try:
+            path = _pricing.write_xero_csv(out, out_rows)
+        except Exception as exc:
+            messagebox.showerror("Invoice to Xero",
+                                 f"The file could not be written:\n{exc}")
+            return
+        try:
+            _db.log_action("invoiced_to_xero",
+                           f"{len(seen_numbers)} order(s), {len(out_rows)} line(s)")
+        except Exception:
+            pass
+        self.status_var.set(f"Xero invoice file saved: {Path(path).name}")
+        messagebox.showinfo(
+            "Ready for Xero",
+            f"{len(seen_numbers)} invoice"
+            f"{'s' if len(seen_numbers) != 1 else ''} "
+            f"({len(out_rows)} line{'s' if len(out_rows) != 1 else ''}) "
+            f"written to:\n{path}\n\n"
+            "In Xero: Business → Invoices → Import, choose this file, and "
+            "check the account code and tax rate on the preview before "
+            "confirming. Nothing is created in Xero until you confirm there.")
+        try:
+            os.startfile(str(Path(path).parent))
+        except Exception:
+            pass
+
+    def _invoice_dir(self) -> Path:
+        d = APP_DIR / "invoices"
+        d.mkdir(parents=True, exist_ok=True)
+        return d
+
+    def _invoice_selected_orders(self):
+        """Invoice whatever is selected in Previous Orders."""
+        rows = self._get_selected_orders()
+        # Invoicing something still on the bench is how a customer gets billed
+        # for filters that never arrived, so it takes a deliberate yes.
+        undelivered = [r for r in rows
+                       if (r.get("status") or "Pending") != _delivery.DISPATCHED]
+        if undelivered and not messagebox.askyesno(
+                "Invoice to Xero",
+                f"{len(undelivered)} of these "
+                f"{'orders have' if len(undelivered) != 1 else 'order has'} "
+                "not gone out yet.\n\nInvoice anyway?",
+                icon="warning", default="no"):
+            return
+        self._invoice_orders(rows, "an order")
+
+    def _invoice_delivery_run(self):
+        """Invoice the orders selected on the delivery run."""
+        self._invoice_orders(self._selected_delivery_orders(),
+                             "the orders that went out")
 
     def _export_quote_xero(self, header, lines, customer):
         """Write the quote as a Xero sales-invoice import file.
@@ -11724,7 +12022,10 @@ class ModernOrderApp(tk.Frame):
         # ── Database orders (from all users) ──────────────────────────────
         if _db.is_ready() and _db.current_user():
             try:
-                db_rows = _db.get_all_orders()
+                # Without the line items: the list shows a count, not the
+                # lines, and downloading every line of every order was what
+                # made these screens slow.
+                db_rows = _db.get_order_list()
                 for r in db_rows:
                     rows.append({
                         "source":       "db",
@@ -11733,7 +12034,9 @@ class ModernOrderApp(tk.Frame):
                         "order_no":     r.get("order_number", ""),
                         "date_ordered": r.get("date_ordered", ""),
                         "date_due":     r.get("date_due", ""),
-                        "n_items":      len(r.get("items") or []),
+                        "n_items":      (r.get("n_items")
+                                         if r.get("n_items") is not None
+                                         else len(r.get("items") or [])),
                         "created_by":   r.get("full_name") or r.get("username") or r.get("user_email", ""),
                     "created_by_role": r.get("created_by_role", "Employee"),
                     "user_id":      r.get("user_id", ""),
@@ -11741,7 +12044,9 @@ class ModernOrderApp(tk.Frame):
                         "filename":     "database",
                         "db_id":        r.get("id"),
                         "db_header":    r.get("header") or {},
-                        "db_items":     r.get("items") or [],
+                        # None means "not fetched yet" — _order_header_items
+                        # asks for them when an order is actually opened.
+                        "db_items":     r.get("items"),
                         "priority":          bool((r.get("header") or {}).get("priority", False)),
                         "status":            (r.get("header") or {}).get("status", "Pending") or "Pending",
                         "printed":           bool((r.get("header") or {}).get("printed", False)),
@@ -11974,7 +12279,7 @@ class ModernOrderApp(tk.Frame):
         # Pull header + items from DB or local file
         if row.get("source") == "db":
             header = dict(row.get("db_header") or {})
-            items  = list(row.get("db_items") or [])
+            items  = list(self._db_row_items(row))
         else:
             try:
                 payload = json.loads(row["path"].read_text(encoding="utf-8"))
@@ -12010,7 +12315,7 @@ class ModernOrderApp(tk.Frame):
 
     def _load_from_db_row(self, row: dict):
         header = row.get("db_header") or {}
-        items  = list(row.get("db_items") or [])
+        items  = list(self._db_row_items(row))
         for it in items:
             if "item_kind" not in it:
                 it["item_kind"] = "bag" if "product_type" in it else "filter"
@@ -12030,7 +12335,7 @@ class ModernOrderApp(tk.Frame):
             return
         if row.get("source") == "db":
             header = row.get("db_header") or {}
-            items  = list(row.get("db_items") or [])
+            items  = list(self._db_row_items(row))
         else:
             try:
                 payload = json.loads(row["path"].read_text(encoding="utf-8"))
@@ -12728,7 +13033,7 @@ class ModernOrderApp(tk.Frame):
 
         if row.get("source") == "db":
             header = dict(row.get("db_header") or {})
-            items  = list(row.get("db_items") or [])
+            items  = list(self._db_row_items(row))
         else:
             try:
                 payload = json.loads(row["path"].read_text(encoding="utf-8"))
@@ -12878,6 +13183,19 @@ class ModernOrderApp(tk.Frame):
             except Exception:
                 pass
 
+    def _db_row_items(self, row) -> list:
+        """A database order's line items, fetched the first time they matter.
+
+        The order list deliberately doesn't carry them — the lines are the
+        bulk of an order and no list shows them — so this is where they are
+        actually asked for, and they stay on the row afterwards.
+        """
+        items = row.get("db_items")
+        if items is None:
+            items = _db.get_order_items(row.get("db_id") or "")
+            row["db_items"] = items
+        return items or []
+
     def _order_header_items(self, row, what: str = "Order"):
         """An order-list row's header and items, wherever it came from.
 
@@ -12885,7 +13203,13 @@ class ModernOrderApp(tk.Frame):
         local file couldn't be read — callers check for ``None``.
         """
         if row.get("source") == "db":
-            return dict(row.get("db_header") or {}), list(row.get("db_items") or [])
+            items = row.get("db_items")
+            if items is None:
+                # The list doesn't carry the lines. Fetch them the first time
+                # this order is opened, and keep them on the row after that.
+                items = _db.get_order_items(row.get("db_id") or "")
+                row["db_items"] = items
+            return dict(row.get("db_header") or {}), list(items or [])
         try:
             payload = json.loads(Path(row["path"]).read_text(encoding="utf-8"))
             return payload.get("header", {}), payload.get("items", [])

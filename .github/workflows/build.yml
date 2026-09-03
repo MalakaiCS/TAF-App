@@ -86,6 +86,16 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
+      # The tests above check the rules; this starts the actual window and
+      # builds every tab and dialog against a stand-in database. It is what
+      # catches a method that was called but never written, or two cards put
+      # in the same grid cell - neither of which shows up in a diff. Runs
+      # once as a manager and once as everyone else, because rights decide
+      # which half of some screens gets built.
+      - name: Smoke test (build every screen)
+        timeout-minutes: 10
+        run: python tests/smoke_gui.py
+
       - name: Write settings.json from secret
         shell: bash
         env:

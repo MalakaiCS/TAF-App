@@ -16,7 +16,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-MODULES = ["tests.test_rules", "tests.test_db_and_updates", "tests.test_orders"]
+MODULES = ["tests.test_rules", "tests.test_db_and_updates", "tests.test_orders",
+           "tests.test_invoicing_and_backup"]
 
 
 def main() -> int:
