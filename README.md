@@ -81,6 +81,12 @@ log, stock management and a customer database.
   every order, every line, customers, quotes, stock and prices. They open in
   Excel and need nothing else — not this app, not an account, not the
   internet. Sign-in details and portal tokens stay out of it.
+- **Barcodes** — every worksheet page carries its order number as a Code 128
+  barcode, and Stock prints sheets of barcode labels for the racking and the
+  rolls. Groundwork for a scanning gun: stock movements are applied inside the
+  database on a locked row, and a movement carrying the same reference twice
+  is applied once, so a handheld that loses signal and resends cannot
+  double-count.
 - **Settings** — media types (with their part-number codes), custom filter
   types, low-stock thresholds, user management, light/dark mode, change
   password, in-app software update.
@@ -163,6 +169,18 @@ In the Supabase dashboard → **SQL Editor**, run these once (in order):
    lookups that got slower as features were added. It also fixes a silent
    bug: that query had no paging and PostgREST stops at 1000 rows, so past a
    thousand orders the oldest simply stopped appearing.
+8. **`migrate_scanning.sql` — run this before anyone scans anything.** Stock
+   adjustments used to be read-modify-write: two people counting the same rack
+   at once both read the old figure and both wrote their own answer, and one
+   count vanished with nothing in the log to show it. This moves the
+   arithmetic into the database, onto a locked row. It also makes a movement
+   idempotent on a caller-supplied reference — a handheld that loses signal
+   after the write lands but before the reply arrives cannot tell "it failed"
+   from "it worked and I didn't hear", so it retries, and without this the
+   stock moves twice. Finally it makes SKUs unique so a scan finds exactly one
+   item, and adds `resolve_scan()` so an app can ask what a code is instead of
+   guessing. Safe to run on a database that already has duplicate SKUs: it
+   names them and installs everything else.
 
 ### Enable purchase-order import (optional)
 
@@ -382,6 +400,7 @@ taf_order_app/
   stock_usage.py           What an order takes out of stock
   delivery.py              Run sheets and what's ready to go out
   backup.py                The dated zip of spreadsheets
+  labels.py                Barcode labels for stock, on Avery sheets
 tests/                     Rule tests — `python tests/run.py`, run by CI
   smoke_gui.py             Builds every screen for real — also run by CI
   user_management.py       Roles & user admin
@@ -467,6 +486,13 @@ is built. It needs a desktop to draw on, so it runs on Windows in CI and says
 
 Both run in CI before the installer is built, so a broken build cannot be
 published.
+
+The barcode tests print the PDFs and read the barcodes back, because "there is
+a barcode on the page" and "a scanner can read it" are different claims and
+only the second one matters — the first version of the worksheet barcode drew
+perfectly and decoded 0 times out of 4. That optical check needs `pdftoppm`
+(poppler) and `pyzbar`, and skips where they aren't installed; CI has neither,
+so what CI gates is the measured bar width the decoding established.
 
 ## Notes
 

@@ -29,6 +29,7 @@ from taf_order_app import stock_usage as _stock_usage
 from taf_order_app import pricing as _pricing
 from taf_order_app import delivery as _delivery
 from taf_order_app import backup as _backup
+from taf_order_app import labels as _labels
 from taf_order_app.bag_filler import (
     BAG_PRODUCT_TYPES, BAG_MEDIA_TYPES, ROLL_MEDIA_TYPES,
     ROLL_WIDTHS, ROLL_LENGTHS, STANDARD_SIZES,
@@ -7807,6 +7808,9 @@ class ModernOrderApp(tk.Frame):
         flat_btn(bot, "🕐 Transaction History",
                  self._view_stock_history,
                  bg=CNE, pady=7).pack(side="left", padx=(0, 8))
+        flat_btn(bot, "🏷 Print Barcode Labels",
+                 self._print_stock_labels,
+                 bg=CGR, pady=7).pack(side="left", padx=(0, 8))
         if _db.is_ready() and _db.can_manage_stock():
             flat_btn(bot, "🗑 Delete Item",
                      self._delete_stock_item,
@@ -7912,7 +7916,30 @@ class ModernOrderApp(tk.Frame):
         sel = self._stock_tree.selection()
         if not sel:
             return None
-        idx = int(sel[0])
+        idx   = int(sel[0])
+        shown = self._shown_stock_items()
+        return shown[idx] if idx < len(shown) else None
+
+    def _selected_stock_items(self) -> list:
+        """Every stock row selected, in the order the table shows them."""
+        shown = self._shown_stock_items()
+        out = []
+        for iid in self._stock_tree.selection():
+            try:
+                idx = int(iid)
+            except (TypeError, ValueError):
+                continue
+            if idx < len(shown):
+                out.append(shown[idx])
+        return out
+
+    def _shown_stock_items(self) -> list:
+        """The stock list as the table currently has it filtered.
+
+        The tree stores row numbers, not items, so this rebuilds the same
+        order the rows were drawn in — one place, so a filter added to one and
+        not the other can't quietly select the wrong item.
+        """
         # Rebuild the same filtered list order
         q      = self._stock_search_var.get().strip().lower()
         t_filt = self._stock_type_var.get()
@@ -7935,7 +7962,102 @@ class ModernOrderApp(tk.Frame):
             if s_filt == "Out of Stock" and on_hand > 0:
                 continue
             shown.append(item)
-        return shown[idx] if idx < len(shown) else None
+        return shown
+
+    def _print_stock_labels(self):
+        """Write a sheet of barcode labels for the racking and the rolls.
+
+        A scanner is worth nothing until the things it scans carry a code,
+        and nothing in a filter shop does by default.
+        """
+        picked = self._selected_stock_items()
+        if not picked:
+            shown = self._shown_stock_items()
+            if not shown:
+                messagebox.showinfo("Barcode Labels", "There are no stock items to label.")
+                return
+            if not messagebox.askyesno(
+                    "Barcode Labels",
+                    f"Nothing is selected, so this will print labels for all "
+                    f"{len(shown)} item{'s' if len(shown) != 1 else ''} "
+                    "currently listed.\n\nCarry on?"):
+                return
+            picked = shown
+
+        dlg = tk.Toplevel(self.master)
+        dlg.title("Barcode Labels")
+        dlg.configure(bg=CBG, padx=18, pady=16)
+        dlg.transient(self.master)
+        dlg.grab_set()
+
+        tk.Label(dlg, text=f"{len(picked)} label{'s' if len(picked) != 1 else ''} to print",
+                 bg=CBG, fg=CA, font=F_SEC).grid(row=0, column=0, columnspan=2,
+                                                 sticky="w", pady=(0, 2))
+        tk.Label(dlg, text="Sticky label sheets, from any office supplier.\n"
+                           "Feed a part-used sheet back in by telling it which\n"
+                           "label to start on — counting left to right, top row first.",
+                 bg=CBG, fg=CMU, font=F_SM, justify="left").grid(
+            row=1, column=0, columnspan=2, sticky="w", pady=(0, 10))
+
+        tk.Label(dlg, text="Label sheet", bg=CBG, fg=CTX,
+                 font=F_SM).grid(row=2, column=0, sticky="w", pady=4)
+        lay_var = tk.StringVar(value=_labels.L7160.name)
+        ttk.Combobox(dlg, textvariable=lay_var, state="readonly", width=32,
+                     values=[l.name for l in _labels.LAYOUTS.values()]).grid(
+            row=2, column=1, sticky="w", padx=(8, 0))
+
+        tk.Label(dlg, text="Start on label", bg=CBG, fg=CTX,
+                 font=F_SM).grid(row=3, column=0, sticky="w", pady=4)
+        start_var = tk.StringVar(value="1")
+        tk.Spinbox(dlg, from_=1, to=21, textvariable=start_var, width=6).grid(
+            row=3, column=1, sticky="w", padx=(8, 0))
+
+        guides_var = tk.BooleanVar(value=False)
+        tk.Checkbutton(dlg, text="Draw label outlines (for a test print on plain paper)",
+                       variable=guides_var, bg=CBG, fg=CMU, selectcolor=CCA,
+                       activebackground=CBG, font=F_SM).grid(
+            row=4, column=0, columnspan=2, sticky="w", pady=(6, 10))
+
+        def _go():
+            layout = next((l for l in _labels.LAYOUTS.values()
+                           if l.name == lay_var.get()), _labels.L7160)
+            try:
+                start = max(1, int(start_var.get()))
+            except ValueError:
+                start = 1
+            dlg.destroy()
+            out = APP_DIR / "labels"
+            stamp = datetime.datetime.now().strftime("%Y-%m-%d_%H%M")
+            try:
+                path, problems = _labels.build_label_sheet(
+                    out / f"stock_labels_{stamp}.pdf", picked,
+                    layout=layout, start_at=start, guides=guides_var.get())
+            except Exception as exc:
+                messagebox.showerror("Barcode Labels",
+                                     f"The labels could not be written:\n{exc}")
+                return
+            self.status_var.set(f"Labels saved: {Path(path).name}")
+            if problems:
+                shown = "\n".join(f"  • {p}" for p in problems[:8])
+                more = f"\n  … and {len(problems) - 8} more" if len(problems) > 8 else ""
+                messagebox.showwarning(
+                    "Some Labels Won't Scan Well",
+                    f"Saved to:\n{path}\n\n{shown}{more}")
+            else:
+                messagebox.showinfo(
+                    "Labels Ready",
+                    f"Saved to:\n{path}\n\n"
+                    "Print at 100% — 'fit to page' shrinks the barcodes and a "
+                    "scanner stops reading them.")
+            try:
+                os.startfile(str(Path(path).parent))
+            except Exception:
+                pass
+
+        btns = tk.Frame(dlg, bg=CBG)
+        btns.grid(row=5, column=0, columnspan=2, sticky="e")
+        flat_btn(btns, "Cancel", dlg.destroy, bg=CNE, pady=6).pack(side="left", padx=(0, 8))
+        flat_btn(btns, "Make Labels", _go, bg=CA, pady=6).pack(side="left")
 
     def _update_stock_badge(self):
         """Update the Stock tab button label with a low-stock count if needed."""

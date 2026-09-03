@@ -1109,7 +1109,8 @@ def delete_stock_item(item_id: str) -> None:
 
 
 def adjust_stock(item_id: str, transaction_type: str,
-                 quantity: float, notes: str = "") -> float:
+                 quantity: float, notes: str = "",
+                 client_ref: str = "", device: str = "") -> float:
     """
     Adjust stock_on_hand and record a transaction row.
     transaction_type:
@@ -1118,8 +1119,42 @@ def adjust_stock(item_id: str, transaction_type: str,
         'count'    → set absolute value; delta = new - old
         'writeoff' → subtract quantity (negative delta), marks loss
     Returns new stock_on_hand.
+
+    The arithmetic happens in the database, on a locked row — two people
+    counting the same rack at once used to both read the old figure and both
+    write their own answer, losing one of the counts with nothing in the log
+    to show it.
+
+    `client_ref` is the caller's own name for this one movement. Send the same
+    one twice and it is applied once: a handheld that loses signal after the
+    write lands but before the reply arrives cannot tell "it failed" from "it
+    worked and I didn't hear", so it retries — and without this, the stock
+    moves twice. One is generated per call when the caller doesn't supply one,
+    which makes an HTTP-level retry safe without changing any caller.
     """
     import datetime as _dt
+    import uuid as _uuid
+
+    ref = (client_ref or "").strip() or f"app-{_uuid.uuid4()}"
+    try:
+        resp = get_client().rpc("adjust_stock_atomic", {
+            "p_item_id":    item_id,
+            "p_type":       transaction_type,
+            "p_quantity":   quantity,
+            "p_notes":      notes,
+            "p_client_ref": ref,
+            "p_username":   current_username(),
+            "p_device":     device or "desktop",
+        }).execute()
+        rows = resp.data or []
+        row  = rows[0] if isinstance(rows, list) and rows else rows
+        if isinstance(row, dict) and row.get("quantity_after") is not None:
+            return float(row["quantity_after"])
+    except Exception:
+        pass          # migrate_scanning.sql not run yet — fall through
+
+    # Older database: the way it worked before, kept so the app still runs
+    # against a project that hasn't had the migration applied.
     resp    = (get_client().table("stock_items")
                .select("stock_on_hand").eq("id", item_id).single().execute())
     current = float((resp.data or {}).get("stock_on_hand", 0))
@@ -1149,6 +1184,38 @@ def adjust_stock(item_id: str, transaction_type: str,
     }).execute()
 
     return new_qty
+
+
+def resolve_scan(code: str) -> list:
+    """What a scanned barcode is: a stock item, an order, or a part number.
+
+    One place answers this so a handheld, the phone page and the desktop can
+    never drift apart on what a code means. Returns a list because a code
+    could in principle match more than one kind of thing; most specific first
+    (a stock code is something you can count, which is what a gun is for).
+
+    Falls back to a plain SKU lookup when migrate_scanning.sql hasn't been run.
+    """
+    code = (code or "").strip()
+    if not code:
+        return []
+    try:
+        resp = get_client().rpc("resolve_scan", {"p_code": code}).execute()
+        rows = resp.data or []
+        if rows:
+            return rows
+    except Exception:
+        pass
+
+    # Older database: the one lookup worth having without the migration.
+    try:
+        resp = (get_client().table("stock_items").select("*")
+                .ilike("sku", code).limit(2).execute())
+        return [{"kind": "stock", "ref": r.get("id"), "label": r.get("name", ""),
+                 "detail": r.get("location") or "No location", "extra": r}
+                for r in (resp.data or [])]
+    except Exception:
+        return []
 
 
 def get_stock_transactions(item_id: str, limit: int = 150) -> list:

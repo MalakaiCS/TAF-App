@@ -109,7 +109,11 @@ OVERRIDES = {
         {"filter_type": "V-form", "media_type": "G4", "rate_per_sqm": 26.0}],
     "get_stock_items":     lambda *a, **k: [
         {"id": "s1", "name": "G4 media roll", "product_type": "media",
-         "quantity": 4, "reorder_level": 2, "unit": "roll"}],
+         "sku": "TAF-G4-ROLL", "location": "Rack A1", "unit": "m2",
+         "stock_on_hand": 40, "minimum_on_hand": 10},
+        {"id": "s2", "name": "Bag frame 592", "product_type": "Other",
+         "sku": "", "location": "Rack C3", "unit": "each",
+         "stock_on_hand": 4, "minimum_on_hand": 10}],
     "get_quotes":          lambda *a, **k: [
         {"id": "q1", "customer_name": "Bells Creek", "status": "sent",
          "total": 1234.5, "created_at": "2026-09-01T00:00:00Z",
@@ -122,6 +126,10 @@ OVERRIDES = {
     "media_usage_since":   lambda *a, **k: {"G4": 12},
     "list_po_inbox_batches": lambda *a, **k: [],
     "log_action":          lambda *a, **k: None,
+    "resolve_scan":        lambda code="", *a, **k: [
+        {"kind": "stock", "ref": "s1", "label": "G4 media roll",
+         "detail": "Rack A1", "extra": {"sku": "TAF-G4-ROLL"}}],
+    "adjust_stock":        lambda *a, **k: 12.0,
 }
 
 # Rights are a real fork in what gets built: a manager sees the stock-alert
@@ -306,6 +314,23 @@ def _steps(app, gui, root):
     for label, make in _dialogs(gui, root):
         add(f"dialog: {label}", _open_and_close(make))
 
+    # Built inline rather than as a class, so it is opened through the button
+    # it actually hangs off — with a row selected, which is the path a person
+    # takes. Selecting nothing prompts, and the prompt answers "no".
+    def _labels_dialog():
+        tree = getattr(app, "_stock_tree", None)
+        if tree is None:
+            raise AssertionError("the Stock tab has no table")
+        kids = tree.get_children()
+        if kids:
+            tree.selection_set(kids[0])
+        before = set(root.winfo_children())
+        app._print_stock_labels()
+        for w in set(root.winfo_children()) - before:
+            w.update_idletasks()
+            w.destroy()
+    add("dialog: Print Barcode Labels", _labels_dialog)
+
     add("banner: exports", lambda: print("Exporting…"))
     for label, call in _exports(app, gui):
         add(label, call)
@@ -374,6 +399,27 @@ def _exports(app, gui):
         assert rows, "an order that is fully priced produced no invoice lines"
         pricing.write_xero_csv(out / "xero.csv", rows)
 
+    def _labels():
+        from taf_order_app import labels
+        path, problems = labels.build_label_sheet(
+            out / "labels.pdf",
+            [{"name": "G4 media roll", "sku": "TAF-G4-ROLL",
+              "location": "Rack A1", "unit": "m2"},
+             {"name": "No code", "sku": "", "location": "", "unit": "each"}],
+            start_at=3)
+        assert Path(path).exists(), "the label sheet was not written"
+        assert any("no SKU" in p for p in problems), \
+            "an item with no SKU should be reported, not silently blank"
+
+    def _worksheet_barcode():
+        import pdf_generator
+        from reportlab.pdfgen import canvas as rc
+        from reportlab.lib.pagesizes import A4, landscape
+        c = rc.Canvas(str(out / "bc.pdf"), pagesize=landscape(A4))
+        assert pdf_generator.draw_order_barcode(c, "PO-8842") is True
+        assert pdf_generator.draw_order_barcode(c, "") is False
+        c.save()
+
     def _run_sheet():
         orders = [{"order_no": o["order_number"], "customer": o["customer_name"],
                    "date_due": o["date_due"], "status": o["header"].get("status"),
@@ -385,6 +431,8 @@ def _exports(app, gui):
 
     return [("backup.build_backup", _backup),
             ("pricing.invoice_for_order", _invoice),
+            ("labels.build_label_sheet", _labels),
+            ("pdf_generator.draw_order_barcode", _worksheet_barcode),
             ("delivery.build_run_sheet_pdf", _run_sheet)]
 
 
