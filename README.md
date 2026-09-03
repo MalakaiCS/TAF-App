@@ -92,6 +92,10 @@ log, stock management and a customer database.
   searched by code or description with the price coming along with it. Product
   types (Bag Filter, Media Roll, Freight, Labour…) are shared between PCs, so
   the next kind of thing you sell needs an entry rather than a new release.
+- **Fewer buttons** — the common actions stay on the bar and the rest sit
+  under a menu beside them. Previous Orders went from seventeen buttons to
+  five, Quotes from thirteen to seven. Destructive actions live under their
+  own menu rather than one slip of the mouse from Print.
 - **Keyboard** — Ctrl+1…0 for the tabs, Ctrl+N new order, Ctrl+F search,
   Ctrl+S do the main thing on this tab, Ctrl+P print, F5 reload, F1 for the
   list. Enter opens a row, Delete removes a line, Esc closes a dialog. The

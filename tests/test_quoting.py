@@ -297,3 +297,51 @@ def test_the_shortcuts_can_be_found_without_knowing_them():
     src = _gui_source()
     assert "⌨  Shortcuts" in src, "there is no way in but the shortcut itself"
     assert "def _show_shortcuts" in src
+
+
+# ── Clutter ──────────────────────────────────────────────────────────────────
+
+def _tab_button_count(src: str, tab: str) -> int:
+    m = re.search(rf"    def _build_{tab}_tab\(self\)", src)
+    body = src[m.start():]
+    nxt = re.search(r"\n    def ", body[10:])
+    body = body[:nxt.start() + 10] if nxt else body
+    return len(re.findall(r"flat_btn\(|menu_btn\(", body))
+
+
+def test_no_working_screen_is_a_wall_of_buttons():
+    """Previous Orders had seventeen. Nothing stood out, and the two things
+    anyone actually does were lost among fifteen they don't."""
+    src = _gui_source()
+    for tab, limit in (("prev_orders", 8), ("quotes", 8), ("customers", 7),
+                       ("stock", 6), ("delivery", 5)):
+        n = _tab_button_count(src, tab)
+        assert n <= limit, f"{tab} is back up to {n} buttons"
+
+
+def test_the_menu_decides_what_applies_when_it_opens():
+    """Send and Convert only mean something once a quote is saved. Built at
+    start-up they would be wrong the moment anything changed."""
+    src = _gui_source()
+    fn = src.split("def menu_btn")[1].split("\ndef ")[0]
+    assert "items() if callable(items) else items" in fn
+    assert 'state="normal" if command else "disabled"' in fn
+    # And the quote menu uses that, rather than enabling buttons by hand.
+    assert "def _quote_actions()" in src
+    assert "self._share_quote_link if saved else None" in src
+
+
+def test_destructive_actions_are_not_next_to_harmless_ones():
+    """Delete sat one button along from Print."""
+    src = _gui_source()
+    body = src[src.index("def _build_prev_orders_tab"):]
+    body = body[:body.index("\n    def _refresh_orders_list")]
+    assert "_delete_prev_order" not in re.sub(r"menu_btn\(.*?\], bg=", "",
+                                              body, flags=re.S), \
+        "deleting an order is a bare button again"
+
+
+def test_an_empty_quote_does_not_say_so_twice():
+    src = _gui_source()
+    assert "No lines yet." not in src, \
+        "the table's own empty state already says this"

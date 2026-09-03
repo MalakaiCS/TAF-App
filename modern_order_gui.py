@@ -976,6 +976,44 @@ def flat_btn(parent, text, command, bg=CA, fg="white",
                       font=font, h=px(pady * 2 + 24), padx=px(padx))
 
 
+def menu_btn(parent, text, items, bg=CNE, fg="white", pady=6, padx=14):
+    """A button that drops a menu, for the actions that don't earn a place.
+
+    A screen with seventeen buttons on it has no shape: nothing stands out,
+    and the two things anyone actually does are lost among fifteen they
+    don't. The common actions stay on the bar; everything else lives one
+    click away under here.
+
+    `items` is a list of (label, command), with None where a separator goes.
+    An entry whose command is None is greyed out. Pass a function instead of
+    a list when what's on the menu depends on the state of things — it is
+    called each time the menu opens, so "Send to customer" can be greyed out
+    until the quote has actually been saved.
+    """
+    btn = None
+
+    def popup():
+        menu = tk.Menu(parent, tearoff=0, bg=CCA, fg=CTX,
+                       activebackground=CA, activeforeground="white",
+                       font=F_BODY, bd=0, relief="flat",
+                       activeborderwidth=0)
+        for entry in (items() if callable(items) else items):
+            if entry is None:
+                menu.add_separator()
+                continue
+            label, command = entry
+            menu.add_command(label=f"  {label}  ", command=command,
+                             state="normal" if command else "disabled")
+        try:
+            menu.tk_popup(btn.winfo_rootx(),
+                          btn.winfo_rooty() + btn.winfo_height())
+        finally:
+            menu.grab_release()
+
+    btn = flat_btn(parent, text, popup, bg=bg, fg=fg, pady=pady, padx=padx)
+    return btn
+
+
 def _button_variants() -> dict:
     """Built fresh each time so a dark-mode swap is picked up."""
     return {
@@ -5270,25 +5308,25 @@ class ModernOrderApp(tk.Frame):
         tb.grid(row=0, column=0, sticky="ew", pady=(0, 8))
 
         # Two "add" buttons — one for each item type
-        flat_btn(tb, "+ Filter Item",  self._add_filter_item,
-                 bg=CA,  pady=5, padx=10, font=F_BOLD).pack(side="left", padx=(0, 5))
-        flat_btn(tb, "+ Bag / Roll",   self._add_bag_item,
-                 bg=CA2, pady=5, padx=10, font=F_BOLD).pack(side="left", padx=(0, 5))
-        flat_btn(tb, "⚙ Dedicated Filters", self._open_compressor_presets,
-                 bg=CNE, pady=5, padx=10, font=F_BOLD).pack(side="left", padx=(0, 12))
-
-        sep = tk.Frame(tb, bg=CSP, width=1)
-        sep.pack(side="left", fill="y", padx=(0, 8), pady=2)
-
-        for txt, cmd, bg, fnt in [
-            ("Edit",      self._edit_item,             CNE, F_BODY),
-            ("Delete",    self._delete_item,           CRD, F_BODY),
-            ("Duplicate", self._duplicate_item,        CNE, F_BODY),
-            ("↑ Up",      lambda: self._move_item(-1), CNE, F_BODY),
-            ("↓ Down",    lambda: self._move_item(1),  CNE, F_BODY),
-        ]:
-            flat_btn(tb, txt, cmd, bg=bg,
-                     pady=5, padx=10, font=fnt).pack(side="left", padx=(0, 5))
+        # One way in for every kind of line, and the things you can do to
+        # a line you have already added tucked in behind it.
+        self._add_line_btn = menu_btn(tb, "＋ Add Line  ▾", [
+            ("Filter — made to measure", self._add_filter_item),
+            ("Bag filter or media roll", self._add_bag_item),
+            None,
+            ("Dedicated compressor filters…", self._open_compressor_presets),
+        ], bg=CA, pady=5, padx=10)
+        self._add_line_btn.pack(side="left", padx=(0, 5))
+        flat_btn(tb, "Edit", self._edit_item, bg=CNE,
+                 pady=5, padx=10, font=F_BODY).pack(side="left", padx=(0, 5))
+        menu_btn(tb, "Line  ▾", [
+            ("Duplicate this line", self._duplicate_item),
+            None,
+            ("Move up",             lambda: self._move_item(-1)),
+            ("Move down",           lambda: self._move_item(1)),
+            None,
+            ("Delete this line",    self._delete_item),
+        ], bg=CNE, pady=5, padx=10).pack(side="left", padx=(0, 5))
 
         # Treeview
         tree_wrap = tk.Frame(body, bg=CCA,
@@ -5465,11 +5503,11 @@ class ModernOrderApp(tk.Frame):
         o_col_defs = {
             "customer":     ("Customer Name",  200, "w"),
             "order_no":     ("Order #",        120, "w"),
-            "date_ordered": ("Date Ordered",   110, "center"),
+            "date_ordered": ("Date Ordered",   126, "center"),
             "date_due":     ("Date Due",       100, "center"),
             "status":       ("Status",         120, "center"),
             "printed":      ("Printed",         90, "center"),
-            "n_items":      ("# Items",         70, "center"),
+            "n_items":      ("# Items",         86, "center"),
             "created_by":   ("Created By",     180, "w"),
             "file":         ("Source",         130, "center"),
         }
@@ -5500,36 +5538,35 @@ class ModernOrderApp(tk.Frame):
         bot = tk.Frame(frm, bg=CBG, pady=8)
         bot.grid(row=2, column=0, sticky="ew")
 
-        flat_btn(bot, "👁 View Items",         self._view_order_items,
-                 bg=CA,  pady=7).pack(side="left", padx=(0, 8))
-        flat_btn(bot, "Load into New Order",   self._load_prev_order,
-                 bg=CA,  pady=7).pack(side="left", padx=(0, 8))
-        flat_btn(bot, "Duplicate Order",       self._duplicate_prev_order,
-                 bg=CA2, pady=7).pack(side="left", padx=(0, 8))
-        flat_btn(bot, "Regenerate Worksheets", self._regen_prev_order,
-                 bg=CGR, pady=7).pack(side="left", padx=(0, 8))
-        flat_btn(bot, "Open Orders Folder",    self._open_orders_folder,
+        # Fourteen buttons meant nothing stood out and the two anyone
+        # actually uses were lost among twelve they don't. Open and Print
+        # stay out; the rest are one click away, grouped by what they are.
+        flat_btn(bot, "Open Order", self._load_prev_order,
+                 bg=CA, pady=7).pack(side="left", padx=(0, 8))
+        flat_btn(bot, "🖨  Print", self._print_prev_order,
                  bg=CNE, pady=7).pack(side="left", padx=(0, 8))
-        flat_btn(bot, "📝 Add Note",           self._add_order_note,
-                 bg=CA2, pady=7).pack(side="left", padx=(0, 8))
-        flat_btn(bot, "🕐 View History",       self._view_order_history,
-                 bg=CNE, pady=7).pack(side="left", padx=(0, 8))
-        flat_btn(bot, "🚨 Toggle Priority",    self._toggle_order_priority,
-                 bg=CRD, pady=7).pack(side="left", padx=(0, 8))
-        flat_btn(bot, "⚙ Change Status",      self._change_order_status,
-                 bg=CA2, pady=7).pack(side="left", padx=(0, 8))
-        flat_btn(bot, "🖨 Print",             self._print_prev_order,
-                 bg=CNE, pady=7).pack(side="left", padx=(0, 8))
-        flat_btn(bot, "💲 Quote",             self._quote_prev_order,
-                 bg=CA2, pady=7).pack(side="left", padx=(0, 8))
-        flat_btn(bot, "🚚 Freight / Delay",   self._edit_order_freight,
-                 bg=CNE, pady=7).pack(side="left", padx=(0, 8))
-        flat_btn(bot, "🧾 Invoice to Xero",   self._invoice_selected_orders,
-                 bg=CGR, pady=7).pack(side="left", padx=(0, 8))
-        flat_btn(bot, "Delete Order",          self._delete_prev_order,
-                 bg=CRD, pady=7).pack(side="right", padx=(8, 0))
-        flat_btn(bot, "Archive Order",         self._archive_prev_order,
-                 bg="#7D3C98", pady=7).pack(side="right")
+        menu_btn(bot, "Order  ▾", [
+            ("View what's on it",      self._view_order_items),
+            ("Duplicate this order",   self._duplicate_prev_order),
+            ("Regenerate worksheets",  self._regen_prev_order),
+            ("Quote from this order",  self._quote_prev_order),
+            ("Invoice to Xero",        self._invoice_selected_orders),
+            None,
+            ("Change status…",         self._change_order_status),
+            ("Toggle high priority",   self._toggle_order_priority),
+            ("Freight / delay…",       self._edit_order_freight),
+            None,
+            ("Add a note…",            self._add_order_note),
+            ("View history",           self._view_order_history),
+            ("Open orders folder",     self._open_orders_folder),
+        ], bg=CNE, pady=7).pack(side="left", padx=(0, 8))
+        # Destructive actions sit under their own menu, so neither is ever a
+        # slip of the mouse next to something harmless.
+        menu_btn(bot, "⋯", [
+            ("Archive this order", self._archive_prev_order),
+            None,
+            ("Delete this order…", self._delete_prev_order),
+        ], bg=CMU, pady=7, padx=12).pack(side="right")
 
     # ── Delivery tab ──────────────────────────────────────────────────────
     # What is finished and where it goes. Orders already carry a region and a
@@ -5608,14 +5645,14 @@ class ModernOrderApp(tk.Frame):
         bot.grid(row=3, column=0, sticky="ew")
         flat_btn(bot, "🖨  Print Run Sheet", self._print_run_sheet, bg=CGR,
                  pady=7).pack(side="left", padx=(0, 8))
-        flat_btn(bot, "✓ Mark Selected Dispatched", self._mark_dispatched,
+        flat_btn(bot, "✓  Mark Dispatched", self._mark_dispatched,
                  bg=CA, pady=7).pack(side="left", padx=(0, 8))
-        flat_btn(bot, "View Items", self._view_delivery_items, bg=CNE,
-                 pady=7).pack(side="left", padx=(0, 8))
-        flat_btn(bot, "🚚 Freight / Delay", self._edit_delivery_freight,
-                 bg=CA2, pady=7).pack(side="left", padx=(0, 8))
-        flat_btn(bot, "🧾 Invoice Run to Xero", self._invoice_delivery_run,
-                 bg=CNE, pady=7).pack(side="left")
+        menu_btn(bot, "Run  ▾", [
+            ("View what's on this order", self._view_delivery_items),
+            ("Freight / delay…",          self._edit_delivery_freight),
+            None,
+            ("Invoice this run to Xero",  self._invoice_delivery_run),
+        ], bg=CNE, pady=7).pack(side="left")
 
     def _refresh_delivery_run(self):
         """Rebuild the run from the orders already loaded, off the main thread."""
@@ -5932,12 +5969,12 @@ class ModernOrderApp(tk.Frame):
         self._quote_price_state = tk.StringVar(value="")
         tk.Label(top, textvariable=self._quote_price_state, bg=CBG, fg=CMU,
                  font=F_SM).pack(side="left", padx=(14, 0))
-        flat_btn(top, "Load from an Order", self._quote_from_order, bg=CNE,
-                 pady=6, padx=12, font=F_BODY).pack(side="right")
-        flat_btn(top, "📋 Saved Quotes", self._open_saved_quotes, bg=CA2,
-                 pady=6, padx=12, font=F_BODY).pack(side="right", padx=(0, 8))
-        flat_btn(top, "⏳ Follow Up", self._follow_up_quotes, bg=CNE,
-                 pady=6, padx=12, font=F_BODY).pack(side="right", padx=(0, 8))
+        menu_btn(top, "Quotes  ▾", [
+            ("Open a saved quote…",         self._open_saved_quotes),
+            ("Follow up on sent quotes",    self._follow_up_quotes),
+            None,
+            ("Start one from an order…",    self._quote_from_order),
+        ], bg=CNE, pady=6, padx=12).pack(side="right")
         flat_btn(top, "New", self._new_quote, bg=CMU,
                  pady=6, padx=12, font=F_BODY).pack(side="right", padx=(0, 8))
 
@@ -6027,22 +6064,31 @@ class ModernOrderApp(tk.Frame):
                  pady=7).pack(side="left", padx=(0, 8))
         flat_btn(bot, "Remove", self._remove_quote_item, bg=CRD,
                  pady=7).pack(side="left", padx=(0, 8))
-        flat_btn(bot, "Clear", self._clear_quote, bg=CMU,
-                 pady=7).pack(side="left", padx=(0, 8))
-        flat_btn(bot, "Export for Xero", self._quote_tab_xero, bg=CA2,
-                 pady=7).pack(side="right")
-        flat_btn(bot, "Save Quote PDF", self._quote_tab_pdf, bg=CNE,
-                 pady=7).pack(side="right", padx=(0, 8))
-        flat_btn(bot, "💾 Save Quote", self._save_quote, bg=CGR,
-                 pady=7).pack(side="right", padx=(0, 8))
-        self._convert_btn = flat_btn(bot, "→ Convert to Order",
-                                     self._convert_quote_to_order, bg=CA2, pady=7)
-        self._convert_btn.pack(side="right", padx=(0, 8))
-        self._send_btn = flat_btn(bot, "🔗 Send to Customer",
-                                  self._share_quote_link, bg=CA, pady=7)
-        self._send_btn.pack(side="right", padx=(0, 8))
 
-        self._quote_totals_var = tk.StringVar(value="No lines yet.")
+        # Saving is the thing you do here; everything you can then do WITH the
+        # quote is one click away. Built when the menu opens, so sending and
+        # converting are greyed out until there is a saved quote to send.
+        flat_btn(bot, "💾  Save Quote", self._save_quote, bg=CGR,
+                 pady=7).pack(side="right", padx=(0, 8))
+
+        def _quote_actions():
+            saved = bool(getattr(self, "_current_quote_id", None))
+            return [
+                ("Send to the customer…",
+                 self._share_quote_link if saved else None),
+                ("Convert to an order",
+                 self._convert_quote_to_order if saved else None),
+                None,
+                ("Save as a PDF",        self._quote_tab_pdf),
+                ("Export for Xero",      self._quote_tab_xero),
+                None,
+                ("Clear all lines",      self._clear_quote),
+            ]
+
+        menu_btn(bot, "Quote  ▾", _quote_actions, bg=CNE,
+                 pady=7).pack(side="right", padx=(0, 8))
+
+        self._quote_totals_var = tk.StringVar(value="")
         tk.Label(frm, textvariable=self._quote_totals_var, bg=CBG, fg=CTX,
                  font=F_BOLD, anchor="w").grid(row=4, column=0, sticky="w")
         self._quote_warn_var = tk.StringVar(value="")
@@ -6122,7 +6168,7 @@ class ModernOrderApp(tk.Frame):
                             _pricing.source_label(line),
                         ))
         if not lines:
-            self._quote_totals_var.set("No lines yet.")
+            self._quote_totals_var.set("")
             self._quote_warn_var.set("")
             return
         t = _pricing.quote_totals(lines)
@@ -6436,12 +6482,14 @@ class ModernOrderApp(tk.Frame):
         self._update_convert_button()
 
     def _update_convert_button(self):
-        """Convert and Send only mean something once a quote has been saved."""
-        state = "normal" if getattr(self, "_current_quote_id", None) else "disabled"
-        for name in ("_convert_btn", "_send_btn"):
-            btn = getattr(self, name, None)
-            if btn is not None:
-                btn.config(state=state)
+        """Kept as a no-op hook.
+
+        Sending and converting used to be buttons that had to be enabled and
+        disabled by hand. They are menu entries now and the menu works out
+        whether they apply each time it opens, so there is nothing to keep in
+        step - but plenty of places still call this after changing a quote.
+        """
+        return
 
     # ── The link a customer opens ─────────────────────────────────────────
 
@@ -8016,22 +8064,17 @@ class ModernOrderApp(tk.Frame):
         # ── Bottom actions ────────────────────────────────────────────────
         bot = tk.Frame(frm, bg=CBG, pady=8)
         bot.grid(row=2, column=0, sticky="ew")
-        flat_btn(bot, "✏ Edit Customer",
+        flat_btn(bot, "✏  Open Customer",
                  lambda: self._open_customer_dialog(edit=True),
                  bg=CA, pady=7).pack(side="left", padx=(0, 8))
-        flat_btn(bot, "📋 View Orders",
-                 self._view_customer_orders,
-                 bg=CA2, pady=7).pack(side="left", padx=(0, 8))
-        flat_btn(bot, "+ New Order for Customer",
-                 self._new_order_for_customer,
+        flat_btn(bot, "＋  New Order", self._new_order_for_customer,
                  bg=CGR, pady=7).pack(side="left", padx=(0, 8))
-        flat_btn(bot, "🌐 Customer Portal",
-                 self._customer_portal_link,
-                 bg=CNE, pady=7).pack(side="left", padx=(0, 8))
-
-        flat_btn(bot, "🗑 Delete",
-                 self._delete_customer,
-                 bg=CRD, pady=7).pack(side="right")
+        menu_btn(bot, "Customer  ▾", [
+            ("View their orders",     self._view_customer_orders),
+            ("Their portal link…",    self._customer_portal_link),
+            None,
+            ("Delete this customer…", self._delete_customer),
+        ], bg=CNE, pady=7).pack(side="left")
 
         self._customers_data: list = []
 
@@ -8697,22 +8740,23 @@ class ModernOrderApp(tk.Frame):
         bot = tk.Frame(frm, bg=CBG, pady=8)
         bot.grid(row=2, column=0, sticky="ew")
 
-        flat_btn(bot, "📋 View Details / Edit",
+        flat_btn(bot, "📋  Open Item",
                  lambda: self._open_stock_item_dialog(edit=True),
                  bg=CA, pady=7).pack(side="left", padx=(0, 8))
-        flat_btn(bot, "± Adjust Stock",
-                 self._adjust_stock_dialog,
+        flat_btn(bot, "±  Adjust Stock", self._adjust_stock_dialog,
                  bg=CA2, pady=7).pack(side="left", padx=(0, 8))
-        flat_btn(bot, "🕐 Transaction History",
-                 self._view_stock_history,
-                 bg=CNE, pady=7).pack(side="left", padx=(0, 8))
-        flat_btn(bot, "🏷 Print Barcode Labels",
-                 self._print_stock_labels,
-                 bg=CGR, pady=7).pack(side="left", padx=(0, 8))
-        if _db.is_ready() and _db.can_manage_stock():
-            flat_btn(bot, "🗑 Delete Item",
-                     self._delete_stock_item,
-                     bg=CRD, pady=7).pack(side="right")
+
+        def _stock_actions():
+            can = _db.is_ready() and _db.can_manage_stock()
+            return [
+                ("Transaction history",   self._view_stock_history),
+                ("Print barcode labels…", self._print_stock_labels),
+                None,
+                ("Delete this item…",     self._delete_stock_item if can else None),
+            ]
+
+        menu_btn(bot, "Item  ▾", _stock_actions, bg=CNE,
+                 pady=7).pack(side="left")
 
         # Cache for the full stock list
         self._stock_data: list = []
