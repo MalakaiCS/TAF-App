@@ -19,22 +19,22 @@ window.TAF_COMPANY = {
   name:    "Total Air Filtration",
 
   // Rung, emailed and posted. Put the numbers customers should actually use.
-  phone:   "",              // e.g. "07 3800 0000"
-  email:   "",              // e.g. "sales@totalairfiltration.com.au"
-  website: "",              // e.g. "https://totalairfiltration.com.au"
-  abn:     "",              // e.g. "12 345 678 901"
+  phone:   "07 3800 3448",              // e.g. "07 3800 0000"
+  email:   "sales@totalairfiltration.com.au",              // e.g. "sales@totalairfiltration.com.au"
+  website: "https://totalairfiltration.com.au",              // e.g. "https://totalairfiltration.com.au"
+  abn:     "https://totalairfiltration.com.au",              // e.g. "12 345 678 901"
 
   // Where post goes.
-  address: "",              // e.g. "19 Trade Link Road, Hillcrest QLD 4118"
+  address: "Unit 1/19 Tradelink Road, hillcrest QLD 4118",              // e.g. "19 Trade Link Road, Hillcrest QLD 4118"
 
   // Where customers collect an order marked "Ready for pick up", and when.
   // Shown on exactly those orders, which is where it is actually needed.
   pickup: {
-    address: "",            // e.g. "19 Trade Link Road, Hillcrest QLD 4118"
-    hours:   "",            // e.g. "Monday to Friday, 7am - 3.30pm"
-    note:    ""             // e.g. "Ask at the front office and quote your order number."
+    address: "Unit 1/19 Tradelink Road, hillcrest QLD 4118",            // e.g. "19 Trade Link Road, Hillcrest QLD 4118"
+    hours:   "Monday to Thusday 7am to 3:30pm & Friday 7am to 12:30pm",            // e.g. "Monday to Friday, 7am - 3.30pm"
+    note:    "Ask at the front office and quote your order number."             // e.g. "Ask at the front office and quote your order number."
   },
 
   // Trading hours shown in the footer.
-  hours: ""                 // e.g. "Monday to Friday, 7am - 4pm"
+  hours: "Monday to Thusday 7am to 3:30pm & Friday 7am to 12:30pm"                 // e.g. "Monday to Friday, 7am - 4pm"
 };
