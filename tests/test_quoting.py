@@ -160,3 +160,51 @@ def test_a_product_line_cannot_be_saved_blank():
     assert "Quantity must be more than zero" in save
     assert "Nothing to quote" in save, \
         "a line with no description and no part number shows as blank"
+
+
+# ── The look of it ───────────────────────────────────────────────────────────
+
+def test_an_empty_table_says_what_it_means():
+    """A blank white rectangle says nothing — not whether the list is empty,
+    still loading, or filtered down to nothing."""
+    src = _gui_source()
+    assert "def attach_empty_state" in src
+    fn = src.split("def attach_empty_state")[1].split("\ndef ")[0]
+    # It keeps itself in step by hooking the tree's own insert and delete, so
+    # no caller has to remember to.
+    assert 'for name in ("insert", "delete")' in fn
+    assert "place_forget()" in fn and "panel.place(" in fn
+    # Which tables it is attached to, whatever the indentation happens to be.
+    attached = {t.strip() for t in
+                re.findall(r"attach_empty_state\(\s*([\w.]+),", src)}
+    for table in ("self.tree", "self.quote_tree", "self.orders_tree",
+                  "self.delivery_tree", "self.products_tree",
+                  "self._stock_tree"):
+        assert table in attached, f"{table} has no empty state"
+
+
+def test_nothing_still_draws_a_hard_black_border():
+    """relief=solid with bd=1 draws BLACK in Tk whatever the widget colours
+    are — that was the hard outline round the notes box and every panel."""
+    src = _gui_source()
+    assert 'relief="solid", bd=1' not in src
+    assert 'bd=1, relief="solid"' not in src
+
+
+def test_the_window_declares_itself_dpi_aware_before_tk_starts():
+    """Said after the first window exists, it has no effect at all."""
+    src = _gui_source()
+    start = src.split("def _start_app")[1]
+    assert start.index("_enable_hidpi()") < start.index("root = tk.Tk()")
+    assert "_apply_ui_scale(root)" in start
+
+
+def test_measurements_in_pixels_scale_with_the_screen():
+    """A row sized for 96 DPI clips its own text at 150%."""
+    src = _gui_source()
+    assert "rowheight=px(" in src
+    assert "def px(" in src
+    # Column widths too: these clipped "Qty" to "Qt)" at 150%.
+    import re
+    assert not re.search(r"\.column\([^)]*\bwidth=\d", src), \
+        "a table column still has an unscaled pixel width"

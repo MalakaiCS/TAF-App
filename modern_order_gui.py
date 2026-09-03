@@ -281,6 +281,9 @@ CRE  = "#FAFCFD"   # zebra / even row tint
 CSL  = "#E5F4FC"   # selected row
 CNV  = "#16384B"   # navy header (card / section / table headers, title bar)
 CFD  = "#F4F8FA"   # field background
+CHD  = "#F7FAFC"   # table heading fill — a label, not a heavy navy bar
+CHT  = "#40525F"   # table heading text
+CBR  = "#E3EAEF"   # hairline border: card edges, dividers, input outlines
 
 
 _LIGHT_COLORS = {
@@ -307,7 +310,7 @@ _DARK_COLORS = {
 def _set_dark_mode():
     """Reassign all module-level colour globals to the dark palette."""
     global CA, CAH, CA2, CBG, CCA, CTX, CMU, CSP
-    global CGR, CGH, CRD, CRH, CNE, CNH, CRE, CSL, CNV, CFD
+    global CGR, CGH, CRD, CRH, CNE, CNH, CRE, CSL, CNV, CFD, CHD, CHT, CBR
     CA  = "#1DA1E6";  CAH = "#38B0EE";  CA2 = "#4FB4ED"
     CBG = "#0C1A24";  CCA = "#13242F"
     CTX = "#EAF1F6";  CMU = "#8FA0AC";  CSP = "#243540"
@@ -316,11 +319,12 @@ def _set_dark_mode():
     CNE = "#5C6B78";  CNH = "#6A7A86"
     CRE = "#16242E";  CSL = "#143246"
     CNV = "#0A1F2B";  CFD = "#0F2029"
+    CHD = "#182B37";  CHT = "#9FB0BC";  CBR = "#22333E"
 
 def _set_light_mode():
     """Restore all module-level colour globals to the light palette."""
     global CA, CAH, CA2, CBG, CCA, CTX, CMU, CSP
-    global CGR, CGH, CRD, CRH, CNE, CNH, CRE, CSL, CNV, CFD
+    global CGR, CGH, CRD, CRH, CNE, CNH, CRE, CSL, CNV, CFD, CHD, CHT, CBR
     CA  = "#1DA1E6";  CAH = "#1791CF";  CA2 = "#1187C9"
     CBG = "#EDF1F4";  CCA = "#FFFFFF"
     CTX = "#0F1A24";  CMU = "#5C6B78";  CSP = "#DCE4EA"
@@ -329,6 +333,7 @@ def _set_light_mode():
     CNE = "#546572";  CNH = "#44525C"
     CRE = "#FAFCFD";  CSL = "#E5F4FC"
     CNV = "#16384B";  CFD = "#F4F8FA"
+    CHD = "#F7FAFC";  CHT = "#40525F";  CBR = "#E3EAEF"
 
 def _restyle_widget_tree(widget, color_map: dict):
     """Recursively update widget colour properties using color_map {OLD_HEX: new_hex}."""
@@ -357,11 +362,11 @@ def _restyle_widget_tree(widget, color_map: dict):
 # registers the .ttf files at startup and falls back to Segoe UI if the
 # family is unavailable, rebuilding the F_* globals to match.
 FAM    = "Public Sans"
-F_BODY = (FAM, 9)
-F_BOLD = (FAM, 9,  "bold")
-F_SEC  = (FAM, 10, "bold")
-F_TTL  = (FAM, 15, "bold")
-F_SM   = (FAM, 8)
+F_BODY = (FAM, 10)
+F_BOLD = (FAM, 10, "bold")
+F_SEC  = (FAM, 11, "bold")
+F_TTL  = (FAM, 17, "bold")
+F_SM   = (FAM, 9)
 
 
 def _load_app_fonts():
@@ -386,11 +391,11 @@ def _load_app_fonts():
     except Exception:
         fam = "Segoe UI"
     FAM    = fam
-    F_BODY = (fam, 9)
-    F_BOLD = (fam, 9,  "bold")
-    F_SEC  = (fam, 10, "bold")
-    F_TTL  = (fam, 15, "bold")
-    F_SM   = (fam, 8)
+    F_BODY = (fam, 10)
+    F_BOLD = (fam, 10, "bold")
+    F_SEC  = (fam, 11, "bold")
+    F_TTL  = (fam, 17, "bold")
+    F_SM   = (fam, 9)
 
 
 # ── Compressor filter pack presets ───────────────────────────────────────────
@@ -805,7 +810,11 @@ class PillButton(tk.Canvas):
     so existing callers that do .config(text=/bg=/state=) keep working."""
 
     def __init__(self, parent, text, command=None, bg=None, fg="white",
-                 hover=None, font=None, h=36, padx=16, radius=9, bgbase=None):
+                 hover=None, font=None, h=None, padx=None, radius=None,
+                 bgbase=None):
+        h = px(36) if h is None else h
+        padx = px(16) if padx is None else padx
+        radius = max(px(4), int(h * 0.26)) if radius is None else radius
         bg = bg or CA
         try:
             base = bgbase or parent.cget("bg")
@@ -944,11 +953,93 @@ class RoundedCard(tk.Canvas):
 
 
 def flat_btn(parent, text, command, bg=CA, fg="white",
-             width=None, font=F_BOLD, pady=6, padx=14) -> "PillButton":
+             width=None, font=F_BOLD, pady=6, padx=14,
+             variant=None) -> "PillButton":
     """Rounded pill button (Canvas-based). `width` (char count) is ignored —
-    pills size to their text."""
+    pills size to their text.
+
+    `variant` sets the weight of the button rather than its colour, so a
+    screen can have one obvious action and a row of quieter ones instead of
+    six saturated rectangles competing for the eye:
+
+        "primary"   filled, brand blue — the thing to do on this screen
+        "secondary" tinted, quiet — supporting actions
+        "ghost"     text only until hovered — the least important
+        "danger"    filled red — deleting things
+
+    Callers that pass an explicit `bg` keep exactly what they asked for, so
+    every existing button is untouched.
+    """
+    if variant:
+        bg, fg = _BUTTON_VARIANTS.get(variant, (bg, fg))
     return PillButton(parent, text, command=command, bg=bg, fg=fg,
-                      font=font, h=pady * 2 + 24, padx=padx)
+                      font=font, h=px(pady * 2 + 24), padx=px(padx))
+
+
+def _button_variants() -> dict:
+    """Built fresh each time so a dark-mode swap is picked up."""
+    return {
+        "primary":   (CA, "white"),
+        "secondary": (_blend(CA, CCA, 0.88), CA),
+        "ghost":     (CCA, CMU),
+        "danger":    (CRD, "white"),
+        "success":   (CGR, "white"),
+    }
+
+
+class _VariantMap(dict):
+    """Looks the colours up when asked, not when the module was imported."""
+
+    def get(self, key, default=None):
+        return _button_variants().get(key, default)
+
+
+_BUTTON_VARIANTS = _VariantMap()
+
+
+def attach_empty_state(tree, title, hint="", action=None, action_text=""):
+    """Say what an empty table means, and what to do about it.
+
+    A blank white rectangle tells someone nothing — not whether the list is
+    empty, still loading, or filtered down to nothing. This puts a line of
+    plain English in the middle of it, and takes itself away the moment there
+    is a row to show.
+
+    It hooks the tree's own insert and delete so no caller has to remember to
+    keep it in step.
+    """
+    holder = tree.master
+    panel = tk.Frame(holder, bg=CCA)
+    tk.Label(panel, text=title, bg=CCA, fg=CTX, font=F_SEC).pack()
+    if hint:
+        tk.Label(panel, text=hint, bg=CCA, fg=CMU, font=F_BODY,
+                 justify="center").pack(pady=(px(4), 0))
+    if action and action_text:
+        flat_btn(panel, action_text, action, bg=CA,
+                 pady=px(6)).pack(pady=(px(12), 0))
+
+    def _sync():
+        try:
+            if tree.get_children():
+                panel.place_forget()
+            else:
+                panel.place(relx=0.5, rely=0.42, anchor="center")
+        except Exception:
+            pass
+
+    for name in ("insert", "delete"):
+        original = getattr(tree, name)
+
+        def wrapped(*a, _orig=original, **kw):
+            result = _orig(*a, **kw)
+            tree.after_idle(_sync)
+            return result
+
+        setattr(tree, name, wrapped)
+
+    tree.after_idle(_sync)
+    tree._empty_state = panel      # keep a reference so it isn't collected
+    return panel
 
 
 def card_frame(parent, title="", bg_hdr=CNV, **inner_kw):
@@ -1068,25 +1159,38 @@ def _configure_ttk_style():
     except Exception:
         pass
 
+    # ── Tables ────────────────────────────────────────────────────────────
+    # Rows given room to breathe, and a heading that reads as a label rather
+    # than a heavy navy bar: quiet background, brand-blue rule underneath,
+    # and the row text is what the eye lands on.
     style.configure("TAF.Treeview",
                     background=CCA,
                     fieldbackground=CCA,
                     foreground=CTX,
                     font=F_BODY,
-                    rowheight=px(26),
+                    rowheight=px(32),
                     borderwidth=0,
                     relief="flat")
     style.configure("TAF.Treeview.Heading",
-                    background=CNV,
-                    foreground="white",
+                    background=CHD,
+                    foreground=CHT,
                     font=F_BOLD,
                     relief="flat",
-                    padding=(8, 5))
+                    borderwidth=0,
+                    padding=(px(10), px(9)))
     style.map("TAF.Treeview",
               background=[("selected", CSL)],
               foreground=[("selected", CTX)])
     style.map("TAF.Treeview.Heading",
-              background=[("active", _dk(CNV, 12))])
+              background=[("active", _blend(CHD, CA, 0.10))],
+              foreground=[("active", CA)])
+    # clam draws a sunken frame around a Treeview; this removes it so the
+    # table sits flush inside its card instead of in a box within a box.
+    try:
+        style.layout("TAF.Treeview", [
+            ("Treeview.treearea", {"sticky": "nswe"})])
+    except Exception:
+        pass
 
     style.configure("TCombobox",
                     fieldbackground=CFD, background=CFD, foreground=CTX,
@@ -1112,11 +1216,47 @@ def _configure_ttk_style():
         _root.option_add("*TCombobox*Listbox.font", F_BODY)
         _root.option_add("*TCombobox*Listbox.borderWidth", 0)
 
-    style.configure("Vertical.TScrollbar",
-                    background=CBG,
-                    troughcolor=CBG,
-                    borderwidth=0,
-                    arrowsize=12)
+    # ── Scrollbars ────────────────────────────────────────────────────────
+    # The default is the grey 3D bar with a raised arrow button at each end,
+    # and it is the single most dated thing on the screen. This is a thin
+    # rounded thumb on a quiet trough, and no arrows - the same shape every
+    # other program has used for a decade.
+    for orient in ("Vertical", "Horizontal"):
+        style.configure(f"{orient}.TScrollbar",
+                        background=_blend(CMU, CBG, 0.62),   # the thumb
+                        troughcolor=CBG,
+                        bordercolor=CBG,
+                        lightcolor=CBG, darkcolor=CBG,
+                        borderwidth=0,
+                        relief="flat",
+                        gripcount=0,
+                        arrowsize=px(1),        # 0 is rejected; 1 hides them
+                        width=px(11))
+        style.map(f"{orient}.TScrollbar",
+                  background=[("pressed", CA),
+                              ("active", _blend(CMU, CBG, 0.35))])
+
+    # ── Fields ────────────────────────────────────────────────────────────
+    style.configure("TEntry",
+                    fieldbackground=CFD, background=CFD, foreground=CTX,
+                    bordercolor=CSP, lightcolor=CSP, darkcolor=CSP,
+                    insertcolor=CTX, padding=(px(8), px(6)), relief="flat")
+    style.map("TEntry",
+              bordercolor=[("focus", CA)],
+              lightcolor=[("focus", CA)], darkcolor=[("focus", CA)])
+
+    style.configure("TSeparator", background=CSP)
+
+    style.configure("TAF.TCheckbutton", background=CCA, foreground=CTX,
+                    font=F_BODY, focuscolor=CCA)
+    style.map("TAF.TCheckbutton", background=[("active", CCA)])
+
+    # ── Progress ──────────────────────────────────────────────────────────
+    style.configure("TAF.Horizontal.TProgressbar",
+                    troughcolor=_blend(CSP, CCA, 0.4),
+                    background=CA, bordercolor=CBG,
+                    lightcolor=CA, darkcolor=CA,
+                    borderwidth=0, thickness=px(6))
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -1132,7 +1272,7 @@ class CalendarPicker(tk.Toplevel):
     def __init__(self, master, target_var: tk.StringVar, anchor=None):
         super().__init__(master)
         self.overrideredirect(True)          # no title bar / chrome
-        self.configure(bg=CSP, bd=1, relief="solid")
+        self.configure(bg=CSP, relief="flat", bd=0, highlightthickness=1, highlightbackground=CBR)
         self.resizable(False, False)
         self.target_var = target_var
 
@@ -1570,7 +1710,7 @@ class CompressorFilterDialog(tk.Toplevel):
                  font=F_BOLD).pack(side="left", padx=(0, 10))
         self._gd_qty = tk.StringVar(value="1")
         tk.Spinbox(qty_row, from_=1, to=50, textvariable=self._gd_qty,
-                   width=5, font=F_BODY, relief="solid", bd=1,
+                   width=5, font=F_BODY, relief="flat", bd=0, highlightthickness=1, highlightbackground=CBR,
                    command=self._gd_update_preview).pack(side="left")
         tk.Label(qty_row, text="  (multiplies filter quantities & updates job name)",
                  bg=CBG, fg=CMU, font=F_SM).pack(side="left")
@@ -1634,7 +1774,7 @@ class CompressorFilterDialog(tk.Toplevel):
         right.pack(side="left", fill="both", expand=True)
         tk.Label(right, text="Preview", bg=CBG, fg=CMU, font=F_SM).pack(anchor="w", pady=(0, 4))
 
-        prev = tk.Frame(right, bg=CCA, bd=1, relief="solid", padx=10, pady=8)
+        prev = tk.Frame(right, bg=CCA, relief="flat", bd=0, highlightthickness=1, highlightbackground=CBR, padx=10, pady=8)
         prev.pack(fill="both", expand=True)
 
         job_row = tk.Frame(prev, bg=CCA)
@@ -1802,7 +1942,7 @@ class CompressorFilterDialog(tk.Toplevel):
                  font=F_BOLD).pack(side="left", padx=(0, 10))
         self._sigrist_qty = tk.StringVar(value="1")
         tk.Spinbox(qty_row, from_=1, to=50, textvariable=self._sigrist_qty,
-                   width=5, font=F_BODY, relief="solid", bd=1).pack(side="left")
+                   width=5, font=F_BODY, relief="flat", bd=0, highlightthickness=1, highlightbackground=CBR).pack(side="left")
 
         self._sigrist_hint = tk.Label(frm, text="", bg=CBG, fg=CMU,
                                       font=F_SM, justify="left")
@@ -1915,7 +2055,7 @@ class CompressorFilterDialog(tk.Toplevel):
                  font=F_BOLD).pack(side="left", padx=(0, 10))
         self._stepped_qty = tk.StringVar(value="1")
         tk.Spinbox(qty_row, from_=1, to=50, textvariable=self._stepped_qty,
-                   width=5, font=F_BODY, relief="solid", bd=1).pack(side="left")
+                   width=5, font=F_BODY, relief="flat", bd=0, highlightthickness=1, highlightbackground=CBR).pack(side="left")
 
         tk.Label(frm,
                  text="Clicking 'Add to Order' will add the selected quantity of\n"
@@ -2324,7 +2464,7 @@ class LineItemDialog(tk.Toplevel):
         # ── Dimensions ────────────────────────────────────────────────────
         dim_f = tk.LabelFrame(body, text=" Dimensions (mm) ",
                                bg=CCA, fg=CA, font=F_SEC,
-                               bd=1, relief="solid", padx=16, pady=14)
+                               relief="flat", bd=0, highlightthickness=1, highlightbackground=CBR, padx=16, pady=14)
         dim_f.pack(fill="x", pady=(0, 12))
 
         self.vars = {}
@@ -2352,7 +2492,7 @@ class LineItemDialog(tk.Toplevel):
         # ── Classification ────────────────────────────────────────────────
         cls_f = tk.LabelFrame(body, text=" Classification ",
                                bg=CCA, fg=CA, font=F_SEC,
-                               bd=1, relief="solid", padx=16, pady=14)
+                               relief="flat", bd=0, highlightthickness=1, highlightbackground=CBR, padx=16, pady=14)
         cls_f.pack(fill="x", pady=(0, 12))
 
         for col, (key, vals) in enumerate([
@@ -2368,10 +2508,9 @@ class LineItemDialog(tk.Toplevel):
             # Use tk.OptionMenu instead of ttk.Combobox — always renders cleanly
             v.set(v.get() or vals[0])
             om = tk.OptionMenu(sub, v, *vals)
-            om.config(relief="solid", bd=1, bg=CBG, fg=CTX,
+            om.config(relief="flat", bd=0, highlightthickness=1, highlightbackground=CBR, bg=CBG, fg=CTX,
                       font=F_BODY, anchor="w",
-                      activebackground=CRE, activeforeground=CTX,
-                      highlightthickness=0, cursor="hand2", padx=8, pady=4)
+                      activebackground=CRE, activeforeground=CTX, cursor="hand2", padx=8, pady=4)
             om["menu"].config(bg=CCA, fg=CTX, font=F_BODY,
                               activebackground=CA, activeforeground="white")
             om.pack(fill="x", pady=(3, 0))
@@ -2387,7 +2526,7 @@ class LineItemDialog(tk.Toplevel):
         # ── Options ───────────────────────────────────────────────────────
         opt_f = tk.LabelFrame(body, text=" Options ",
                                bg=CCA, fg=CA, font=F_SEC,
-                               bd=1, relief="solid", padx=16, pady=14)
+                               relief="flat", bd=0, highlightthickness=1, highlightbackground=CBR, padx=16, pady=14)
         opt_f.pack(fill="x", pady=(0, 12))
 
         self.var_pleat    = tk.BooleanVar(value=bool(initial.get("Pleat Insert", False)))
@@ -2412,7 +2551,7 @@ class LineItemDialog(tk.Toplevel):
         # ── Page Overrides ────────────────────────────────────────────────
         ov_f = tk.LabelFrame(body, text=" Page Overrides (optional) ",
                               bg=CCA, fg=CA, font=F_SEC,
-                              bd=1, relief="solid", padx=16, pady=14)
+                              relief="flat", bd=0, highlightthickness=1, highlightbackground=CBR, padx=16, pady=14)
         ov_f.pack(fill="x", pady=(0, 4))
 
         tk.Label(ov_f,
@@ -2429,7 +2568,7 @@ class LineItemDialog(tk.Toplevel):
         tk.Label(ov_f, text="Page Notes:", bg=CCA, fg=CTX,
                  font=F_BOLD).pack(anchor="w")
         self.txt_notes = tk.Text(ov_f, width=60, height=3, wrap="word",
-                                  font=F_BODY, relief="solid", bd=1,
+                                  font=F_BODY, relief="flat", bd=0, highlightthickness=1, highlightbackground=CBR,
                                   bg=CBG, fg=CTX, insertbackground=CTX)
         self.txt_notes.pack(fill="x", pady=(3, 0))
         self.txt_notes.insert("1.0", initial.get("Notes", "") or "")
@@ -2826,9 +2965,9 @@ class BagLineItemDialog(tk.Toplevel):
         self.var_pt = tk.StringVar(value=d.get("product_type", BAG_PRODUCT_TYPES[0]))
         om_pt = tk.OptionMenu(pt_col, self.var_pt, *BAG_PRODUCT_TYPES,
                               command=lambda _: self._on_type_change())
-        om_pt.config(relief="solid", bd=1, bg=CCA, fg=CTX, font=F_BODY,
+        om_pt.config(relief="flat", bd=0, highlightthickness=1, highlightbackground=CBR, bg=CCA, fg=CTX, font=F_BODY,
                      width=16, anchor="w", activebackground=CRE,
-                     activeforeground=CTX, highlightthickness=0, cursor="hand2")
+                     activeforeground=CTX, cursor="hand2")
         om_pt["menu"].config(bg=CCA, fg=CTX, font=F_BODY,
                              activebackground=CA, activeforeground="white")
         om_pt.pack()
@@ -2851,9 +2990,9 @@ class BagLineItemDialog(tk.Toplevel):
         self.var_preset = tk.StringVar(value="Custom")
         self.om_preset  = tk.OptionMenu(self.preset_frame, self.var_preset, "Custom",
                                         command=lambda _: self._on_preset_change())
-        self.om_preset.config(relief="solid", bd=1, bg=CCA, fg=CTX, font=F_BODY,
+        self.om_preset.config(relief="flat", bd=0, highlightthickness=1, highlightbackground=CBR, bg=CCA, fg=CTX, font=F_BODY,
                               width=28, anchor="w", activebackground=CRE,
-                              activeforeground=CTX, highlightthickness=0, cursor="hand2")
+                              activeforeground=CTX, cursor="hand2")
         self.om_preset["menu"].config(bg=CCA, fg=CTX, font=F_BODY,
                                        activebackground=CA, activeforeground="white")
         self.om_preset.pack(side="left")
@@ -2921,9 +3060,8 @@ class BagLineItemDialog(tk.Toplevel):
         self.var_media = tk.StringVar(value=d.get("media", BAG_MEDIA_TYPES[0]))
         self.om_media  = tk.OptionMenu(m_col, self.var_media, *BAG_MEDIA_TYPES,
                                        command=lambda _: self._auto_pn())
-        self.om_media.config(relief="solid", bd=1, bg=CCA, fg=CTX, font=F_BODY,
-                             width=10, anchor="w", activebackground=CRE,
-                             highlightthickness=0, cursor="hand2")
+        self.om_media.config(relief="flat", bd=0, highlightthickness=1, highlightbackground=CBR, bg=CCA, fg=CTX, font=F_BODY,
+                             width=10, anchor="w", activebackground=CRE, cursor="hand2")
         self.om_media["menu"].config(bg=CCA, fg=CTX, font=F_BODY,
                                       activebackground=CA, activeforeground="white")
         self.om_media.pack()
@@ -3002,7 +3140,7 @@ class BagLineItemDialog(tk.Toplevel):
                               bd=1, relief="groove", padx=12, pady=8)
         nt_f.pack(fill="x", pady=(0, 4))
         self.txt_notes = tk.Text(nt_f, width=60, height=3, wrap="word",
-                                  font=F_BODY, relief="solid", bd=1,
+                                  font=F_BODY, relief="flat", bd=0, highlightthickness=1, highlightbackground=CBR,
                                   bg=CCA, fg=CTX, insertbackground=CTX)
         self.txt_notes.pack(fill="x")
         self.txt_notes.insert("1.0", d.get("notes", "") or "")
@@ -3606,7 +3744,7 @@ class POReviewDialog(tk.Toplevel):
                                   wraplength=640, padx=10, pady=6)
 
         hf = tk.LabelFrame(right, text=" Order Details ", bg=CCA, fg=CA,
-                           font=F_SEC, bd=1, relief="solid", padx=12, pady=10)
+                           font=F_SEC, relief="flat", bd=0, highlightthickness=1, highlightbackground=CBR, padx=12, pady=10)
         hf.grid(row=2, column=0, sticky="ew")
         self._hvars = {}
         fields = [("Customer Name", True), ("Order Number", True),
@@ -4858,7 +4996,7 @@ class ModernOrderApp(tk.Frame):
                                    pady=(8, 4), padx=(0, 10))
         self.txt_header_notes = tk.Text(
             card_body, height=5, width=24, wrap="word",
-            font=F_BODY, relief="solid", bd=1,
+            font=F_BODY, relief="flat", bd=0, highlightthickness=1, highlightbackground=CBR,
             bg=CCA, fg=CTX, insertbackground=CTX)
         self.txt_header_notes.grid(row=r, column=1, sticky="we", pady=(8, 4))
         self.txt_header_notes.bind("<<Modified>>",
@@ -4947,6 +5085,11 @@ class ModernOrderApp(tk.Frame):
                                   style="TAF.Treeview",
                                   selectmode="browse")
         self.tree.grid(row=0, column=0, sticky="nsew")
+        attach_empty_state(
+                    self.tree,
+                    "No lines on this order yet",
+                    "Add a filter, a bag or roll, or import a purchase order.",
+                    action=self._add_filter_item, action_text="＋  Add Filter Item")
         self.tree.heading("#0", text="Kind", anchor="center")
         self.tree.column("#0", width=px(92), minwidth=px(80), anchor="center", stretch=False)
 
@@ -5091,6 +5234,11 @@ class ModernOrderApp(tk.Frame):
                                          style="TAF.Treeview",
                                          selectmode="extended")
         self.orders_tree.grid(row=0, column=0, sticky="nsew")
+        attach_empty_state(
+                    self.orders_tree,
+                    "No orders to show",
+                    "Nothing matches the current search and filters.\n"
+                    "Clear them to see everything, or start a new order.")
         self.orders_tree.heading("#0", text="Type", anchor="center")
         self.orders_tree.column("#0", width=px(106), minwidth=px(92), anchor="center", stretch=False)
 
@@ -5226,6 +5374,10 @@ class ModernOrderApp(tk.Frame):
         self.delivery_tree.tag_configure("overdue", background="#FADBD8",
                                          foreground="#922B21")
         self.delivery_tree.grid(row=0, column=0, sticky="nsew")
+        attach_empty_state(
+                    self.delivery_tree,
+                    "Nothing ready to go out",
+                    "Orders appear here once they are marked Complete.")
         dsb = ttk.Scrollbar(wrap, orient="vertical",
                             command=self.delivery_tree.yview)
         dsb.grid(row=0, column=1, sticky="ns")
@@ -5628,6 +5780,12 @@ class ModernOrderApp(tk.Frame):
         self.quote_tree.tag_configure("missing", background="#FDEDEC",
                                       foreground=CRD)
         self.quote_tree.grid(row=0, column=0, sticky="nsew")
+        attach_empty_state(
+                    self.quote_tree,
+                    "Nothing on this quote yet",
+                    "Add a filter, a bag or roll, or pick a product\n"
+                    "straight out of the price list.",
+                    action=self._quote_add_menu, action_text="＋  Add Line")
         qsb = ttk.Scrollbar(wrap, orient="vertical",
                             command=self.quote_tree.yview)
         qsb.grid(row=0, column=1, sticky="ns")
@@ -6814,6 +6972,11 @@ class ModernOrderApp(tk.Frame):
         self.products_tree.tag_configure("even", background=CRE)
         self.products_tree.tag_configure("odd", background=CCA)
         self.products_tree.grid(row=0, column=0, sticky="nsew")
+        attach_empty_state(
+                    self.products_tree,
+                    "No products priced yet",
+                    "Import your price spreadsheets and every part number\n"
+                    "in them becomes quotable.")
         sb = ttk.Scrollbar(wrap, orient="vertical",
                            command=self.products_tree.yview)
         sb.grid(row=0, column=1, sticky="ns")
@@ -8073,7 +8236,7 @@ class ModernOrderApp(tk.Frame):
                  font=F_BODY, width=18, anchor="nw").grid(
             row=_row, column=0, sticky="nw", pady=4)
         txt_notes = tk.Text(body, height=3, width=36, wrap="word",
-                            font=F_BODY, relief="solid", bd=1,
+                            font=F_BODY, relief="flat", bd=0, highlightthickness=1, highlightbackground=CBR,
                             bg=CCA, fg=CTX, insertbackground=CTX)
         txt_notes.grid(row=_row, column=1, sticky="ew", pady=4)
         if cust and cust.get("notes"):
@@ -8271,6 +8434,11 @@ class ModernOrderApp(tk.Frame):
                                         style="TAF.Treeview",
                                         selectmode="browse")
         self._stock_tree.grid(row=0, column=0, sticky="nsew")
+        attach_empty_state(
+                    self._stock_tree,
+                    "No stock items",
+                    "Add the media, frames and parts you keep on hand,\n"
+                    "and orders can take them off automatically.")
 
         s_col_defs = {
             "img":      ("📷",         36,  "center"),
@@ -8701,7 +8869,7 @@ class ModernOrderApp(tk.Frame):
         # Description
         _lbl(r, "Description")
         txt_desc = tk.Text(body, height=3, width=36, wrap="word",
-                           font=F_BODY, relief="solid", bd=1,
+                           font=F_BODY, relief="flat", bd=0, highlightthickness=1, highlightbackground=CBR,
                            bg=CCA, fg=CTX, insertbackground=CTX,
                            state="normal" if is_manager else "disabled")
         txt_desc.grid(row=r, column=1, sticky="ew", pady=5)
@@ -8712,7 +8880,7 @@ class ModernOrderApp(tk.Frame):
         # Notes
         _lbl(r, "Notes")
         txt_notes = tk.Text(body, height=2, width=36, wrap="word",
-                            font=F_BODY, relief="solid", bd=1,
+                            font=F_BODY, relief="flat", bd=0, highlightthickness=1, highlightbackground=CBR,
                             bg=CCA, fg=CTX, insertbackground=CTX,
                             state="normal" if is_manager else "disabled")
         txt_notes.grid(row=r, column=1, sticky="ew", pady=5)
@@ -8727,7 +8895,7 @@ class ModernOrderApp(tk.Frame):
 
         img_preview = tk.Label(img_frame, text="No image", bg=CBG, fg=CMU,
                                font=F_SM, width=20, height=6,
-                               relief="solid", bd=1, anchor="center")
+                               relief="flat", bd=0, highlightthickness=1, highlightbackground=CBR, anchor="center")
         img_preview.pack(side="left", padx=(0, 8))
         _img_widget[0] = img_preview
 
@@ -8930,7 +9098,7 @@ class ModernOrderApp(tk.Frame):
         # Notes
         tk.Label(body, text="Notes (optional):", bg=CBG, fg=CTX, font=F_BODY).pack(anchor="w", pady=(8, 2))
         notes_txt = tk.Text(body, height=3, width=40, wrap="word",
-                            font=F_BODY, relief="solid", bd=1,
+                            font=F_BODY, relief="flat", bd=0, highlightthickness=1, highlightbackground=CBR,
                             bg=CCA, fg=CTX, insertbackground=CTX)
         notes_txt.pack(fill="x")
 
@@ -9191,7 +9359,7 @@ class ModernOrderApp(tk.Frame):
                  anchor="w").grid(row=0, column=0, sticky="w", pady=(0, 12))
 
         # row 2 – Software Update  (always visible to everyone)
-        upd_card = tk.Frame(frm, bg=CCA, bd=1, relief="solid", padx=16, pady=12)
+        upd_card = tk.Frame(frm, bg=CCA, relief="flat", bd=0, highlightthickness=1, highlightbackground=CBR, padx=16, pady=12)
         upd_card.grid(row=2, column=0, sticky="ew", pady=(12, 0))
 
         upd_top = tk.Frame(upd_card, bg=CCA)
@@ -9229,7 +9397,7 @@ class ModernOrderApp(tk.Frame):
 
         # row 3 – User Management (Managers and above only)
         if _db.is_ready() and _db.can_manage_roles():
-            um_card = tk.Frame(frm, bg=CCA, bd=1, relief="solid",
+            um_card = tk.Frame(frm, bg=CCA, relief="flat", bd=0, highlightthickness=1, highlightbackground=CBR,
                                padx=16, pady=12)
             um_card.grid(row=3, column=0, sticky="ew", pady=(12, 0))
             tk.Label(um_card, text="User Management",
@@ -9331,7 +9499,7 @@ class ModernOrderApp(tk.Frame):
         self._refresh_filter_types_list()
 
         # ── Stock ─────────────────────────────────────────────────────────
-        st_card = tk.Frame(frm, bg=CCA, bd=1, relief="solid", padx=16, pady=12)
+        st_card = tk.Frame(frm, bg=CCA, relief="flat", bd=0, highlightthickness=1, highlightbackground=CBR, padx=16, pady=12)
         st_card.grid(row=11, column=0, sticky="ew", pady=(12, 0))
         tk.Label(st_card, text="Stock", bg=CCA, fg=CA,
                  font=F_SEC, anchor="w").pack(anchor="w")
@@ -9359,7 +9527,7 @@ class ModernOrderApp(tk.Frame):
                  bg=CCA, fg=CMU, font=F_SM, anchor="w").pack(anchor="w", pady=(6, 0))
 
         # ── Pricing ───────────────────────────────────────────────────────
-        pc_card = tk.Frame(frm, bg=CCA, bd=1, relief="solid", padx=16, pady=12)
+        pc_card = tk.Frame(frm, bg=CCA, relief="flat", bd=0, highlightthickness=1, highlightbackground=CBR, padx=16, pady=12)
         pc_card.grid(row=12, column=0, sticky="ew", pady=(12, 0))
         tk.Label(pc_card, text="Pricing", bg=CCA, fg=CA,
                  font=F_SEC, anchor="w").pack(anchor="w")
@@ -9395,7 +9563,7 @@ class ModernOrderApp(tk.Frame):
         self.master.after(400, self._refresh_price_count)
 
         # ── Local Storage ─────────────────────────────────────────────────
-        ls_card = tk.Frame(frm, bg=CCA, bd=1, relief="solid", padx=16, pady=12)
+        ls_card = tk.Frame(frm, bg=CCA, relief="flat", bd=0, highlightthickness=1, highlightbackground=CBR, padx=16, pady=12)
         ls_card.grid(row=7, column=0, sticky="ew", pady=(12, 0))
         tk.Label(ls_card, text="Local Storage",
                  bg=CCA, fg=CA, font=F_SEC, anchor="w").pack(anchor="w")
@@ -9411,7 +9579,7 @@ class ModernOrderApp(tk.Frame):
                  bg=CRD, pady=6).pack(anchor="w")
 
         # ── Change Password ───────────────────────────────────────────────
-        cp_card = tk.Frame(frm, bg=CCA, bd=1, relief="solid", padx=16, pady=12)
+        cp_card = tk.Frame(frm, bg=CCA, relief="flat", bd=0, highlightthickness=1, highlightbackground=CBR, padx=16, pady=12)
         cp_card.grid(row=6, column=0, sticky="ew", pady=(12, 0))
         tk.Label(cp_card, text="Change Password",
                  bg=CCA, fg=CA, font=F_SEC, anchor="w").pack(anchor="w")
@@ -9436,7 +9604,7 @@ class ModernOrderApp(tk.Frame):
                  bg=CA, pady=6).pack(anchor="w")
 
         # ── PDF File Naming ───────────────────────────────────────────────
-        pn_card = tk.Frame(frm, bg=CCA, bd=1, relief="solid", padx=16, pady=12)
+        pn_card = tk.Frame(frm, bg=CCA, relief="flat", bd=0, highlightthickness=1, highlightbackground=CBR, padx=16, pady=12)
         # row 10 — not 9: the Filter Types card already owns row 9, and two
         # cards in one grid cell draw on top of each other.
         pn_card.grid(row=10, column=0, sticky="ew", pady=(12, 0))
@@ -9494,7 +9662,7 @@ class ModernOrderApp(tk.Frame):
         _update_preview()
 
         # ── Default Printer ───────────────────────────────────────────────
-        pr_card = tk.Frame(frm, bg=CCA, bd=1, relief="solid", padx=16, pady=12)
+        pr_card = tk.Frame(frm, bg=CCA, relief="flat", bd=0, highlightthickness=1, highlightbackground=CBR, padx=16, pady=12)
         pr_card.grid(row=8, column=0, sticky="ew", pady=(12, 0))
         tk.Label(pr_card, text="Default Printer",
                  bg=CCA, fg=CA, font=F_SEC, anchor="w").pack(anchor="w")
@@ -9549,7 +9717,7 @@ class ModernOrderApp(tk.Frame):
         self.master.after(300, _refresh_printers)
 
         # ── Appearance / Dark Mode ────────────────────────────────────────
-        ap_card = tk.Frame(frm, bg=CCA, bd=1, relief="solid", padx=16, pady=12)
+        ap_card = tk.Frame(frm, bg=CCA, relief="flat", bd=0, highlightthickness=1, highlightbackground=CBR, padx=16, pady=12)
         ap_card.grid(row=5, column=0, sticky="ew", pady=(12, 0))
         tk.Label(ap_card, text="Appearance",
                  bg=CCA, fg=CA, font=F_SEC, anchor="w").pack(anchor="w")
@@ -9571,7 +9739,7 @@ class ModernOrderApp(tk.Frame):
 
         # ── Low Stock Alert Thresholds (Manager+ only) ────────────────────
         if _db.is_ready() and _db.can_manage_stock_alerts():
-            alert_outer = tk.Frame(frm, bg=CCA, bd=1, relief="solid",
+            alert_outer = tk.Frame(frm, bg=CCA, relief="flat", bd=0, highlightthickness=1, highlightbackground=CBR,
                                    padx=16, pady=12)
             alert_outer.grid(row=4, column=0, sticky="ew", pady=(12, 0))
             tk.Label(alert_outer, text="Low Stock Alert Thresholds",
@@ -9584,7 +9752,7 @@ class ModernOrderApp(tk.Frame):
             self._refresh_alert_thresholds_ui()
 
         # ── Backup ────────────────────────────────────────────────────────
-        bk_card = tk.Frame(frm, bg=CCA, bd=1, relief="solid", padx=16, pady=12)
+        bk_card = tk.Frame(frm, bg=CCA, relief="flat", bd=0, highlightthickness=1, highlightbackground=CBR, padx=16, pady=12)
         bk_card.grid(row=13, column=0, sticky="ew", pady=(12, 0))
         tk.Label(bk_card, text="Backup & Export",
                  bg=CCA, fg=CA, font=F_SEC, anchor="w").pack(anchor="w")
@@ -10973,7 +11141,7 @@ class ModernOrderApp(tk.Frame):
                  font=(FAM, 9),
                  justify="left", anchor="w",
                  padx=10, pady=6,
-                 relief="solid", bd=1,
+                 relief="flat", bd=0, highlightthickness=1, highlightbackground=CBR,
                  wraplength=340).pack()
 
         # Position near cursor, nudged right and below
@@ -11387,7 +11555,7 @@ class ModernOrderApp(tk.Frame):
             from PIL import Image as _PILImage
             img = img.resize((340, 340), _PILImage.NEAREST)
             photo = ImageTk.PhotoImage(img)
-            lbl = tk.Label(body, image=photo, bg=CBG, bd=1, relief="solid")
+            lbl = tk.Label(body, image=photo, bg=CBG, relief="flat", bd=0, highlightthickness=1, highlightbackground=CBR)
             lbl.image = photo          # keep a reference or Tk drops it
             lbl.pack()
         except Exception as exc:
@@ -11406,7 +11574,7 @@ class ModernOrderApp(tk.Frame):
         tk.Label(body, textvariable=status, bg=CBG, fg=CA,
                  font=F_BOLD, wraplength=340, justify="center").pack(pady=(14, 0))
 
-        link = tk.Entry(body, font=F_SM, width=46, relief="solid", bd=1)
+        link = tk.Entry(body, font=F_SM, width=46, relief="flat", bd=0, highlightthickness=1, highlightbackground=CBR)
         link.insert(0, url)
         link.configure(state="readonly")
         link.pack(pady=(12, 0))
@@ -13372,7 +13540,7 @@ class ModernOrderApp(tk.Frame):
         body.pack(fill="both", expand=True)
         tk.Label(body, text="Note:", bg=CBG, fg=CTX, font=F_BODY).pack(anchor="w", pady=(0, 4))
         note_txt = tk.Text(body, width=50, height=5, wrap="word",
-                           font=F_BODY, relief="solid", bd=1,
+                           font=F_BODY, relief="flat", bd=0, highlightthickness=1, highlightbackground=CBR,
                            bg=CCA, fg=CTX, insertbackground=CTX)
         note_txt.pack(fill="both", expand=True)
         note_txt.focus_set()
