@@ -1498,6 +1498,7 @@ class _GDModelEditor(tk.Toplevel):
         self.title("Edit Model" if name else "Add Model")
         self.transient(master)
         self.grab_set()
+        self.bind("<Escape>", lambda _e: self.destroy())
         self.configure(bg=CBG)
         self.result = None
         pack = pack or {}
@@ -1653,6 +1654,7 @@ class CompressorFilterDialog(tk.Toplevel):
         self.title("Dedicated Filter Presets")
         self.transient(master)
         self.grab_set()
+        self.bind("<Escape>", lambda _e: self.destroy())
         self.lift()
         self.focus_force()
         self.configure(bg=CBG)
@@ -2429,6 +2431,9 @@ class LineItemDialog(tk.Toplevel):
         self.resizable(False, False)
         self.transient(master)
         self.grab_set()
+        # Typed the last figure? Enter saves it. These two dialogs are
+        # opened dozens of times a day.
+        self.bind("<Return>", lambda _e: self._save())
         self.lift()
         self.focus_force()
         self.configure(bg=CBG)
@@ -2914,6 +2919,9 @@ class BagLineItemDialog(tk.Toplevel):
         self.resizable(False, False)
         self.transient(master)
         self.grab_set()
+        # Typed the last figure? Enter saves it. These two dialogs are
+        # opened dozens of times a day.
+        self.bind("<Return>", lambda _e: self._save())
         self.lift()
         self.focus_force()
         self.configure(bg=CBG)
@@ -3581,6 +3589,7 @@ class _UnknownMediaDialog(tk.Toplevel):
         self.title("Unknown Media Type")
         self.transient(master)
         self.grab_set()
+        self.bind("<Escape>", lambda _e: self.destroy())
         self.resizable(False, False)
         self.configure(bg=CBG)
         self.result = None
@@ -3668,6 +3677,7 @@ class POReviewDialog(tk.Toplevel):
         self.title("Review Imported Purchase Orders")
         self.transient(master)
         self.grab_set()
+        self.bind("<Escape>", lambda _e: self._escape())
         self.configure(bg=CBG)
         self.result = None
         # What the corrections made in here taught the app; read by the caller
@@ -4070,6 +4080,19 @@ class POReviewDialog(tk.Toplevel):
 
     # ── Finish ────────────────────────────────────────────────────────────
 
+    def _escape(self):
+        """Escape closes a dialog everywhere else, so it should here too —
+        but this one can hold a batch of purchase orders somebody has spent
+        ten minutes correcting, and _cancel throws that away without asking.
+        So here, and only here, it asks."""
+        if messagebox.askyesno(
+                "Discard this import?",
+                "Close the review and discard what was read from these "
+                "photos?\n\nThe photos stay where they are and can be "
+                "imported again.",
+                parent=self, icon="warning", default="no"):
+            self._cancel()
+
     def _cancel(self):
         self.result = None
         self.destroy()
@@ -4321,6 +4344,7 @@ class ModernOrderApp(tk.Frame):
 
         _configure_ttk_style()
         self._build_ui()
+        self._bind_shortcuts()
         self._refresh_items_tree()
 
         # Offer to restore any unsaved draft (after UI is fully built)
@@ -4770,6 +4794,16 @@ class ModernOrderApp(tk.Frame):
             for w in (prof, tcol, av):
                 w.bind("<Button-1>", lambda e: self._show_tab("settings"))
 
+        # A shortcut nobody knows about saves nobody any time, so there is a
+        # way in that doesn't require already knowing the shortcut.
+        kb = tk.Label(inner, text="⌨  Shortcuts", bg=CCA, fg=CMU,
+                      font=F_SM, cursor="hand2", padx=px(10))
+        kb.pack(side="right", padx=(0, px(6)))
+        kb.bind("<Button-1>", lambda _e: self._show_shortcuts())
+        kb.bind("<Enter>", lambda _e: kb.config(fg=CA))
+        kb.bind("<Leave>", lambda _e: kb.config(fg=CMU))
+        _Tooltip(kb, "Keyboard shortcuts  (F1)")
+
     # ── Tab bar ───────────────────────────────────────────────────────────
 
     def _build_tab_bar(self):
@@ -4779,18 +4813,7 @@ class ModernOrderApp(tk.Frame):
         self._tab_bar_inner = tk.Frame(bar, bg=CCA, padx=8)
         self._tab_bar_inner.pack(fill="x")
 
-        tabs = [
-            ("dashboard",   "▦  Dashboard"),
-            ("new_order",   "＋  New Order"),
-            ("prev_orders", "▤  Previous Orders"),
-            ("delivery",    "🚚  Delivery"),
-            ("quotes",      "💲  Quotes"),
-            ("products",    "🏷  Products"),
-            ("customers",   "👥  Customers"),
-            ("stock",       "📦  Stock"),
-            ("audit_log",   "☰  Audit Log"),
-            ("settings",    "⚙  Settings"),
-        ]
+        tabs = [(k, self._TAB_LABELS[k]) for k in self._TAB_ORDER]
         self._tab_underlines = {}
         for key, label_text in tabs:
             cell = tk.Frame(self._tab_bar_inner, bg=CCA)
@@ -4811,6 +4834,199 @@ class ModernOrderApp(tk.Frame):
             return
         self._tab_buttons[key].config(fg=CTX if entering else CMU)
 
+    # The tabs, left to right. One list: the bar is built from it and Ctrl+1
+    # to Ctrl+0 are numbered off it, so the shortcut can never point at a
+    # different tab from the one under that position on screen.
+    _TAB_LABELS = {
+        "dashboard":   "▦  Dashboard",
+        "new_order":   "＋  New Order",
+        "prev_orders": "▤  Previous Orders",
+        "delivery":    "🚚  Delivery",
+        "quotes":      "💲  Quotes",
+        "products":    "🏷  Products",
+        "customers":   "👥  Customers",
+        "stock":       "📦  Stock",
+        "audit_log":   "☰  Audit Log",
+        "settings":    "⚙  Settings",
+    }
+    _TAB_ORDER = list(_TAB_LABELS)
+
+    # ── Keyboard ──────────────────────────────────────────────────────────
+    # An order-entry app is used all day by people who know where everything
+    # is. Reaching for the mouse to change tab, start an order or find a
+    # customer is the slowest part of the job.
+    #
+    # Ctrl+letter is safe to bind application-wide because it is never
+    # someone typing. The Delete key is not, so it is bound to the tables
+    # themselves rather than globally - otherwise it would eat a line while
+    # someone was editing a field.
+
+    SHORTCUTS = [
+        ("Ctrl+1 … Ctrl+0", "Jump straight to a tab, left to right"),
+        ("Ctrl+N",          "Start a new order"),
+        ("Ctrl+F",          "Jump to the search box on this tab"),
+        ("Ctrl+S",          "Do the main thing on this tab "
+                            "(generate the order, save the quote)"),
+        ("Ctrl+P",          "Print — the selected order, or the delivery run"),
+        ("F5",              "Reload what's on screen"),
+        ("F1",              "This list"),
+        ("Enter",           "Open the selected row"),
+        ("Delete",          "Remove the selected line (New Order and Quotes)"),
+        ("Esc",             "Close a dialog"),
+    ]
+
+    def _bind_shortcuts(self):
+        root = self.master
+        for i, key in enumerate(self._TAB_ORDER):
+            # Ctrl+1..9 then Ctrl+0 for the tenth, the way browsers do it.
+            digit = (i + 1) % 10
+            root.bind_all(f"<Control-Key-{digit}>",
+                          lambda _e, k=key: self._shortcut(lambda: self._show_tab(k)))
+        root.bind_all("<Control-n>", lambda _e: self._shortcut(self._new_order))
+        root.bind_all("<Control-N>", lambda _e: self._shortcut(self._new_order))
+        root.bind_all("<Control-f>", lambda _e: self._shortcut(self._focus_search))
+        root.bind_all("<Control-F>", lambda _e: self._shortcut(self._focus_search))
+        root.bind_all("<Control-s>", lambda _e: self._shortcut(self._primary_action))
+        root.bind_all("<Control-S>", lambda _e: self._shortcut(self._primary_action))
+        root.bind_all("<Control-p>", lambda _e: self._shortcut(self._print_action))
+        root.bind_all("<Control-P>", lambda _e: self._shortcut(self._print_action))
+        root.bind_all("<F5>", lambda _e: self._shortcut(self._reload_active_tab))
+        root.bind_all("<F1>", lambda _e: self._shortcut(self._show_shortcuts))
+
+    def _shortcut(self, action):
+        """Run a shortcut, unless a dialog is open.
+
+        bind_all reaches every window in the program, dialogs included, so
+        without this Ctrl+N inside the line-item dialog would start a new
+        order behind it.
+        """
+        try:
+            if self.master.grab_current() is not None:
+                return "break"
+        except Exception:
+            pass
+        try:
+            action()
+        except Exception as exc:
+            self.status_var.set(f"That didn't work: {exc}")
+        return "break"
+
+    # Which box Ctrl+F should land in, per tab.
+    _SEARCH_FIELDS = {
+        "prev_orders": "search_var",
+        "products":    "product_search_var",
+        "customers":   "_cust_search_var",
+        "stock":       "_stock_search_var",
+    }
+
+    def _focus_search(self):
+        """Put the cursor in this tab's search box, and select what's there
+        so typing replaces the last search instead of appending to it."""
+        name = self._SEARCH_FIELDS.get(self._active_tab)
+        widget = None
+        if name:
+            var = getattr(self, name, None)
+            widget = self._entry_for_var(var) if var is not None else None
+        if widget is None:
+            self.status_var.set("Nothing to search on this tab.")
+            return
+        widget.focus_set()
+        try:
+            widget.select_range(0, "end")
+            widget.icursor("end")
+        except Exception:
+            pass
+
+    def _entry_for_var(self, var):
+        """Find the Entry showing a given variable, wherever it was built."""
+        target = str(var)
+        stack = [self]
+        while stack:
+            w = stack.pop()
+            try:
+                if isinstance(w, tk.Entry) and str(w.cget("textvariable")) == target:
+                    return w
+                stack.extend(w.winfo_children())
+            except Exception:
+                continue
+        return None
+
+    def _primary_action(self):
+        """Ctrl+S does the main thing on whichever tab is open."""
+        tab = self._active_tab
+        if tab == "new_order":
+            self._generate()
+        elif tab == "quotes":
+            self._save_quote()
+        elif tab == "stock":
+            self._adjust_stock_dialog()
+        else:
+            self.status_var.set(
+                "Ctrl+S generates an order on New Order and saves on Quotes.")
+
+    def _print_action(self):
+        tab = self._active_tab
+        if tab == "delivery":
+            self._print_run_sheet()
+        elif tab == "prev_orders":
+            self._print_prev_order()
+        elif tab == "new_order":
+            self._generate()
+        else:
+            self.status_var.set("Nothing to print on this tab.")
+
+    def _reload_active_tab(self):
+        """F5: fetch this tab again, ignoring how recently it was loaded."""
+        self._tab_loaded.pop(self._active_tab, None)
+        self._maybe_refresh(self._active_tab)
+        self.status_var.set("Reloaded.")
+
+    def _show_shortcuts(self):
+        """A shortcut nobody knows about saves nobody any time."""
+        dlg = tk.Toplevel(self.master)
+        dlg.title("Keyboard Shortcuts")
+        dlg.configure(bg=CBG, padx=px(22), pady=px(18))
+        dlg.transient(self.master)
+        dlg.resizable(False, False)
+        tk.Label(dlg, text="Keyboard Shortcuts", bg=CBG, fg=CA,
+                 font=F_SEC).grid(row=0, column=0, columnspan=2, sticky="w",
+                                  pady=(0, px(10)))
+        for r, (keys, what) in enumerate(self.SHORTCUTS, start=1):
+            tk.Label(dlg, text=keys, bg=CBG, fg=CTX, font=F_BOLD,
+                     anchor="w").grid(row=r, column=0, sticky="w",
+                                      padx=(0, px(18)), pady=px(3))
+            tk.Label(dlg, text=what, bg=CBG, fg=CMU, font=F_BODY,
+                     anchor="w").grid(row=r, column=1, sticky="w", pady=px(3))
+        flat_btn(dlg, "Close", dlg.destroy, bg=CA, pady=px(6)).grid(
+            row=len(self.SHORTCUTS) + 1, column=0, columnspan=2,
+            sticky="e", pady=(px(14), 0))
+        dlg.bind("<Escape>", lambda _e: dlg.destroy())
+        dlg.grab_set()
+
+    # Where the cursor should land when a tab is opened, so the common job on
+    # each screen can be started by typing rather than clicking first.
+    _TAB_FOCUS = {
+        "new_order":   "_focus_new_order",
+        "prev_orders": "_focus_search",
+        "products":    "_focus_search",
+        "customers":   "_focus_search",
+        "stock":       "_focus_search",
+    }
+
+    def _focus_new_order(self):
+        entry = self._entry_for_var(self.hvars.get("Customer Name"))
+        if entry is not None and not str(self.hvars["Customer Name"].get()).strip():
+            entry.focus_set()
+
+    def _focus_for_tab(self, key: str):
+        name = self._TAB_FOCUS.get(key)
+        if not name:
+            return
+        try:
+            getattr(self, name)()
+        except Exception:
+            pass          # a tab that hasn't finished building yet
+
     def _show_tab(self, key: str):
         self._ensure_tab_built(key)   # lazily build the tab if not constructed yet
         self._active_tab = key
@@ -4821,6 +5037,8 @@ class ModernOrderApp(tk.Frame):
 
         self._tab_frames[key].tkraise()
         self._maybe_refresh(key)
+        # After the tab is raised, so the widget being focused is visible.
+        self.master.after_idle(lambda: self._focus_for_tab(key))
 
     # Seconds a tab's data stays "fresh" — bouncing between tabs within this
     # window skips the re-fetch + treeview rebuild, so switching is instant.
@@ -5118,6 +5336,8 @@ class ModernOrderApp(tk.Frame):
         vsb.grid(row=0, column=1, sticky="ns")
         self.tree.configure(yscrollcommand=vsb.set)
         self.tree.bind("<Double-1>", lambda e: self._edit_item())
+        self.tree.bind("<Delete>", lambda _e: self._delete_item())
+        self.tree.bind("<Return>", lambda _e: self._edit_item())
 
         # Generate button
         gen_row = tk.Frame(right, bg=CBG, pady=8)
@@ -5272,6 +5492,7 @@ class ModernOrderApp(tk.Frame):
         ovsb.grid(row=0, column=1, sticky="ns")
         self.orders_tree.configure(yscrollcommand=ovsb.set)
         self.orders_tree.bind("<Double-1>", lambda e: self._load_prev_order())
+        self.orders_tree.bind("<Return>", lambda _e: self._load_prev_order())
         self.orders_tree.bind("<Motion>",   self._on_orders_tree_hover)
         self.orders_tree.bind("<Leave>",    lambda e: self._hide_order_tooltip())
 
@@ -5791,6 +6012,8 @@ class ModernOrderApp(tk.Frame):
         qsb.grid(row=0, column=1, sticky="ns")
         self.quote_tree.configure(yscrollcommand=qsb.set)
         self.quote_tree.bind("<Double-1>", lambda _e: self._edit_quote_item())
+        self.quote_tree.bind("<Delete>", lambda _e: self._remove_quote_item())
+        self.quote_tree.bind("<Return>", lambda _e: self._edit_quote_item())
 
         # ── Actions and totals ───────────────────────────────────────────
         bot = tk.Frame(frm, bg=CBG, pady=8)
@@ -11152,11 +11375,14 @@ class ModernOrderApp(tk.Frame):
         self._tooltip_win = tip
 
     def _new_order(self):
-        has_data = self.items or any(v.get() for v in self.hvars.values())
-        if has_data:
-            if not messagebox.askyesno(
-                    "New Order", "Clear the current order and start fresh?"):
-                return
+        # "ASAP" is what a fresh form starts with, so counting it as data made
+        # this ask "clear the current order?" on an order nobody had typed
+        # anything into yet.
+        typed = any(v.get().strip() for key, v in self.hvars.items()
+                    if not (key == "Date Due" and v.get().strip() == "ASAP"))
+        if (self.items or typed) and not messagebox.askyesno(
+                "New Order", "Clear the current order and start fresh?"):
+            return
         for v in self.hvars.values():
             v.set("")
         self.hvars["Date Due"].set("ASAP")
@@ -11168,6 +11394,9 @@ class ModernOrderApp(tk.Frame):
         self.items = []
         self._refresh_items_tree()
         self._clear_draft()
+        # Starting an order from the Dashboard or Ctrl+N should land you on
+        # the form, not clear one you can't see.
+        self._show_tab("new_order")
         self.status_var.set("New order started.")
 
     def _add_filter_item(self):

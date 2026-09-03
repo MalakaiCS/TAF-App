@@ -87,6 +87,15 @@ log, stock management and a customer database.
   database on a locked row, and a movement carrying the same reference twice
   is applied once, so a handheld that loses signal and resends cannot
   double-count.
+- **Quote anything you sell** — Add Line covers a made-to-measure filter, a
+  bag filter or media roll, or any of the twelve thousand priced part numbers,
+  searched by code or description with the price coming along with it. Product
+  types (Bag Filter, Media Roll, Freight, Labour…) are shared between PCs, so
+  the next kind of thing you sell needs an entry rather than a new release.
+- **Keyboard** — Ctrl+1…0 for the tabs, Ctrl+N new order, Ctrl+F search,
+  Ctrl+S do the main thing on this tab, Ctrl+P print, F5 reload, F1 for the
+  list. Enter opens a row, Delete removes a line, Esc closes a dialog. The
+  cursor lands in the field you were going to type in anyway.
 - **Settings** — media types (with their part-number codes), custom filter
   types, low-stock thresholds, user management, light/dark mode, change
   password, in-app software update.

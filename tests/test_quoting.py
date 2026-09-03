@@ -208,3 +208,92 @@ def test_measurements_in_pixels_scale_with_the_screen():
     import re
     assert not re.search(r"\.column\([^)]*\bwidth=\d", src), \
         "a table column still has an unscaled pixel width"
+
+
+# ── Getting around ───────────────────────────────────────────────────────────
+
+def test_every_tab_has_a_number_and_they_match_the_bar():
+    """Ctrl+1..0 must land on the tab that is actually in that position, so
+    both come off one list."""
+    src = _gui_source()
+    assert "_TAB_ORDER = list(_TAB_LABELS)" in src
+    assert "tabs = [(k, self._TAB_LABELS[k]) for k in self._TAB_ORDER]" in src
+    labels = re.search(r"_TAB_LABELS = \{(.*?)\n    \}", src, re.S).group(1)
+    keys = re.findall(r'"(\w+)":', labels)
+    assert keys[0] == "dashboard" and len(keys) == 10, keys
+    # Ctrl+0 is the tenth, the way a browser numbers its tabs.
+    assert "digit = (i + 1) % 10" in src
+
+
+def test_a_shortcut_cannot_fire_behind_an_open_dialog():
+    """bind_all reaches every window, dialogs included — without the guard,
+    Ctrl+N inside the line-item dialog starts an order behind it."""
+    src = _gui_source()
+    fn = src.split("def _shortcut")[1].split("\n    def ")[0]
+    assert "grab_current() is not None" in fn
+    assert 'return "break"' in fn
+
+
+def test_delete_is_bound_to_the_tables_not_the_whole_window():
+    """A global Delete would eat a line while someone edited a field."""
+    src = _gui_source()
+    assert 'bind_all("<Delete>' not in src
+    for tree in ("self.tree", "self.quote_tree"):
+        assert f'{tree}.bind("<Delete>"' in src, f"{tree} has no Delete key"
+
+
+def test_the_shortcut_list_matches_what_is_actually_bound():
+    """A list that drifts from the bindings is worse than no list."""
+    src = _gui_source()
+    binder = src.split("def _bind_shortcuts")[1].split("\n    def ")[0]
+    listed = src.split("SHORTCUTS = [")[1].split("\n    ]")[0]
+    for combo, doc in (("Control-n", "Ctrl+N"), ("Control-f", "Ctrl+F"),
+                       ("Control-s", "Ctrl+S"), ("Control-p", "Ctrl+P"),
+                       ("<F5>", "F5"), ("<F1>", "F1")):
+        assert combo in binder, f"{doc} is documented but not bound"
+        assert doc in listed, f"{combo} is bound but not documented"
+
+
+def test_starting_an_order_takes_you_to_the_order():
+    """Ctrl+N from the Dashboard used to clear a form you could not see."""
+    src = _gui_source()
+    fn = src.split("def _new_order(self)")[1].split("\n    def ")[0]
+    assert '_show_tab("new_order")' in fn
+
+
+def test_a_pristine_form_is_not_treated_as_unsaved_work():
+    """A fresh form starts with Date Due = ASAP; counting that as data made
+    New Order ask 'clear the current order?' when there was nothing to
+    clear."""
+    src = _gui_source()
+    fn = src.split("def _new_order(self)")[1].split("\n    def ")[0]
+    assert 'key == "Date Due" and v.get().strip() == "ASAP"' in fn
+
+
+def test_enter_saves_the_dialogs_used_all_day():
+    src = _gui_source()
+    for cls in ("LineItemDialog", "BagLineItemDialog"):
+        body = src.split(f"class {cls}(tk.Toplevel)")[1].split("\nclass ")[0]
+        assert '.bind("<Return>", lambda _e: self._save())' in body, \
+            f"{cls} still needs the mouse to save"
+
+
+def test_escape_closes_every_dialog():
+    src = _gui_source()
+    missing = []
+    for m in re.finditer(r"^class (\w+)\(tk\.Toplevel\)", src, re.M):
+        name = m.group(1)
+        if name in ("_ProgressDialog", "JobNumberHighlighter", "CalendarPicker"):
+            continue          # a progress bar and a canvas tool, not forms
+        body = src[m.start():]
+        nxt = re.search(r"\nclass ", body[10:])
+        body = body[:nxt.start() + 10] if nxt else body
+        if '"<Escape>"' not in body:
+            missing.append(name)
+    assert not missing, f"Escape does not close: {missing}"
+
+
+def test_the_shortcuts_can_be_found_without_knowing_them():
+    src = _gui_source()
+    assert "⌨  Shortcuts" in src, "there is no way in but the shortcut itself"
+    assert "def _show_shortcuts" in src
