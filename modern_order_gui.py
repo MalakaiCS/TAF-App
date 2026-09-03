@@ -932,18 +932,20 @@ class RoundedCard(tk.Canvas):
         if W < 8 or H < 8:
             return
         _round_rect(self, 1, 1, W - 1, H - 1, self._R,
-                    fill=CCA, outline=CSP, width=1, tags="carddeco")
+                    fill=CCA, outline=CBR, width=1, tags="carddeco")
         if self._title:
+            # A title and a hairline, not a slab of navy. Two card styles were
+            # in use — navy-barred on New Order and Settings, plain everywhere
+            # else, sometimes on the same page. This is the plain one, and the
+            # navy is kept for the app header where it belongs.
             hb = self._hdr_h
-            _round_rect(self, 1, 1, W - 1, hb + self._R, self._R,
-                        fill=self._hdrbg, outline="", tags="carddeco")
-            self.create_rectangle(1, hb, W - 1, hb + self._R,
-                                  fill=self._hdrbg, outline="", tags="carddeco")
             self.create_text(self._pad, hb // 2, anchor="w", text=self._title,
-                             fill="white", font=F_SEC, tags="carddeco")
+                             fill=CA, font=F_SEC, tags="carddeco")
+            self.create_line(self._pad, hb - 1, W - self._pad, hb - 1,
+                             fill=CBR, tags="carddeco")
             if self._hdr_right:
                 self.create_text(W - self._pad, hb // 2, anchor="e",
-                                 text=self._hdr_right, fill="#9AA9B3",
+                                 text=self._hdr_right, fill=CMU,
                                  font=F_SM, tags="carddeco")
         self.tag_lower("carddeco")
 
@@ -976,7 +978,8 @@ def flat_btn(parent, text, command, bg=CA, fg="white",
                       font=font, h=px(pady * 2 + 24), padx=px(padx))
 
 
-def menu_btn(parent, text, items, bg=CNE, fg="white", pady=6, padx=14):
+def menu_btn(parent, text, items, bg=CNE, fg="white", pady=6,
+             padx=14, variant=None):
     """A button that drops a menu, for the actions that don't earn a place.
 
     A screen with seventeen buttons on it has no shape: nothing stands out,
@@ -1010,7 +1013,8 @@ def menu_btn(parent, text, items, bg=CNE, fg="white", pady=6, padx=14):
         finally:
             menu.grab_release()
 
-    btn = flat_btn(parent, text, popup, bg=bg, fg=fg, pady=pady, padx=padx)
+    btn = flat_btn(parent, text, popup, bg=bg, fg=fg, pady=pady,
+                   padx=padx, variant=variant)
     return btn
 
 
@@ -1559,7 +1563,7 @@ class _GDModelEditor(tk.Toplevel):
 
         foot = tk.Frame(self, bg=CBG, padx=16, pady=10)
         foot.pack(fill="x", side="bottom")
-        flat_btn(foot, "Cancel", self.destroy, bg=CNE, pady=7).pack(side="right", padx=(8, 0))
+        flat_btn(foot, "Cancel", self.destroy, variant="secondary", pady=7).pack(side="right", padx=(8, 0))
         flat_btn(foot, "Save",   self._save,   bg=CGR, pady=7).pack(side="right")
 
         body = tk.Frame(self, bg=CBG, padx=16, pady=12)
@@ -1733,7 +1737,7 @@ class CompressorFilterDialog(tk.Toplevel):
         # ── Footer ────────────────────────────────────────────────────────
         foot = tk.Frame(self, bg=CBG, padx=16, pady=10)
         foot.pack(fill="x")
-        flat_btn(foot, "Cancel",       self.destroy,  bg=CNE, pady=7).pack(side="right", padx=(8, 0))
+        flat_btn(foot, "Cancel",       self.destroy,  variant="secondary", pady=7).pack(side="right", padx=(8, 0))
         flat_btn(foot, "Add to Order", self._confirm, bg=CGR, pady=7).pack(side="right")
 
         self.update_idletasks()
@@ -2980,7 +2984,7 @@ class BagLineItemDialog(tk.Toplevel):
         # ── Footer — packed BEFORE body ────────────────────────────────────
         foot = tk.Frame(self, bg=CBG, padx=16, pady=10)
         foot.pack(fill="x", side="bottom")
-        flat_btn(foot, "Cancel",    self._cancel, bg=CNE, pady=7).pack(side="right", padx=(8, 0))
+        flat_btn(foot, "Cancel",    self._cancel, variant="secondary", pady=7).pack(side="right", padx=(8, 0))
         flat_btn(foot, "Save Item", self._save,   bg=CGR, pady=7).pack(side="right")
 
         # ── Scrollable body ────────────────────────────────────────────────
@@ -3451,7 +3455,7 @@ class JobNumberHighlighter(tk.Toplevel):
 
         foot = tk.Frame(self, bg=CBG, padx=16, pady=12)
         foot.pack(fill="x")
-        flat_btn(foot, "Cancel", self.destroy, bg=CNE, pady=7).pack(side="right", padx=(8, 0))
+        flat_btn(foot, "Cancel", self.destroy, variant="secondary", pady=7).pack(side="right", padx=(8, 0))
         flat_btn(foot, "Save",   self._save,   bg=CGR, pady=7).pack(side="right")
         tk.Label(foot, text="You can also just type the wording yourself.",
                  bg=CBG, fg=CMU, font=F_SM).pack(side="left")
@@ -3662,7 +3666,7 @@ class _UnknownMediaDialog(tk.Toplevel):
                 self.result = ("swap", alt.get())
             self.destroy()
 
-        flat_btn(foot, "Cancel Import", self.destroy, bg=CNE, pady=7).pack(side="right", padx=(8, 0))
+        flat_btn(foot, "Cancel Import", self.destroy, variant="secondary", pady=7).pack(side="right", padx=(8, 0))
         flat_btn(foot, "Continue",      _ok,          bg=CGR, pady=7).pack(side="right")
 
         self.update_idletasks()
@@ -5311,8 +5315,10 @@ class ModernOrderApp(tk.Frame):
         left.grid(row=0, column=0, sticky="nsew")
 
         # Card: Order Details
+        # fill="x" gave it its natural height and left a slab of dead grey
+        # underneath; expanding it puts the card where the space is.
         card_outer, card_body = card_frame(left, title="Order Details")
-        card_outer.pack(fill="x")
+        card_outer.pack(fill="both", expand=True)
         card_body.columnconfigure(1, weight=1)
 
         self.hvars = {
@@ -5454,8 +5460,8 @@ class ModernOrderApp(tk.Frame):
         act.pack(fill="x")
         flat_btn(act, "New Order", self._new_order,
                  bg=CA, pady=7).pack(side="left", padx=(0, 6))
-        flat_btn(act, "Load JSON", self._load_json,
-                 bg=CNE, pady=7).pack(side="left")
+        flat_btn(act, "Open a saved order…", self._load_json,
+                 variant="secondary", pady=7).pack(side="left")
 
     def _build_line_items_panel(self, parent):
         right = tk.Frame(parent, bg=CBG, pady=12)
@@ -5554,7 +5560,7 @@ class ModernOrderApp(tk.Frame):
                  self._quote_current_order, bg=CA2,
                  pady=10, padx=18, font=F_BOLD).pack(side="right", padx=(0, 8))
         flat_btn(gen_row, "📄  Import Purchase Order",
-                 self._import_purchase_orders, bg=CA,
+                 self._import_purchase_orders, variant="secondary",
                  pady=10, padx=18, font=F_BOLD).pack(side="left")
         # Only shown once photos sent from a phone are read and waiting.
         self._inbox_btn = flat_btn(gen_row, "📱  Phone Inbox",
@@ -5713,7 +5719,7 @@ class ModernOrderApp(tk.Frame):
         flat_btn(bot, "Open in New Order", self._load_prev_order,
                  bg=CA2, pady=7).pack(side="left", padx=(0, 8))
         flat_btn(bot, "🖨  Print", self._print_prev_order,
-                 bg=CNE, pady=7).pack(side="left", padx=(0, 8))
+                 variant="secondary", pady=7).pack(side="left", padx=(0, 8))
         menu_btn(bot, "Order  ▾", [
             ("Duplicate this order",   self._duplicate_prev_order),
             ("Regenerate worksheets",  self._regen_prev_order),
@@ -5727,7 +5733,7 @@ class ModernOrderApp(tk.Frame):
             ("Add a note…",            self._add_order_note),
             ("View history",           self._view_order_history),
             ("Open orders folder",     self._open_orders_folder),
-        ], bg=CNE, pady=7).pack(side="left", padx=(0, 8))
+        ], variant="secondary", pady=7).pack(side="left", padx=(0, 8))
         # Destructive actions sit under their own menu, so neither is ever a
         # slip of the mouse next to something harmless.
         menu_btn(bot, "⋯", [
@@ -5820,7 +5826,7 @@ class ModernOrderApp(tk.Frame):
             ("Freight / delay…",          self._edit_delivery_freight),
             None,
             ("Invoice this run to Xero",  self._invoice_delivery_run),
-        ], bg=CNE, pady=7).pack(side="left")
+        ], variant="secondary", pady=7).pack(side="left")
 
     def _refresh_delivery_run(self):
         """Rebuild the run from the orders already loaded, off the main thread."""
@@ -6083,7 +6089,7 @@ class ModernOrderApp(tk.Frame):
 
         foot = tk.Frame(dlg, bg=CBG, padx=16, pady=10)
         foot.pack(fill="x")
-        flat_btn(foot, "Cancel", dlg.destroy, bg=CNE,
+        flat_btn(foot, "Cancel", dlg.destroy, variant="secondary",
                  pady=7).pack(side="right", padx=(8, 0))
         flat_btn(foot, "Save", _save, bg=CGR, pady=7).pack(side="right")
         dlg.bind("<Escape>", lambda _e: dlg.destroy())
@@ -6228,7 +6234,7 @@ class ModernOrderApp(tk.Frame):
         self._quote_add_btn = flat_btn(bot, "＋ Add Line  ▾",
                                        self._quote_add_menu, bg=CA, pady=7)
         self._quote_add_btn.pack(side="left", padx=(0, 8))
-        flat_btn(bot, "Edit", self._edit_quote_item, bg=CNE,
+        flat_btn(bot, "Edit", self._edit_quote_item, variant="secondary",
                  pady=7).pack(side="left", padx=(0, 8))
         flat_btn(bot, "Remove", self._remove_quote_item, bg=CRD,
                  pady=7).pack(side="left", padx=(0, 8))
@@ -6253,7 +6259,7 @@ class ModernOrderApp(tk.Frame):
                 ("Clear all lines",      self._clear_quote),
             ]
 
-        menu_btn(bot, "Quote  ▾", _quote_actions, bg=CNE,
+        menu_btn(bot, "Quote  ▾", _quote_actions, variant="secondary",
                  pady=7).pack(side="right", padx=(0, 8))
 
         self._quote_totals_var = tk.StringVar(value="")
@@ -6615,7 +6621,7 @@ class ModernOrderApp(tk.Frame):
 
         foot = tk.Frame(dlg, bg=CBG, padx=16, pady=10)
         foot.pack(fill="x")
-        flat_btn(foot, "Cancel", dlg.destroy, bg=CNE,
+        flat_btn(foot, "Cancel", dlg.destroy, variant="secondary",
                  pady=7).pack(side="right", padx=(8, 0))
         flat_btn(foot, "Load", _ok, bg=CGR, pady=7).pack(side="right")
         lb.bind("<Double-1>", lambda _e: _ok())
@@ -6792,7 +6798,7 @@ class ModernOrderApp(tk.Frame):
 
         foot = tk.Frame(dlg, bg=CBG, padx=16, pady=10)
         foot.pack(fill="x")
-        flat_btn(foot, "Close", dlg.destroy, bg=CNE,
+        flat_btn(foot, "Close", dlg.destroy, variant="secondary",
                  pady=7).pack(side="right", padx=(8, 0))
         if has_link:
             flat_btn(foot, "New Link", lambda: _issue(rotate=True), bg=CRD,
@@ -6926,9 +6932,9 @@ class ModernOrderApp(tk.Frame):
         _copy()
         foot = tk.Frame(dlg, bg=CBG, padx=16, pady=10)
         foot.pack(fill="x")
-        flat_btn(foot, "Close", dlg.destroy, bg=CNE,
+        flat_btn(foot, "Close", dlg.destroy, variant="secondary",
                  pady=7).pack(side="right", padx=(8, 0))
-        flat_btn(foot, "Open It Myself", _open, bg=CNE,
+        flat_btn(foot, "Open It Myself", _open, variant="secondary",
                  pady=7).pack(side="right", padx=(8, 0))
         flat_btn(foot, "Copy Again", _copy, bg=CGR, pady=7).pack(side="right")
         dlg.bind("<Escape>", lambda _e: dlg.destroy())
@@ -7018,7 +7024,7 @@ class ModernOrderApp(tk.Frame):
         foot.pack(fill="x")
         flat_btn(foot, "Open Quote", _open_selected, bg=CGR,
                  pady=7).pack(side="left")
-        flat_btn(foot, "Close", dlg.destroy, bg=CNE, pady=7).pack(side="right")
+        flat_btn(foot, "Close", dlg.destroy, variant="secondary", pady=7).pack(side="right")
         tree.bind("<Double-1>", lambda _e: _open_selected())
         dlg.bind("<Escape>", lambda _e: dlg.destroy())
         W, H = 740, 470
@@ -7252,7 +7258,7 @@ class ModernOrderApp(tk.Frame):
         if _db.is_ready() and _db.can_delete_quotes():
             flat_btn(foot, "Delete", _delete, bg=CRD,
                      pady=7).pack(side="left", padx=(8, 0))
-        flat_btn(foot, "Close", dlg.destroy, bg=CNE,
+        flat_btn(foot, "Close", dlg.destroy, variant="secondary",
                  pady=7).pack(side="right")
         tree.bind("<Double-1>", lambda _e: _open())
         dlg.bind("<Escape>", lambda _e: dlg.destroy())
@@ -7584,7 +7590,7 @@ class ModernOrderApp(tk.Frame):
             self._refresh_products_list()
             self.status_var.set(f"{part} saved at ${price:,.2f}.")
 
-        flat_btn(foot, "Cancel", dlg.destroy, bg=CNE,
+        flat_btn(foot, "Cancel", dlg.destroy, variant="secondary",
                  pady=7).pack(side="right", padx=(8, 0))
         flat_btn(foot, "Save", _save, bg=CGR, pady=7).pack(side="right")
         dlg.bind("<Escape>", lambda _e: dlg.destroy())
@@ -7644,51 +7650,54 @@ class ModernOrderApp(tk.Frame):
     # ── Dashboard tab ─────────────────────────────────────────────────────
 
     def _build_dashboard_tab(self):
-        frm = tk.Frame(self.content, bg=CBG, padx=16, pady=12)
+        """What needs doing, first; what has happened, second.
+
+        This is the screen everyone opens at seven in the morning. It used to
+        answer "how did the last twelve weeks go", with two charts filling most
+        of it, while the one thing worth knowing — what is late — sat in a
+        small box beside the title. Now the counts come first and each one
+        opens the list behind it.
+        """
+        frm = tk.Frame(self.content, bg=CBG, padx=px(16), pady=px(12))
         frm.grid(row=0, column=0, sticky="nsew")
         frm.columnconfigure(0, weight=1)
         frm.columnconfigure(1, weight=1)
-        frm.rowconfigure(1, weight=1)
         frm.rowconfigure(2, weight=1)
+        frm.rowconfigure(3, weight=1)
         self._tab_frames["dashboard"] = frm
 
         head = tk.Frame(frm, bg=CBG)
-        head.grid(row=0, column=0, sticky="ew", pady=(0, 10))
-        tk.Label(head, text="Dashboard", bg=CBG, fg=CA,
-                 font=F_TTL).pack(side="left", anchor="n")
+        head.grid(row=0, column=0, columnspan=2, sticky="ew", pady=(0, px(10)))
+        tk.Label(head, text="Today", bg=CBG, fg=CA,
+                 font=F_TTL).pack(side="left", anchor="s")
+        self._dash_when = tk.StringVar(value="")
+        tk.Label(head, textvariable=self._dash_when, bg=CBG, fg=CMU,
+                 font=F_BODY).pack(side="left", anchor="s", padx=(px(12), 0))
 
-        # Alerts panel top-right
-        alert_outer = tk.Frame(frm, bg=CCA, relief="flat", bd=1,
-                               highlightbackground=CSP, highlightthickness=1)
-        alert_outer.grid(row=0, column=1, sticky="ne", padx=(8, 0))
-        tk.Label(alert_outer, text="⚠  Low Stock Alerts", bg=CCA, fg=CRD,
-                 font=F_SEC).pack(anchor="w", padx=8, pady=(6, 2))
-        self._alert_list_frame = tk.Frame(alert_outer, bg=CCA)
-        self._alert_list_frame.pack(fill="x", padx=8, pady=(0, 6))
+        # The counts. Filled by _refresh_worklist.
+        self._worklist_frame = tk.Frame(frm, bg=CBG)
+        self._worklist_frame.grid(row=1, column=0, columnspan=2, sticky="ew",
+                                  pady=(0, px(14)))
 
-        # What's due — the first thing worth knowing on opening the app.
-        # Each line opens Previous Orders already filtered to it.
-        due_outer = tk.Frame(head, bg=CCA, relief="flat", bd=1,
-                             highlightbackground=CSP, highlightthickness=1)
-        due_outer.pack(side="left", padx=(24, 0))
-        tk.Label(due_outer, text="🗓  Due", bg=CCA, fg=CA,
-                 font=F_SEC).pack(anchor="w", padx=8, pady=(6, 2))
-        self._due_list_frame = tk.Frame(due_outer, bg=CCA)
-        self._due_list_frame.pack(fill="x", padx=8, pady=(0, 6))
+        # Kept so the old refreshes still have somewhere to draw.
+        self._due_list_frame = tk.Frame(frm, bg=CBG)
+        self._alert_list_frame = tk.Frame(frm, bg=CBG)
 
         def _make_chart_card(row, col, title, colspan=1):
-            outer = tk.Frame(frm, bg=CCA, highlightbackground=CSP, highlightthickness=1)
+            outer = tk.Frame(frm, bg=CCA, highlightbackground=CBR,
+                             highlightthickness=1)
             outer.grid(row=row, column=col, columnspan=colspan, sticky="nsew",
-                       padx=(0 if col == 0 else 4, 0), pady=(0, 6))
+                       padx=(0 if col == 0 else px(6), 0), pady=(0, px(8)))
             tk.Label(outer, text=title, bg=CCA, fg=CTX,
-                     font=F_SEC).pack(anchor="w", padx=8, pady=(6, 2))
-            cv = tk.Canvas(outer, bg=CCA, height=180, highlightthickness=0)
-            cv.pack(fill="both", expand=True, padx=6, pady=(0, 6))
+                     font=F_SEC).pack(anchor="w", padx=px(12), pady=(px(10), px(2)))
+            # Capped: a chart of two bars does not need half the window.
+            cv = tk.Canvas(outer, bg=CCA, height=px(150), highlightthickness=0)
+            cv.pack(fill="both", expand=True, padx=px(10), pady=(0, px(10)))
             return cv
 
-        self._canvas_weekly    = _make_chart_card(1, 0, "Orders per Week  (Australian FY — last 12 weeks)")
-        self._canvas_types     = _make_chart_card(1, 1, "Order Types")
-        self._canvas_customers = _make_chart_card(2, 0, "Busiest Customers  (top 5)", colspan=2)
+        self._canvas_weekly    = _make_chart_card(2, 0, "Orders per week  ·  this financial year")
+        self._canvas_types     = _make_chart_card(2, 1, "Order types")
+        self._canvas_customers = _make_chart_card(3, 0, "Busiest customers  ·  top 5", colspan=2)
 
         # Redraw on resize
         for cv in (self._canvas_weekly, self._canvas_types, self._canvas_customers):
@@ -7696,7 +7705,8 @@ class ModernOrderApp(tk.Frame):
 
         # Monthly summary button row
         dash_btn_row = tk.Frame(frm, bg=CBG)
-        dash_btn_row.grid(row=3, column=0, columnspan=2, sticky="w", pady=(8, 0))
+        dash_btn_row.grid(row=4, column=0, columnspan=2, sticky="w",
+                          pady=(px(4), 0))
         flat_btn(dash_btn_row, "📊  Generate Monthly Summary Report",
                  self._generate_monthly_summary,
                  bg=CA, pady=7, padx=16, font=F_BOLD).pack(side="left")
@@ -7706,9 +7716,9 @@ class ModernOrderApp(tk.Frame):
         main thread so opening the tab never blocks the UI."""
         data = getattr(self, "_all_orders_data", None)
         if data:
+            self._refresh_worklist(data)
             self._refresh_charts()
             self._refresh_alerts(data)
-            self._refresh_due_panel(data)
             return
 
         import queue as _q
@@ -7727,9 +7737,9 @@ class ModernOrderApp(tk.Frame):
                 self.master.after(60, _poll)
                 return
             self._all_orders_data = data
+            self._refresh_worklist(data)
             self._refresh_charts()
             self._refresh_alerts(data)
-            self._refresh_due_panel(data)
 
         threading.Thread(target=_work, daemon=True).start()
         self.master.after(60, _poll)
@@ -7772,10 +7782,16 @@ class ModernOrderApp(tk.Frame):
                 if k in week_counts:
                     week_counts[k] += 1
         # Label as FY week number (W1 = first week of July)
+        # Anchored to the Monday of the week 1 July falls in, not to 1 July
+        # itself. That week's Monday is usually before the financial year
+        # starts, so measuring from the 1st sent it negative and the clamp
+        # turned it into another W1 — two different weeks, one label.
+        fy_week_start = fy_start - _dt_module.timedelta(days=fy_start.weekday())
+
         def _fy_wk(year, iso_wk):
             try:
                 mon = _dt_module.date.fromisocalendar(year, iso_wk, 1)
-                return max(1, (mon - fy_start).days // 7 + 1)
+                return (mon - fy_week_start).days // 7 + 1
             except Exception:
                 return iso_wk
         wk_labels = [f"W{_fy_wk(k[0], k[1])}" for k in week_keys]
@@ -8106,6 +8122,98 @@ class ModernOrderApp(tk.Frame):
             lbl.bind("<Button-1>",
                      lambda _e, f=label: self._show_orders_due(f))
 
+    def _refresh_worklist(self, data=None):
+        """The counts across the top: what is waiting, and what opens it.
+
+        Anything at zero is still shown, quietly. A row that disappears when
+        it is empty makes people wonder whether it was ever there, and the
+        shape of the row changing every morning is harder to read at a glance
+        than the same seven boxes with different numbers in them.
+        """
+        frame = getattr(self, "_worklist_frame", None)
+        if frame is None:
+            return
+        for w in frame.winfo_children():
+            w.destroy()
+        if data is None:
+            data = getattr(self, "_all_orders_data", []) or []
+
+        self._dash_when.set(
+            datetime.datetime.now().strftime("%A %d %B").replace(" 0", " "))
+
+        due = {"overdue": 0, "today": 0, "week": 0}
+        for row in data:
+            bucket = due_bucket(row)
+            if bucket in due:
+                due[bucket] += 1
+        ready = sum(1 for r in data
+                    if (r.get("status") or "") in _delivery.READY_STATUSES)
+
+        quotes_waiting = 0
+        try:
+            quotes_waiting = len(_db.quotes_awaiting_reply() or [])
+        except Exception:
+            quotes_waiting = 0
+        # Orders read from phone photos and waiting for someone to check them.
+        photos = 0
+        try:
+            photos = sum(len(b.get("orders") or [])
+                         for b in _po_import.pending_batches(APP_DIR))
+        except Exception:
+            photos = 0
+        staff = 0
+        try:
+            if _db.can_manage_roles():
+                staff = _db.pending_staff_count()
+        except Exception:
+            staff = 0
+
+        tiles = [
+            ("Overdue",        due["overdue"], CRD,
+             lambda: self._show_orders_due("Overdue")),
+            ("Due today",      due["today"], "#D98C00",
+             lambda: self._show_orders_due("Due today")),
+            ("Due this week",  due["overdue"] + due["today"] + due["week"], CA,
+             lambda: self._show_orders_due("Due this week")),
+            ("Ready to go out", ready, CGR, lambda: self._show_tab("delivery")),
+            ("Quotes awaiting reply", quotes_waiting, CA,
+             lambda: self._show_tab("quotes")),
+        ]
+        if photos:
+            tiles.append(("From a phone, to check", photos, CA2,
+                          self._open_phone_inbox))
+        if staff:
+            tiles.append(("Staff to approve", staff, CRD,
+                          self._open_user_management))
+
+        for i, (label, count, colour, action) in enumerate(tiles):
+            frame.columnconfigure(i, weight=1)
+            live = count > 0
+            card = tk.Frame(frame, bg=CCA, highlightbackground=CBR,
+                            highlightthickness=1, cursor="hand2",
+                            padx=px(14), pady=px(12))
+            card.grid(row=0, column=i, sticky="nsew",
+                      padx=(0 if i == 0 else px(8), 0))
+            num = tk.Label(card, text=str(count), bg=CCA,
+                           fg=colour if live else CMU,
+                           font=(FAM, 22, "bold"), anchor="w")
+            num.pack(anchor="w")
+            cap = tk.Label(card, text=label, bg=CCA,
+                           fg=CTX if live else CMU, font=F_SM, anchor="w")
+            cap.pack(anchor="w")
+            for w in (card, num, cap):
+                w.bind("<Button-1>", lambda _e, a=action: a())
+                w.bind("<Enter>", lambda _e, c=card: c.config(
+                    highlightbackground=CA))
+                w.bind("<Leave>", lambda _e, c=card: c.config(
+                    highlightbackground=CBR))
+
+        # Low stock rides along underneath, when there is any.
+        alerts = tk.Frame(frame, bg=CBG)
+        alerts.grid(row=1, column=0, columnspan=max(1, len(tiles)),
+                    sticky="ew", pady=(px(10), 0))
+        self._alert_list_frame = alerts
+
     def _show_orders_due(self, due_filter: str):
         """Open Previous Orders showing just that slice of the due list."""
         self._show_tab("prev_orders")
@@ -8242,7 +8350,7 @@ class ModernOrderApp(tk.Frame):
             ("Their portal link…",    self._customer_portal_link),
             None,
             ("Delete this customer…", self._delete_customer),
-        ], bg=CNE, pady=7).pack(side="left")
+        ], variant="secondary", pady=7).pack(side="left")
 
         self._customers_data: list = []
 
@@ -8923,7 +9031,7 @@ class ModernOrderApp(tk.Frame):
                 ("Delete this item…",     self._delete_stock_item if can else None),
             ]
 
-        menu_btn(bot, "Item  ▾", _stock_actions, bg=CNE,
+        menu_btn(bot, "Item  ▾", _stock_actions, variant="secondary",
                  pady=7).pack(side="left")
 
         # Cache for the full stock list
@@ -9793,9 +9901,28 @@ class ModernOrderApp(tk.Frame):
                  bg=CBG, fg=CA, font=(FAM, 13, "bold"),
                  anchor="w").grid(row=0, column=0, sticky="w", pady=(0, 12))
 
+        # Grouped by subject, not the order they were written in.
+        tk.Label(frm, text="Filters and media", bg=CBG, fg=CMU, font=F_BOLD,
+                 anchor="w").grid(row=1, column=0, sticky="w",
+                                  pady=(px(18), px(4)))
+        tk.Label(frm, text="Products and stock", bg=CBG, fg=CMU, font=F_BOLD,
+                 anchor="w").grid(row=4, column=0, sticky="w",
+                                  pady=(px(18), px(4)))
+        tk.Label(frm, text="Printing", bg=CBG, fg=CMU, font=F_BOLD,
+                 anchor="w").grid(row=8, column=0, sticky="w",
+                                  pady=(px(18), px(4)))
+        tk.Label(frm, text="This computer", bg=CBG, fg=CMU, font=F_BOLD,
+                 anchor="w").grid(row=11, column=0, sticky="w",
+                                  pady=(px(18), px(4)))
+        tk.Label(frm, text="Accounts", bg=CBG, fg=CMU, font=F_BOLD,
+                 anchor="w").grid(row=15, column=0, sticky="w",
+                                  pady=(px(18), px(4)))
+        tk.Label(frm, text="About", bg=CBG, fg=CMU, font=F_BOLD,
+                 anchor="w").grid(row=18, column=0, sticky="w",
+                                  pady=(px(18), px(4)))
         # row 2 – Software Update  (always visible to everyone)
         upd_card = tk.Frame(frm, bg=CCA, relief="flat", bd=0, highlightthickness=1, highlightbackground=CBR, padx=16, pady=12)
-        upd_card.grid(row=2, column=0, sticky="ew", pady=(12, 0))
+        upd_card.grid(row=19, column=0, sticky="ew", pady=(12, 0))
 
         upd_top = tk.Frame(upd_card, bg=CCA)
         upd_top.pack(fill="x")
@@ -9834,7 +9961,7 @@ class ModernOrderApp(tk.Frame):
         if _db.is_ready() and _db.can_manage_roles():
             um_card = tk.Frame(frm, bg=CCA, relief="flat", bd=0, highlightthickness=1, highlightbackground=CBR,
                                padx=16, pady=12)
-            um_card.grid(row=3, column=0, sticky="ew", pady=(12, 0))
+            um_card.grid(row=17, column=0, sticky="ew", pady=(12, 0))
             tk.Label(um_card, text="User Management",
                      bg=CCA, fg=CA, font=F_SEC, anchor="w").pack(anchor="w")
             tk.Label(um_card,
@@ -9846,7 +9973,7 @@ class ModernOrderApp(tk.Frame):
 
         # ── Media Types card ──────────────────────────────────────────────
         card_o, card_b = card_frame(frm, title="Media Types")
-        card_o.grid(row=1, column=0, sticky="ew", pady=(0, 12))
+        card_o.grid(row=2, column=0, sticky="ew", pady=(0, 12))
         card_b.columnconfigure(0, weight=1)
 
         # Description
@@ -9858,7 +9985,7 @@ class ModernOrderApp(tk.Frame):
 
         # Listbox + scrollbar
         lb_wrap = tk.Frame(card_b, bg=CSP)
-        lb_wrap.grid(row=1, column=0, sticky="ew", pady=(0, 8))
+        lb_wrap.grid(row=2, column=0, sticky="ew", pady=(0, 8))
 
         self.media_lb = tk.Listbox(
             lb_wrap,
@@ -9868,7 +9995,7 @@ class ModernOrderApp(tk.Frame):
             activestyle="none",
             relief="flat", bd=0,
             highlightthickness=0,
-            height=14,
+            height=8,
         )
         self.media_lb.pack(side="left", fill="both", expand=True, padx=1, pady=1)
 
@@ -9879,7 +10006,7 @@ class ModernOrderApp(tk.Frame):
 
         # Toolbar
         tb = tk.Frame(card_b, bg=CCA)
-        tb.grid(row=2, column=0, sticky="w")
+        tb.grid(row=3, column=0, sticky="w")
 
         flat_btn(tb, "+ Add Type",  self._add_media_type,
                  bg=CA,  pady=5, padx=10, font=F_BODY).pack(side="left", padx=(0, 6))
@@ -9898,7 +10025,7 @@ class ModernOrderApp(tk.Frame):
 
         # ── Filter Types card ─────────────────────────────────────────────
         ft_o, ft_b = card_frame(frm, title="Filter Types")
-        ft_o.grid(row=9, column=0, sticky="ew", pady=(12, 0))
+        ft_o.grid(row=3, column=0, sticky="ew", pady=(12, 0))
         ft_b.columnconfigure(0, weight=1)
 
         tk.Label(ft_b,
@@ -9910,7 +10037,7 @@ class ModernOrderApp(tk.Frame):
                  ).grid(row=0, column=0, sticky="w", pady=(0, 8))
 
         ft_wrap = tk.Frame(ft_b, bg=CSP)
-        ft_wrap.grid(row=1, column=0, sticky="ew", pady=(0, 8))
+        ft_wrap.grid(row=2, column=0, sticky="ew", pady=(0, 8))
         self.filter_types_lb = tk.Listbox(
             ft_wrap, font=F_BODY, bg=CCA, fg=CTX,
             selectbackground=CA, selectforeground="white",
@@ -9923,7 +10050,7 @@ class ModernOrderApp(tk.Frame):
         self.filter_types_lb.configure(yscrollcommand=ft_sb.set)
 
         ft_tb = tk.Frame(ft_b, bg=CCA)
-        ft_tb.grid(row=2, column=0, sticky="w")
+        ft_tb.grid(row=3, column=0, sticky="w")
         flat_btn(ft_tb, "+ Add Type", self._add_filter_type,
                  bg=CA,  pady=5, padx=10, font=F_BODY).pack(side="left", padx=(0, 6))
         flat_btn(ft_tb, "Edit",       self._edit_filter_type,
@@ -9935,7 +10062,7 @@ class ModernOrderApp(tk.Frame):
 
         # ── Stock ─────────────────────────────────────────────────────────
         st_card = tk.Frame(frm, bg=CCA, relief="flat", bd=0, highlightthickness=1, highlightbackground=CBR, padx=16, pady=12)
-        st_card.grid(row=11, column=0, sticky="ew", pady=(12, 0))
+        st_card.grid(row=6, column=0, sticky="ew", pady=(12, 0))
         tk.Label(st_card, text="Stock", bg=CCA, fg=CA,
                  font=F_SEC, anchor="w").pack(anchor="w")
         tk.Label(st_card,
@@ -9963,7 +10090,7 @@ class ModernOrderApp(tk.Frame):
 
         # ── Pricing ───────────────────────────────────────────────────────
         pc_card = tk.Frame(frm, bg=CCA, relief="flat", bd=0, highlightthickness=1, highlightbackground=CBR, padx=16, pady=12)
-        pc_card.grid(row=12, column=0, sticky="ew", pady=(12, 0))
+        pc_card.grid(row=5, column=0, sticky="ew", pady=(12, 0))
         tk.Label(pc_card, text="Pricing", bg=CCA, fg=CA,
                  font=F_SEC, anchor="w").pack(anchor="w")
         tk.Label(pc_card,
@@ -9999,7 +10126,7 @@ class ModernOrderApp(tk.Frame):
 
         # ── Local Storage ─────────────────────────────────────────────────
         ls_card = tk.Frame(frm, bg=CCA, relief="flat", bd=0, highlightthickness=1, highlightbackground=CBR, padx=16, pady=12)
-        ls_card.grid(row=7, column=0, sticky="ew", pady=(12, 0))
+        ls_card.grid(row=13, column=0, sticky="ew", pady=(12, 0))
         tk.Label(ls_card, text="Local Storage",
                  bg=CCA, fg=CA, font=F_SEC, anchor="w").pack(anchor="w")
         tk.Label(ls_card,
@@ -10015,7 +10142,7 @@ class ModernOrderApp(tk.Frame):
 
         # ── Change Password ───────────────────────────────────────────────
         cp_card = tk.Frame(frm, bg=CCA, relief="flat", bd=0, highlightthickness=1, highlightbackground=CBR, padx=16, pady=12)
-        cp_card.grid(row=6, column=0, sticky="ew", pady=(12, 0))
+        cp_card.grid(row=16, column=0, sticky="ew", pady=(12, 0))
         tk.Label(cp_card, text="Change Password",
                  bg=CCA, fg=CA, font=F_SEC, anchor="w").pack(anchor="w")
         tk.Label(cp_card,
@@ -10042,7 +10169,7 @@ class ModernOrderApp(tk.Frame):
         pn_card = tk.Frame(frm, bg=CCA, relief="flat", bd=0, highlightthickness=1, highlightbackground=CBR, padx=16, pady=12)
         # row 10 — not 9: the Filter Types card already owns row 9, and two
         # cards in one grid cell draw on top of each other.
-        pn_card.grid(row=10, column=0, sticky="ew", pady=(12, 0))
+        pn_card.grid(row=9, column=0, sticky="ew", pady=(12, 0))
         tk.Label(pn_card, text="PDF File Naming",
                  bg=CCA, fg=CA, font=F_SEC, anchor="w").pack(anchor="w")
         tk.Label(pn_card,
@@ -10098,7 +10225,7 @@ class ModernOrderApp(tk.Frame):
 
         # ── Default Printer ───────────────────────────────────────────────
         pr_card = tk.Frame(frm, bg=CCA, relief="flat", bd=0, highlightthickness=1, highlightbackground=CBR, padx=16, pady=12)
-        pr_card.grid(row=8, column=0, sticky="ew", pady=(12, 0))
+        pr_card.grid(row=10, column=0, sticky="ew", pady=(12, 0))
         tk.Label(pr_card, text="Default Printer",
                  bg=CCA, fg=CA, font=F_SEC, anchor="w").pack(anchor="w")
         tk.Label(pr_card,
@@ -10153,7 +10280,7 @@ class ModernOrderApp(tk.Frame):
 
         # ── Appearance / Dark Mode ────────────────────────────────────────
         ap_card = tk.Frame(frm, bg=CCA, relief="flat", bd=0, highlightthickness=1, highlightbackground=CBR, padx=16, pady=12)
-        ap_card.grid(row=5, column=0, sticky="ew", pady=(12, 0))
+        ap_card.grid(row=12, column=0, sticky="ew", pady=(12, 0))
         tk.Label(ap_card, text="Appearance",
                  bg=CCA, fg=CA, font=F_SEC, anchor="w").pack(anchor="w")
         is_dark = self._settings.get("dark_mode", False)
@@ -10176,7 +10303,7 @@ class ModernOrderApp(tk.Frame):
         if _db.is_ready() and _db.can_manage_stock_alerts():
             alert_outer = tk.Frame(frm, bg=CCA, relief="flat", bd=0, highlightthickness=1, highlightbackground=CBR,
                                    padx=16, pady=12)
-            alert_outer.grid(row=4, column=0, sticky="ew", pady=(12, 0))
+            alert_outer.grid(row=7, column=0, sticky="ew", pady=(12, 0))
             tk.Label(alert_outer, text="Low Stock Alert Thresholds",
                      bg=CCA, fg=CA, font=F_SEC, anchor="w").pack(anchor="w")
             tk.Label(alert_outer,
@@ -10188,7 +10315,7 @@ class ModernOrderApp(tk.Frame):
 
         # ── Backup ────────────────────────────────────────────────────────
         bk_card = tk.Frame(frm, bg=CCA, relief="flat", bd=0, highlightthickness=1, highlightbackground=CBR, padx=16, pady=12)
-        bk_card.grid(row=13, column=0, sticky="ew", pady=(12, 0))
+        bk_card.grid(row=14, column=0, sticky="ew", pady=(12, 0))
         tk.Label(bk_card, text="Backup & Export",
                  bg=CCA, fg=CA, font=F_SEC, anchor="w").pack(anchor="w")
         tk.Label(bk_card,
@@ -10205,7 +10332,7 @@ class ModernOrderApp(tk.Frame):
                                     self._run_backup, bg=CGR, pady=7)
         self._backup_btn.pack(side="left", padx=(0, 8))
         flat_btn(bk_row, "Open Backups Folder", self._open_backup_folder,
-                 bg=CNE, pady=7).pack(side="left", padx=(0, 8))
+                 variant="secondary", pady=7).pack(side="left", padx=(0, 8))
         tk.Label(bk_row, textvariable=self._backup_status,
                  bg=CCA, fg=CMU, font=F_SM).pack(side="left")
 
@@ -12034,7 +12161,7 @@ class ModernOrderApp(tk.Frame):
 
         foot = tk.Frame(dlg, bg=CBG, padx=18, pady=12)
         foot.pack(fill="x")
-        flat_btn(foot, "Close", _closed, bg=CNE, pady=7).pack(side="right")
+        flat_btn(foot, "Close", _closed, variant="secondary", pady=7).pack(side="right")
         dlg.protocol("WM_DELETE_WINDOW", _closed)
 
         def _poll():
@@ -12112,7 +12239,7 @@ class ModernOrderApp(tk.Frame):
 
         foot = tk.Frame(dlg, bg=CBG, padx=18, pady=12)
         foot.pack(fill="x")
-        flat_btn(foot, "Cancel", dlg.destroy, bg=CNE, pady=7).pack(side="right")
+        flat_btn(foot, "Cancel", dlg.destroy, variant="secondary", pady=7).pack(side="right")
 
         dlg.update_idletasks()
         W = max(360, dlg.winfo_reqwidth())
@@ -14530,7 +14657,7 @@ class ModernOrderApp(tk.Frame):
             ("Quote from this order",  _act(self._quote_prev_order, close=True)),
             ("Invoice to Xero",        _act(self._invoice_selected_orders)),
             ("Full history…",          _act(self._view_order_history)),
-        ], bg=CNE, pady=px(6)).pack(side="right", padx=(0, px(8)))
+        ], variant="secondary", pady=px(6)).pack(side="right", padx=(0, px(8)))
 
     def _reread_order(self, row) -> dict:
         """Fetch one order again so the window can show what an action did."""

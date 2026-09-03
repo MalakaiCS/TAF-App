@@ -472,3 +472,75 @@ def test_the_avatar_migration_keeps_pictures_to_staff():
     assert "GRANT EXECUTE ON FUNCTION public.set_avatar" in code
     # Your own picture, or anyone's if you manage accounts.
     assert "auth.uid() <> p_user_id AND NOT public.is_manager()" in code
+
+
+# ── The Dashboard, cards, and the week labels ────────────────────────────────
+
+def test_the_dashboard_leads_with_what_needs_doing():
+    """It is the screen everyone opens at seven in the morning. It used to
+    answer 'how did the last twelve weeks go'."""
+    src = _gui_source()
+    fn = src.split("def _refresh_worklist")[1].split("\n    def ")[0]
+    for tile in ("Overdue", "Due today", "Due this week", "Ready to go out",
+                 "Quotes awaiting reply"):
+        assert tile in fn, f"the worklist has no {tile!r}"
+    # Every tile opens the thing it counts.
+    assert "_show_orders_due" in fn and "_show_tab" in fn
+    build = src.split("def _build_dashboard_tab")[1].split("\n    def ")[0]
+    assert "_worklist_frame" in build
+    # Counts first, charts after.
+    assert build.index("_worklist_frame") < build.index("_make_chart_card")
+
+
+def test_a_count_that_is_a_list_is_not_compared_to_a_number():
+    """quotes_awaiting_reply returns the quotes, not a count. `[] > 0` is a
+    TypeError, which killed the tile loop part-way — four tiles, not five."""
+    src = _gui_source()
+    fn = src.split("def _refresh_worklist")[1].split("\n    def ")[0]
+    assert "len(_db.quotes_awaiting_reply() or [])" in fn
+
+
+def test_the_financial_week_is_not_labelled_twice():
+    """The week straddling 1 July has a Monday before the year starts, so
+    measuring from the 1st went negative and the clamp made a second W1."""
+    src = _gui_source()
+    fn = src.split("def _fy_wk")[1].split("wk_labels")[0]
+    assert "fy_week_start" in src.split("def _refresh_charts")[1][:4000]
+    assert "max(1," not in fn, "the clamp is back, and with it the duplicate"
+
+
+def test_there_is_one_card_style():
+    """Navy-barred cards on New Order and Settings, plain ones everywhere
+    else — sometimes on the same page."""
+    src = _gui_source()
+    draw = src.split("def _redraw")[1].split("\n    def ")[0]
+    assert 'fill="white", font=F_SEC' not in draw, "the navy header bar is back"
+    assert "fill=CA, font=F_SEC" in draw
+
+
+def test_settings_is_grouped_and_nothing_shares_a_cell():
+    src = _gui_source()
+    block = src.split("def _build_settings_tab")[1].split("\n    def _local_storage_info")[0]
+    for heading in ("Filters and media", "Products and stock", "Printing",
+                    "This computer", "Accounts", "About"):
+        assert heading in block, f"Settings has no {heading!r} group"
+    # Every widget put straight into the settings frame gets its own row.
+    rows = [int(m) for m in re.findall(r"\.grid\(row=(\d+), column=0, sticky=\"w\",\n"
+                                       r"\s+pady=\(px\(18\)", block)]
+    assert len(rows) == len(set(rows)) == 6, rows
+
+
+def test_the_settings_frame_sits_where_every_other_tab_does():
+    """It was gridded at row 1 of the content area while every other tab uses
+    row 0, so it rendered underneath them instead of over them."""
+    src = _gui_source()
+    block = src.split("def _build_settings_tab")[1][:400]
+    assert 'outer.grid(row=0, column=0, sticky="nsew")' in block
+
+
+def test_a_menu_button_can_be_quiet_too():
+    """A blanket swap to variants hit menu_btn, which did not accept one —
+    four tabs failed to build and only the smoke test noticed."""
+    src = _gui_source()
+    sig = src.split("def menu_btn")[1].split("\n")[0:2]
+    assert "variant" in "".join(sig)
