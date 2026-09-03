@@ -331,6 +331,14 @@ def _steps(app, gui, root):
             w.destroy()
     add("dialog: Print Barcode Labels", _labels_dialog)
 
+    def _product_types_dialog():
+        before = set(root.winfo_children())
+        app._manage_product_types()
+        for w in set(root.winfo_children()) - before:
+            w.update_idletasks()
+            w.destroy()
+    add("dialog: Manage Product Types", _product_types_dialog)
+
     add("banner: exports", lambda: print("Exporting…"))
     for label, call in _exports(app, gui):
         add(label, call)
@@ -362,6 +370,14 @@ def _dialogs(gui, root):
             root, "Line Item", item, ["G4", "F7"], ["V-form", "Flat Panel"])),
         ("BagLineItemDialog", lambda: gui.BagLineItemDialog(
             root, "Bag Item", {"pockets": 6, "width": 592}, ["G4"])),
+        ("CatalogueLineDialog", lambda: gui.CatalogueLineDialog(
+            root, "Add Product",
+            {"Product Type": "Bag Filter", "Description": "Bag 592 6P",
+             "Quantity": 8, "Unit Price": 47.25},
+            gui.product_type_names(),
+            lambda term: [{"part_number": "BAG-592-6P",
+                           "name": "Bag filter 592x592 6 pocket",
+                           "unit_price": 47.25}])),
         ("JobNumberHighlighter", lambda: gui.JobNumberHighlighter(root)),
         ("_UnknownMediaDialog", lambda: gui._UnknownMediaDialog(
             root, "Mystery Media", ["G4", "F7"])),

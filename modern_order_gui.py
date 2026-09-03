@@ -496,6 +496,38 @@ PO_CORRECTIONS = {"filter_types": {}, "media_types": {}}
 # the company rather than on each PC.
 STOCK_SETTINGS = {"auto_deduct": False}
 
+# Kinds of thing this business sells, beyond the filters the app was built
+# around. A quote has to be able to carry a bag filter, a roll of media, a
+# service call or whatever gets added next — so the list is data, saved to the
+# shared catalogue, rather than something that needs a new release each time.
+#
+# `unit` is what one of them is counted in and is printed on the quote.
+DEFAULT_PRODUCT_TYPES = [
+    {"name": "Bag Filter",     "unit": "each"},
+    {"name": "Media Roll",     "unit": "roll"},
+    {"name": "Panel Filter",   "unit": "each"},
+    {"name": "Carbon Filter",  "unit": "each"},
+    {"name": "HEPA Filter",    "unit": "each"},
+    {"name": "Filter Housing", "unit": "each"},
+    {"name": "Frame",          "unit": "each"},
+    {"name": "Gasket / Seal",  "unit": "m"},
+    {"name": "Freight",        "unit": "each"},
+    {"name": "Labour",         "unit": "hour"},
+]
+PRODUCT_TYPES = [dict(p) for p in DEFAULT_PRODUCT_TYPES]
+
+
+def product_type_names() -> list:
+    return [p.get("name", "") for p in PRODUCT_TYPES if p.get("name")]
+
+
+def product_type_unit(name: str) -> str:
+    key = (name or "").strip().lower()
+    for p in PRODUCT_TYPES:
+        if (p.get("name") or "").strip().lower() == key:
+            return p.get("unit") or "each"
+    return "each"
+
 
 def _merge_corrections(data) -> None:
     """Fold a stored corrections map into the live one."""
@@ -526,6 +558,14 @@ def _apply_catalog(data: dict) -> None:
     stock = data.get("stock_settings")
     if isinstance(stock, dict) and "auto_deduct" in stock:
         STOCK_SETTINGS["auto_deduct"] = bool(stock["auto_deduct"])
+    kinds = data.get("product_types")
+    if isinstance(kinds, list) and kinds:
+        cleaned = [{"name": str(k.get("name", "")).strip(),
+                    "unit": str(k.get("unit", "") or "each").strip()}
+                   for k in kinds if isinstance(k, dict) and k.get("name")]
+        if cleaned:
+            PRODUCT_TYPES.clear()
+            PRODUCT_TYPES.extend(cleaned)
 
 
 def _load_catalog_cache() -> None:
@@ -544,6 +584,7 @@ def _save_catalog_cache() -> None:
             "stepped_packs":   STEPPED_PACKS,
             "po_corrections":  PO_CORRECTIONS,
             "stock_settings":  STOCK_SETTINGS,
+            "product_types":   PRODUCT_TYPES,
         }, indent=2), encoding="utf-8")
     except Exception:
         pass
@@ -955,6 +996,69 @@ def _make_date_entry(parent, textvariable, **kw):
     return field_entry(parent, textvariable=textvariable, width=10)
 
 
+# ── Sharpness on a modern screen ──────────────────────────────────────────
+# Almost every laptop sold in the last few years runs Windows at 125% or 150%
+# scaling. A program that doesn't say it understands that is drawn by Windows
+# at 96 DPI and then stretched like a photograph - every letter and every line
+# smeared across a fraction of a pixel. That is what "pixelated" looks like,
+# and no amount of restyling fixes it.
+#
+# Saying so has to happen before the first window exists, so this is called at
+# the very top of start-up. Windows 8.1 and later have the per-monitor call;
+# older ones only have the system-wide one; anything else is not Windows and
+# has nothing to do.
+
+UI_SCALE = 1.0          # set from the real screen once Tk is up
+
+
+def _enable_hidpi() -> None:
+    """Tell Windows this program draws its own pixels. Must run before Tk."""
+    if sys.platform != "win32":
+        return
+    import ctypes
+    try:
+        # 2 = per-monitor aware: correct when a laptop is docked to a second
+        # screen at a different scaling, which is the normal office setup.
+        ctypes.windll.shcore.SetProcessDpiAwareness(2)
+        return
+    except Exception:
+        pass
+    try:
+        ctypes.windll.user32.SetProcessDPIAware()
+    except Exception:
+        pass            # an old Windows, or already set by the launcher
+
+
+def _apply_ui_scale(root) -> float:
+    """Match Tk's idea of a point to the actual screen, and remember by how much.
+
+    Tk sizes fonts in points and everything else in pixels. Once the program is
+    DPI-aware, Tk sees the true resolution, so the text comes out the right
+    physical size on its own - but anything measured in pixels does not, and a
+    row sized for 96 DPI clips its own text at 150%. UI_SCALE is what the rest
+    of the file multiplies those by.
+    """
+    global UI_SCALE
+    try:
+        dpi = float(root.winfo_fpixels("1i"))
+    except Exception:
+        dpi = 96.0
+    # Ignore nonsense from an odd X server, and don't scale below 1: shrinking
+    # the layout to fit a mis-reported DPI is worse than leaving it alone.
+    scale = min(3.0, max(1.0, dpi / 96.0))
+    UI_SCALE = scale
+    try:
+        root.tk.call("tk", "scaling", dpi / 72.0)
+    except Exception:
+        pass
+    return scale
+
+
+def px(value: float) -> int:
+    """A pixel measurement that keeps its physical size on a high-DPI screen."""
+    return int(round(value * UI_SCALE))
+
+
 # ── Style helper (called once at startup) ─────────────────────────────────
 
 def _configure_ttk_style():
@@ -969,7 +1073,7 @@ def _configure_ttk_style():
                     fieldbackground=CCA,
                     foreground=CTX,
                     font=F_BODY,
-                    rowheight=26,
+                    rowheight=px(26),
                     borderwidth=0,
                     relief="flat")
     style.configure("TAF.Treeview.Heading",
@@ -1313,7 +1417,7 @@ class _GDModelEditor(tk.Toplevel):
                             style="TAF.Treeview", height=5)
         for c in columns:
             tree.heading(c, text=c)
-            tree.column(c, width=90, anchor="center",
+            tree.column(c, width=px(90), anchor="center",
                         stretch=(c == "Label"))
         tree.pack(fill="both", expand=True, padx=1, pady=1)
 
@@ -2427,6 +2531,237 @@ _ROLL_TYPES  = {"Media Roll"}
 _PAD_TYPES   = {"Cut Pads", "Other"}
 
 
+class CatalogueLineDialog(tk.Toplevel):
+    """Add anything that isn't a made-to-measure filter.
+
+    Two ways in, on one screen. Search the price list — twelve thousand part
+    numbers, and every one of them quotable — or type a product in by hand for
+    a one-off. Either way the line carries its own price, so nothing has to be
+    worked back from dimensions it doesn't have.
+
+    The product-type list is shared and editable, so a kind of thing this
+    business starts selling next year needs a new entry, not a new release.
+    """
+
+    def __init__(self, master, title="Add Product", initial=None,
+                 product_types=None, on_lookup=None):
+        super().__init__(master)
+        self.title(title)
+        self.configure(bg=CBG, padx=px(18), pady=px(16))
+        self.resizable(False, False)
+        self.transient(master)
+        self.result = None
+        self._on_lookup = on_lookup          # (search) -> [price rows]
+        self._matches = []
+        initial = initial or {}
+
+        types = list(product_types or []) or ["Item"]
+
+        tk.Label(self, text="Search the price list",
+                 bg=CBG, fg=CA, font=F_SEC).grid(row=0, column=0, columnspan=3,
+                                                 sticky="w")
+        tk.Label(self, text="Part number or description — pick one and the "
+                            "price comes with it.",
+                 bg=CBG, fg=CMU, font=F_SM).grid(row=1, column=0, columnspan=3,
+                                                 sticky="w", pady=(0, px(6)))
+
+        self.search_var = tk.StringVar()
+        se = field_entry(self, textvariable=self.search_var, width=38)
+        se.grid(row=2, column=0, columnspan=2, sticky="ew")
+        se.bind("<Return>", lambda _e: self._search())
+        flat_btn(self, "Search", self._search, bg=CA,
+                 pady=px(5)).grid(row=2, column=2, sticky="w", padx=(px(8), 0))
+
+        self.results = tk.Listbox(self, height=7, width=58, font=F_BODY,
+                                  bg=CCA, fg=CTX, highlightthickness=1,
+                                  highlightbackground=CSP, relief="flat",
+                                  activestyle="none",
+                                  selectbackground=CSL, selectforeground=CTX)
+        self.results.grid(row=3, column=0, columnspan=3, sticky="ew",
+                          pady=(px(6), px(2)))
+        self.results.bind("<<ListboxSelect>>", self._take_match)
+        self.results.bind("<Double-Button-1>", lambda _e: self._save())
+
+        self._hint = tk.StringVar(value="")
+        tk.Label(self, textvariable=self._hint, bg=CBG, fg=CMU,
+                 font=F_SM, anchor="w").grid(row=4, column=0, columnspan=3,
+                                             sticky="w", pady=(0, px(10)))
+
+        ttk.Separator(self, orient="horizontal").grid(
+            row=5, column=0, columnspan=3, sticky="ew", pady=(0, px(10)))
+
+        tk.Label(self, text="The line", bg=CBG, fg=CA,
+                 font=F_SEC).grid(row=6, column=0, columnspan=3, sticky="w",
+                                  pady=(0, px(6)))
+
+        self.vars = {
+            "Product Type": tk.StringVar(value=initial.get("Product Type") or types[0]),
+            "Part Number":  tk.StringVar(value=initial.get("Part Number", "")),
+            "Description":  tk.StringVar(value=initial.get("Description", "")),
+            "Quantity":     tk.StringVar(value=str(initial.get("Quantity", "1"))),
+            "Unit":         tk.StringVar(value=initial.get("Unit", "each")),
+            "Unit Price":   tk.StringVar(value=str(initial.get("Unit Price", ""))),
+        }
+
+        row = 7
+        tk.Label(self, text="Product type", bg=CBG, fg=CTX,
+                 font=F_BODY).grid(row=row, column=0, sticky="w", pady=px(3))
+        cb = ttk.Combobox(self, textvariable=self.vars["Product Type"],
+                          values=types, state="readonly", width=26)
+        cb.grid(row=row, column=1, columnspan=2, sticky="w", padx=(px(8), 0))
+        cb.bind("<<ComboboxSelected>>", self._type_changed)
+        row += 1
+
+        for label, key, width in (("Part number", "Part Number", 26),
+                                  ("Description", "Description", 38)):
+            tk.Label(self, text=label, bg=CBG, fg=CTX,
+                     font=F_BODY).grid(row=row, column=0, sticky="w", pady=px(3))
+            field_entry(self, textvariable=self.vars[key], width=width).grid(
+                row=row, column=1, columnspan=2, sticky="w", padx=(px(8), 0))
+            row += 1
+
+        qty_row = tk.Frame(self, bg=CBG)
+        qty_row.grid(row=row, column=0, columnspan=3, sticky="w", pady=px(3))
+        tk.Label(qty_row, text="Quantity", bg=CBG, fg=CTX,
+                 font=F_BODY).pack(side="left")
+        field_entry(qty_row, textvariable=self.vars["Quantity"], width=7).pack(
+            side="left", padx=(px(8), px(4)))
+        field_entry(qty_row, textvariable=self.vars["Unit"], width=8).pack(
+            side="left", padx=(0, px(16)))
+        tk.Label(qty_row, text="Unit price  $", bg=CBG, fg=CTX,
+                 font=F_BODY).pack(side="left")
+        pe = field_entry(qty_row, textvariable=self.vars["Unit Price"], width=11)
+        pe.pack(side="left", padx=(px(4), 0))
+        row += 1
+
+        self._total = tk.StringVar(value="")
+        tk.Label(self, textvariable=self._total, bg=CBG, fg=CTX,
+                 font=F_BOLD, anchor="e").grid(row=row, column=0, columnspan=3,
+                                               sticky="e", pady=(px(8), px(4)))
+        for key in ("Quantity", "Unit Price"):
+            self.vars[key].trace_add("write", lambda *_a: self._retotal())
+        self._retotal()
+        row += 1
+
+        btns = tk.Frame(self, bg=CBG)
+        btns.grid(row=row, column=0, columnspan=3, sticky="e", pady=(px(10), 0))
+        flat_btn(btns, "Cancel", self.destroy, bg=CNE,
+                 pady=px(6)).pack(side="left", padx=(0, px(8)))
+        flat_btn(btns, "Add to Quote", self._save, bg=CGR,
+                 pady=px(6)).pack(side="left")
+
+        self.columnconfigure(1, weight=1)
+        self.bind("<Escape>", lambda _e: self.destroy())
+        self.bind("<Return>", lambda _e: self._save())
+        se.focus_set()
+        self.grab_set()
+
+    # ── the price list ────────────────────────────────────────────────────
+    def _search(self):
+        term = self.search_var.get().strip()
+        self.results.delete(0, "end")
+        self._matches = []
+        if not term:
+            self._hint.set("Type a part number or a few words first.")
+            return
+        if not self._on_lookup:
+            self._hint.set("The price list isn't loaded on this PC.")
+            return
+        self._hint.set("Searching…")
+        self.update_idletasks()
+        try:
+            rows = self._on_lookup(term) or []
+        except Exception as exc:
+            self._hint.set(f"Couldn't search the price list: {exc}")
+            return
+        self._matches = rows[:200]
+        for r in self._matches:
+            name = (r.get("name") or r.get("description") or "").replace("\n", " ")
+            price = float(r.get("unit_price") or 0)
+            self.results.insert("end",
+                                f"{r.get('part_number', ''):<22} "
+                                f"{name[:44]:<46} ${price:,.2f}")
+        if not self._matches:
+            self._hint.set(f"Nothing in the price list matches “{term}”. "
+                           "You can still type the product in below.")
+        else:
+            more = " (showing the first 200)" if len(rows) > 200 else ""
+            self._hint.set(f"{len(rows):,} match{'es' if len(rows) != 1 else ''}"
+                           f"{more} — click one to use it.")
+
+    def _take_match(self, _event=None):
+        sel = self.results.curselection()
+        if not sel or sel[0] >= len(self._matches):
+            return
+        row = self._matches[sel[0]]
+        self.vars["Part Number"].set(row.get("part_number", ""))
+        self.vars["Description"].set(
+            (row.get("name") or row.get("description") or "").replace("\n", " "))
+        self.vars["Unit Price"].set(f'{float(row.get("unit_price") or 0):.2f}')
+        self._retotal()
+
+    def _type_changed(self, _event=None):
+        # Only fill the unit in if it hasn't been touched — never overwrite
+        # something someone deliberately typed.
+        if self.vars["Unit"].get().strip() in ("", "each", "roll", "hour", "m"):
+            self.vars["Unit"].set(product_type_unit(self.vars["Product Type"].get()))
+
+    def _retotal(self):
+        try:
+            qty = float(self.vars["Quantity"].get().strip() or 0)
+            unit = float(self.vars["Unit Price"].get().strip() or 0)
+        except ValueError:
+            self._total.set("")
+            return
+        self._total.set(f"Line total   ${qty * unit:,.2f}" if qty and unit else "")
+
+    def _save(self):
+        try:
+            qty = int(float(self.vars["Quantity"].get().strip()))
+        except ValueError:
+            messagebox.showerror("Quantity",
+                                 "Quantity must be a number.", parent=self)
+            return
+        if qty <= 0:
+            messagebox.showerror("Quantity",
+                                 "Quantity must be more than zero.", parent=self)
+            return
+        price_text = self.vars["Unit Price"].get().strip().lstrip("$")
+        try:
+            unit = float(price_text or 0)
+        except ValueError:
+            messagebox.showerror("Unit price",
+                                 "The unit price must be a number.", parent=self)
+            return
+        desc = self.vars["Description"].get().strip()
+        part = self.vars["Part Number"].get().strip().upper()
+        if not desc and not part:
+            messagebox.showerror(
+                "Nothing to quote",
+                "Give the line a description, or pick a part number from the "
+                "price list — otherwise the customer sees a blank line.",
+                parent=self)
+            return
+        if unit <= 0 and not messagebox.askyesno(
+                "No price",
+                "This line has no price, so it will show on the quote as "
+                "\"to be confirmed\" and be left out of the total.\n\nAdd it "
+                "anyway?", parent=self, icon="warning", default="no"):
+            return
+
+        self.result = {
+            "item_kind":    "catalogue",
+            "Product Type": self.vars["Product Type"].get().strip(),
+            "Part Number":  part,
+            "Description":  desc,
+            "Quantity":     qty,
+            "Unit":         self.vars["Unit"].get().strip() or "each",
+            "Unit Price":   round(unit, 4),
+            "_price_source": "list" if unit > 0 else "",
+        }
+        self.destroy()
+
+
 class BagLineItemDialog(tk.Toplevel):
     """
     Modal dialog for adding / editing a single bag-filter or media-roll line item.
@@ -3336,7 +3671,7 @@ class POReviewDialog(tk.Toplevel):
         }.items():
             self._items_tree.heading(col, text=txt,
                                      anchor="center" if anc == "center" else "w")
-            self._items_tree.column(col, width=wd, anchor=anc, minwidth=40,
+            self._items_tree.column(col, width=px(wd), anchor=anc, minwidth=px(40),
                                     stretch=stretch)
         for level, (bg, fg) in self.CONF_COLORS.items():
             self._items_tree.tag_configure(level, background=bg, foreground=fg)
@@ -3766,7 +4101,7 @@ class QuoteDialog(tk.Toplevel):
                 "total": ("Line Total",   95, "e"),
                 "src":   ("Priced from",  240, "w")}.items():
             tree.heading(col, text=hd)
-            tree.column(col, width=wd, anchor=anc,
+            tree.column(col, width=px(wd), anchor=anc,
                         stretch=(col == "desc"))
         tree.tag_configure("even", background=CRE)
         tree.tag_configure("odd", background=CCA)
@@ -4613,7 +4948,7 @@ class ModernOrderApp(tk.Frame):
                                   selectmode="browse")
         self.tree.grid(row=0, column=0, sticky="nsew")
         self.tree.heading("#0", text="Kind", anchor="center")
-        self.tree.column("#0", width=92, minwidth=80, anchor="center", stretch=False)
+        self.tree.column("#0", width=px(92), minwidth=px(80), anchor="center", stretch=False)
 
         col_defs = {
             "qty":     ("Qty",          50, "center"),
@@ -4627,7 +4962,7 @@ class ModernOrderApp(tk.Frame):
         }
         for col, (hd, wd, anc) in col_defs.items():
             self.tree.heading(col, text=hd)
-            self.tree.column(col, width=wd, anchor=anc, minwidth=40,
+            self.tree.column(col, width=px(wd), anchor=anc, minwidth=px(40),
                              stretch=(col == "notes"))
 
         self.tree.tag_configure("even",   background=CRE)
@@ -4757,7 +5092,7 @@ class ModernOrderApp(tk.Frame):
                                          selectmode="extended")
         self.orders_tree.grid(row=0, column=0, sticky="nsew")
         self.orders_tree.heading("#0", text="Type", anchor="center")
-        self.orders_tree.column("#0", width=106, minwidth=92, anchor="center", stretch=False)
+        self.orders_tree.column("#0", width=px(106), minwidth=px(92), anchor="center", stretch=False)
 
         o_col_defs = {
             "customer":     ("Customer Name",  200, "w"),
@@ -4772,7 +5107,7 @@ class ModernOrderApp(tk.Frame):
         }
         for col, (hd, wd, anc) in o_col_defs.items():
             self.orders_tree.heading(col, text=hd, anchor="center" if anc == "center" else "w")
-            self.orders_tree.column(col, width=wd, anchor=anc, minwidth=40,
+            self.orders_tree.column(col, width=px(wd), anchor=anc, minwidth=px(40),
                                     stretch=(col in ("customer", "created_by")))
 
         self.orders_tree.tag_configure("even",        background=CRE)
@@ -4874,7 +5209,7 @@ class ModernOrderApp(tk.Frame):
                                           style="TAF.Treeview",
                                           selectmode="extended")
         self.delivery_tree.heading("#0", text="Region / Order", anchor="w")
-        self.delivery_tree.column("#0", width=230, minwidth=160, stretch=False)
+        self.delivery_tree.column("#0", width=px(230), minwidth=px(160), stretch=False)
         for col, (hd, wd, anc) in {
                 "order_no": ("Order #",   130, "w"),
                 "customer": ("Customer",  260, "w"),
@@ -4882,7 +5217,7 @@ class ModernOrderApp(tk.Frame):
                 "due":      ("Due",       120, "center"),
                 "status":   ("Status",    120, "center")}.items():
             self.delivery_tree.heading(col, text=hd)
-            self.delivery_tree.column(col, width=wd, anchor=anc,
+            self.delivery_tree.column(col, width=px(wd), anchor=anc,
                                       stretch=(col == "customer"))
         self.delivery_tree.tag_configure("region", background=CCA,
                                          font=(FAM, 10, "bold"))
@@ -5287,7 +5622,7 @@ class ModernOrderApp(tk.Frame):
                 "total": ("Line Total",   95, "e", False),
                 "src":   ("Priced from", 260, "w", False)}.items():
             self.quote_tree.heading(col, text=hd)
-            self.quote_tree.column(col, width=wd, anchor=anc, stretch=stretch)
+            self.quote_tree.column(col, width=px(wd), anchor=anc, stretch=stretch)
         self.quote_tree.tag_configure("even", background=CRE)
         self.quote_tree.tag_configure("odd", background=CCA)
         self.quote_tree.tag_configure("missing", background="#FDEDEC",
@@ -5302,8 +5637,11 @@ class ModernOrderApp(tk.Frame):
         # ── Actions and totals ───────────────────────────────────────────
         bot = tk.Frame(frm, bg=CBG, pady=8)
         bot.grid(row=3, column=0, sticky="ew")
-        flat_btn(bot, "＋ Add Line", self._add_quote_item, bg=CA,
-                 pady=7).pack(side="left", padx=(0, 8))
+        # One button, four kinds of line. A quote has to be able to carry
+        # anything this business sells, not just a made-to-measure filter.
+        self._quote_add_btn = flat_btn(bot, "＋ Add Line  ▾",
+                                       self._quote_add_menu, bg=CA, pady=7)
+        self._quote_add_btn.pack(side="left", padx=(0, 8))
         flat_btn(bot, "Edit", self._edit_quote_item, bg=CNE,
                  pady=7).pack(side="left", padx=(0, 8))
         flat_btn(bot, "Remove", self._remove_quote_item, bg=CRD,
@@ -5418,6 +5756,32 @@ class ModernOrderApp(tk.Frame):
             "Price them on the Products tab before sending this out."
             if missing else "")
 
+    def _quote_add_menu(self):
+        """Everything a quote can carry, in one list.
+
+        A made-to-measure filter is only one of the things this business
+        sells, and until now it was the only thing a quote could hold.
+        """
+        menu = tk.Menu(self.master, tearoff=0, bg=CCA, fg=CTX,
+                       activebackground=CA, activeforeground="white",
+                       font=F_BODY, bd=0, relief="flat")
+        menu.add_command(label="  Filter — made to measure",
+                         command=self._add_quote_item)
+        menu.add_command(label="  Bag filter or media roll",
+                         command=self._add_quote_bag)
+        menu.add_separator()
+        menu.add_command(label="  From the price list…",
+                         command=self._add_quote_product)
+        menu.add_separator()
+        menu.add_command(label="  Manage product types…",
+                         command=self._manage_product_types)
+        btn = self._quote_add_btn
+        try:
+            menu.tk_popup(btn.winfo_rootx(),
+                          btn.winfo_rooty() + btn.winfo_height())
+        finally:
+            menu.grab_release()
+
     def _add_quote_item(self):
         dlg = LineItemDialog(self.master, title="Add Quote Line",
                              media_types=self.all_media_types,
@@ -5427,16 +5791,159 @@ class ModernOrderApp(tk.Frame):
             self.quote_items.append(self._stamp_item(dict(dlg.result)))
             self._refresh_quote_lines()
 
+    def _add_quote_bag(self):
+        dlg = BagLineItemDialog(self.master, title="Add Bag / Roll to Quote",
+                                media_types=self.all_media_types)
+        self.master.wait_window(dlg)
+        if dlg.result:
+            self.quote_items.append(self._stamp_item(dict(dlg.result)))
+            self._refresh_quote_lines()
+
+    def _manage_product_types(self):
+        """Add a kind of product once; every PC has it from then on.
+
+        Saved to the shared catalogue rather than this machine's settings —
+        a product type someone adds on the office PC is no use if the person
+        writing quotes on another one can't pick it.
+        """
+        dlg = tk.Toplevel(self.master)
+        dlg.title("Product Types")
+        dlg.configure(bg=CBG, padx=px(18), pady=px(16))
+        dlg.transient(self.master)
+        dlg.grab_set()
+
+        tk.Label(dlg, text="Product Types", bg=CBG, fg=CA,
+                 font=F_SEC).grid(row=0, column=0, columnspan=3, sticky="w")
+        tk.Label(dlg, text="The kinds of thing a quote can carry, besides a\n"
+                           "made-to-measure filter. Shared with every PC.",
+                 bg=CBG, fg=CMU, font=F_SM, justify="left").grid(
+            row=1, column=0, columnspan=3, sticky="w", pady=(0, px(8)))
+
+        box = tk.Listbox(dlg, height=11, width=38, font=F_BODY, bg=CCA, fg=CTX,
+                         highlightthickness=1, highlightbackground=CSP,
+                         relief="flat", activestyle="none",
+                         selectbackground=CSL, selectforeground=CTX)
+        box.grid(row=2, column=0, columnspan=2, sticky="nsew")
+
+        def _fill():
+            box.delete(0, "end")
+            for p in PRODUCT_TYPES:
+                box.insert("end", f"  {p['name']}   ({p.get('unit') or 'each'})")
+
+        _fill()
+
+        entry_row = tk.Frame(dlg, bg=CBG)
+        entry_row.grid(row=3, column=0, columnspan=3, sticky="w", pady=(px(8), 0))
+        name_var, unit_var = tk.StringVar(), tk.StringVar(value="each")
+        tk.Label(entry_row, text="Name", bg=CBG, fg=CTX,
+                 font=F_BODY).pack(side="left")
+        name_e = field_entry(entry_row, textvariable=name_var, width=20)
+        name_e.pack(side="left", padx=(px(6), px(12)))
+        tk.Label(entry_row, text="Counted in", bg=CBG, fg=CTX,
+                 font=F_BODY).pack(side="left")
+        field_entry(entry_row, textvariable=unit_var, width=9).pack(
+            side="left", padx=(px(6), 0))
+
+        def _add():
+            name = name_var.get().strip()
+            if not name:
+                return
+            if any((p.get("name") or "").lower() == name.lower()
+                   for p in PRODUCT_TYPES):
+                messagebox.showinfo("Product Types",
+                                    f"“{name}” is already on the list.",
+                                    parent=dlg)
+                return
+            PRODUCT_TYPES.append({"name": name,
+                                  "unit": unit_var.get().strip() or "each"})
+            name_var.set("")
+            unit_var.set("each")
+            _fill()
+            name_e.focus_set()
+
+        def _remove():
+            sel = box.curselection()
+            if not sel:
+                return
+            gone = PRODUCT_TYPES.pop(sel[0])
+            _fill()
+            self.status_var.set(f"Removed product type: {gone.get('name', '')}")
+
+        def _save():
+            if _persist_catalog_key("product_types", PRODUCT_TYPES, parent=dlg):
+                self.status_var.set(
+                    f"{len(PRODUCT_TYPES)} product type"
+                    f"{'s' if len(PRODUCT_TYPES) != 1 else ''} saved for everyone.")
+            dlg.destroy()
+
+        name_e.bind("<Return>", lambda _e: _add())
+
+        btns = tk.Frame(dlg, bg=CBG)
+        btns.grid(row=4, column=0, columnspan=3, sticky="ew", pady=(px(12), 0))
+        flat_btn(btns, "Add", _add, bg=CA, pady=px(6)).pack(side="left",
+                                                            padx=(0, px(8)))
+        flat_btn(btns, "Remove", _remove, bg=CRD,
+                 pady=px(6)).pack(side="left")
+        flat_btn(btns, "Save", _save, bg=CGR,
+                 pady=px(6)).pack(side="right")
+        flat_btn(btns, "Cancel", dlg.destroy, bg=CNE,
+                 pady=px(6)).pack(side="right", padx=(0, px(8)))
+
+        dlg.columnconfigure(0, weight=1)
+        dlg.rowconfigure(2, weight=1)
+        dlg.bind("<Escape>", lambda _e: dlg.destroy())
+        name_e.focus_set()
+
+    def _price_list_lookup(self, term: str) -> list:
+        """Search every priced part number. Used by the product picker."""
+        try:
+            return _db.get_price_rows(term, limit=400)
+        except Exception:
+            # Offline, or the price list hasn't been imported. Fall back to
+            # whatever this session already has cached.
+            prices, _rates = self._load_prices()
+            t = term.strip().upper()
+            return [{"part_number": p, "name": "", "unit_price": v}
+                    for p, v in prices.items() if t in p][:400]
+
+    def _add_quote_product(self, initial=None, index=None):
+        dlg = CatalogueLineDialog(
+            self.master,
+            title="Edit Product Line" if index is not None else "Add Product",
+            initial=initial, product_types=product_type_names(),
+            on_lookup=self._price_list_lookup)
+        self.master.wait_window(dlg)
+        if not dlg.result:
+            return
+        line = dict(dlg.result)
+        if index is None:
+            self.quote_items.append(line)
+        else:
+            self.quote_items[index] = line
+        self._refresh_quote_lines()
+
     def _edit_quote_item(self):
         sel = self.quote_tree.selection()
         if not sel:
             messagebox.showinfo("Edit Line", "Select a line first.")
             return
         idx = int(sel[0])
-        dlg = LineItemDialog(self.master, title="Edit Quote Line",
-                             initial=self.quote_items[idx],
-                             media_types=self.all_media_types,
-                             filter_types=self.all_filter_types)
+        item = self.quote_items[idx]
+        # Open the line in the dialog it was made in — editing a media roll in
+        # the filter dialog would ask for a channel depth it hasn't got.
+        kind = item.get("item_kind") or "filter"
+        if kind == "catalogue":
+            self._add_quote_product(initial=item, index=idx)
+            return
+        if kind == "bag":
+            dlg = BagLineItemDialog(self.master, title="Edit Bag / Roll",
+                                    initial=item,
+                                    media_types=self.all_media_types)
+        else:
+            dlg = LineItemDialog(self.master, title="Edit Quote Line",
+                                 initial=item,
+                                 media_types=self.all_media_types,
+                                 filter_types=self.all_filter_types)
         self.master.wait_window(dlg)
         if dlg.result:
             self.quote_items[idx] = self._stamp_item(dict(dlg.result))
@@ -5873,7 +6380,7 @@ class ModernOrderApp(tk.Frame):
                 "sent":     ("Sent",      110, "center"),
                 "opened":   ("Opened",    130, "center")}.items():
             tree.heading(col, text=hd)
-            tree.column(col, width=wd, anchor=anc,
+            tree.column(col, width=px(wd), anchor=anc,
                         stretch=(col == "customer"))
         tree.tag_configure("even", background=CRE)
         tree.tag_configure("odd", background=CCA)
@@ -6023,7 +6530,7 @@ class ModernOrderApp(tk.Frame):
                 "answer":   ("Their answer", 200, "w"),
                 "created":  ("Created",     100, "center")}.items():
             tree.heading(col, text=hd)
-            tree.column(col, width=wd, anchor=anc,
+            tree.column(col, width=px(wd), anchor=anc,
                         stretch=(col == "customer"))
         tree.tag_configure("even", background=CRE)
         tree.tag_configure("odd", background=CCA)
@@ -6303,7 +6810,7 @@ class ModernOrderApp(tk.Frame):
                 "price":   ("Price ex GST", 110, "e", False),
                 "updated": ("Updated",     150, "center", False)}.items():
             self.products_tree.heading(col, text=hd)
-            self.products_tree.column(col, width=wd, anchor=anc, stretch=stretch)
+            self.products_tree.column(col, width=px(wd), anchor=anc, stretch=stretch)
         self.products_tree.tag_configure("even", background=CRE)
         self.products_tree.tag_configure("odd", background=CCA)
         self.products_tree.grid(row=0, column=0, sticky="nsew")
@@ -7106,7 +7613,7 @@ class ModernOrderApp(tk.Frame):
         for col, (hd, wd, anc) in c_col_defs.items():
             self._cust_tree.heading(col, text=hd,
                                     anchor="center" if anc == "center" else "w")
-            self._cust_tree.column(col, width=wd, anchor=anc, minwidth=40,
+            self._cust_tree.column(col, width=px(wd), anchor=anc, minwidth=px(40),
                                    stretch=(col in ("name", "email")))
 
         self._cust_tree.tag_configure("even",     background=CRE)
@@ -7779,7 +8286,7 @@ class ModernOrderApp(tk.Frame):
         for col, (hd, wd, anc) in s_col_defs.items():
             self._stock_tree.heading(col, text=hd,
                                      anchor="center" if anc == "center" else "w")
-            self._stock_tree.column(col, width=wd, anchor=anc, minwidth=30,
+            self._stock_tree.column(col, width=px(wd), anchor=anc, minwidth=px(30),
                                     stretch=(col == "location"))
 
         self._stock_tree.tag_configure("ok",    background="#D4EDDA", foreground="#155724")
@@ -8505,7 +9012,7 @@ class ModernOrderApp(tk.Frame):
             ("notes",  "Notes",    999),
         ]:
             htree.heading(col, text=hd)
-            htree.column(col, width=wd, anchor="center" if col in ("change","after") else "w",
+            htree.column(col, width=px(wd), anchor="center" if col in ("change","after") else "w",
                          stretch=(col == "notes"))
 
         hsb = ttk.Scrollbar(wrap, orient="vertical", command=htree.yview)
@@ -8607,7 +9114,7 @@ class ModernOrderApp(tk.Frame):
             ("details", "Details", 400, "w"),
         ]:
             self.audit_tree.heading(col, text=hd)
-            self.audit_tree.column(col, width=wd, anchor=anc, minwidth=60,
+            self.audit_tree.column(col, width=px(wd), anchor=anc, minwidth=px(60),
                                    stretch=(col == "details"))
         self.audit_tree.tag_configure("even", background=CRE)
         self.audit_tree.tag_configure("odd",  background=CCA)
@@ -13389,7 +13896,7 @@ class ModernOrderApp(tk.Frame):
             "notes": ("Notes",           260, "w",      True),
         }.items():
             tree.heading(col, text=hd_txt, anchor="center" if anc == "center" else "w")
-            tree.column(col, width=wd, anchor=anc, minwidth=40, stretch=stretch)
+            tree.column(col, width=px(wd), anchor=anc, minwidth=px(40), stretch=stretch)
         tree.tag_configure("even", background=CRE)
         tree.tag_configure("odd",  background=CCA)
 
@@ -13593,8 +14100,10 @@ def _start_app():
     if settings.get("dark_mode"):
         _set_dark_mode()
 
+    _enable_hidpi()          # before the first window, or it has no effect
     root = tk.Tk()
     root.withdraw()          # hide until login succeeds
+    _apply_ui_scale(root)    # match Tk's point size to the actual screen
     # A fresh Tk root invalidates every previously-rendered PhotoImage (this
     # runs again after sign-out) — drop the badge cache so it re-renders.
     _BADGE_CACHE.clear()

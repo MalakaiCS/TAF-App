@@ -332,6 +332,18 @@ def price_for_item(item: Dict[str, Any],
     human. "near" is a price taken from the same filter a few millimetres
     thicker or thinner, and is always shown as such.
     """
+    # A line someone entered a price on themselves — picked out of the price
+    # list, or a one-off nobody has a part number for. It is already priced,
+    # and guessing at it from dimensions it doesn't have would be worse.
+    if item.get("item_kind") == "catalogue":
+        try:
+            unit = float(item.get("Unit Price") or 0)
+        except (TypeError, ValueError):
+            unit = 0.0
+        if unit > 0:
+            return (round(unit, 4), item.get("_price_source") or "list")
+        # Fall through: it may still carry a part number the list knows.
+
     part = (item.get("Part Number") or "").strip().upper()
     if part and prices:
         listed = prices.get(part)
@@ -363,6 +375,15 @@ def why_unpriced(item: Dict[str, Any],
     to go and add, while "this line has no part number" is something wrong
     with the line itself. Guessing a nearby price instead would hide both.
     """
+    # A line typed in by hand or picked from the list carries its own price.
+    # If it has none, that is simply a price nobody has entered — nothing to
+    # do with filter types or dimensions it was never going to have.
+    if item.get("item_kind") == "catalogue":
+        part = (item.get("Part Number") or "").strip().upper()
+        if part and prices and part not in prices:
+            return f"{part} is not in the price list"
+        return "no price entered for this line"
+
     part = (item.get("Part Number") or "").strip().upper()
     if not part:
         ftype = (item.get("Filter Type") or "").strip()
@@ -449,6 +470,17 @@ def describe_item(item: Dict[str, Any]) -> str:
     a quote, and an accounting import is the wrong place to find out how a
     piece of punctuation is decoded.
     """
+    if item.get("item_kind") == "catalogue":
+        # Whatever it was called in the price list, or what someone typed for
+        # a one-off. It already reads the way it should on a quote.
+        text = (str(item.get("Description") or "").strip()
+                or str(item.get("Part Number") or "").strip()
+                or "Item")
+        kind = str(item.get("Product Type") or "").strip()
+        if kind and kind.lower() not in text.lower():
+            text = f"{kind} - {text}"
+        return text
+
     if (item.get("item_kind") or "filter") == "bag":
         bits = [str(item.get("Filter Type") or "Bag Filter")]
         dims = " x ".join(str(item.get(k)) for k in ("width", "height")

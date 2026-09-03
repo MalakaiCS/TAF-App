@@ -474,7 +474,10 @@ def apply_derived_fields(item: Dict[str, Any],
     Called wherever an item is created or edited so the two always agree with
     the dimensions actually on the line.
     """
-    if (item.get("item_kind") or "filter") == "bag":
+    if (item.get("item_kind") or "filter") in ("bag", "catalogue"):
+        # A bag has its own generator; a catalogue line already carries the
+        # part number it was picked by, and deriving one from dimensions it
+        # doesn't have would wipe it.
         return item
     area = effective_area(item)
     item["Square Metres"] = round(area, 4)
