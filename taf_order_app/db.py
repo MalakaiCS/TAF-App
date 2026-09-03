@@ -477,6 +477,20 @@ def get_order_list(limit: int = 0) -> list:
         return get_all_orders(limit=limit)
 
 
+def get_order(order_id: str) -> "dict | None":
+    """One order in full, lines included.
+
+    Used where a screen needs to show what an action just did — re-reading
+    the whole list to find one order is a lot of wire for one row.
+    """
+    try:
+        resp = (get_client().table("orders").select("*")
+                .eq("id", order_id).single().execute())
+        return resp.data or None
+    except Exception:
+        return None
+
+
 def get_order_items(order_id: str) -> list:
     """One order's line items, fetched when something actually needs them."""
     try:
@@ -1261,6 +1275,86 @@ def upload_stock_image(item_id: str, image_path: str) -> str:
         name, data,
         file_options={"content-type": mime, "upsert": "true"})
     return f"{SUPABASE_URL}/storage/v1/object/public/stock-images/{name}"
+
+
+# ── Profile pictures ─────────────────────────────────────────────────────────
+
+AVATAR_BUCKET = "avatars"
+
+
+def upload_avatar(user_id: str, image_path: str) -> str:
+    """Put a photo against an account and return the link to it.
+
+    Named after the account rather than the file it came from, so replacing a
+    picture replaces it rather than leaving the old one behind for ever.
+    """
+    import mimetypes
+    from pathlib import Path as _P
+    p = _P(image_path)
+    ext = p.suffix.lower() or ".jpg"
+    name = f"{user_id}{ext}"
+    mime = mimetypes.guess_type(str(p))[0] or "image/jpeg"
+    data = p.read_bytes()
+    store = get_client().storage.from_(AVATAR_BUCKET)
+    # A different extension would leave the old file sitting there.
+    for old in (".jpg", ".jpeg", ".png", ".webp"):
+        if old != ext:
+            try:
+                store.remove([f"{user_id}{old}"])
+            except Exception:
+                pass
+    try:
+        store.remove([name])
+    except Exception:
+        pass
+    store.upload(name, data,
+                 file_options={"content-type": mime, "upsert": "true"})
+    # Cache-busted: the URL never changes when a picture is replaced, so
+    # without this the old one keeps being served.
+    import time as _t
+    return (f"{SUPABASE_URL}/storage/v1/object/public/{AVATAR_BUCKET}/"
+            f"{name}?v={int(_t.time())}")
+
+
+def set_avatar(user_id: str, url: str) -> None:
+    """Record the link on the profile. Falls back to a plain update on a
+    database that hasn't had migrate_avatars.sql run."""
+    try:
+        get_client().rpc("set_avatar",
+                         {"p_user_id": user_id, "p_url": url}).execute()
+        return
+    except Exception:
+        pass
+    get_client().table("profiles").update(
+        {"avatar_url": url}).eq("id", user_id).execute()
+
+
+def remove_avatar(user_id: str) -> None:
+    """Take the picture off an account and out of storage."""
+    store = get_client().storage.from_(AVATAR_BUCKET)
+    for ext in (".jpg", ".jpeg", ".png", ".webp"):
+        try:
+            store.remove([f"{user_id}{ext}"])
+        except Exception:
+            pass
+    set_avatar(user_id, "")
+
+
+def current_avatar_url() -> str:
+    return (current_profile() or {}).get("avatar_url") or ""
+
+
+def refresh_current_profile() -> dict:
+    """Re-read the signed-in account, after changing something on it."""
+    global _current_profile
+    user = current_user()
+    if not user:
+        return {}
+    try:
+        _current_profile = _load_profile(str(user.id)) or _current_profile
+    except Exception:
+        pass
+    return _current_profile or {}
 
 
 def can_manage_stock() -> bool:

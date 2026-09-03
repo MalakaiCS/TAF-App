@@ -41,6 +41,7 @@ ORDER = [
     "migrate_supplied_order_numbers.sql",
     "migrate_performance.sql",
     "migrate_scanning.sql",
+    "migrate_avatars.sql",
 ]
 
 

@@ -4761,17 +4761,189 @@ class ModernOrderApp(tk.Frame):
 
     # ── Header bar ────────────────────────────────────────────────────────
 
-    def _avatar(self, parent, initials, size=34):
-        """Circular brand-blue avatar with white initials (drawn on a Canvas)."""
-        c = tk.Canvas(parent, width=size, height=size, bg=CCA, highlightthickness=0)
-        c.create_oval(1, 1, size - 1, size - 1, fill=CA, outline="")
-        c.create_text(size // 2, size // 2 + 1, text=initials, fill="white",
-                      font=(FAM, int(size * 0.36), "bold"))
+    def _avatar(self, parent, initials, size=34, url=None):
+        """The account's photo, or its initials when there isn't one.
+
+        Cropped to a square and masked to a circle here rather than asking
+        whoever uploads it to crop it first — a photo straight off a phone is
+        the wrong shape, and refusing it would just mean nobody bothers.
+        """
+        size = px(size)
+        c = tk.Canvas(parent, width=size, height=size, bg=CCA,
+                      highlightthickness=0)
+        photo = self._avatar_image(url, size) if url else None
+        if photo is not None:
+            c.create_image(size // 2, size // 2, image=photo)
+            c._photo = photo          # Tk drops an image with no reference
+        else:
+            c.create_oval(1, 1, size - 1, size - 1, fill=CA, outline="")
+            c.create_text(size // 2, size // 2 + 1, text=initials, fill="white",
+                          font=(FAM, int(size * 0.36), "bold"))
         return c
+
+    def _avatar_image(self, url: str, size: int):
+        """Fetch, crop and round a profile picture. None if anything fails.
+
+        Kept per URL and size: the header rebuilds on every sign-in and tab
+        change, and fetching the same photo each time would be a download for
+        no reason.
+        """
+        cache = getattr(self, "_avatar_cache", None)
+        if cache is None:
+            cache = self._avatar_cache = {}
+        key = (url, size)
+        if key in cache:
+            return cache[key]
+        image = None
+        try:
+            from PIL import Image, ImageDraw, ImageTk
+            import io
+            import urllib.request
+            with urllib.request.urlopen(url, timeout=6) as resp:
+                raw = resp.read()
+            src = Image.open(io.BytesIO(raw)).convert("RGBA")
+            # Square from the middle, then scale — never squash a face.
+            edge = min(src.size)
+            left = (src.width - edge) // 2
+            top = (src.height - edge) // 2
+            src = src.crop((left, top, left + edge, top + edge))
+            src = src.resize((size, size), Image.LANCZOS)
+            mask = Image.new("L", (size * 4, size * 4), 0)
+            ImageDraw.Draw(mask).ellipse((0, 0, size * 4 - 1, size * 4 - 1),
+                                         fill=255)
+            src.putalpha(mask.resize((size, size), Image.LANCZOS))
+            image = ImageTk.PhotoImage(src)
+        except Exception:
+            image = None          # offline, no Pillow, or not an image
+        cache[key] = image
+        return image
+
+    def _account_menu(self):
+        """The account, and the screens that keep the app running.
+
+        Products, Settings and user management are set-up work, not the job —
+        having them as tabs put them in front of everyone all day. They live
+        behind the name instead, which is where people already look for
+        their account.
+        """
+        can_manage = _db.is_ready() and _db.can_manage_prices()
+        items = [("Change my picture…", self._change_avatar)]
+        if _db.is_ready() and _db.current_avatar_url():
+            items.append(("Remove my picture", self._remove_avatar))
+        items += [
+            ("Change my password…", self._do_change_password),
+            None,
+            ("Products and prices", lambda: self._show_tab("products")),
+            ("Settings",            lambda: self._show_tab("settings")),
+        ]
+        if _db.is_ready() and _db.can_manage_roles():
+            pending = 0
+            try:
+                pending = _db.pending_staff_count()
+            except Exception:
+                pending = 0
+            label = "Staff and accounts"
+            if pending:
+                label += f"   ({pending} waiting)"
+            items.append((label, self._open_user_management))
+        items += [None, ("Sign out", self._sign_out)]
+        if not can_manage:
+            items = [i for i in items
+                     if i is None or i[0] != "Products and prices"]
+
+        menu = tk.Menu(self.master, tearoff=0, bg=CCA, fg=CTX,
+                       activebackground=CA, activeforeground="white",
+                       font=F_BODY, bd=0, relief="flat", activeborderwidth=0)
+        for entry in items:
+            if entry is None:
+                menu.add_separator()
+                continue
+            label, command = entry
+            menu.add_command(label=f"  {label}  ", command=command)
+        anchor = getattr(self, "_profile_anchor", None)
+        try:
+            if anchor is not None:
+                menu.tk_popup(anchor.winfo_rootx(),
+                              anchor.winfo_rooty() + anchor.winfo_height() + px(4))
+            else:
+                menu.tk_popup(self.master.winfo_pointerx(),
+                              self.master.winfo_pointery())
+        finally:
+            menu.grab_release()
+
+    def _change_avatar(self):
+        """Pick a photo for this account."""
+        if not (_db.is_ready() and _db.current_user()):
+            messagebox.showinfo("Profile picture", "Sign in first.")
+            return
+        path = filedialog.askopenfilename(
+            title="Choose a profile picture",
+            filetypes=[("Images", "*.png *.jpg *.jpeg *.webp"),
+                       ("All files", "*.*")])
+        if not path:
+            return
+        try:
+            size = Path(path).stat().st_size
+        except OSError:
+            size = 0
+        if size > 8 * 1024 * 1024:
+            messagebox.showwarning(
+                "Profile picture",
+                "That picture is over 8MB. Something straight off a phone is "
+                "usually plenty — try a smaller one.")
+            return
+        self.status_var.set("Uploading your picture…")
+        self.master.update_idletasks()
+        try:
+            user_id = str(_db.current_user().id)
+            url = _db.upload_avatar(user_id, path)
+            _db.set_avatar(user_id, url)
+            _db.refresh_current_profile()
+        except Exception as exc:
+            messagebox.showerror(
+                "Profile picture",
+                f"That didn't upload:\\n{exc}\\n\\n"
+                "If this is the first one, an admin needs to run "
+                "migrate_avatars.sql in the Supabase SQL Editor.")
+            self.status_var.set("")
+            return
+        # A new URL each time, so the cache holds the picture, not the old one.
+        self._rebuild_header()
+        self.status_var.set("Profile picture updated.")
+
+    def _remove_avatar(self):
+        if not messagebox.askyesno("Profile picture",
+                                   "Remove your picture and go back to your "
+                                   "initials?"):
+            return
+        try:
+            _db.remove_avatar(str(_db.current_user().id))
+            _db.refresh_current_profile()
+        except Exception as exc:
+            messagebox.showerror("Profile picture", f"Couldn't remove it:\\n{exc}")
+            return
+        self._rebuild_header()
+        self.status_var.set("Profile picture removed.")
+
+    def _rebuild_header(self):
+        """Redraw the top bar so a changed name or picture shows straight away."""
+        header = getattr(self, "_header_frame", None)
+        if header is None:
+            return
+        for w in header.winfo_children():
+            w.destroy()
+        header.destroy()
+        self._build_header()
+        # It was packed last, so lift it back above the tab bar.
+        try:
+            self._header_frame.pack_configure(before=self._tab_bar_frame)
+        except Exception:
+            pass
 
     def _build_header(self):
         hdr = tk.Frame(self, bg=CCA, highlightbackground=CSP, highlightthickness=1)
         hdr.pack(fill="x")
+        self._header_frame = hdr
         inner = tk.Frame(hdr, bg=CCA, padx=18, pady=8)
         inner.pack(fill="x")
 
@@ -4793,31 +4965,31 @@ class ModernOrderApp(tk.Frame):
                  bg=CCA, fg=CMU, font=(FAM, 9), justify="left",
                  anchor="w").pack(side="left")
 
-        # Right: profile block (clickable → Settings) + Sign out outline button
+        # Right: the account, which is also the way into the admin screens.
         if _db.is_ready() and _db.current_user():
             role = _db.current_role()
             name = _db.current_full_name() or _db.current_username()
 
-            so = tk.Label(inner, text="Sign out", bg=CCA, fg=CMU,
-                          font=(FAM, 9, "bold"), padx=14, pady=7, cursor="hand2",
-                          highlightbackground=CSP, highlightthickness=1)
-            so.pack(side="right", padx=(14, 0))
-            so.bind("<Button-1>", lambda e: self._sign_out())
-            so.bind("<Enter>", lambda e: so.config(fg=CA, highlightbackground=CA))
-            so.bind("<Leave>", lambda e: so.config(fg=CMU, highlightbackground=CSP))
-
-            prof = tk.Frame(inner, bg=CCA, cursor="hand2")
+            prof = tk.Frame(inner, bg=CCA, cursor="hand2", padx=px(6))
             prof.pack(side="right")
-            av = self._avatar(prof, _initials(name), size=36)
-            av.pack(side="right", padx=(10, 0))
+            av = self._avatar(prof, _initials(name), size=36,
+                              url=_db.current_avatar_url())
+            av.pack(side="right", padx=(px(10), 0))
             tcol = tk.Frame(prof, bg=CCA)
             tcol.pack(side="right")
             tk.Label(tcol, text=role.upper(), bg=CCA, fg=CGR,
                      font=(FAM, 8, "bold"), anchor="e").pack(anchor="e")
-            tk.Label(tcol, text=name, bg=CCA, fg=CTX,
-                     font=(FAM, 10, "bold"), anchor="e").pack(anchor="e")
-            for w in (prof, tcol, av):
-                w.bind("<Button-1>", lambda e: self._show_tab("settings"))
+            namerow = tk.Frame(tcol, bg=CCA)
+            namerow.pack(anchor="e")
+            tk.Label(namerow, text=name, bg=CCA, fg=CTX,
+                     font=(FAM, 10, "bold"), anchor="e").pack(side="left")
+            tk.Label(namerow, text="  ▾", bg=CCA, fg=CMU,
+                     font=(FAM, 9, "bold")).pack(side="left")
+            self._profile_anchor = prof
+            for w in (prof, tcol, av, namerow):
+                w.bind("<Button-1>", lambda _e: self._account_menu())
+                for child in w.winfo_children():
+                    child.bind("<Button-1>", lambda _e: self._account_menu())
 
         # A shortcut nobody knows about saves nobody any time, so there is a
         # way in that doesn't require already knowing the shortcut.
@@ -4834,6 +5006,7 @@ class ModernOrderApp(tk.Frame):
     def _build_tab_bar(self):
         bar = tk.Frame(self, bg=CCA, highlightbackground=CSP, highlightthickness=1)
         bar.pack(fill="x")
+        self._tab_bar_frame = bar
 
         self._tab_bar_inner = tk.Frame(bar, bg=CCA, padx=8)
         self._tab_bar_inner.pack(fill="x")
@@ -4868,13 +5041,14 @@ class ModernOrderApp(tk.Frame):
         "prev_orders": "▤  Previous Orders",
         "delivery":    "🚚  Delivery",
         "quotes":      "💲  Quotes",
-        "products":    "🏷  Products",
         "customers":   "👥  Customers",
-        "stock":       "📦  Stock",
+        "stock":        "📦  Stock",
         "audit_log":   "☰  Audit Log",
-        "settings":    "⚙  Settings",
     }
+    # On the bar, left to right, and numbered Ctrl+1..n off the same list.
     _TAB_ORDER = list(_TAB_LABELS)
+    # Reachable, but not on the bar — they live under the account menu.
+    _ADMIN_TABS = ("products", "settings")
 
     # ── Keyboard ──────────────────────────────────────────────────────────
     # An order-entry app is used all day by people who know where everything
@@ -4886,8 +5060,14 @@ class ModernOrderApp(tk.Frame):
     # themselves rather than globally - otherwise it would eat a line while
     # someone was editing a field.
 
+    # Written from the tab list rather than by hand: Settings and Products
+    # moving off the bar shortened it, and a help screen promising a key that
+    # does nothing is worse than no help screen.
+    _TAB_KEYS = ("Ctrl+1 … Ctrl+9, Ctrl+0" if len(_TAB_ORDER) >= 10
+                 else f"Ctrl+1 … Ctrl+{len(_TAB_ORDER)}")
+
     SHORTCUTS = [
-        ("Ctrl+1 … Ctrl+0", "Jump straight to a tab, left to right"),
+        (_TAB_KEYS, "Jump straight to a tab, left to right"),
         ("Ctrl+N",          "Start a new order"),
         ("Ctrl+F",          "Jump to the search box on this tab"),
         ("Ctrl+S",          "Do the main thing on this tab "
@@ -5516,8 +5696,8 @@ class ModernOrderApp(tk.Frame):
                               command=self.orders_tree.yview)
         ovsb.grid(row=0, column=1, sticky="ns")
         self.orders_tree.configure(yscrollcommand=ovsb.set)
-        self.orders_tree.bind("<Double-1>", lambda e: self._load_prev_order())
-        self.orders_tree.bind("<Return>", lambda _e: self._load_prev_order())
+        self.orders_tree.bind("<Double-1>", lambda e: self._view_order())
+        self.orders_tree.bind("<Return>", lambda _e: self._view_order())
         self.orders_tree.bind("<Motion>",   self._on_orders_tree_hover)
         self.orders_tree.bind("<Leave>",    lambda e: self._hide_order_tooltip())
 
@@ -5528,12 +5708,13 @@ class ModernOrderApp(tk.Frame):
         # Fourteen buttons meant nothing stood out and the two anyone
         # actually uses were lost among twelve they don't. Open and Print
         # stay out; the rest are one click away, grouped by what they are.
-        flat_btn(bot, "Open Order", self._load_prev_order,
+        flat_btn(bot, "👁  View Order", self._view_order,
                  bg=CA, pady=7).pack(side="left", padx=(0, 8))
+        flat_btn(bot, "Open in New Order", self._load_prev_order,
+                 bg=CA2, pady=7).pack(side="left", padx=(0, 8))
         flat_btn(bot, "🖨  Print", self._print_prev_order,
                  bg=CNE, pady=7).pack(side="left", padx=(0, 8))
         menu_btn(bot, "Order  ▾", [
-            ("View what's on it",      self._view_order_items),
             ("Duplicate this order",   self._duplicate_prev_order),
             ("Regenerate worksheets",  self._regen_prev_order),
             ("Quote from this order",  self._quote_prev_order),
@@ -14274,41 +14455,163 @@ class ModernOrderApp(tk.Frame):
             messagebox.showerror(what, f"Could not read order file:\n{exc}")
             return {}, None
 
-    def _view_order_items(self):
-        """Popup listing the selected order's line items — see what's in an
-        order without loading it into the New Order tab."""
+    def _view_order(self):
+        """Everything about one order, in one window.
+
+        What is on it, what has been said about it, where it is up to, and
+        every action you can take — so nothing has to be done from the list
+        behind it and then guessed at.
+        """
         row = self._get_selected_order()
         if row is None:
-            messagebox.showinfo("View Items", "Select an order from the list first.")
-            return
-
-        header, items = self._order_header_items(row, "View Items")
-        if items is None:
+            messagebox.showinfo("View Order", "Select an order from the list first.")
             return
 
         order_no = row.get("order_no", "")
         dlg = tk.Toplevel(self.master)
-        dlg.title(f"Order Items — {order_no}")
+        dlg.title(f"Order — {order_no or 'no number'}")
         dlg.transient(self.master)
         dlg.grab_set()
         dlg.configure(bg=CBG)
-        W, H = 960, 520
-        dlg.geometry(f"{W}x{H}+{self.master.winfo_rootx()+self.master.winfo_width()//2-W//2}"
-                     f"+{self.master.winfo_rooty()+self.master.winfo_height()//2-H//2}")
+        W, H = px(1060), px(680)
+        dlg.geometry(f"{W}x{H}+{self.master.winfo_rootx()+max(0, self.master.winfo_width()//2-W//2)}"
+                     f"+{self.master.winfo_rooty()+max(0, self.master.winfo_height()//2-H//2)}")
+        dlg.bind("<Escape>", lambda _e: dlg.destroy())
 
-        hdr = tk.Frame(dlg, bg=CA, padx=14, pady=10)
+        body = tk.Frame(dlg, bg=CBG)
+        body.pack(fill="both", expand=True)
+
+        def _refill():
+            """Redraw from the order as it stands now.
+
+            Every action here changes the order, so the window has to be able
+            to show the result rather than the state it opened with.
+            """
+            for w in body.winfo_children():
+                w.destroy()
+            self._draw_order_view(body, row, dlg, _refill, W)
+
+        _refill()
+
+        # ── What you can do to it ─────────────────────────────────────────
+        foot = tk.Frame(dlg, bg=CBG, pady=px(10), padx=px(14))
+        foot.pack(fill="x")
+
+        def _act(action, close=False):
+            """Run an order action, then show what it did."""
+            def go():
+                action()
+                if close:
+                    dlg.destroy()
+                    return
+                # The list behind holds the order's data; refresh it, find
+                # this order again, and redraw from that.
+                self._tab_loaded.pop("prev_orders", None)
+                fresh = self._reread_order(row)
+                if fresh:
+                    row.update(fresh)
+                _refill()
+            return go
+
+        flat_btn(foot, "Close", dlg.destroy, bg=CNE,
+                 pady=px(6)).pack(side="right")
+        flat_btn(foot, "Open in New Order", _act(self._load_prev_order, close=True),
+                 bg=CA, pady=px(6)).pack(side="right", padx=(0, px(8)))
+        menu_btn(foot, "Actions  ▾", [
+            ("Add a note…",            _act(self._add_order_note)),
+            ("Change status…",         _act(self._change_order_status)),
+            ("Toggle high priority",   _act(self._toggle_order_priority)),
+            ("Freight / delay…",       _act(self._edit_order_freight)),
+            None,
+            ("Print",                  _act(self._print_prev_order)),
+            ("Regenerate worksheets",  _act(self._regen_prev_order)),
+            ("Duplicate this order",   _act(self._duplicate_prev_order, close=True)),
+            None,
+            ("Quote from this order",  _act(self._quote_prev_order, close=True)),
+            ("Invoice to Xero",        _act(self._invoice_selected_orders)),
+            ("Full history…",          _act(self._view_order_history)),
+        ], bg=CNE, pady=px(6)).pack(side="right", padx=(0, px(8)))
+
+    def _reread_order(self, row) -> dict:
+        """Fetch one order again so the window can show what an action did."""
+        oid = row.get("db_id")
+        if not oid or row.get("source") != "db":
+            return {}
+        try:
+            fresh = _db.get_order(oid) if hasattr(_db, "get_order") else None
+            if not fresh:
+                for r in _db.get_order_list():
+                    if r.get("id") == oid:
+                        fresh = r
+                        break
+            if not fresh:
+                return {}
+            header = fresh.get("header") or {}
+            return {
+                "db_header":   header,
+                "db_items":    fresh.get("items"),
+                "status":      header.get("status", "Pending") or "Pending",
+                "priority":    bool(header.get("priority", False)),
+                "printed":     bool(header.get("printed", False)),
+                "printed_at":  header.get("printed_at", ""),
+                "notes_list":  header.get("order_notes") or [],
+                "notes_count": len(header.get("order_notes") or []),
+            }
+        except Exception:
+            return {}
+
+    def _draw_order_view(self, body, row, dlg, refill, W):
+        """The contents of the order window: heading, lines, notes."""
+        header, items = self._order_header_items(row, "View Order")
+        if items is None:
+            items = []
+        order_no = row.get("order_no", "")
+        status = row.get("status") or header.get("status") or "Pending"
+
+        # ── Heading ───────────────────────────────────────────────────────
+        hdr = tk.Frame(body, bg=CA, padx=px(16), pady=px(12))
         hdr.pack(fill="x")
-        tk.Label(hdr, text=row.get("customer", ""), bg=CA, fg="white",
-                 font=(FAM, 11, "bold")).pack(anchor="w")
-        sub_bits = [f"O/N: {order_no or '—'}"]
-        if header.get("Date Ordered"): sub_bits.append(f"Ordered {header['Date Ordered']}")
-        if header.get("Date Due"):     sub_bits.append(f"Due {header['Date Due']}")
-        sub_bits.append(f"{len(items)} item{'s' if len(items) != 1 else ''}")
-        tk.Label(hdr, text="  ·  ".join(sub_bits),
-                 bg=CA, fg="#A9CCE3", font=F_SM).pack(anchor="w")
+        title = tk.Frame(hdr, bg=CA)
+        title.pack(fill="x")
+        tk.Label(title, text=row.get("customer", "") or "—", bg=CA, fg="white",
+                 font=(FAM, 13, "bold")).pack(side="left")
+        if row.get("priority"):
+            tk.Label(title, text="  ★ HIGH PRIORITY", bg=CA, fg="#FFE08A",
+                     font=F_BOLD).pack(side="left")
+        tk.Label(title, text=status.upper(), bg=CA, fg="white",
+                 font=F_BOLD).pack(side="right")
 
-        tbl_wrap = tk.Frame(dlg, bg=CCA, highlightbackground=CSP, highlightthickness=1)
-        tbl_wrap.pack(fill="both", expand=True, padx=14, pady=(12, 0))
+        bits = [f"O/N {order_no or '—'}"]
+        for label, key in (("Ordered", "Date Ordered"), ("Due", "Date Due"),
+                           ("Job", "Job"), ("Attn", "Attention")):
+            if header.get(key):
+                bits.append(f"{label} {header[key]}")
+        bits.append(f"{len(items)} line{'s' if len(items) != 1 else ''}")
+        if row.get("printed"):
+            bits.append("Printed" + (f" {row.get('printed_at','')[:10]}"
+                                     if row.get("printed_at") else ""))
+        tk.Label(hdr, text="   ·   ".join(bits), bg=CA, fg="#CDE7F7",
+                 font=F_SM).pack(anchor="w", pady=(px(3), 0))
+
+        # Freight, when it has gone out on a truck.
+        freight = (header.get("freight") or {})
+        if freight.get("carrier") or freight.get("consignment") or freight.get("delay_reason"):
+            fbits = [b for b in (freight.get("carrier"),
+                                 freight.get("consignment"),
+                                 freight.get("delay_reason")) if b]
+            tk.Label(hdr, text="🚚  " + "   ·   ".join(fbits), bg=CA,
+                     fg="white", font=F_SM).pack(anchor="w", pady=(px(4), 0))
+
+        # ── Lines ─────────────────────────────────────────────────────────
+        split = tk.Frame(body, bg=CBG)
+        split.pack(fill="both", expand=True, padx=px(14), pady=(px(12), 0))
+        split.rowconfigure(0, weight=1)
+        split.columnconfigure(0, weight=3)
+        split.columnconfigure(1, weight=2)
+
+        tbl_wrap = tk.Frame(split, bg=CCA, highlightbackground=CBR,
+                            highlightthickness=1)
+        tbl_wrap.grid(row=0, column=0, sticky="nsew", padx=(0, px(12)))
         tbl_wrap.rowconfigure(0, weight=1)
         tbl_wrap.columnconfigure(0, weight=1)
 
@@ -14317,58 +14620,112 @@ class ModernOrderApp(tk.Frame):
                             style="TAF.Treeview")
         tree.grid(row=0, column=0, sticky="nsew")
         for col, (hd_txt, wd, anc, stretch) in {
-            "qty":   ("Qty",              60, "center", False),
-            "item":  ("Item",            250, "w",      True),
-            "size":  ("Size (mm)",       170, "center", False),
-            "media": ("Media",           110, "center", False),
-            "notes": ("Notes",           260, "w",      True),
+            "qty":   ("Qty",         60, "center", False),
+            "item":  ("Item",       230, "w",      True),
+            "size":  ("Size (mm)",  160, "center", False),
+            "media": ("Media",      100, "center", False),
+            "notes": ("Notes",      180, "w",      True),
         }.items():
             tree.heading(col, text=hd_txt, anchor="center" if anc == "center" else "w")
             tree.column(col, width=px(wd), anchor=anc, minwidth=px(40), stretch=stretch)
         tree.tag_configure("even", background=CRE)
         tree.tag_configure("odd",  background=CCA)
-
         vsb = ttk.Scrollbar(tbl_wrap, orient="vertical", command=tree.yview)
         vsb.grid(row=0, column=1, sticky="ns")
         tree.configure(yscrollcommand=vsb.set)
+        attach_empty_state(tree, "No lines on this order",
+                           "Nothing was saved against it.")
 
         for i, it in enumerate(items):
-            if (it.get("item_kind") or "filter") == "bag":
-                name = it.get("product_type", "Bag / Roll")
-                pn   = (it.get("part_number") or "").strip()
-                if pn:
-                    name += f"   (P/N {pn})"
-                if it.get("roll_width") or it.get("roll_length"):
-                    size = f"{it.get('roll_width','')} × {it.get('roll_length','')}".strip(" ×")
-                else:
-                    dims = [it.get("width"), it.get("height"), it.get("depth")]
-                    size = " × ".join(str(d) for d in dims if d)
-                qty   = it.get("quantity", "")
-                media = it.get("media", "")
-                notes = it.get("notes", "")
-            else:
-                name  = it.get("Filter Type", "Filter")
-                size  = f"{it.get('Short','')} × {it.get('Long','')} × {it.get('Channel','')}"
-                qty   = it.get("Quantity", "")
-                media = it.get("Media Type", "")
-                notes = it.get("Notes", "")
             tree.insert("", "end", tags=("even" if i % 2 == 0 else "odd",),
-                        values=(qty, name, size, media, notes))
+                        values=self._order_line_cells(it))
 
-        if header.get("Notes"):
-            tk.Label(dlg, text=f"Order notes:  {header['Notes']}",
-                     bg=CBG, fg=CMU, font=F_SM, wraplength=W - 40,
-                     justify="left", anchor="w").pack(fill="x", padx=16, pady=(8, 0))
+        # ── Notes ─────────────────────────────────────────────────────────
+        side = tk.Frame(split, bg=CCA, highlightbackground=CBR,
+                        highlightthickness=1)
+        side.grid(row=0, column=1, sticky="nsew")
+        head = tk.Frame(side, bg=CCA, padx=px(12), pady=px(10))
+        head.pack(fill="x")
+        notes = row.get("notes_list") or header.get("order_notes") or []
+        tk.Label(head, text=f"Notes ({len(notes)})", bg=CCA, fg=CA,
+                 font=F_SEC).pack(side="left")
 
-        foot = tk.Frame(dlg, bg=CBG, pady=10, padx=14)
-        foot.pack(fill="x")
-        flat_btn(foot, "Close", dlg.destroy, bg=CNE, pady=6).pack(side="right")
+        def _add_then_refill():
+            self._add_order_note()
+            fresh = self._reread_order(row)
+            if fresh:
+                row.update(fresh)
+            refill()
 
-        def _load_and_close():
-            dlg.destroy()
-            self._load_prev_order()
-        flat_btn(foot, "Load into New Order", _load_and_close,
-                 bg=CA, pady=6).pack(side="right", padx=(0, 8))
+        flat_btn(head, "＋ Add", _add_then_refill, bg=CA,
+                 pady=px(4), padx=px(10)).pack(side="right")
+
+        holder = tk.Frame(side, bg=CCA)
+        holder.pack(fill="both", expand=True, padx=px(12), pady=(0, px(10)))
+
+        wrapping = []
+
+        def _rewrap(event):
+            # Text as wide as the panel actually is, whatever the window size.
+            width = max(px(160), event.width - px(24))
+            for lbl in wrapping:
+                lbl.config(wraplength=width)
+
+        holder.bind("<Configure>", _rewrap)
+
+        standing = (header.get("Notes") or "").strip()
+        if standing:
+            box = tk.Frame(holder, bg=CFD, padx=px(10), pady=px(8))
+            box.pack(fill="x", pady=(0, px(8)))
+            tk.Label(box, text="On the order", bg=CFD, fg=CMU,
+                     font=F_SM).pack(anchor="w")
+            body_lbl = tk.Label(box, text=standing, bg=CFD, fg=CTX, font=F_BODY,
+                                justify="left", anchor="w")
+            body_lbl.pack(anchor="w", fill="x")
+            wrapping.append(body_lbl)
+
+        if not notes and not standing:
+            tk.Label(holder, text="Nothing noted yet.", bg=CCA, fg=CMU,
+                     font=F_BODY).pack(anchor="w", pady=px(6))
+
+        for note in reversed(notes):
+            if isinstance(note, str):
+                note = {"text": note, "author": "", "ts": ""}
+            item = tk.Frame(holder, bg=CCA)
+            item.pack(fill="x", pady=(0, px(8)))
+            who = " · ".join(b for b in (note.get("author", ""),
+                                         note.get("ts", "")) if b)
+            if who:
+                tk.Label(item, text=who, bg=CCA, fg=CMU,
+                         font=F_SM).pack(anchor="w")
+            text_lbl = tk.Label(item, text=note.get("text", ""), bg=CCA,
+                                fg=CTX, font=F_BODY, justify="left", anchor="w")
+            text_lbl.pack(anchor="w", fill="x")
+            wrapping.append(text_lbl)
+
+    @staticmethod
+    def _order_line_cells(it) -> tuple:
+        """One line as it reads in the order window."""
+        kind = it.get("item_kind") or "filter"
+        if kind == "bag":
+            name = it.get("product_type", "Bag / Roll")
+            pn = (it.get("part_number") or "").strip()
+            if pn:
+                name += f"   (P/N {pn})"
+            if it.get("roll_width") or it.get("roll_length"):
+                size = f"{it.get('roll_width','')} × {it.get('roll_length','')}".strip(" ×")
+            else:
+                size = " × ".join(str(d) for d in
+                                  (it.get("width"), it.get("height"), it.get("depth")) if d)
+            return (it.get("quantity", ""), name, size,
+                    it.get("media", ""), it.get("notes", ""))
+        if kind == "catalogue":
+            return (it.get("Quantity", ""),
+                    it.get("Description") or it.get("Part Number", ""),
+                    "", it.get("Product Type", ""), "")
+        return (it.get("Quantity", ""), it.get("Filter Type", "Filter"),
+                f"{it.get('Short','')} × {it.get('Long','')} × {it.get('Channel','')}",
+                it.get("Media Type", ""), it.get("Notes", ""))
 
     def _view_order_history(self):
         """Show a popup with the full audit history for the selected order."""

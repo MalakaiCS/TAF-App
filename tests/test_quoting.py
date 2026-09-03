@@ -220,7 +220,11 @@ def test_every_tab_has_a_number_and_they_match_the_bar():
     assert "tabs = [(k, self._TAB_LABELS[k]) for k in self._TAB_ORDER]" in src
     labels = re.search(r"_TAB_LABELS = \{(.*?)\n    \}", src, re.S).group(1)
     keys = re.findall(r'"(\w+)":', labels)
-    assert keys[0] == "dashboard" and len(keys) == 10, keys
+    assert keys[0] == "dashboard", keys
+    # Products and Settings are set-up work and live behind the account menu,
+    # so the bar holds only the screens used to do the job.
+    assert "products" not in keys and "settings" not in keys, keys
+    assert 6 <= len(keys) <= 9, keys
     # Ctrl+0 is the tenth, the way a browser numbers its tabs.
     assert "digit = (i + 1) % 10" in src
 
@@ -389,3 +393,82 @@ def test_the_bag_dialog_still_repopulates_its_choices():
     assert 'self.om_preset["values"]' in fn
     assert 'self.om_media["values"]' in fn
     assert '["menu"]' not in fn, "still driving a menu that no longer exists"
+
+
+# ── The order window, the account, the admin menu ────────────────────────────
+
+def test_view_order_holds_everything_about_an_order():
+    """It used to list the lines and nothing else, so anything you wanted to
+    do meant closing it and finding the order again in the list behind."""
+    src = _gui_source()
+    assert "def _view_order(self)" in src
+    fn = src.split("def _view_order(self)")[1].split("\n    def _reread_order")[0]
+    for action in ("_add_order_note", "_change_order_status",
+                   "_toggle_order_priority", "_edit_order_freight",
+                   "_print_prev_order", "_regen_prev_order",
+                   "_duplicate_prev_order", "_quote_prev_order",
+                   "_invoice_selected_orders", "_view_order_history"):
+        assert action in fn, f"View Order cannot {action}"
+    draw = src.split("def _draw_order_view")[1].split("\n    @staticmethod")[0]
+    assert "order_notes" in draw, "the notes are not shown"
+    assert "freight" in draw, "freight and delays are not shown"
+
+
+def test_the_order_window_shows_what_an_action_just_did():
+    """Every action there changes the order; showing the state it opened with
+    would be lying to whoever just pressed the button."""
+    src = _gui_source()
+    fn = src.split("def _view_order(self)")[1].split("\n    def _reread_order")[0]
+    assert "_refill()" in fn and "self._reread_order(row)" in fn
+    assert "def _reread_order" in src
+
+
+def test_one_order_is_re_read_on_its_own():
+    """Pulling the whole list back to find one row is a lot of wire."""
+    db = (ROOT / "taf_order_app" / "db.py").read_text(encoding="utf-8")
+    assert "def get_order(order_id" in db
+
+
+def test_a_profile_picture_falls_back_to_initials():
+    src = _gui_source()
+    fn = src.split("def _avatar(self")[1].split("\n    def _avatar_image")[0]
+    assert "if photo is not None:" in fn and "create_text" in fn, \
+        "an account with no picture must still show something"
+
+
+def test_a_photo_is_cropped_not_squashed():
+    """A picture straight off a phone is the wrong shape; refusing it would
+    just mean nobody uploads one."""
+    src = _gui_source()
+    fn = src.split("def _avatar_image")[1].split("\n    def ")[0]
+    assert "min(src.size)" in fn, "it is not cropped square"
+    assert "ellipse" in fn and "putalpha" in fn, "it is not masked to a circle"
+    assert "except Exception" in fn, "a missing photo must not break the header"
+
+
+def test_replacing_a_picture_actually_shows_the_new_one():
+    """The file is named after the account, so the URL never changes — without
+    a cache-buster the old picture keeps being served."""
+    db = (ROOT / "taf_order_app" / "db.py").read_text(encoding="utf-8")
+    fn = db.split("def upload_avatar")[1].split("\ndef ")[0]
+    assert "?v=" in fn
+
+
+def test_the_admin_screens_are_behind_the_account_not_on_the_bar():
+    src = _gui_source()
+    menu = src.split("def _account_menu")[1].split("\n    def ")[0]
+    for entry in ("Change my picture", "Products and prices", "Settings",
+                  "Sign out"):
+        assert entry in menu, f"the account menu has no {entry!r}"
+    assert '_ADMIN_TABS = ("products", "settings")' in src
+
+
+def test_the_avatar_migration_keeps_pictures_to_staff():
+    sql = (ROOT / "migrate_avatars.sql").read_text(encoding="utf-8")
+    code = "\n".join(l.split("--")[0] for l in sql.splitlines())
+    assert "avatar_url" in code
+    assert "is_staff()" in code, "anyone signed in could replace a picture"
+    assert "SET search_path = public, pg_temp" in code
+    assert "GRANT EXECUTE ON FUNCTION public.set_avatar" in code
+    # Your own picture, or anyone's if you manage accounts.
+    assert "auth.uid() <> p_user_id AND NOT public.is_manager()" in code

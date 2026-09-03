@@ -126,6 +126,9 @@ OVERRIDES = {
     "media_usage_since":   lambda *a, **k: {"G4": 12},
     "list_po_inbox_batches": lambda *a, **k: [],
     "log_action":          lambda *a, **k: None,
+    "current_avatar_url":  lambda *a, **k: "",
+    "get_order":           lambda oid="", *a, **k: next(
+        (dict(o) for o in ORDERS if o["id"] == oid), None),
     "resolve_scan":        lambda code="", *a, **k: [
         {"kind": "stock", "ref": "s1", "label": "G4 media roll",
          "detail": "Rack A1", "extra": {"sku": "TAF-G4-ROLL"}}],
@@ -338,6 +341,28 @@ def _steps(app, gui, root):
             w.update_idletasks()
             w.destroy()
     add("dialog: Manage Product Types", _product_types_dialog)
+
+    def _order_view():
+        app._show_tab("prev_orders")
+        root.update()
+        kids = app.orders_tree.get_children()
+        if not kids:
+            raise AssertionError("no orders to open")
+        app.orders_tree.selection_set(kids[0])
+        before = set(root.winfo_children())
+        app._view_order()
+        opened = set(root.winfo_children()) - before
+        if not opened:
+            raise AssertionError("View Order opened nothing")
+        for w in opened:
+            w.update_idletasks()
+            w.destroy()
+    add("dialog: View Order", _order_view)
+
+    def _account():
+        # A menu, so nothing new is packed — this checks it builds at all.
+        app._account_menu()
+    add("menu: account", _account)
 
     add("banner: exports", lambda: print("Exporting…"))
     for label, call in _exports(app, gui):

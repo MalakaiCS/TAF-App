@@ -92,6 +92,17 @@ log, stock management and a customer database.
   searched by code or description with the price coming along with it. Product
   types (Bag Filter, Media Roll, Freight, Labour…) are shared between PCs, so
   the next kind of thing you sell needs an entry rather than a new release.
+- **View Order** — one window with everything about an order: what's on it,
+  every note anyone has left with who and when, its status, priority and
+  freight, and every action — add a note, change status, freight/delay,
+  print, regenerate, duplicate, quote, invoice. It shows the result rather
+  than the state it opened with.
+- **Profile pictures** — a photo against each account, cropped and rounded
+  automatically, falling back to initials when there isn't one.
+- **The account menu** — click your name or picture, top right, for your
+  picture and password, Products, Settings, staff accounts and sign out.
+  Those were tabs in front of everyone all day; they are set-up work, so the
+  bar now holds only the screens used to do the job.
 - **Fewer buttons** — the common actions stay on the bar and the rest sit
   under a menu beside them. Previous Orders went from seventeen buttons to
   five, Quotes from thirteen to seven. Destructive actions live under their
@@ -182,6 +193,7 @@ just run it — nothing is lost and nothing is duplicated.
 | 19 | `migrate_supplied_order_numbers.sql` | Our own TAF-ON- order numbers | recommended |
 | 20 | `migrate_performance.sql` | Speed, and orders past the thousandth | recommended |
 | 21 | `migrate_scanning.sql` | Stock counts that can't be lost | recommended |
+| 22 | `migrate_avatars.sql` | Profile pictures on accounts | optional |
 
 **Step 16 is the one that matters most.** Every policy in the older scripts is
 `TO authenticated USING (true)` — meaning *anyone Supabase counts as signed
@@ -197,6 +209,9 @@ A few notes on the rest:
 - **20 (`migrate_performance.sql`)** also fixes a silent bug: the order list
   had no paging and PostgREST stops at 1000 rows, so past a thousand orders
   the oldest simply stopped appearing.
+- **22 (`migrate_avatars.sql`)** adds profile pictures — an `avatar_url` on
+  each profile and a public-read `avatars` bucket only staff can write to.
+  Without it the app shows initials, exactly as it did before.
 - **21 (`migrate_scanning.sql`)** must be run before anyone scans anything.
   Stock adjustments used to be read-modify-write, so two people counting the
   same rack at once lost a count. It also makes SKUs unique — if you already

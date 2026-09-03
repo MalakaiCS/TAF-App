@@ -85,7 +85,12 @@ WITH checks(step, file, purpose, needed, present) AS (VALUES
 
   (21, 'migrate_scanning.sql', 'Stock counts that cannot be lost or double-counted', 'recommended',
       EXISTS (SELECT 1 FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace
-               WHERE n.nspname='public' AND p.proname='adjust_stock_atomic'))
+               WHERE n.nspname='public' AND p.proname='adjust_stock_atomic')),
+
+  (22, 'migrate_avatars.sql', 'Profile pictures on accounts', 'optional',
+      EXISTS (SELECT 1 FROM information_schema.columns
+               WHERE table_schema='public' AND table_name='profiles'
+                 AND column_name='avatar_url'))
 )
 SELECT step,
        CASE WHEN present THEN 'already done' ELSE 'RUN THIS' END AS status,
