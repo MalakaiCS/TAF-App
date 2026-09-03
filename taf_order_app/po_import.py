@@ -18,6 +18,7 @@ import json
 import mimetypes
 import urllib.error
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -325,6 +326,33 @@ def _inbox_dir(app_dir: Path) -> Path:
     return d
 
 
+def _download_photos(batch: str, photos: List[str], dest: Path) -> List[str]:
+    """Bring a batch's photos down, several at a time, and return their paths.
+
+    Downloads used to run one after another, so a ten-page order waited out ten
+    round trips end to end when nearly all of that time is spent waiting rather
+    than working. Four at once keeps the order of the pages (the names decide
+    that, not the finishing order) and any failure still raises.
+    """
+    out = [str(dest / n) for n in photos]
+    missing = [(i, n) for i, n in enumerate(photos) if not (dest / n).exists()]
+    if not missing:
+        return out
+
+    def grab(job):
+        i, name = job
+        return i, name, _db.download_po_photo(batch, name)
+
+    if len(missing) == 1:
+        results = [grab(missing[0])]
+    else:
+        with ThreadPoolExecutor(max_workers=min(4, len(missing))) as pool:
+            results = list(pool.map(grab, missing))
+    for _i, name, raw in results:
+        (dest / name).write_bytes(raw)
+    return out
+
+
 def fetch_new_batches(app_dir: Path, pair_id: str = "",
                       media_types: Optional[List[str]] = None,
                       job_labels: Optional[List[str]] = None) -> List[str]:
@@ -339,8 +367,11 @@ def fetch_new_batches(app_dir: Path, pair_id: str = "",
     """
     if not is_configured():
         return []
+    # Batches already sitting here waiting for review need no cloud lookup.
+    inbox = _inbox_dir(app_dir)
+    already = {p.parent.name for p in inbox.glob("*/orders.json")}
     try:
-        batches = _db.list_po_inbox_batches()
+        batches = _db.list_po_inbox_batches(skip=already)
     except Exception:
         return []          # offline, or migrate_po_inbox.sql not run yet
 
@@ -351,17 +382,12 @@ def fetch_new_batches(app_dir: Path, pair_id: str = "",
         sent_to = ((b.get("manifest") or {}).get("pair_id") or "").strip()
         if sent_to and pair_id and sent_to != pair_id:
             continue       # addressed to a different PC — leave it alone
-        dest   = _inbox_dir(app_dir) / batch
+        dest   = inbox / batch
         if (dest / "orders.json").exists():
             continue       # already read and waiting for review
         try:
             dest.mkdir(parents=True, exist_ok=True)
-            local: List[str] = []
-            for name in photos:
-                p = dest / name
-                if not p.exists():
-                    p.write_bytes(_db.download_po_photo(batch, name))
-                local.append(str(p))
+            local = _download_photos(batch, photos, dest)
 
             orders = extract_orders(local, media_types=media_types,
                                     job_labels=job_labels)

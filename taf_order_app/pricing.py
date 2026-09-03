@@ -516,14 +516,20 @@ def xero_rows(header: Dict[str, Any], lines: Iterable[Dict[str, Any]],
               customer: Optional[Dict[str, Any]] = None,
               account_code: str = "200",
               tax_type: str = "GST on Income",
-              due_days: int = 30) -> List[Dict[str, str]]:
+              due_days: int = 30,
+              invoice_number: str = "",
+              reference: str = "") -> List[Dict[str, str]]:
     """One row per priced line, in Xero's sales-invoice import shape.
 
     Xero repeats the invoice-level fields on every line of the same invoice,
     which is why the contact and dates appear on each row.
+
+    `invoice_number` and `reference` override the defaults. Invoicing a real
+    order wants our own number on the invoice and the customer's purchase
+    order in the reference, which is the opposite way round from a quote.
     """
     customer = customer or {}
-    invoice_no = (header.get("Order Number") or "").strip()
+    invoice_no = (invoice_number or "").strip() or (header.get("Order Number") or "").strip()
     issued = _xero_date(header.get("Date Ordered") or "")
     due_raw = (header.get("Date Due") or "").strip()
     if due_raw and due_raw.lower() != "asap":
@@ -552,7 +558,7 @@ def xero_rows(header: Dict[str, Any], lines: Iterable[Dict[str, Any]],
             "POPostalCode":      (customer.get("delivery_postcode") or "").strip(),
             "POCountry":         (customer.get("delivery_country") or "").strip(),
             "*InvoiceNumber":    invoice_no,
-            "Reference":         (header.get("Job") or "").strip(),
+            "Reference":         (reference or "").strip() or (header.get("Job") or "").strip(),
             "*InvoiceDate":      issued,
             "*DueDate":          due,
             "InventoryItemCode": line.get("part_number", ""),
@@ -570,6 +576,48 @@ def xero_rows(header: Dict[str, Any], lines: Iterable[Dict[str, Any]],
             "BrandingTheme":     "",
         })
     return rows
+
+
+def invoice_reference(header: Dict[str, Any], invoice_number: str = "") -> str:
+    """What to put in Xero's Reference so the customer recognises the invoice.
+
+    Their purchase order number is the thing they will look for, so it goes in
+    the reference — unless it is already the invoice number, or it is one of
+    ours (TAF-ON-…), which means them, not us, and would only be noise there.
+    """
+    order_no = (header.get("Order Number") or "").strip()
+    job = (header.get("Job") or "").strip()
+    from .part_numbers import is_supplied_order_number
+    same = (invoice_number or "").strip().upper() == order_no.upper()
+    if order_no and not same and not is_supplied_order_number(order_no):
+        return f"PO {order_no}" + (f" - {job}" if job else "")
+    return job
+
+
+def invoice_for_order(header: Dict[str, Any],
+                      items: Iterable[Dict[str, Any]],
+                      customer: Optional[Dict[str, Any]] = None,
+                      prices: Optional[Dict[str, float]] = None,
+                      rates: Optional[Dict[str, float]] = None,
+                      invoice_number: str = "",
+                      account_code: str = "200",
+                      tax_type: str = "GST on Income",
+                      due_days: int = 30) -> Tuple[List[Dict[str, str]],
+                                                   List[Dict[str, Any]]]:
+    """Price a finished order and return (Xero rows, lines nothing could price).
+
+    The unpriced lines come back rather than being dropped: an invoice that is
+    quietly short a line is worse than one that doesn't go out, and the caller
+    is the only thing that can ask a person what to do about it.
+    """
+    lines = quote_lines(items, prices, rates)
+    number = (invoice_number or "").strip() or (header.get("Order Number") or "").strip()
+    rows = xero_rows(header, [l for l in lines if l.get("source")],
+                     customer=customer, account_code=account_code,
+                     tax_type=tax_type, due_days=due_days,
+                     invoice_number=number,
+                     reference=invoice_reference(header, number))
+    return rows, unpriced(lines)
 
 
 def write_xero_csv(path, rows: Iterable[Dict[str, str]]) -> str:

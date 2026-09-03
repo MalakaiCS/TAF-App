@@ -72,6 +72,15 @@ log, stock management and a customer database.
   screen ("V Filter" was read as unknown and they picked V-form; "MERV 8" was
   swapped for G4), the wording and what it meant are remembered and shared
   with every PC, so the next order that says the same thing is read correctly.
+- **Invoice to Xero** — a dispatched order, or a whole delivery run, priced
+  from the price list and written as a Xero sales-invoice import file. Xero
+  splits one file into one invoice per order. Anything it couldn't price is
+  listed before the file is written, so a line is never quietly dropped off
+  an invoice.
+- **Backup & Export** — one button writes a dated zip of spreadsheets:
+  every order, every line, customers, quotes, stock and prices. They open in
+  Excel and need nothing else — not this app, not an account, not the
+  internet. Sign-in details and portal tokens stay out of it.
 - **Settings** — media types (with their part-number codes), custom filter
   types, low-stock thresholds, user management, light/dark mode, change
   password, in-app software update.
@@ -147,6 +156,13 @@ In the Supabase dashboard → **SQL Editor**, run these once (in order):
    `migrate_quotes.sql` adds saved quotes, and `migrate_quote_portal.sql`
    the customer accept/decline page. `migrate_supplied_order_numbers.sql`
    adds the TAF-ON- order-number counter.
+7. **`migrate_performance.sql` — worth running.** The order list was doing
+   `select *` on `orders`, which pulls every line of every order ever placed
+   every time Previous Orders, the Dashboard or Delivery is opened. This adds
+   a view that gives the list a line count instead, plus indexes for the
+   lookups that got slower as features were added. It also fixes a silent
+   bug: that query had no paging and PostgREST stops at 1000 rows, so past a
+   thousand orders the oldest simply stopped appearing.
 
 ### Enable purchase-order import (optional)
 
@@ -365,7 +381,9 @@ taf_order_app/
   quote_pdf.py             The quote PDF
   stock_usage.py           What an order takes out of stock
   delivery.py              Run sheets and what's ready to go out
+  backup.py                The dated zip of spreadsheets
 tests/                     Rule tests — `python tests/run.py`, run by CI
+  smoke_gui.py             Builds every screen for real — also run by CI
   user_management.py       Roles & user admin
   models.py / validation.py
 fonts/                     Bundled Public Sans (OFL)
@@ -431,11 +449,24 @@ one.
 ## Tests
 
 ```bash
-python tests/run.py      # no dependencies; pytest also works
+python tests/run.py       # the rules. No dependencies; pytest also works
+python tests/smoke_gui.py # starts the real window and builds every screen
 ```
 
 Every test is a regression — something that went wrong in a shipped build and
 reached the people using it. Add one whenever a bug gets out.
+
+`tests/smoke_gui.py` is the second kind. It starts the actual app against a
+stand-in database, builds every tab, opens every dialog and runs every export,
+once as a manager and once as everyone else — rights decide which half of some
+screens gets built. It is what catches a method that is called but was never
+written, or two cards placed in the same grid cell so one draws on top of the
+other: neither shows up in a diff, and both are obvious the moment the screen
+is built. It needs a desktop to draw on, so it runs on Windows in CI and says
+`SKIP` anywhere without one (on Linux, `xvfb-run python tests/smoke_gui.py`).
+
+Both run in CI before the installer is built, so a broken build cannot be
+published.
 
 ## Notes
 
