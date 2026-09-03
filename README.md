@@ -194,6 +194,7 @@ just run it — nothing is lost and nothing is duplicated.
 | 20 | `migrate_performance.sql` | Speed, and orders past the thousandth | recommended |
 | 21 | `migrate_scanning.sql` | Stock counts that can't be lost | recommended |
 | 22 | `migrate_avatars.sql` | Profile pictures on accounts | optional |
+| 23 | `migrate_bulk_status.sql` | Marking a batch of orders complete | recommended |
 
 **Step 16 is the one that matters most.** Every policy in the older scripts is
 `TO authenticated USING (true)` — meaning *anyone Supabase counts as signed
@@ -212,6 +213,13 @@ A few notes on the rest:
 - **22 (`migrate_avatars.sql`)** adds profile pictures — an `avatar_url` on
   each profile and a public-read `avatars` bucket only staff can write to.
   Without it the app shows initials, exactly as it did before.
+- **23 (`migrate_bulk_status.sql`)** makes changing one field of an order one
+  statement in the database instead of a read of the whole header, an edit in
+  the app and a write back. That halves the round trips when you tick twenty
+  orders and mark the lot complete, and it stops a note someone adds
+  mid-batch from being overwritten. Without it the app falls back to the old
+  two-step write — still correct on its own, just slower and not safe against
+  someone editing the same order at the same moment.
 - **21 (`migrate_scanning.sql`)** must be run before anyone scans anything.
   Stock adjustments used to be read-modify-write, so two people counting the
   same rack at once lost a count. It also makes SKUs unique — if you already

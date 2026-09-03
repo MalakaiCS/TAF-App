@@ -306,11 +306,18 @@ def test_the_shortcuts_can_be_found_without_knowing_them():
 # ── Clutter ──────────────────────────────────────────────────────────────────
 
 def _tab_button_count(src: str, tab: str) -> int:
+    """Buttons on the screen as you find it.
+
+    A bar that stays hidden until you have picked something out doesn't count
+    — it is not on screen until you have already said what you want to do
+    something to, and it goes away again when you clear. Buttons built into
+    one are excluded by the frame they are packed into.
+    """
     m = re.search(rf"    def _build_{tab}_tab\(self\)", src)
     body = src[m.start():]
     nxt = re.search(r"\n    def ", body[10:])
     body = body[:nxt.start() + 10] if nxt else body
-    return len(re.findall(r"flat_btn\(|menu_btn\(", body))
+    return len(re.findall(r"(?:flat_btn|menu_btn)\((?!self\._tick_bar)", body))
 
 
 def test_no_working_screen_is_a_wall_of_buttons():
@@ -321,6 +328,19 @@ def test_no_working_screen_is_a_wall_of_buttons():
                        ("stock", 6), ("delivery", 5)):
         n = _tab_button_count(src, tab)
         assert n <= limit, f"{tab} is back up to {n} buttons"
+
+
+def test_the_bar_of_bulk_actions_is_not_there_until_it_applies():
+    """It is only excluded from the count above because it is hidden at rest.
+    If it were ever gridded at build time that exclusion would be a lie."""
+    src = _gui_source()
+    build = src.split("def _build_prev_orders_tab")[1].split("\n    def ")[0]
+    made = build.split("self._tick_bar = ")[1]
+    assert "self._tick_bar.grid(" not in made, \
+        "the bulk bar is on screen before anything is ticked"
+    # And it is the tick count, not a click, that puts it there.
+    fn = src.split("def _refresh_tick_bar")[1].split("\n    def ")[0]
+    assert "grid_remove()" in fn and "bar.grid(" in fn
 
 
 def test_the_menu_decides_what_applies_when_it_opens():

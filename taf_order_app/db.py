@@ -414,14 +414,10 @@ def find_potential_duplicates(customer: str, order_number: str,
 def mark_order_printed(order_id: str) -> None:
     """Flag an order as printed (stored in the header JSON — no migration)."""
     import datetime as _dt
-    try:
-        resp = get_client().table("orders").select("header").eq("id", order_id).single().execute()
-        header = dict(resp.data.get("header") or {})
-        header["printed"]    = True
-        header["printed_at"] = _dt.datetime.now().strftime("%d/%m/%Y %H:%M")
-        get_client().table("orders").update({"header": header}).eq("id", order_id).execute()
-    except Exception:
-        pass
+    merge_order_header(order_id, {
+        "printed":    True,
+        "printed_at": _dt.datetime.now().strftime("%d/%m/%Y %H:%M"),
+    })
 
 
 def tables_exist() -> tuple[bool, bool]:
@@ -705,17 +701,61 @@ def can_manage_stock_alerts() -> bool:
     return role_level() >= 3
 
 
+# ── Changing one field of an order's header ───────────────────────────────────
+
+def merge_order_header(order_id: str, patch: dict) -> None:
+    """Change some keys of an order's header JSON, leaving the rest alone.
+
+    Two things this fixes, both of which showed up when marking a batch of
+    orders complete.
+
+    It raises. Every one of these used to end in `except Exception: pass`, so
+    a write the database refused — a row-level security policy, an expired
+    session, a dropped connection — looked exactly like a write that worked.
+    The app counted it as done, said so, then reloaded the list and showed
+    the old status. Nothing anywhere said why.
+
+    And it merges server-side. Reading the whole header, changing one key in
+    Python and writing the whole thing back takes two round trips and loses
+    anything anyone else changed in between: mark twenty orders complete
+    while someone adds a note to one of them, and the note goes. `header ||
+    patch` in the database is one statement and only touches the keys given.
+
+    Falls back to the read-modify-write if migrate_bulk_status.sql has not
+    been run — still raising, which is the half that matters.
+    """
+    try:
+        resp = get_client().rpc("merge_order_header", {
+            "p_order_id": str(order_id),
+            "p_patch":    patch,
+        }).execute()
+        if resp.data:                      # the RPC returns the updated id
+            return
+        raise RuntimeError(
+            "The database did not change that order. It may have been "
+            "deleted, or your account may not be allowed to change it.")
+    except Exception as exc:
+        if "merge_order_header" not in str(exc):
+            raise
+        # PostgREST doesn't know the function: migration not applied yet.
+
+    resp = (get_client().table("orders")
+            .select("header").eq("id", order_id).single().execute())
+    header = dict((resp.data or {}).get("header") or {})
+    header.update(patch)
+    out = (get_client().table("orders")
+           .update({"header": header}).eq("id", order_id).execute())
+    if not (out.data or []):
+        raise RuntimeError(
+            "The database did not change that order. It may have been "
+            "deleted, or your account may not be allowed to change it.")
+
+
 # ── Priority ──────────────────────────────────────────────────────────────────
 
 def set_order_priority(order_id: str, priority: bool) -> None:
     """Set or clear the priority flag stored in the order's header JSON."""
-    try:
-        resp = get_client().table("orders").select("header").eq("id", order_id).single().execute()
-        header = dict(resp.data.get("header") or {})
-        header["priority"] = priority
-        get_client().table("orders").update({"header": header}).eq("id", order_id).execute()
-    except Exception:
-        pass
+    merge_order_header(order_id, {"priority": priority})
 
 
 # ── Order Status ──────────────────────────────────────────────────────────────
@@ -728,13 +768,24 @@ ORDER_STATUS_VALUES = [
 
 def set_order_status(order_id: str, status: str) -> None:
     """Set the order status stored in the order's header JSON."""
-    try:
-        resp = get_client().table("orders").select("header").eq("id", order_id).single().execute()
-        header = dict(resp.data.get("header") or {})
-        header["status"] = status
-        get_client().table("orders").update({"header": header}).eq("id", order_id).execute()
-    except Exception:
-        pass
+    merge_order_header(order_id, {"status": status})
+
+
+def set_order_status_bulk(order_ids, status: str) -> list:
+    """Set the status on several orders. Returns [(order_id, reason), …] for
+    the ones that did not change.
+
+    Bulk work that stops at the first failure is worse than useless — you are
+    left not knowing which half of the batch went through. This does every
+    one it can and hands back what didn't, so the app can say so.
+    """
+    problems = []
+    for oid in order_ids:
+        try:
+            set_order_status(str(oid), status)
+        except Exception as exc:
+            problems.append((str(oid), str(exc)))
+    return problems
 
 
 # Carriers TAF books freight with, and where a consignment can be followed.
@@ -809,20 +860,21 @@ def get_order_freight(order_id: str) -> dict:
 
 
 def append_order_note(order_id: str, note_text: str, author: str = "") -> None:
-    """Append a timestamped note to the order's header JSON."""
+    """Append a timestamped note to the order's header JSON.
+
+    Raises if it did not save. A note that is typed, accepted and silently
+    dropped is worse than one that was never offered.
+    """
     import datetime as _dt
-    try:
-        resp = get_client().table("orders").select("header").eq("id", order_id).single().execute()
-        header = dict(resp.data.get("header") or {})
-        existing = header.get("order_notes") or []
-        if isinstance(existing, str):
-            existing = [{"ts": "", "author": "", "text": existing}] if existing else []
-        ts = _dt.datetime.utcnow().strftime("%d/%m/%Y %H:%M")
-        existing.append({"ts": ts, "author": author, "text": note_text})
-        header["order_notes"] = existing
-        get_client().table("orders").update({"header": header}).eq("id", order_id).execute()
-    except Exception:
-        pass
+    resp = (get_client().table("orders")
+            .select("header").eq("id", order_id).single().execute())
+    header = dict((resp.data or {}).get("header") or {})
+    existing = header.get("order_notes") or []
+    if isinstance(existing, str):
+        existing = [{"ts": "", "author": "", "text": existing}] if existing else []
+    ts = _dt.datetime.utcnow().strftime("%d/%m/%Y %H:%M")
+    existing.append({"ts": ts, "author": author, "text": note_text})
+    merge_order_header(order_id, {"order_notes": existing})
 
 
 # ── Customer Database ─────────────────────────────────────────────────────────

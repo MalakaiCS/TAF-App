@@ -101,6 +101,14 @@ def classify_by_channel(channel) -> "tuple[str | None, str | None]":
 DONE_STATUSES = ("Complete", "Dispatched")
 DUE_FILTERS = ["All", "Overdue", "Due today", "Due this week", "No due date"]
 
+# The tick box drawn in the orders list. A Treeview cell holds text, not a
+# widget, so the box is a character — these three are in every Windows UI
+# font, unlike the boxed-tick emoji, which falls back to a blank square on
+# some machines.
+TICK_EMPTY = "☐"
+TICK_FULL  = "☑"
+TICK_SOME  = "▪"        # some of what's on screen, not all
+
 
 def due_bucket(row: dict, today=None) -> str:
     """Where an order sits against its due date.
@@ -4363,6 +4371,7 @@ class ModernOrderApp(tk.Frame):
         self.service = OrderService(APP_DIR)
         self.items: list = []
         self._all_orders_data: list = []
+        self._ticked: set = set()     # orders ticked in Previous Orders
         self._tab_frames: dict = {}
         self._tab_buttons: dict = {}
         self._tab_loaded: dict = {}   # tab -> monotonic time of last data load (freshness cache)
@@ -5682,7 +5691,7 @@ class ModernOrderApp(tk.Frame):
         tbl_wrap.rowconfigure(0, weight=1)
         tbl_wrap.columnconfigure(0, weight=1)
 
-        ocols = ("customer", "order_no", "date_ordered", "date_due", "status", "printed", "n_items", "created_by", "file")
+        ocols = ("pick", "customer", "order_no", "date_ordered", "date_due", "status", "printed", "n_items", "created_by", "file")
         self.orders_tree = ttk.Treeview(tbl_wrap, columns=ocols,
                                          show="tree headings",
                                          style="TAF.Treeview",
@@ -5697,6 +5706,7 @@ class ModernOrderApp(tk.Frame):
         self.orders_tree.column("#0", width=px(106), minwidth=px(92), anchor="center", stretch=False)
 
         o_col_defs = {
+            "pick":         ("",                38, "center"),
             "customer":     ("Customer Name",  200, "w"),
             "order_no":     ("Order #",        120, "w"),
             "date_ordered": ("Date Ordered",   126, "center"),
@@ -5711,6 +5721,10 @@ class ModernOrderApp(tk.Frame):
             self.orders_tree.heading(col, text=hd, anchor="center" if anc == "center" else "w")
             self.orders_tree.column(col, width=px(wd), anchor=anc, minwidth=px(40),
                                     stretch=(col in ("customer", "created_by")))
+        # The tick column stays the width of a tick.
+        self.orders_tree.column("pick", width=px(38), minwidth=px(38), stretch=False)
+        self.orders_tree.heading("pick", text=TICK_EMPTY, anchor="center",
+                                 command=self._toggle_all_ticks)
 
         self.orders_tree.tag_configure("even",        background=CRE)
         self.orders_tree.tag_configure("odd",         background=CCA)
@@ -5729,10 +5743,28 @@ class ModernOrderApp(tk.Frame):
         self.orders_tree.bind("<Return>", lambda _e: self._view_order())
         self.orders_tree.bind("<Motion>",   self._on_orders_tree_hover)
         self.orders_tree.bind("<Leave>",    lambda e: self._hide_order_tooltip())
+        # Clicking a tick box must not also drag the highlight around, so this
+        # runs before Treeview's own click handling and stops it.
+        self.orders_tree.bind("<Button-1>", self._on_orders_tree_click, add=False)
+        self.orders_tree.bind("<space>",    self._tick_highlighted)
+
+        # ── What you have ticked ──────────────────────────────────────────
+        # Hidden until something is ticked: an empty bar on every screen is
+        # the clutter we just spent a release taking out.
+        self._tick_bar = tk.Frame(frm, bg=CSL, padx=12, pady=8)
+        self._tick_lbl = tk.Label(self._tick_bar, text="", bg=CSL, fg=CA,
+                                  font=F_BOLD)
+        self._tick_lbl.pack(side="left", padx=(0, 12))
+        flat_btn(self._tick_bar, "✓  Mark Complete", self._bulk_complete,
+                 bg=CGR, pady=6).pack(side="left", padx=(0, 8))
+        flat_btn(self._tick_bar, "Change status…", self._change_order_status,
+                 variant="secondary", pady=6).pack(side="left", padx=(0, 8))
+        flat_btn(self._tick_bar, "Clear", self._clear_ticks,
+                 variant="secondary", pady=6).pack(side="right")
 
         # ── Bottom actions ────────────────────────────────────────────────
         bot = tk.Frame(frm, bg=CBG, pady=8)
-        bot.grid(row=2, column=0, sticky="ew")
+        bot.grid(row=3, column=0, sticky="ew")
 
         # Fourteen buttons meant nothing stood out and the two anyone
         # actually uses were lost among twelve they don't. Open and Print
@@ -13621,6 +13653,7 @@ class ModernOrderApp(tk.Frame):
             self.orders_tree.insert("", "end", iid=str(i), tags=(tag,),
                 text=("" if _badge else otype_label), image=(_badge or ""),
                 values=(
+                TICK_FULL if self._order_key(row) in self._ticked else TICK_EMPTY,
                 cust_display,
                 row["order_no"],
                 row["date_ordered"],
@@ -13632,6 +13665,13 @@ class ModernOrderApp(tk.Frame):
                 src_label,
             ))
 
+        # An order that has been deleted since it was ticked would otherwise
+        # keep the count wrong for the rest of the session.
+        live = {self._order_key(r) for r in getattr(self, "_all_orders_data", [])}
+        if live:
+            self._ticked &= live
+        self._refresh_tick_bar()
+
     def _get_selected_order(self) -> "dict | None":
         """Return the first selected order row, or None."""
         sel = self.orders_tree.selection()
@@ -13642,17 +13682,121 @@ class ModernOrderApp(tk.Frame):
         return displayed[idx] if idx < len(displayed) else None
 
     def _get_selected_orders(self) -> list:
-        """Return all selected order rows (supports multi-select)."""
-        sel = self.orders_tree.selection()
-        if not sel:
-            return []
+        """The orders an action applies to: what is ticked, or failing that
+        what is highlighted.
+
+        Ticks win because they are deliberate — you clicked a box on each
+        one. They also survive filtering and re-sorting, which a highlight
+        does not: search for "Bells Creek", tick four, clear the search, and
+        those four are still ticked.
+        """
         displayed = getattr(self, "_displayed_orders", self._all_orders_data)
+        ticked = [r for r in displayed if self._order_key(r) in self._ticked]
+        if ticked:
+            return ticked
         result = []
-        for iid in sel:
-            idx = int(iid)
+        for iid in self.orders_tree.selection():
+            try:
+                idx = int(iid)
+            except (TypeError, ValueError):
+                continue
             if idx < len(displayed):
                 result.append(displayed[idx])
         return result
+
+    # ── Ticking orders ────────────────────────────────────────────────────
+    # A row's iid is its position in the list on screen, which changes the
+    # moment anyone searches or re-sorts. Ticks are keyed by the order
+    # instead, so they follow the order rather than the row it happened to
+    # be on.
+
+    @staticmethod
+    def _order_key(row: dict) -> str:
+        if row.get("source") == "db" and row.get("db_id"):
+            return f"db:{row['db_id']}"
+        return f"file:{row.get('path') or row.get('filename') or ''}"
+
+    def _on_orders_tree_click(self, event):
+        """A click in the tick column toggles that row and nothing else."""
+        if self.orders_tree.identify_region(event.x, event.y) != "cell":
+            return None
+        if self.orders_tree.identify_column(event.x) != "#1":     # "pick"
+            return None
+        iid = self.orders_tree.identify_row(event.y)
+        if not iid:
+            return None
+        self._toggle_tick(iid)
+        return "break"        # don't let the click move the highlight too
+
+    def _tick_highlighted(self, _event=None):
+        """Space bar ticks whatever is highlighted — quicker than the mouse
+        for a run of orders picked out with shift-arrow."""
+        for iid in self.orders_tree.selection():
+            self._toggle_tick(iid, refresh_bar=False)
+        self._refresh_tick_bar()
+        return "break"
+
+    def _toggle_tick(self, iid, refresh_bar=True):
+        displayed = getattr(self, "_displayed_orders", self._all_orders_data)
+        try:
+            row = displayed[int(iid)]
+        except (TypeError, ValueError, IndexError):
+            return
+        key = self._order_key(row)
+        if key in self._ticked:
+            self._ticked.discard(key)
+        else:
+            self._ticked.add(key)
+        self.orders_tree.set(iid, "pick",
+                             TICK_FULL if key in self._ticked else TICK_EMPTY)
+        if refresh_bar:
+            self._refresh_tick_bar()
+
+    def _toggle_all_ticks(self):
+        """The heading ticks everything on screen, or clears it if it is
+        already all ticked. Only what is on screen — silently acting on rows
+        a filter is hiding is how people mark the wrong orders complete."""
+        displayed = getattr(self, "_displayed_orders", self._all_orders_data)
+        keys = [self._order_key(r) for r in displayed]
+        if keys and all(k in self._ticked for k in keys):
+            self._ticked.difference_update(keys)
+        else:
+            self._ticked.update(keys)
+        for i, key in enumerate(keys):
+            if self.orders_tree.exists(str(i)):
+                self.orders_tree.set(str(i), "pick",
+                                     TICK_FULL if key in self._ticked else TICK_EMPTY)
+        self._refresh_tick_bar()
+
+    def _clear_ticks(self):
+        self._ticked.clear()
+        displayed = getattr(self, "_displayed_orders", self._all_orders_data)
+        for i in range(len(displayed)):
+            if self.orders_tree.exists(str(i)):
+                self.orders_tree.set(str(i), "pick", TICK_EMPTY)
+        self._refresh_tick_bar()
+
+    def _refresh_tick_bar(self):
+        """Show the bar only when there is something on it to do."""
+        bar = getattr(self, "_tick_bar", None)
+        if bar is None or not bar.winfo_exists():
+            return
+        displayed = getattr(self, "_displayed_orders", self._all_orders_data)
+        keys = [self._order_key(r) for r in displayed]
+        on_screen = sum(1 for k in keys if k in self._ticked)
+        hidden = len(self._ticked) - on_screen
+        if not self._ticked:
+            bar.grid_remove()
+            self.orders_tree.heading("pick", text=TICK_EMPTY)
+            return
+        text = f"{len(self._ticked)} order{'s' if len(self._ticked) != 1 else ''} ticked"
+        if hidden > 0:
+            # Say so rather than let someone mark orders they cannot see.
+            text += f"  ({hidden} not shown by the current filter)"
+        self._tick_lbl.config(text=text)
+        bar.grid(row=2, column=0, sticky="ew", pady=(0, 8))
+        self.orders_tree.heading(
+            "pick", text=TICK_FULL if keys and on_screen == len(keys) else TICK_SOME)
 
     def _load_prev_order(self):
         row = self._get_selected_order()
@@ -14184,7 +14328,10 @@ class ModernOrderApp(tk.Frame):
         """Show a dialog to change status for one or more selected orders (bulk-capable)."""
         rows = self._get_selected_orders()
         if not rows:
-            messagebox.showinfo("Change Status", "Select one or more orders first.")
+            messagebox.showinfo(
+                "Change Status",
+                "Tick the box on each order you want to change, or click a "
+                "row.")
             return
         db_rows = [r for r in rows if r.get("source") == "db" and r.get("db_id")]
         if not db_rows:
@@ -14258,30 +14405,91 @@ class ModernOrderApp(tk.Frame):
 
         if not result[0]:
             return
+        self._apply_status_to(db_rows, result[0])
 
-        new_status = result[0]
-        failed = 0
-        changed = 0
-        for r in db_rows:
-            old_status = r.get("status", "Pending") or "Pending"
-            if old_status == new_status:
-                continue
-            try:
-                _db.set_order_status(str(r["db_id"]), new_status)
-                _db.log_action("order_status",
-                    f"O/N: {r.get('order_no','')} | Customer: {r.get('customer','')} | "
-                    f"Status: {old_status} → {new_status}")
-                changed += 1
-            except Exception:
-                failed += 1
+    def _bulk_complete(self):
+        """The one bulk change anyone actually makes: these are finished."""
+        rows = [r for r in self._get_selected_orders()
+                if r.get("source") == "db" and r.get("db_id")]
+        if not rows:
+            messagebox.showinfo(
+                "Mark Complete",
+                "Tick the orders you want to mark complete first.\n\n"
+                "Only orders saved to the database can be given a status.")
+            return
+        n = len(rows)
+        if not messagebox.askyesno(
+                "Mark Complete",
+                f"Mark {n} order{'s' if n != 1 else ''} complete?"):
+            return
+        self._apply_status_to(rows, "Complete")
 
-        if changed:
+    def _apply_status_to(self, db_rows: list, new_status: str):
+        """Write the status to each order, off the main thread.
+
+        This used to run on the main thread, one order at a time, with the
+        errors thrown away. Twenty orders meant twenty round trips with the
+        window frozen and no way to tell a slow save from a stuck one — and
+        if the database refused the write, it still said it had saved.
+        """
+        todo = [r for r in db_rows
+                if (r.get("status", "Pending") or "Pending") != new_status]
+        if not todo:
+            n = len(db_rows)
             self.status_var.set(
-                f"Status set to '{new_status}' on {changed} order{'s' if changed != 1 else ''}."
-                + (f"  ({failed} failed)" if failed else ""))
-            self._refresh_orders_list()
-        elif failed:
-            messagebox.showerror("Error", f"Could not update {failed} order(s).")
+                f"{n} order{'s were' if n != 1 else ' was'} already "
+                f"'{new_status}'. Nothing to change.")
+            return
+
+        total = len(todo)
+        self.status_var.set(f"Setting {total} order{'s' if total != 1 else ''} "
+                            f"to '{new_status}'…")
+
+        def _work():
+            done, problems = 0, []
+            for r in todo:
+                old = r.get("status", "Pending") or "Pending"
+                try:
+                    _db.set_order_status(str(r["db_id"]), new_status)
+                    done += 1
+                except Exception as exc:
+                    problems.append((r.get("order_no", "?"), str(exc)))
+                    continue
+                try:
+                    _db.log_action("order_status",
+                        f"O/N: {r.get('order_no','')} | "
+                        f"Customer: {r.get('customer','')} | "
+                        f"Status: {old} → {new_status}")
+                except Exception:
+                    pass          # the status did change; the log is a bonus
+                self.master.after(
+                    0, lambda d=done: self.status_var.set(
+                        f"Setting orders to '{new_status}'… {d} of {total}"))
+            self.master.after(0, lambda: _finish(done, problems))
+
+        def _finish(done, problems):
+            if done:
+                self._ticked.clear()
+                self._refresh_orders_list()
+            if problems:
+                # Say which ones and why. "Could not update 3 order(s)" sends
+                # someone hunting through twenty rows to find out what broke.
+                listed = "\n".join(f"  • {no}: {why}" for no, why in problems[:6])
+                if len(problems) > 6:
+                    listed += f"\n  … and {len(problems) - 6} more"
+                messagebox.showerror(
+                    "Some orders did not change",
+                    f"{done} of {total} set to '{new_status}'.\n\n"
+                    f"These did not:\n{listed}")
+                self.status_var.set(
+                    f"{done} of {total} set to '{new_status}' — "
+                    f"{len(problems)} failed.")
+            else:
+                self.status_var.set(
+                    f"Status set to '{new_status}' on {done} "
+                    f"order{'s' if done != 1 else ''}.")
+
+        threading.Thread(target=_work, daemon=True).start()
 
     @staticmethod
     def _shell_verb(path: str, verb: str, params: str = "") -> bool:

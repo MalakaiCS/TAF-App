@@ -20,6 +20,7 @@ import inspect
 import os
 import sys
 import tempfile
+import time
 import traceback
 from pathlib import Path
 
@@ -363,6 +364,97 @@ def _steps(app, gui, root):
         # A menu, so nothing new is packed — this checks it builds at all.
         app._account_menu()
     add("menu: account", _account)
+
+    def _ticking():
+        """A tick has to survive the list being filtered and redrawn, or you
+        tick four orders, clear the search, and mark the wrong ones."""
+        app._show_tab("prev_orders")
+        root.update()
+        tree, shown = app.orders_tree, app._displayed_orders
+        if not shown:
+            raise AssertionError("no orders to tick")
+        app._clear_ticks()
+        if app._tick_bar.grid_info():
+            raise AssertionError("the bulk bar is showing with nothing ticked")
+
+        app._toggle_tick(tree.get_children()[0])
+        if tree.set(tree.get_children()[0], "pick") != gui.TICK_FULL:
+            raise AssertionError("ticking a row did not fill its box")
+        if not app._tick_bar.grid_info():
+            raise AssertionError("the bulk bar did not appear")
+        picked = app._get_selected_orders()
+        if len(picked) != 1 or picked[0] is not shown[0]:
+            raise AssertionError(f"a tick did not decide the action: {picked}")
+
+        # Highlighting something else must not quietly win.
+        if len(tree.get_children()) > 1:
+            tree.selection_set(tree.get_children()[1])
+            if app._get_selected_orders() != [shown[0]]:
+                raise AssertionError("a highlight overrode the ticks")
+
+        # Filter it off screen and back.
+        key = app._order_key(shown[0])
+        app.search_var.set("zzz no order is called this")
+        root.update()
+        if key not in app._ticked:
+            raise AssertionError("the tick was lost when the row was filtered out")
+        if "not shown" not in app._tick_lbl.cget("text"):
+            raise AssertionError("it did not say the ticked order is out of view")
+        app.search_var.set("")
+        root.update()
+        back = [i for i in tree.get_children()
+                if tree.set(i, "pick") == gui.TICK_FULL]
+        if len(back) != 1:
+            raise AssertionError(f"the tick came back on {len(back)} rows")
+
+        app._toggle_all_ticks()
+        if len(app._ticked) != len(app._displayed_orders):
+            raise AssertionError("the heading did not tick everything shown")
+        app._toggle_all_ticks()
+        if app._ticked or app._tick_bar.grid_info():
+            raise AssertionError("clicking the heading again did not clear")
+    add("previous orders: ticking", _ticking)
+
+    def _bulk_status_says_what_happened():
+        """The bug: every write was wrapped in `except Exception: pass`, so a
+        refused one was reported as saved and the list came back unchanged."""
+        app._show_tab("prev_orders")
+        root.update()
+        rows = [r for r in app._displayed_orders
+                if r.get("source") == "db" and r.get("db_id")]
+        if not rows:
+            raise AssertionError("no database orders to change")
+
+        def refuse(_oid, _status):
+            raise RuntimeError("new row violates row-level security policy")
+
+        told = []
+        real_set = gui._db.set_order_status
+        real_err = gui.messagebox.showerror
+        gui._db.set_order_status = refuse
+        gui.messagebox.showerror = lambda t, m: told.append(m)
+        try:
+            app._apply_status_to(rows, "Complete")
+            for _ in range(60):                 # it runs off the main thread
+                root.update()
+                if told:
+                    break
+                time.sleep(0.05)
+        finally:
+            gui._db.set_order_status = real_set
+            gui.messagebox.showerror = real_err
+
+        if not told:
+            raise AssertionError(
+                "the database refused every write and the app said nothing")
+        if "row-level security" not in told[0]:
+            raise AssertionError(f"it did not say why: {told[0]!r}")
+        if "0 of" not in app.status_var.get():
+            raise AssertionError(
+                f"the status line claims work that did not happen: "
+                f"{app.status_var.get()!r}")
+        app._clear_ticks()
+    add("previous orders: a refused bulk change is reported", _bulk_status_says_what_happened)
 
     def _pills(widget, found):
         if isinstance(widget, gui.PillButton):
