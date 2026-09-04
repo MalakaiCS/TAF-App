@@ -75,16 +75,23 @@ jobs:
         shell: bash
         run: python -m compileall -q modern_order_gui.py pdf_generator.py template_filler.py taf_order_app
 
-      # A published release auto-updates every PC immediately and there is no
-      # staging, so this is the only gate between a broken rule and everyone
-      # using it. Needs no dependencies — see tests/run.py.
-      - name: Tests (fail fast before shipping)
-        run: python tests/run.py
-
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
+
+      # A published release auto-updates every PC immediately and there is no
+      # staging, so this is the only gate between a broken rule and everyone
+      # using it.
+      #
+      # This used to run before the install, to fail a minute sooner. That
+      # only held while every test was dependency-free, and it stopped being
+      # true without anyone noticing: the barcode and label tests need
+      # reportlab, so they failed here on a tree that was perfectly fine.
+      # A gate that reports a missing package as a broken build is worse than
+      # a gate that takes another minute.
+      - name: Tests (fail fast before shipping)
+        run: python tests/run.py
 
       # The tests above check the rules; this starts the actual window and
       # builds every tab and dialog against a stand-in database. It is what
