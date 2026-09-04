@@ -1,0 +1,20 @@
+TAF Order Entry — Third-Party Notices
+=====================================
+
+SumatraPDF
+----------
+This application bundles SumatraPDF.exe (SumatraPDF 3.4.6, 32-bit) and uses it
+to print order PDFs directly to a printer without requiring a separate PDF
+viewer.
+
+SumatraPDF is free software licensed under the GNU General Public License,
+version 3 (GPLv3). SumatraPDF is not modified by this application; it is
+invoked as a separate, unmodified executable.
+
+  Project & source code: https://www.sumatrapdfreader.org/
+  Source repository:      https://github.com/sumatrapdfreader/sumatrapdf
+  License (GPLv3):        https://www.gnu.org/licenses/gpl-3.0.html
+
+The complete corresponding source code for the bundled SumatraPDF version is
+available at the repository above. A copy can also be obtained from the
+maintainers of this application on request.

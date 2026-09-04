@@ -1,0 +1,12 @@
+project_id = "djexdkwohkylunnwbxpf"
+
+# Reads uploaded purchase orders. Called by the desktop app with the signed-in
+# user's token, so JWT verification stays on (the default).
+[functions.extract-orders]
+verify_jwt = true
+
+# The phone upload page is not hosted here at all. Supabase serves anything it
+# hosts as text/plain with "Content-Security-Policy: default-src 'none';
+# sandbox" and nosniff -- a deliberate anti-XSS policy -- so a page served from
+# a function or from Storage arrives on the phone as unstyled source with every
+# script blocked. It lives on GitHub Pages instead (docs/phone/index.html).

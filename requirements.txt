@@ -10,6 +10,7 @@ pywin32             # Excel/Word COM automation (Windows only)
 tkcalendar          # date picker widgets
 babel               # locale data (tkcalendar dependency)
 Pillow              # type-badge rendering + image handling
+qrcode              # phone-pairing QR code (pure Python, renders via Pillow)
 
 # Build only
 pyinstaller         # packages the app into dist/TAFOrderEntry/

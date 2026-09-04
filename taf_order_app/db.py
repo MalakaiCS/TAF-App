@@ -95,6 +95,23 @@ def current_profile() -> dict:
     return _current_profile or {}
 
 
+def is_approved() -> bool:
+    """Whether this account has been approved as staff.
+
+    Being signed in is not the same as being staff: the publishable key is
+    public, so anyone holding it can create an account. Approval is what
+    actually grants access, and the database enforces it — this only decides
+    what the app says rather than letting it fail with empty screens.
+
+    A database that predates migrate_staff_access.sql has no `approved`
+    column; there, everyone signed in is treated as staff, exactly as before.
+    """
+    profile = current_profile() or {}
+    if "approved" not in profile:
+        return True
+    return bool(profile.get("approved"))
+
+
 def current_role() -> str:
     return current_profile().get("role", "Employee")
 
@@ -194,6 +211,27 @@ def delete_user_account(target_user_id: str) -> None:
         get_client().table("profiles").delete().eq("id", target_user_id).execute()
 
 
+def set_user_approved(target_user_id: str, approved: bool) -> None:
+    """Let a new account in, or shut one out.
+
+    Approval is the whole of the staff boundary: an unapproved account can
+    sign in and see nothing. Directors and Admins decide.
+    """
+    get_client().table("profiles").update(
+        {"approved": bool(approved)}).eq("id", target_user_id).execute()
+
+
+def pending_staff_count() -> int:
+    """Accounts waiting to be approved."""
+    try:
+        resp = (get_client().table("profiles")
+                .select("id", count="exact").eq("approved", False)
+                .limit(1).execute())
+        return int(resp.count or 0)
+    except Exception:
+        return 0          # column not there yet — nothing is pending
+
+
 def update_user_role(target_user_id: str, new_role: str) -> None:
     """Update role — tries RPC first (enforces hierarchy), falls back to direct update."""
     try:
@@ -260,7 +298,8 @@ def reload_profile() -> None:
 
 # ── Orders ────────────────────────────────────────────────────────────────────
 
-def save_order(header: dict, items: list, order_type: str) -> None:
+def save_order(header: dict, items: list, order_type: str) -> "str | None":
+    """Insert an order and return its new id (or None if it can't be read)."""
     user = _current_user
     if not user:
         raise RuntimeError("Not logged in.")
@@ -284,15 +323,101 @@ def save_order(header: dict, items: list, order_type: str) -> None:
     }
     # Add new columns only if migration has been run (graceful degradation)
     try:
-        get_client().table("orders").insert(
+        resp = get_client().table("orders").insert(
             {**data, "created_by_role": prof.get("role", "Employee")}
         ).execute()
     except Exception as exc:
         if "created_by_role" in str(exc) or "archived" in str(exc):
             # Migration not yet run — insert without new columns
-            get_client().table("orders").insert(data).execute()
+            resp = get_client().table("orders").insert(data).execute()
         else:
             raise
+    try:
+        return (resp.data or [{}])[0].get("id")
+    except Exception:
+        return None
+
+
+def item_signature(items: list) -> str:
+    """Stable fingerprint of an order's line items, for duplicate detection.
+
+    Only the fields that define *what is being made* participate — notes,
+    part-number overrides etc. don't stop two orders being duplicates.
+    """
+    import hashlib
+    import json as _json
+    core = []
+    for it in (items or []):
+        if (it.get("item_kind") or "filter") == "bag":
+            key = {k: it.get(k) for k in ("product_type", "quantity", "media",
+                                          "width", "height", "depth")}
+        else:
+            key = {k: it.get(k) for k in ("Quantity", "Short", "Long",
+                                          "Channel", "Filter Type", "Media Type")}
+        core.append(_json.dumps(key, sort_keys=True, default=str))
+    return hashlib.sha1("|".join(sorted(core)).encode("utf-8")).hexdigest()
+
+
+def find_potential_duplicates(customer: str, order_number: str,
+                              items: list, days: int = 14) -> list:
+    """Return existing orders that look like duplicates of the one described.
+
+    Two signals, checked against the shared database:
+      • an order with the same order number already exists; or
+      • the same customer has an order with identical line items created in
+        the last `days` days (two people keying the same job at once).
+    Each returned row carries a human-readable "duplicate_reason".
+    """
+    import datetime as _dt
+    c = get_client()
+    matches: dict = {}
+
+    on = (order_number or "").strip()
+    if on:
+        try:
+            resp = (c.table("orders")
+                    .select("id, customer_name, order_number, full_name, username, created_at")
+                    .ilike("order_number", on.replace("%", "\\%"))
+                    .execute())
+            for r in resp.data or []:
+                r["duplicate_reason"] = "same order number"
+                matches[r["id"]] = r
+        except Exception:
+            pass
+
+    cust = (customer or "").strip()
+    if cust and items:
+        sig = item_signature(items)
+        since = (_dt.datetime.now(_dt.timezone.utc) - _dt.timedelta(days=days)).isoformat()
+        try:
+            resp = (c.table("orders")
+                    .select("id, customer_name, order_number, full_name, username, created_at, items")
+                    .ilike("customer_name", cust.replace("%", "\\%"))
+                    .gte("created_at", since)
+                    .execute())
+            for r in resp.data or []:
+                if item_signature(r.get("items") or []) != sig:
+                    continue
+                r.pop("items", None)
+                if r["id"] in matches:
+                    matches[r["id"]]["duplicate_reason"] = \
+                        "same order number and identical items"
+                else:
+                    r["duplicate_reason"] = "identical items for this customer"
+                    matches[r["id"]] = r
+        except Exception:
+            pass
+
+    return list(matches.values())
+
+
+def mark_order_printed(order_id: str) -> None:
+    """Flag an order as printed (stored in the header JSON — no migration)."""
+    import datetime as _dt
+    merge_order_header(order_id, {
+        "printed":    True,
+        "printed_at": _dt.datetime.now().strftime("%d/%m/%Y %H:%M"),
+    })
 
 
 def tables_exist() -> tuple[bool, bool]:
@@ -311,29 +436,96 @@ def tables_exist() -> tuple[bool, bool]:
     return p, o
 
 
-def get_all_orders() -> list:
+def _page_through(build_query, step: int = 1000, limit: int = 0) -> list:
+    """Read every row a query matches, a page at a time.
+
+    PostgREST returns at most 1000 rows and says nothing about the rest, so a
+    single request silently truncates — which is how the price list came back
+    as its first thousand entries, and how orders past the thousandth stopped
+    appearing in Previous Orders.
+    """
+    out: list = []
+    while True:
+        resp = build_query().range(len(out), len(out) + step - 1).execute()
+        batch = resp.data or []
+        out.extend(batch)
+        if len(batch) < step or (limit and len(out) >= limit):
+            break
+    return out[:limit] if limit else out
+
+
+def get_order_list(limit: int = 0) -> list:
+    """Orders for a list screen: everything except the line items.
+
+    The lines are the bulk of an order and no list shows them — only a count —
+    so they stay in the database until something opens one. Falls back to the
+    old whole-row query when migrate_performance.sql hasn't been run.
+    """
     try:
-        resp = (
-            get_client()
-            .table("orders")
-            .select("*")
-            .eq("archived", False)
-            .order("created_at", desc=True)
-            .execute()
-        )
+        rows = _page_through(
+            lambda: (get_client().table("orders_list").select("*")
+                     .eq("archived", False).order("created_at", desc=True)),
+            limit=limit)
+        for r in rows:
+            r["items"] = None          # not fetched; ask for them if needed
+        return rows
+    except Exception:
+        return get_all_orders(limit=limit)
+
+
+def get_order(order_id: str) -> "dict | None":
+    """One order in full, lines included.
+
+    Used where a screen needs to show what an action just did — re-reading
+    the whole list to find one order is a lot of wire for one row.
+    """
+    try:
+        resp = (get_client().table("orders").select("*")
+                .eq("id", order_id).single().execute())
+        return resp.data or None
+    except Exception:
+        return None
+
+
+def get_order_items(order_id: str) -> list:
+    """One order's line items, fetched when something actually needs them."""
+    try:
+        resp = (get_client().table("orders")
+                .select("items").eq("id", order_id).single().execute())
+        return (resp.data or {}).get("items") or []
+    except Exception:
+        return []
+
+
+def media_usage_since(since) -> dict:
+    """How much of each media grade has been used since a date.
+
+    Counted in the database. The Dashboard used to do it by walking every
+    line of every order it had already downloaded.
+    """
+    try:
+        resp = get_client().rpc(
+            "media_usage_since", {"p_since": str(since)}).execute()
+        return {r["media_type"]: int(r["used"] or 0)
+                for r in (resp.data or []) if r.get("media_type")}
+    except Exception:
+        return {}
+
+
+def get_all_orders(limit: int = 0) -> list:
+    try:
+        return _page_through(
+            lambda: (get_client().table("orders").select("*")
+                     .eq("archived", False).order("created_at", desc=True)),
+            limit=limit)
     except Exception as exc:
         if "archived" in str(exc):
             # Migration not yet run — fetch without archived filter
-            resp = (
-                get_client()
-                .table("orders")
-                .select("*")
-                .order("created_at", desc=True)
-                .execute()
-            )
-        else:
-            raise
-    return resp.data or []
+            return _page_through(
+                lambda: (get_client().table("orders").select("*")
+                         .order("created_at", desc=True)),
+                limit=limit)
+        raise
 
 
 def delete_order(order_id: str) -> None:
@@ -359,6 +551,25 @@ def can_archive_order() -> bool:
 
 
 # ── Media Types ───────────────────────────────────────────────────────────────
+
+def get_media_codes() -> dict:
+    """{media name: part-number code} for every custom media type.
+
+    Carbon -> CARB, so a flat panel becomes FPFCARB25-020. Missing codes fall
+    back to a value derived from the name (see part_numbers.default_media_code),
+    and an empty dict is returned if the column hasn't been migrated yet.
+    """
+    try:
+        resp = get_client().table("media_types").select("name, code").execute()
+        return {r["name"]: (r.get("code") or "") for r in (resp.data or [])}
+    except Exception:
+        return {}
+
+
+def set_media_code(name: str, code: str) -> None:
+    get_client().table("media_types").update(
+        {"code": (code or "").strip().upper()}).eq("name", name).execute()
+
 
 def get_custom_media_types() -> list[str]:
     """Return custom media type names in sort order from the DB."""
@@ -403,6 +614,31 @@ def reorder_media_types(names: list[str]) -> None:
 
 
 def can_manage_media_types() -> bool:
+    return role_level() >= 3
+
+
+# ── Shared catalogue (dedicated filter presets & filter types) ────────────────
+# One row per list in catalog_lists (key text, value jsonb). The app falls
+# back to its built-in defaults when the table is missing or unreachable.
+
+def get_catalog_map() -> dict:
+    """Return {key: value} for every stored catalogue list. Raises on failure
+    so callers can fall back to local caches / built-in defaults."""
+    resp = get_client().table("catalog_lists").select("key, value").execute()
+    return {r["key"]: r["value"] for r in (resp.data or [])}
+
+
+def set_catalog_value(key: str, value) -> None:
+    """Create or replace one catalogue list (value is JSON-serialisable)."""
+    import datetime as _dt
+    get_client().table("catalog_lists").upsert({
+        "key":        key,
+        "value":      value,
+        "updated_at": _dt.datetime.now(_dt.timezone.utc).isoformat(),
+    }).execute()
+
+
+def can_manage_catalog() -> bool:
     return role_level() >= 3
 
 
@@ -465,17 +701,61 @@ def can_manage_stock_alerts() -> bool:
     return role_level() >= 3
 
 
+# ── Changing one field of an order's header ───────────────────────────────────
+
+def merge_order_header(order_id: str, patch: dict) -> None:
+    """Change some keys of an order's header JSON, leaving the rest alone.
+
+    Two things this fixes, both of which showed up when marking a batch of
+    orders complete.
+
+    It raises. Every one of these used to end in `except Exception: pass`, so
+    a write the database refused — a row-level security policy, an expired
+    session, a dropped connection — looked exactly like a write that worked.
+    The app counted it as done, said so, then reloaded the list and showed
+    the old status. Nothing anywhere said why.
+
+    And it merges server-side. Reading the whole header, changing one key in
+    Python and writing the whole thing back takes two round trips and loses
+    anything anyone else changed in between: mark twenty orders complete
+    while someone adds a note to one of them, and the note goes. `header ||
+    patch` in the database is one statement and only touches the keys given.
+
+    Falls back to the read-modify-write if migrate_bulk_status.sql has not
+    been run — still raising, which is the half that matters.
+    """
+    try:
+        resp = get_client().rpc("merge_order_header", {
+            "p_order_id": str(order_id),
+            "p_patch":    patch,
+        }).execute()
+        if resp.data:                      # the RPC returns the updated id
+            return
+        raise RuntimeError(
+            "The database did not change that order. It may have been "
+            "deleted, or your account may not be allowed to change it.")
+    except Exception as exc:
+        if "merge_order_header" not in str(exc):
+            raise
+        # PostgREST doesn't know the function: migration not applied yet.
+
+    resp = (get_client().table("orders")
+            .select("header").eq("id", order_id).single().execute())
+    header = dict((resp.data or {}).get("header") or {})
+    header.update(patch)
+    out = (get_client().table("orders")
+           .update({"header": header}).eq("id", order_id).execute())
+    if not (out.data or []):
+        raise RuntimeError(
+            "The database did not change that order. It may have been "
+            "deleted, or your account may not be allowed to change it.")
+
+
 # ── Priority ──────────────────────────────────────────────────────────────────
 
 def set_order_priority(order_id: str, priority: bool) -> None:
     """Set or clear the priority flag stored in the order's header JSON."""
-    try:
-        resp = get_client().table("orders").select("header").eq("id", order_id).single().execute()
-        header = dict(resp.data.get("header") or {})
-        header["priority"] = priority
-        get_client().table("orders").update({"header": header}).eq("id", order_id).execute()
-    except Exception:
-        pass
+    merge_order_header(order_id, {"priority": priority})
 
 
 # ── Order Status ──────────────────────────────────────────────────────────────
@@ -488,30 +768,113 @@ ORDER_STATUS_VALUES = [
 
 def set_order_status(order_id: str, status: str) -> None:
     """Set the order status stored in the order's header JSON."""
+    merge_order_header(order_id, {"status": status})
+
+
+def set_order_status_bulk(order_ids, status: str) -> list:
+    """Set the status on several orders. Returns [(order_id, reason), …] for
+    the ones that did not change.
+
+    Bulk work that stops at the first failure is worse than useless — you are
+    left not knowing which half of the batch went through. This does every
+    one it can and hands back what didn't, so the app can say so.
+    """
+    problems = []
+    for oid in order_ids:
+        try:
+            set_order_status(str(oid), status)
+        except Exception as exc:
+            problems.append((str(oid), str(exc)))
+    return problems
+
+
+# Carriers TAF books freight with, and where a consignment can be followed.
+# {number} is replaced with the consignment number.
+FREIGHT_CARRIERS = {
+    "":              "",
+    "TNT":           "https://www.tnt.com/express/en_au/site/tracking.html?searchType=con&cons={number}",
+    "Startrack":     "https://startrack.com.au/track/search?id={number}",
+    "Australia Post": "https://auspost.com.au/mypost/track/#/details/{number}",
+    "Followmont":    "https://www.followmont.com.au/track-and-trace/?consignment={number}",
+    "Border Express": "https://www.borderexpress.com.au/track-and-trace/?connote={number}",
+    "Northline":     "https://www.northline.com.au/track-trace/?con={number}",
+    "Toll":          "https://www.mytoll.com/?externalSearchQuery={number}",
+    "Other":         "",
+}
+
+
+def tracking_url(carrier: str, number: str, custom: str = "") -> str:
+    """Where a customer can follow a consignment, or "" if nowhere.
+
+    A link typed in by hand wins — carriers change their tracking pages, and
+    a stale template should never override what someone has actually checked.
+    """
+    custom = (custom or "").strip()
+    if custom:
+        return custom
+    number = (number or "").strip()
+    template = FREIGHT_CARRIERS.get((carrier or "").strip(), "")
+    if not template or not number:
+        return ""
+    from urllib.parse import quote
+    return template.replace("{number}", quote(number, safe=""))
+
+
+def set_order_freight(order_id: str, carrier: str = "", number: str = "",
+                      url: str = "", note: str = "", expected: str = "") -> None:
+    """Record how an order is travelling, and anything holding it up.
+
+    All of it is shown to the customer on their portal, which is the point:
+    "where is it" and "why is it late" are the two questions a delivery
+    generates, and both are better answered before they are asked.
+    """
+    import datetime as _dt
+    resp = (get_client().table("orders")
+            .select("header").eq("id", order_id).single().execute())
+    header = dict((resp.data or {}).get("header") or {})
+    freight = {
+        "carrier":   (carrier or "").strip(),
+        "number":    (number or "").strip(),
+        "url":       tracking_url(carrier, number, url),
+        "note":      (note or "").strip(),
+        "expected":  (expected or "").strip(),
+        "updated_at": _dt.datetime.utcnow().isoformat(),
+        "updated_by": current_full_name() or current_username(),
+    }
+    if not any((freight["carrier"], freight["number"], freight["note"],
+                freight["expected"])):
+        header.pop("freight", None)          # cleared
+    else:
+        header["freight"] = freight
+    get_client().table("orders").update(
+        {"header": header}).eq("id", order_id).execute()
+
+
+def get_order_freight(order_id: str) -> dict:
     try:
-        resp = get_client().table("orders").select("header").eq("id", order_id).single().execute()
-        header = dict(resp.data.get("header") or {})
-        header["status"] = status
-        get_client().table("orders").update({"header": header}).eq("id", order_id).execute()
+        resp = (get_client().table("orders")
+                .select("header").eq("id", order_id).single().execute())
+        return dict(((resp.data or {}).get("header") or {}).get("freight") or {})
     except Exception:
-        pass
+        return {}
 
 
 def append_order_note(order_id: str, note_text: str, author: str = "") -> None:
-    """Append a timestamped note to the order's header JSON."""
+    """Append a timestamped note to the order's header JSON.
+
+    Raises if it did not save. A note that is typed, accepted and silently
+    dropped is worse than one that was never offered.
+    """
     import datetime as _dt
-    try:
-        resp = get_client().table("orders").select("header").eq("id", order_id).single().execute()
-        header = dict(resp.data.get("header") or {})
-        existing = header.get("order_notes") or []
-        if isinstance(existing, str):
-            existing = [{"ts": "", "author": "", "text": existing}] if existing else []
-        ts = _dt.datetime.utcnow().strftime("%d/%m/%Y %H:%M")
-        existing.append({"ts": ts, "author": author, "text": note_text})
-        header["order_notes"] = existing
-        get_client().table("orders").update({"header": header}).eq("id", order_id).execute()
-    except Exception:
-        pass
+    resp = (get_client().table("orders")
+            .select("header").eq("id", order_id).single().execute())
+    header = dict((resp.data or {}).get("header") or {})
+    existing = header.get("order_notes") or []
+    if isinstance(existing, str):
+        existing = [{"ts": "", "author": "", "text": existing}] if existing else []
+    ts = _dt.datetime.utcnow().strftime("%d/%m/%Y %H:%M")
+    existing.append({"ts": ts, "author": author, "text": note_text})
+    merge_order_header(order_id, {"order_notes": existing})
 
 
 # ── Customer Database ─────────────────────────────────────────────────────────
@@ -570,6 +933,168 @@ def delete_customer(customer_id: str) -> None:
     get_client().table("customers").delete().eq("id", customer_id).execute()
 
 
+# ── Matching a purchase order to a customer branch ───────────────────────────
+# A purchase order says "Complete Air Supply Pty Ltd" at "19-27 Fred Chaplin
+# Circuit, Bells Creek". The order should say "CAS - Bells Creek" in
+# "Sunshine Coast". Each branch is its own profile; these helpers find the
+# right one and remember the wording so the next order matches without asking.
+
+def _norm(text: str) -> str:
+    import re as _re
+    return _re.sub(r"[^a-z0-9]+", " ", (text or "").lower()).strip()
+
+
+def is_company_name(value: str, customers: list | None = None) -> bool:
+    """True when `value` is a legal name shared by every branch of a company.
+
+    "Complete Air Supply Pty Ltd" identifies a company; "CAS - Bells Creek"
+    identifies a branch. Only the second is safe to record against a profile
+    or to match an order on.
+    """
+    v = _norm(value)
+    if not v:
+        return False
+    try:
+        people = customers if customers is not None else get_customers(active_only=False)
+    except Exception:
+        return False
+    return any(_norm(c.get("legal_name") or "") == v for c in people)
+
+
+def match_customer(po_name: str, po_address: str = "",
+                   customers: list | None = None) -> "dict | None":
+    """Find the branch a purchase order belongs to, or None to ask.
+
+    The rule throughout: a match has to identify a BRANCH, not just a company.
+    Branches of one company share a legal name, so anything that only proves
+    "this is Complete Air Supply" proves nothing about which depot the order
+    is for — and picking the wrong one sends the work to the wrong place under
+    the wrong short name. Company-level evidence therefore only counts when an
+    address backs it up, and if two branches both look plausible, neither is
+    chosen.
+    """
+    people = customers if customers is not None else get_customers(active_only=True)
+    name_n = _norm(po_name)
+    addr_n = _norm(po_address)
+    if not name_n and not addr_n:
+        return None
+
+    # Every legal name on file. A wording that is one of these names a
+    # company, not a branch — whichever profile it happens to sit on. Taking
+    # the whole list, rather than just the profile being tested, catches the
+    # branch whose own legal name was left blank or typed differently.
+    company_names = {_norm(c.get("legal_name") or "") for c in people}
+    company_names.discard("")
+
+    def _company_level(c: dict, value: str) -> bool:
+        """True when `value` is just the company name every branch shares."""
+        return value in company_names
+
+    def _address_agrees(c: dict) -> bool:
+        if not addr_n:
+            return False
+        for part in (c.get("delivery_address1"), c.get("delivery_city"),
+                     c.get("delivery_postcode")):
+            p = _norm(part or "")
+            if p and len(p) > 3 and p in addr_n:
+                return True
+        return False
+
+    def _identifies(c: dict) -> bool:
+        # 1. Wording already recorded against this branch. An alias that is
+        #    only the company name is ignored: earlier versions saved those,
+        #    and acting on one is what matched a Bells Creek order to Tweed.
+        for alias in (c.get("po_aliases") or []):
+            a = _norm(str(alias))
+            if not a or _company_level(c, a):
+                continue
+            if a == name_n:
+                return True
+            # Substring only for wordings long enough to mean something: a
+            # three-letter alias would otherwise land inside half the list.
+            if len(a) > 3 and ((addr_n and a in addr_n) or (name_n and a in name_n)):
+                return True
+
+        # 2. Its own short name or trading name — unless that is just the
+        #    company name again.
+        if name_n:
+            for field in ("short_name", "name"):
+                v = _norm(c.get(field) or "")
+                if v and v == name_n and not _company_level(c, v):
+                    return True
+
+        # 3. Same company by legal name, which only counts with an address.
+        if addr_n:
+            legal = _norm(c.get("legal_name") or "")
+            if legal and (legal == name_n or legal in name_n or name_n in legal) \
+                    and _address_agrees(c):
+                return True
+        return False
+
+    matches = [c for c in people if _identifies(c)]
+    # Exactly one branch, or none: two candidates means ask rather than guess.
+    return matches[0] if len(matches) == 1 else None
+
+
+def add_customer_alias(customer_id: str, alias: str) -> None:
+    """Remember a name or address as belonging to this branch.
+
+    Refuses anything that is only the company's legal name: every branch
+    shares it, so recording it would make the next order from any other
+    branch match this one.
+    """
+    alias = (alias or "").strip()
+    if not alias:
+        return
+    try:
+        resp = (get_client().table("customers")
+                .select("po_aliases").eq("id", customer_id)
+                .single().execute())
+        aliases = list((resp.data or {}).get("po_aliases") or [])
+    except Exception:
+        aliases = []
+    if any(_norm(a) == _norm(alias) for a in aliases):
+        return
+    if is_company_name(alias):
+        return          # company-wide wording, not this branch
+    aliases.append(alias)
+    get_client().table("customers").update(
+        {"po_aliases": aliases}).eq("id", customer_id).execute()
+
+
+# ── The customer portal (see migrate_customer_portal.sql) ───────────────────
+# A customer follows a link with a random token and sees their own orders,
+# quotes and account. The token belongs to the customer rather than to a
+# person, so it can be turned off or replaced — which invalidates every link
+# ever sent for that account.
+
+def customer_portal_token(customer_id: str, rotate: bool = False) -> str:
+    """The customer's portal token, creating or replacing it as asked.
+
+    `rotate` issues a new one, which is how a link that has gone somewhere it
+    shouldn't is dealt with: every old link stops working at once.
+    """
+    import secrets
+    row = get_customer(customer_id) or {}
+    token = (row.get("portal_token") or "").strip()
+    if token and not rotate:
+        if not row.get("portal_enabled"):
+            get_client().table("customers").update(
+                {"portal_enabled": True}).eq("id", customer_id).execute()
+        return token
+    token = secrets.token_hex(32)
+    get_client().table("customers").update({
+        "portal_token": token, "portal_enabled": True,
+    }).eq("id", customer_id).execute()
+    return token
+
+
+def set_customer_portal(customer_id: str, enabled: bool) -> None:
+    """Turn a customer's portal on or off without changing their link."""
+    get_client().table("customers").update(
+        {"portal_enabled": bool(enabled)}).eq("id", customer_id).execute()
+
+
 def can_manage_customers() -> bool:
     return role_level() >= 3
 
@@ -593,7 +1118,11 @@ STOCK_PRODUCT_TYPES = [
     "Other",
 ]
 
-STOCK_UNITS = ["each", "metre", "roll", "kg", "box", "pack", "sheet", "pair", "set"]
+# "m2" is what media has to be kept in for an order to deduct it by area —
+# see stock_usage.py. A roll kept in metres can't be reduced by an area
+# without knowing the roll's width.
+STOCK_UNITS = ["each", "m2", "metre", "roll", "kg", "box", "pack", "sheet",
+               "pair", "set"]
 
 
 def get_stock_items(search: str = "", product_type: str = "") -> list:
@@ -646,7 +1175,8 @@ def delete_stock_item(item_id: str) -> None:
 
 
 def adjust_stock(item_id: str, transaction_type: str,
-                 quantity: float, notes: str = "") -> float:
+                 quantity: float, notes: str = "",
+                 client_ref: str = "", device: str = "") -> float:
     """
     Adjust stock_on_hand and record a transaction row.
     transaction_type:
@@ -655,8 +1185,42 @@ def adjust_stock(item_id: str, transaction_type: str,
         'count'    → set absolute value; delta = new - old
         'writeoff' → subtract quantity (negative delta), marks loss
     Returns new stock_on_hand.
+
+    The arithmetic happens in the database, on a locked row — two people
+    counting the same rack at once used to both read the old figure and both
+    write their own answer, losing one of the counts with nothing in the log
+    to show it.
+
+    `client_ref` is the caller's own name for this one movement. Send the same
+    one twice and it is applied once: a handheld that loses signal after the
+    write lands but before the reply arrives cannot tell "it failed" from "it
+    worked and I didn't hear", so it retries — and without this, the stock
+    moves twice. One is generated per call when the caller doesn't supply one,
+    which makes an HTTP-level retry safe without changing any caller.
     """
     import datetime as _dt
+    import uuid as _uuid
+
+    ref = (client_ref or "").strip() or f"app-{_uuid.uuid4()}"
+    try:
+        resp = get_client().rpc("adjust_stock_atomic", {
+            "p_item_id":    item_id,
+            "p_type":       transaction_type,
+            "p_quantity":   quantity,
+            "p_notes":      notes,
+            "p_client_ref": ref,
+            "p_username":   current_username(),
+            "p_device":     device or "desktop",
+        }).execute()
+        rows = resp.data or []
+        row  = rows[0] if isinstance(rows, list) and rows else rows
+        if isinstance(row, dict) and row.get("quantity_after") is not None:
+            return float(row["quantity_after"])
+    except Exception:
+        pass          # migrate_scanning.sql not run yet — fall through
+
+    # Older database: the way it worked before, kept so the app still runs
+    # against a project that hasn't had the migration applied.
     resp    = (get_client().table("stock_items")
                .select("stock_on_hand").eq("id", item_id).single().execute())
     current = float((resp.data or {}).get("stock_on_hand", 0))
@@ -686,6 +1250,38 @@ def adjust_stock(item_id: str, transaction_type: str,
     }).execute()
 
     return new_qty
+
+
+def resolve_scan(code: str) -> list:
+    """What a scanned barcode is: a stock item, an order, or a part number.
+
+    One place answers this so a handheld, the phone page and the desktop can
+    never drift apart on what a code means. Returns a list because a code
+    could in principle match more than one kind of thing; most specific first
+    (a stock code is something you can count, which is what a gun is for).
+
+    Falls back to a plain SKU lookup when migrate_scanning.sql hasn't been run.
+    """
+    code = (code or "").strip()
+    if not code:
+        return []
+    try:
+        resp = get_client().rpc("resolve_scan", {"p_code": code}).execute()
+        rows = resp.data or []
+        if rows:
+            return rows
+    except Exception:
+        pass
+
+    # Older database: the one lookup worth having without the migration.
+    try:
+        resp = (get_client().table("stock_items").select("*")
+                .ilike("sku", code).limit(2).execute())
+        return [{"kind": "stock", "ref": r.get("id"), "label": r.get("name", ""),
+                 "detail": r.get("location") or "No location", "extra": r}
+                for r in (resp.data or [])]
+    except Exception:
+        return []
 
 
 def get_stock_transactions(item_id: str, limit: int = 150) -> list:
@@ -733,9 +1329,491 @@ def upload_stock_image(item_id: str, image_path: str) -> str:
     return f"{SUPABASE_URL}/storage/v1/object/public/stock-images/{name}"
 
 
+# ── Profile pictures ─────────────────────────────────────────────────────────
+
+AVATAR_BUCKET = "avatars"
+
+
+def upload_avatar(user_id: str, image_path: str) -> str:
+    """Put a photo against an account and return the link to it.
+
+    Named after the account rather than the file it came from, so replacing a
+    picture replaces it rather than leaving the old one behind for ever.
+    """
+    import mimetypes
+    from pathlib import Path as _P
+    p = _P(image_path)
+    ext = p.suffix.lower() or ".jpg"
+    name = f"{user_id}{ext}"
+    mime = mimetypes.guess_type(str(p))[0] or "image/jpeg"
+    data = p.read_bytes()
+    store = get_client().storage.from_(AVATAR_BUCKET)
+    # A different extension would leave the old file sitting there.
+    for old in (".jpg", ".jpeg", ".png", ".webp"):
+        if old != ext:
+            try:
+                store.remove([f"{user_id}{old}"])
+            except Exception:
+                pass
+    try:
+        store.remove([name])
+    except Exception:
+        pass
+    store.upload(name, data,
+                 file_options={"content-type": mime, "upsert": "true"})
+    # Cache-busted: the URL never changes when a picture is replaced, so
+    # without this the old one keeps being served.
+    import time as _t
+    return (f"{SUPABASE_URL}/storage/v1/object/public/{AVATAR_BUCKET}/"
+            f"{name}?v={int(_t.time())}")
+
+
+def set_avatar(user_id: str, url: str) -> None:
+    """Record the link on the profile. Falls back to a plain update on a
+    database that hasn't had migrate_avatars.sql run."""
+    try:
+        get_client().rpc("set_avatar",
+                         {"p_user_id": user_id, "p_url": url}).execute()
+        return
+    except Exception:
+        pass
+    get_client().table("profiles").update(
+        {"avatar_url": url}).eq("id", user_id).execute()
+
+
+def remove_avatar(user_id: str) -> None:
+    """Take the picture off an account and out of storage."""
+    store = get_client().storage.from_(AVATAR_BUCKET)
+    for ext in (".jpg", ".jpeg", ".png", ".webp"):
+        try:
+            store.remove([f"{user_id}{ext}"])
+        except Exception:
+            pass
+    set_avatar(user_id, "")
+
+
+def current_avatar_url() -> str:
+    return (current_profile() or {}).get("avatar_url") or ""
+
+
+def refresh_current_profile() -> dict:
+    """Re-read the signed-in account, after changing something on it."""
+    global _current_profile
+    user = current_user()
+    if not user:
+        return {}
+    try:
+        _current_profile = _load_profile(str(user.id)) or _current_profile
+    except Exception:
+        pass
+    return _current_profile or {}
+
+
 def can_manage_stock() -> bool:
     """Managers and above can create / edit / delete stock items."""
     return role_level() >= 3
+
+
+# ── Pricing (see migrate_pricing.sql) ────────────────────────────────────────
+# price_list is one price per part number, imported from the price
+# spreadsheets. price_rates is a fallback per square metre, used only where a
+# part number has no listed price.
+
+def get_price_rows(search: str = "", limit: int = 0) -> list:
+    """Every priced part number, or those matching `search`.
+
+    Paged through in batches: PostgREST caps a response at 1000 rows, so a
+    12,000-row price list would otherwise come back looking like 1,000.
+    """
+    def build():
+        q = get_client().table("price_list").select("*")
+        if search:
+            s = search.replace(",", " ").strip()
+            q = q.or_(f"part_number.ilike.%{s}%,name.ilike.%{s}%,"
+                      f"description.ilike.%{s}%")
+        return q.order("part_number")
+
+    try:
+        return _page_through(build, limit=limit)
+    except Exception:
+        return []
+
+
+def count_prices() -> int:
+    """How many part numbers are priced, without fetching them all."""
+    try:
+        resp = (get_client().table("price_list")
+                .select("part_number", count="exact").limit(1).execute())
+        return int(resp.count or 0)
+    except Exception:
+        return 0
+
+
+def get_price_list() -> dict:
+    """Part number → unit price."""
+    out = {}
+    for row in get_price_rows():
+        part = (row.get("part_number") or "").strip().upper()
+        if part:
+            try:
+                out[part] = float(row.get("unit_price") or 0)
+            except (TypeError, ValueError):
+                continue
+    return out
+
+
+def upsert_prices(rows: list) -> int:
+    """Save priced part numbers, replacing any that are already there.
+
+    Sent in batches: a full price list runs to thousands of rows and a single
+    request that size times out.
+    """
+    import datetime as _dt
+    who, now = current_username(), _dt.datetime.utcnow().isoformat()
+    payload = []
+    for row in rows or []:
+        part = (row.get("part_number") or "").strip().upper()
+        if not part:
+            continue
+        payload.append({
+            "part_number":     part,
+            "name":            (row.get("name") or "")[:300],
+            "description":     (row.get("description") or "")[:500],
+            "unit_price":      round(float(row.get("unit_price") or 0), 4),
+            "updated_by_name": who,
+            "updated_at":      now,
+        })
+    saved = 0
+    for i in range(0, len(payload), 500):
+        chunk = payload[i:i + 500]
+        get_client().table("price_list").upsert(
+            chunk, on_conflict="part_number").execute()
+        saved += len(chunk)
+    return saved
+
+
+def set_price(part_number: str, unit_price: float, name: str = "",
+              description: str = "") -> None:
+    """Add or correct one priced part number."""
+    upsert_prices([{"part_number": part_number, "unit_price": unit_price,
+                    "name": name, "description": description}])
+
+
+def delete_price(part_number: str) -> None:
+    get_client().table("price_list").delete().eq(
+        "part_number", (part_number or "").strip().upper()).execute()
+
+
+def clear_price_list() -> None:
+    """Remove every listed price. Used before a full re-import."""
+    get_client().table("price_list").delete().neq("part_number", "").execute()
+
+
+def get_price_rate_rows() -> list:
+    try:
+        resp = (get_client().table("price_rates")
+                .select("*").order("filter_type").execute())
+        return resp.data or []
+    except Exception:
+        return []
+
+
+def set_price_rate(filter_type: str, media_type: str, rate: float) -> None:
+    import datetime as _dt
+    get_client().table("price_rates").upsert({
+        "filter_type":     (filter_type or "").strip(),
+        "media_type":      (media_type or "").strip(),
+        "rate_per_sqm":    round(float(rate or 0), 4),
+        "updated_by_name": current_username(),
+        "updated_at":      _dt.datetime.utcnow().isoformat(),
+    }, on_conflict="filter_type,media_type").execute()
+
+
+def delete_price_rate(rate_id: str) -> None:
+    get_client().table("price_rates").delete().eq("id", rate_id).execute()
+
+
+def can_manage_prices() -> bool:
+    """Managers and above. A wrong price goes out to a customer."""
+    return role_level() >= 3
+
+
+# ── Quotes (see migrate_quotes.sql) ──────────────────────────────────────────
+# A quote is kept as the lines that were actually quoted, not as a reference
+# to today's prices: what a customer was told does not change because the
+# price list did.
+
+# "viewed" is set by the customer portal when the link is first opened — the
+# difference between "they haven't looked" and "they looked and haven't
+# answered" is most of what following up is about.
+QUOTE_STATUSES = ["draft", "sent", "viewed", "accepted", "declined", "expired"]
+AWAITING_STATUSES = ("sent", "viewed")
+
+
+def next_supplied_order_number() -> str:
+    """Take the next TAF-ON- number from the shared counter.
+
+    Straight to a Postgres sequence, so two people pressing the button at the
+    same moment on different PCs cannot be handed the same number. Raises if
+    the database is unreachable rather than inventing one locally: a
+    duplicate order number is a worse problem than a delayed one.
+    """
+    resp = get_client().rpc("next_taf_order_number").execute()
+    number = (resp.data or "")
+    if isinstance(number, list):          # some clients wrap a scalar
+        number = number[0] if number else ""
+    number = str(number or "").strip()
+    if not number:
+        raise RuntimeError("The shared counter returned nothing.")
+    return number
+
+
+def next_quote_number() -> str:
+    """The next quote number, as Q-0001. Falls back to a date-stamped one."""
+    import datetime as _dt
+    try:
+        resp = (get_client().table("quotes")
+                .select("quote_number")
+                .like("quote_number", "Q-%")
+                .order("quote_number", desc=True).limit(1).execute())
+        rows = resp.data or []
+        if rows:
+            last = (rows[0].get("quote_number") or "").split("-")[-1]
+            return f"Q-{int(last) + 1:04d}"
+        return "Q-0001"
+    except Exception:
+        return f"Q-{_dt.datetime.now():%y%m%d-%H%M}"
+
+
+def save_quote(data: dict) -> "dict | None":
+    """Create a quote, or update one when `data` carries an id."""
+    import datetime as _dt
+    payload = {
+        "quote_number":   (data.get("quote_number") or "").strip(),
+        "customer_id":    data.get("customer_id") or None,
+        "customer_name":  (data.get("customer_name") or "").strip(),
+        "reference":      (data.get("reference") or "").strip(),
+        "location":       (data.get("location") or "").strip(),
+        "status":         (data.get("status") or "draft").strip(),
+        "items":          data.get("items") or [],
+        # The priced lines exactly as quoted, kept apart from `items` so what
+        # the customer was shown is never re-rendered at today's prices.
+        "lines":          data.get("lines") or [],
+        "subtotal":       round(float(data.get("subtotal") or 0), 2),
+        "gst":            round(float(data.get("gst") or 0), 2),
+        "total":          round(float(data.get("total") or 0), 2),
+        "unpriced_count": int(data.get("unpriced_count") or 0),
+        "valid_until":    data.get("valid_until") or None,
+        "notes":          (data.get("notes") or "").strip(),
+        "updated_at":     _dt.datetime.utcnow().isoformat(),
+    }
+    quote_id = data.get("id")
+    if quote_id:
+        get_client().table("quotes").update(payload).eq("id", quote_id).execute()
+        return dict(payload, id=quote_id)
+    payload["created_by_name"] = current_full_name() or current_username()
+    resp = get_client().table("quotes").insert(payload).execute()
+    return resp.data[0] if resp.data else None
+
+
+def get_quotes(status: str = "", search: str = "", limit: int = 500) -> list:
+    try:
+        q = get_client().table("quotes").select("*")
+        if status and status != "All":
+            q = q.eq("status", status)
+        resp = q.order("created_at", desc=True).limit(limit).execute()
+        rows = resp.data or []
+    except Exception:
+        return []
+    if search:
+        s = search.lower()
+        rows = [r for r in rows
+                if s in (r.get("quote_number") or "").lower()
+                or s in (r.get("customer_name") or "").lower()
+                or s in (r.get("reference") or "").lower()]
+    return rows
+
+
+def get_quote(quote_id: str) -> "dict | None":
+    try:
+        resp = (get_client().table("quotes")
+                .select("*").eq("id", quote_id).single().execute())
+        return resp.data
+    except Exception:
+        return None
+
+
+def set_quote_status(quote_id: str, status: str) -> None:
+    import datetime as _dt
+    get_client().table("quotes").update({
+        "status": status,
+        "updated_at": _dt.datetime.utcnow().isoformat(),
+    }).eq("id", quote_id).execute()
+
+
+def mark_quote_converted(quote_id: str, order_id: str = "") -> None:
+    """Record that a quote became an order, so it can't be converted twice."""
+    import datetime as _dt
+    now = _dt.datetime.utcnow().isoformat()
+    get_client().table("quotes").update({
+        "status":             "accepted",
+        "converted_order_id": order_id or None,
+        "converted_at":       now,
+        "updated_at":         now,
+    }).eq("id", quote_id).execute()
+
+
+def delete_quote(quote_id: str) -> None:
+    get_client().table("quotes").delete().eq("id", quote_id).execute()
+
+
+def can_delete_quotes() -> bool:
+    return role_level() >= 3
+
+
+# ── The customer quote portal (see migrate_quote_portal.sql) ────────────────
+# A quote gets a random token; the link containing it is the only way in. The
+# quotes table itself gives the anonymous role nothing — the page can call two
+# functions and nothing else.
+
+def ensure_quote_token(quote_id: str) -> str:
+    """The quote's public token, creating one the first time it is shared.
+
+    256 bits from `secrets`, so it cannot be guessed and does not need to be
+    kept anywhere but in the link itself.
+    """
+    import secrets
+    row = get_quote(quote_id) or {}
+    existing = (row.get("public_token") or "").strip()
+    if existing:
+        return existing
+    token = secrets.token_hex(32)
+    get_client().table("quotes").update(
+        {"public_token": token}).eq("id", quote_id).execute()
+    return token
+
+
+def mark_quote_sent(quote_id: str) -> None:
+    """Record that the link went to the customer, so follow-up can start."""
+    import datetime as _dt
+    now = _dt.datetime.utcnow().isoformat()
+    row = get_quote(quote_id) or {}
+    payload = {"sent_at": row.get("sent_at") or now, "updated_at": now}
+    # Only a quote nobody has answered moves to "sent".
+    if (row.get("status") or "draft") in ("draft", "sent"):
+        payload["status"] = "sent"
+    get_client().table("quotes").update(payload).eq("id", quote_id).execute()
+
+
+def quotes_awaiting_reply(days: int = 0) -> list:
+    """Quotes sent to a customer that have had no answer.
+
+    `days` keeps only those sent at least that long ago — the ones actually
+    worth a phone call rather than the ones sent this morning.
+    """
+    import datetime as _dt
+    try:
+        resp = (get_client().table("quotes")
+                .select("*")
+                .in_("status", list(AWAITING_STATUSES))
+                .order("sent_at", desc=False).limit(500).execute())
+        rows = resp.data or []
+    except Exception:
+        return []
+    if days <= 0:
+        return rows
+    cutoff = _dt.datetime.utcnow() - _dt.timedelta(days=days)
+    out = []
+    for r in rows:
+        stamp = (r.get("sent_at") or "")[:19]
+        try:
+            when = _dt.datetime.fromisoformat(stamp)
+        except ValueError:
+            continue          # never actually sent — nothing to chase
+        if when <= cutoff:
+            out.append(r)
+    return out
+
+
+# ── Phone upload page ────────────────────────────────────────────────────────
+# The page phones open is NOT hosted on Supabase. Supabase serves anything it
+# hosts as text/plain with "Content-Security-Policy: default-src 'none';
+# sandbox" and X-Content-Type-Options: nosniff -- a deliberate anti-XSS policy
+# -- so a page served from an Edge Function or from Storage arrives on the
+# phone as unstyled source with every script blocked. It lives on GitHub Pages
+# (docs/phone/index.html); the app only supplies the URL and key via the QR.
+
+
+def current_anon_key() -> str:
+    """The publishable key this app connected with (safe for the page)."""
+    try:
+        return get_client().supabase_key or ""
+    except Exception:
+        return ""
+
+
+# ── Phone photo inbox (purchase orders sent from a phone) ────────────────────
+# Layout in the private `po-inbox` bucket (see migrate_po_inbox.sql):
+#     <batch-id>/01.jpg, 02.jpg, …
+#     <batch-id>/_complete.json   ← written last by the phone page
+# A batch without the marker is still uploading and must be left alone.
+
+PO_INBOX_BUCKET = "po-inbox"
+_PO_MARKER = "_complete.json"
+
+
+def list_po_inbox_batches(skip: "set[str] | None" = None) -> list:
+    """Return finished batches waiting to be read, oldest first.
+
+    Each entry is {"batch", "photos": [names], "manifest": {...}}. Raises on a
+    connection failure so the caller can stay quiet and retry later.
+
+    `skip` names batches this PC has already read. Checking a batch costs a
+    listing call plus a manifest download, and this runs on a timer, so a
+    batch we are only going to discard is dropped before either of those.
+    """
+    skip = skip or set()
+    store = get_client().storage.from_(PO_INBOX_BUCKET)
+    folders = store.list("") or []
+    batches = []
+    for entry in folders:
+        name = entry.get("name") or ""
+        # Storage lists folders as entries with no id / metadata.
+        if not name or entry.get("id") or name in skip:
+            continue
+        files = store.list(name) or []
+        filenames = [f.get("name") or "" for f in files]
+        if _PO_MARKER not in filenames:
+            continue      # still uploading — leave it for the next sweep
+        photos = sorted(n for n in filenames
+                        if n and not n.startswith("_"))
+        if not photos:
+            continue
+        manifest = {}
+        try:
+            import json as _json
+            raw = store.download(f"{name}/{_PO_MARKER}")
+            manifest = _json.loads(bytes(raw).decode("utf-8"))
+        except Exception:
+            pass
+        batches.append({"batch": name, "photos": photos, "manifest": manifest})
+    batches.sort(key=lambda b: b["batch"])
+    return batches
+
+
+def download_po_photo(batch: str, name: str) -> bytes:
+    """Fetch one photo out of a batch."""
+    return bytes(get_client().storage.from_(PO_INBOX_BUCKET)
+                 .download(f"{batch}/{name}"))
+
+
+def delete_po_batch(batch: str, names: list) -> None:
+    """Remove a batch from the cloud once its photos are safely on this PC."""
+    paths = [f"{batch}/{n}" for n in names] + [f"{batch}/{_PO_MARKER}"]
+    try:
+        get_client().storage.from_(PO_INBOX_BUCKET).remove(paths)
+    except Exception:
+        pass
 
 
 # ── Customer list (for autocomplete) ─────────────────────────────────────────

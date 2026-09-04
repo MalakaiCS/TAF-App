@@ -425,6 +425,16 @@ class LoginWindow(tk.Toplevel):
                 q.put(("status", "Verifying credentials…"))
                 db.sign_in(email, pw)
                 q.put(("status", "Loading profile…"))
+                # Signed in is not the same as staff. An account nobody has
+                # approved can reach nothing, so say so here rather than
+                # opening an app where every screen is mysteriously empty.
+                if not db.is_approved():
+                    q.put(("error",
+                           "This account is waiting to be approved.\n"
+                           "Ask a Director or Admin to approve it in "
+                           "Settings → User Management."))
+                    db.sign_out()
+                    return
                 q.put(("success", None))
             except Exception as exc:
                 msg = str(exc)

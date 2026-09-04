@@ -24,8 +24,16 @@ data_entry_gui.exe
 TAFOrderEntry_Setup.exe
 
 # ── Runtime / user data ─────────────────────────────────────────────────
+# Off Windows there is no APPDATA, so the app keeps these next to itself —
+# which is the repo when it is run from source, or by the smoke test.
 orders/
 draft_order.json
+catalog_cache.json
+last_seen_version.txt
+phone_inbox/
+pending_sync/
+backups/
+invoices/
 
 # ── Test / scratch artifacts ────────────────────────────────────────────
 Test_TEST.xlsx

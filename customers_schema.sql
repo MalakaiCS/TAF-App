@@ -55,7 +55,11 @@ CREATE INDEX IF NOT EXISTS customers_active_idx  ON customers (is_active);
 -- Row-level security
 ALTER TABLE customers ENABLE ROW LEVEL SECURITY;
 
+drop policy if exists "customers_select" on customers;
 CREATE POLICY "customers_select" ON customers FOR SELECT TO authenticated USING (true);
+drop policy if exists "customers_insert" on customers;
 CREATE POLICY "customers_insert" ON customers FOR INSERT TO authenticated WITH CHECK (true);
+drop policy if exists "customers_update" on customers;
 CREATE POLICY "customers_update" ON customers FOR UPDATE TO authenticated USING (true);
+drop policy if exists "customers_delete" on customers;
 CREATE POLICY "customers_delete" ON customers FOR DELETE TO authenticated USING (true);

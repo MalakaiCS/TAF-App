@@ -14,9 +14,26 @@ class OrderService:
     """
 
     def __init__(self, base_dir: Optional[Path] = None):
-        self.base_dir = Path(base_dir) if base_dir else Path.cwd()
+        # Never derive the orders location from the current working directory:
+        # when the app is relaunched by the updater (or any service), cwd can
+        # be C:\Windows\System32 — mkdir there is Access Denied and crashed
+        # startup. Anchor to the app data dir instead (same as the GUI's
+        # APP_DIR): %APPDATA%\TAF Order Entry when frozen, repo dir otherwise.
+        import os, sys
+        if base_dir is not None:
+            self.base_dir = Path(base_dir)
+        elif getattr(sys, "frozen", False):
+            self.base_dir = Path(os.environ.get("APPDATA", Path.home())) / "TAF Order Entry"
+        else:
+            self.base_dir = Path(__file__).resolve().parents[1]
         self.orders_dir = self.base_dir / "orders"
-        self.orders_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            self.orders_dir.mkdir(parents=True, exist_ok=True)
+        except Exception:
+            # Last-ditch fallback — never let folder creation kill startup.
+            import tempfile
+            self.orders_dir = Path(tempfile.gettempdir()) / "TAF Order Entry" / "orders"
+            self.orders_dir.mkdir(parents=True, exist_ok=True)
 
     def save_order_json(self, header: Dict[str, Any], items: List[Dict[str, Any]]) -> Path:
         safe_customer = "".join(c for c in (header.get("Customer Name","") or "") if c.isalnum() or c in (" ","_","-")).strip().replace(" ", "_")
@@ -41,10 +58,12 @@ class OrderService:
                      extra_media_types: List[str] = None,
                      auto_open: bool = True,
                      page_start: int = 1,
-                     grand_total: int = None) -> Dict[str, Any]:
+                     grand_total: int = None,
+                     extra_filter_types: List[str] = None) -> Dict[str, Any]:
         # Validate
         validate_header(header)
-        validate_items(items, extra_media_types=extra_media_types)
+        validate_items(items, extra_media_types=extra_media_types,
+                       extra_filter_types=extra_filter_types)
 
         # Persist
         json_path = None

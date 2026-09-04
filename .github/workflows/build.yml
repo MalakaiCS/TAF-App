@@ -75,10 +75,26 @@ jobs:
         shell: bash
         run: python -m compileall -q modern_order_gui.py pdf_generator.py template_filler.py taf_order_app
 
+      # A published release auto-updates every PC immediately and there is no
+      # staging, so this is the only gate between a broken rule and everyone
+      # using it. Needs no dependencies — see tests/run.py.
+      - name: Tests (fail fast before shipping)
+        run: python tests/run.py
+
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
+
+      # The tests above check the rules; this starts the actual window and
+      # builds every tab and dialog against a stand-in database. It is what
+      # catches a method that was called but never written, or two cards put
+      # in the same grid cell - neither of which shows up in a diff. Runs
+      # once as a manager and once as everyone else, because rights decide
+      # which half of some screens gets built.
+      - name: Smoke test (build every screen)
+        timeout-minutes: 10
+        run: python tests/smoke_gui.py
 
       - name: Write settings.json from secret
         shell: bash
@@ -97,6 +113,30 @@ jobs:
           EOF
           echo "settings.json written (key hidden)."
 
+      - name: Fetch SumatraPDF helper (viewer-free PDF printing)
+        shell: bash
+        run: |
+          # SumatraPDF prints PDFs straight to a named printer with no PDF
+          # viewer. We get it from the pinned `pdf-to-printer` npm package,
+          # which vendors it — the npm registry is reliably reachable from CI
+          # (columbia.edu, the original PDFtoPrinter host, 403s datacenter IPs).
+          TARBALL="https://registry.npmjs.org/pdf-to-printer/-/pdf-to-printer-5.8.0.tgz"
+          for i in 1 2 3; do
+            curl -fL --retry 3 -o p2p.tgz "$TARBALL" && break
+            echo "npm tarball attempt $i failed"; sleep 3
+          done
+          tar xzf p2p.tgz 2>/dev/null || true
+          cp package/dist/SumatraPDF-*.exe SumatraPDF.exe 2>/dev/null || true
+          if [ -f SumatraPDF.exe ] && [ "$(stat -c%s SumatraPDF.exe 2>/dev/null || echo 0)" -gt 1000000 ] \
+             && head -c2 SumatraPDF.exe | grep -q "MZ"; then
+            echo "SumatraPDF.exe bundled ($(stat -c%s SumatraPDF.exe) bytes)."
+          else
+            echo "::error::SumatraPDF.exe not obtained — printing would fall back to the PDF-viewer path. Failing the build so a broken print feature isn't shipped."
+            rm -f SumatraPDF.exe
+            exit 1
+          fi
+          rm -rf package p2p.tgz
+
       - name: Build app (PyInstaller)
         run: pyinstaller --noconfirm --clean TAFOrderEntry.spec
 
@@ -110,14 +150,38 @@ jobs:
         shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Passed through the environment, never interpolated into the script.
+          # Substituting it inline meant notes containing a double quote (or a
+          # newline) broke the shell quoting and the release silently fell back
+          # to auto-generated notes — which is what the app shows as "What's
+          # New", so the actual notes never reached anyone.
+          NOTES: ${{ github.event.inputs.notes }}
         run: |
           TAG="${{ steps.ver.outputs.tag }}"
-          if [ -n "${{ github.event.inputs.notes }}" ]; then
-            gh release create "$TAG" "TAFOrderEntry_Setup.exe" \
-              --title "TAF Order Entry $TAG" --notes "${{ github.event.inputs.notes }}" \
-            || gh release upload "$TAG" "TAFOrderEntry_Setup.exe" --clobber
+          printf '%s' "$NOTES" > release_notes.md
+
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            if [ -s release_notes.md ]; then
+              gh release edit "$TAG" --title "TAF Order Entry $TAG" \
+                --notes-file release_notes.md
+            fi
+          elif [ -s release_notes.md ]; then
+            gh release create "$TAG" --title "TAF Order Entry $TAG" \
+              --notes-file release_notes.md
           else
-            gh release create "$TAG" "TAFOrderEntry_Setup.exe" \
-              --title "TAF Order Entry $TAG" --generate-notes \
-            || gh release upload "$TAG" "TAFOrderEntry_Setup.exe" --clobber
+            gh release create "$TAG" --title "TAF Order Entry $TAG" --generate-notes
+          fi
+
+          gh release upload "$TAG" "TAFOrderEntry_Setup.exe" --clobber
+
+          # The notes are what the app shows after updating, so a release that
+          # lost them is a defect worth failing on rather than shipping quietly.
+          if [ -s release_notes.md ]; then
+            gh release view "$TAG" --json body -q .body > published_notes.txt
+            head -c 60 release_notes.md > expected_head.txt
+            grep -qF "$(cat expected_head.txt)" published_notes.txt || {
+              echo "::error::Release notes were not published correctly."
+              exit 1
+            }
+            echo "Release notes published ($(wc -c < release_notes.md) bytes)."
           fi

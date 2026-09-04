@@ -12,10 +12,12 @@ create table if not exists audit_log (
 
 alter table audit_log enable row level security;
 
+drop policy if exists "Users can insert audit log" on audit_log;
 create policy "Users can insert audit log"
   on audit_log for insert to authenticated
   with check (user_id = auth.uid());
 
+drop policy if exists "Managers can read audit log" on audit_log;
 create policy "Managers can read audit log"
   on audit_log for select to authenticated
   using (
