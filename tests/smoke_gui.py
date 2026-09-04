@@ -16,6 +16,7 @@ reason that has nothing to do with the code.
 """
 from __future__ import annotations
 
+import faulthandler
 import inspect
 import os
 import sys
@@ -26,6 +27,26 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
+
+# Two things that only matter when this hangs, which is exactly when there is
+# no one at the keyboard to ask.
+#
+# Windows block-buffers stdout when it is a pipe, so a run that CI kills on a
+# timeout produces no output at all — not even the banner — and the log says
+# nothing about where it stopped. Line buffering means whatever it reached is
+# already on disk when it dies.
+try:
+    sys.stdout.reconfigure(line_buffering=True)
+    sys.stderr.reconfigure(line_buffering=True)
+except Exception:
+    pass
+
+# And if it is still going after five minutes, print every thread's stack and
+# exit non-zero. A step that blocks runs inside the Tk event loop, so the
+# harness's own watchdog below cannot fire — this is the only thing that
+# still can.
+faulthandler.enable()
+faulthandler.dump_traceback_later(300, exit=True)
 
 # Point the app's storage at a throwaway folder before anything reads it:
 # APP_DIR is decided at import time and a smoke test must not touch, or
@@ -220,6 +241,17 @@ def install_stubs(manager: bool = True):
         setattr(filedialog, name, lambda *a, **k: "")
     filedialog.askopenfilenames = lambda *a, **k: ()
 
+    # A dropdown is the same trap, and a worse one because of where it bites.
+    # On Windows tk_popup goes through TrackPopupMenu, which does not return
+    # until the menu is dismissed — so a menu opened with nobody there hangs
+    # the event loop, and hangs it from *inside*, where the harness's own
+    # watchdog cannot fire. On X11 it returns straight away, so this only
+    # ever showed up on the build machine, as a ten-minute timeout with no
+    # output. Building the menu is what these tests are for; displaying one
+    # is Tk's business.
+    import tkinter as _tk
+    _tk.Menu.tk_popup = lambda self, *a, **k: None
+
     from taf_order_app import updater
     updater.fetch_latest = lambda *a, **k: {"tag_name": "v0.0.0", "assets": []}
     updater.latest_release = lambda *a, **k: ("0.0.0", "", "")
@@ -272,10 +304,19 @@ def run(role: str = "manager") -> int:
             root.quit()
             return
         label, step = steps.pop(0)
+        # Said before it runs, not after. A step that blocks runs inside the
+        # event loop, so nothing else gets to report it — the last line in the
+        # log has to be the answer to "which one?".
+        if not label.startswith("banner:"):
+            print(f"  · {label}")
+        started = time.monotonic()
         try:
             step()
         except Exception as exc:
             _fail(label, exc)
+        took = time.monotonic() - started
+        if took > 2.0:
+            print(f"    ^ took {took:.1f}s")
         root.after(80, _drive)
 
     root.after(50, _drive)
@@ -415,11 +456,19 @@ def _steps(app, gui, root):
             raise AssertionError("clicking the heading again did not clear")
     add("previous orders: ticking", _ticking)
 
-    def _bulk_status_says_what_happened():
-        """The bug: every write was wrapped in `except Exception: pass`, so a
-        refused one was reported as saved and the list came back unchanged."""
+    # The bug: every write was wrapped in `except Exception: pass`, so a
+    # refused one was reported as saved and the list came back unchanged.
+    #
+    # The writes run off the main thread and report back with after(), so
+    # this is a step to start it and a step to check it. Waiting inside one
+    # step cannot work: steps run *in* the event loop, so a step that sits
+    # there is a step that stops the callback it is waiting for from ever
+    # arriving. The gap between two steps is where the loop actually runs.
+    told: list = []
+    saved: dict = {}
+
+    def _refuse_every_write():
         app._show_tab("prev_orders")
-        root.update()
         rows = [r for r in app._displayed_orders
                 if r.get("source") == "db" and r.get("db_id")]
         if not rows:
@@ -428,33 +477,30 @@ def _steps(app, gui, root):
         def refuse(_oid, _status):
             raise RuntimeError("new row violates row-level security policy")
 
-        told = []
-        real_set = gui._db.set_order_status
-        real_err = gui.messagebox.showerror
+        saved["set"] = gui._db.set_order_status
+        saved["err"] = gui.messagebox.showerror
         gui._db.set_order_status = refuse
-        gui.messagebox.showerror = lambda t, m: told.append(m)
-        try:
-            app._apply_status_to(rows, "Complete")
-            for _ in range(60):                 # it runs off the main thread
-                root.update()
-                if told:
-                    break
-                time.sleep(0.05)
-        finally:
-            gui._db.set_order_status = real_set
-            gui.messagebox.showerror = real_err
+        gui.messagebox.showerror = lambda _t, m: told.append(m)
+        app._apply_status_to(rows, "Complete")
+    add("previous orders: refuse every write", _refuse_every_write)
 
-        if not told:
-            raise AssertionError(
-                "the database refused every write and the app said nothing")
-        if "row-level security" not in told[0]:
-            raise AssertionError(f"it did not say why: {told[0]!r}")
-        if "0 of" not in app.status_var.get():
-            raise AssertionError(
-                f"the status line claims work that did not happen: "
-                f"{app.status_var.get()!r}")
-        app._clear_ticks()
-    add("previous orders: a refused bulk change is reported", _bulk_status_says_what_happened)
+    def _the_refusal_is_reported():
+        try:
+            if not told:
+                raise AssertionError(
+                    "the database refused every write and the app said nothing")
+            if "row-level security" not in told[0]:
+                raise AssertionError(f"it did not say why: {told[0]!r}")
+            if "0 of" not in app.status_var.get():
+                raise AssertionError(
+                    f"the status line claims work that did not happen: "
+                    f"{app.status_var.get()!r}")
+        finally:
+            gui._db.set_order_status = saved.get("set", gui._db.set_order_status)
+            gui.messagebox.showerror = saved.get("err", gui.messagebox.showerror)
+            app._clear_ticks()
+    add("previous orders: a refused bulk change is reported",
+        _the_refusal_is_reported)
 
     def _pills(widget, found):
         if isinstance(widget, gui.PillButton):
