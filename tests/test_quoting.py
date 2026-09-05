@@ -566,6 +566,18 @@ def test_a_menu_button_can_be_quiet_too():
     assert "variant" in "".join(sig)
 
 
+def test_a_tab_built_in_the_background_does_not_take_the_screen():
+    """Tabs share one grid cell and the visible one is whichever is on top.
+    Gridding puts a frame on top, and the tabs are built one per idle tick
+    after start-up — so the last one built covered the Dashboard and signing
+    in showed Settings."""
+    src = _gui_source()
+    fn = src.split("def _ensure_tab_built")[1].split("\n    def ")[0]
+    assert "tkraise()" in fn, \
+        "nothing puts the chosen tab back on top after a background build"
+    assert "_active_tab" in fn
+
+
 def test_asking_for_slate_gets_the_quiet_weight():
     """Slate was what a button got for not being the main action. Converting
     them one at a time left most of them behind, so the rule lives in

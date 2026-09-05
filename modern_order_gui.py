@@ -4775,8 +4775,17 @@ class ModernOrderApp(tk.Frame):
     def _ensure_tab_built(self, key: str):
         """Construct a tab's widgets on first access (lazy building)."""
         builder = getattr(self, "_lazy_tab_builders", {}).pop(key, None)
-        if builder is not None:
-            builder()
+        if builder is None:
+            return
+        builder()
+        # Every tab is gridded into the same cell and the one you see is
+        # whichever is on top. Gridding puts a frame on top — so a tab built
+        # quietly in the background covers the one being looked at, and you
+        # sign in to the Dashboard and get Settings, because Settings is the
+        # last one the prebuilder gets to.
+        active = getattr(self, "_active_tab", None)
+        if active and active != key and active in self._tab_frames:
+            self._tab_frames[active].tkraise()
 
     def _prebuild_next_tab(self):
         """Build one not-yet-built tab per idle tick, then reschedule."""

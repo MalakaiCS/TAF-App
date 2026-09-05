@@ -338,6 +338,53 @@ def _steps(app, gui, root):
     def add(label, fn):
         steps.append((label, fn))
 
+    def _topmost_tab():
+        """Which tab a person is actually looking at.
+
+        Every tab is gridded into the same cell, so the visible one is
+        whichever is top of the stacking order — not whichever the app has
+        recorded as active. winfo_children() is in stacking order, lowest
+        first, so the last tab frame in it is the one on screen.
+        """
+        by_path = {str(f): k for k, f in app._tab_frames.items()}
+        stack = [by_path[str(w)] for w in app.content.winfo_children()
+                 if str(w) in by_path]
+        return stack[-1] if stack else None
+
+    def _sign_in_lands_on_the_dashboard():
+        """The tabs are built one at a time in the background after start-up,
+        and gridding a frame puts it on top of the one already there. So the
+        last tab built covered the Dashboard, and signing in showed Settings.
+
+        This has to run first and drain the builders the way the background
+        does. Every step after this one shows tabs by hand, which hides it.
+        """
+        if _topmost_tab() != "dashboard":
+            raise AssertionError(
+                f"before any tab is built, the screen already shows "
+                f"{_topmost_tab()!r}")
+        builders = getattr(app, "_lazy_tab_builders", {})
+        while builders:
+            app._ensure_tab_built(next(iter(builders)))
+            on_screen = _topmost_tab()
+            if on_screen != "dashboard":
+                raise AssertionError(
+                    f"building the tabs in the background left {on_screen!r} "
+                    f"on screen; the person chose 'dashboard'")
+        if app._active_tab != "dashboard":
+            raise AssertionError(
+                f"the app thinks it is on {app._active_tab!r}")
+    add("sign-in lands on the Dashboard", _sign_in_lands_on_the_dashboard)
+
+    def _switching_tabs_sticks():
+        """And a tab chosen by hand must survive the next background build."""
+        for key in list(app._tab_frames):
+            app._show_tab(key)
+            if _topmost_tab() != key:
+                raise AssertionError(
+                    f"chose {key!r}, screen shows {_topmost_tab()!r}")
+    add("every tab shows when chosen", _switching_tabs_sticks)
+
     add("banner: tabs", lambda: print("Building every tab…"))
     for key in list(getattr(app, "_lazy_tab_builders", {})):
         add(f"build tab: {key}", lambda k=key: app._ensure_tab_built(k))
