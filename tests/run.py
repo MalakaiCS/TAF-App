@@ -19,7 +19,8 @@ sys.path.insert(0, str(ROOT))
 MODULES = ["tests.test_rules", "tests.test_db_and_updates", "tests.test_orders",
            "tests.test_invoicing_and_backup", "tests.test_scanning",
            "tests.test_migrations", "tests.test_quoting",
-           "tests.test_bulk_status"]
+           "tests.test_bulk_status",
+           "tests.test_line_progress"]
 
 
 def main() -> int:

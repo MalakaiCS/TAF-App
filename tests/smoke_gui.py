@@ -166,6 +166,12 @@ PERMISSIONS = ("can_manage_stock_alerts", "can_manage_prices",
                "can_edit_catalog", "can_view_audit_log", "is_approved",
                "is_manager", "is_admin")
 
+# Functions in db.py that work something out rather than fetch it. They touch
+# no client, so replacing them with a canned answer tests nothing and hides
+# what the screen really does — line_progress stubbed to an empty tuple made
+# "3 of 8 made" unpack a pair from nothing.
+PURE = ("line_progress", "with_line_ids", "item_signature")
+
 ROLES = ("manager", "employee")
 
 # Anything not named above answers from its own return annotation, so a new
@@ -211,6 +217,9 @@ class StubDB:
             cache[name] = lambda *a, _v=allow, **k: _v
             return cache[name]
         value = getattr(object.__getattribute__(self, "_real"), name)
+        if name in PURE:
+            cache[name] = value            # the real one — it only computes
+            return value
         if inspect.isfunction(value) or inspect.isbuiltin(value):
             default = _default_for(value)
             def stub(*a, _d=default, **k):

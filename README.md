@@ -195,6 +195,7 @@ just run it — nothing is lost and nothing is duplicated.
 | 21 | `migrate_scanning.sql` | Stock counts that can't be lost | recommended |
 | 22 | `migrate_avatars.sql` | Profile pictures on accounts | optional |
 | 23 | `migrate_bulk_status.sql` | Marking a batch of orders complete | recommended |
+| 24 | `migrate_line_progress.sql` | Ticking an order off line by line | recommended |
 
 **Step 16 is the one that matters most.** Every policy in the older scripts is
 `TO authenticated USING (true)` — meaning *anyone Supabase counts as signed

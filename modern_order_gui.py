@@ -110,6 +110,16 @@ TICK_FULL  = "☑"
 TICK_SOME  = "▪"        # some of what's on screen, not all
 
 
+def _items_cell(row: dict) -> str:
+    """The # Items column: how many lines, and how many are made.
+
+    A bare count never said whether anything had been started. "3/8" does,
+    and it costs the list nothing — the database counts them alongside the
+    total.
+    """
+    return _db.progress_cell(row.get("n_items"), row.get("n_made"))
+
+
 def due_bucket(row: dict, today=None) -> str:
     """Where an order sits against its due date.
 
@@ -13669,7 +13679,7 @@ class ModernOrderApp(tk.Frame):
                 due_lbl,
                 status_lbl,
                 printed_lbl,
-                row["n_items"],
+                _items_cell(row),
                 row.get("created_by", ""),
                 src_label,
             ))
@@ -15002,11 +15012,12 @@ class ModernOrderApp(tk.Frame):
         tbl_wrap.rowconfigure(0, weight=1)
         tbl_wrap.columnconfigure(0, weight=1)
 
-        cols = ("qty", "item", "size", "media", "notes")
+        cols = ("made", "qty", "item", "size", "media", "notes")
         tree = ttk.Treeview(tbl_wrap, columns=cols, show="headings",
                             style="TAF.Treeview")
         tree.grid(row=0, column=0, sticky="nsew")
         for col, (hd_txt, wd, anc, stretch) in {
+            "made":  ("",            38, "center", False),
             "qty":   ("Qty",         60, "center", False),
             "item":  ("Item",       230, "w",      True),
             "size":  ("Size (mm)",  160, "center", False),
@@ -15014,9 +15025,10 @@ class ModernOrderApp(tk.Frame):
             "notes": ("Notes",      180, "w",      True),
         }.items():
             tree.heading(col, text=hd_txt, anchor="center" if anc == "center" else "w")
-            tree.column(col, width=px(wd), anchor=anc, minwidth=px(40), stretch=stretch)
+            tree.column(col, width=px(wd), anchor=anc, minwidth=px(38), stretch=stretch)
         tree.tag_configure("even", background=CRE)
         tree.tag_configure("odd",  background=CCA)
+        tree.tag_configure("made", background="#EAF7EE", foreground="#1D6F3D")
         vsb = ttk.Scrollbar(tbl_wrap, orient="vertical", command=tree.yview)
         vsb.grid(row=0, column=1, sticky="ns")
         tree.configure(yscrollcommand=vsb.set)
@@ -15024,8 +15036,55 @@ class ModernOrderApp(tk.Frame):
                            "Nothing was saved against it.")
 
         for i, it in enumerate(items):
-            tree.insert("", "end", tags=("even" if i % 2 == 0 else "odd",),
-                        values=self._order_line_cells(it))
+            done = bool(it.get("made"))
+            tree.insert("", "end", iid=str(i),
+                        tags=("made",) if done else
+                             ("even" if i % 2 == 0 else "odd",),
+                        values=((TICK_FULL if done else TICK_EMPTY,)
+                                + self._order_line_cells(it)))
+
+        # An order is eight filters, and by Tuesday three of them are made.
+        # Which three is the thing nobody could record until now.
+        made_n, total_n = _db.line_progress(items)
+        prog = tk.Frame(tbl_wrap, bg=CCA, padx=px(10), pady=px(6))
+        prog.grid(row=1, column=0, columnspan=2, sticky="ew")
+        prog_lbl = tk.Label(prog, bg=CCA, fg=CMU, font=F_SM,
+                            text=self._line_progress_text(made_n, total_n))
+        prog_lbl.pack(side="left")
+
+        def _toggle_line(event):
+            if tree.identify_region(event.x, event.y) != "cell":
+                return None
+            if tree.identify_column(event.x) != "#1":       # the tick column
+                return None
+            iid = tree.identify_row(event.y)
+            if not iid:
+                return None
+            line = items[int(iid)]
+            want = not bool(line.get("made"))
+            db_id = row.get("db_id")
+            if not db_id:
+                messagebox.showinfo(
+                    "Mark as made",
+                    "This order is only on this PC, so there is nowhere to "
+                    "record which lines are made.", parent=dlg)
+                return "break"
+            try:
+                _db.set_line_made(str(db_id), line.get(_db.LINE_ID) or "",
+                                  want, by=_db.current_full_name()
+                                  or _db.current_username())
+            except Exception as exc:
+                messagebox.showerror("Mark as made", str(exc), parent=dlg)
+                return "break"
+            line["made"] = want
+            tree.set(iid, "made", TICK_FULL if want else TICK_EMPTY)
+            tree.item(iid, tags=("made",) if want else
+                      ("even" if int(iid) % 2 == 0 else "odd",))
+            made_now, total_now = _db.line_progress(items)
+            prog_lbl.config(text=self._line_progress_text(made_now, total_now))
+            return "break"
+
+        tree.bind("<Button-1>", _toggle_line, add=False)
 
         # ── Notes ─────────────────────────────────────────────────────────
         side = tk.Frame(split, bg=CCA, highlightbackground=CBR,
@@ -15089,6 +15148,14 @@ class ModernOrderApp(tk.Frame):
                                 fg=CTX, font=F_BODY, justify="left", anchor="w")
             text_lbl.pack(anchor="w", fill="x")
             wrapping.append(text_lbl)
+
+    @staticmethod
+    def _line_progress_text(made: int, total: int) -> str:
+        if not total:
+            return "No lines on this order"
+        if made == total:
+            return f"All {total} lines made"
+        return f"{made} of {total} lines made  ·  {total - made} to go"
 
     @staticmethod
     def _order_line_cells(it) -> tuple:

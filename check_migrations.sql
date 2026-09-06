@@ -94,7 +94,11 @@ WITH checks(step, file, purpose, needed, present) AS (VALUES
 
   (23, 'migrate_bulk_status.sql', 'Marking a batch of orders complete without losing notes', 'recommended',
       EXISTS (SELECT 1 FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace
-               WHERE n.nspname='public' AND p.proname='merge_order_header'))
+               WHERE n.nspname='public' AND p.proname='merge_order_header')),
+
+  (24, 'migrate_line_progress.sql', 'Ticking an order off one line at a time', 'recommended',
+      EXISTS (SELECT 1 FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace
+               WHERE n.nspname='public' AND p.proname='set_order_line_made'))
 )
 SELECT step,
        CASE WHEN present THEN 'already done' ELSE 'RUN THIS' END AS status,

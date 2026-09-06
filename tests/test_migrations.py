@@ -43,6 +43,7 @@ ORDER = [
     "migrate_scanning.sql",
     "migrate_avatars.sql",
     "migrate_bulk_status.sql",
+    "migrate_line_progress.sql",
 ]
 
 

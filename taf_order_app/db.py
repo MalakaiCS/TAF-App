@@ -298,11 +298,114 @@ def reload_profile() -> None:
 
 # ── Orders ────────────────────────────────────────────────────────────────────
 
+LINE_ID = "line_id"
+
+
+def with_line_ids(items: list) -> list:
+    """Give every line an id of its own, keeping any it already has.
+
+    Lines live in a JSON array on the order, so the only thing naming one is
+    where it sits in that list. That is fine until someone edits the order —
+    insert a line at the top and every line below it is now a different
+    line, which would move a tick from the item that was made to the one
+    that wasn't. An id is the line, wherever it ends up in the list.
+    """
+    import uuid as _uuid
+    out = []
+    for item in items or []:
+        line = dict(item)
+        if not line.get(LINE_ID):
+            line[LINE_ID] = _uuid.uuid4().hex
+        out.append(line)
+    return out
+
+
+def line_progress(items: list) -> tuple:
+    """(made, total) for one order's lines."""
+    lines = items or []
+    return sum(1 for i in lines if i.get("made")), len(lines)
+
+
+def progress_cell(n_items, n_made) -> str:
+    """How far along an order is, in the width of a table column.
+
+    Lives here rather than in the window because the customer portal will
+    want to say the same thing about the same order, and two places deciding
+    separately what "half made" looks like is how they end up disagreeing.
+
+    Nothing started reads as the plain count it always did — so does a
+    database without the migration, where n_made comes back as None.
+    """
+    total = n_items or 0
+    if not total or n_made is None:
+        return str(total)
+    if n_made <= 0:
+        return str(total)
+    if n_made >= total:
+        return f"✓ {total}"
+    return f"{n_made}/{total}"
+
+
+def set_line_made(order_id: str, line_id: str, made: bool = True,
+                  by: str = "") -> None:
+    """Mark one line of an order as made, or unmake it.
+
+    Server-side, by id, for the same reason the header merge is: two people
+    on two benches ticking two different lines of the same order is the
+    normal case, not a rare one. Read the whole array, change one entry and
+    write it all back, and whoever saves second erases the other's tick.
+
+    Falls back to doing it here when migrate_line_progress.sql has not been
+    run — still raising if it does not land, which is the half that matters.
+    """
+    import datetime as _dt
+    stamp = _dt.datetime.utcnow().strftime("%d/%m/%Y %H:%M") if made else ""
+    try:
+        resp = get_client().rpc("set_order_line_made", {
+            "p_order_id": str(order_id),
+            "p_line_id":  str(line_id),
+            "p_made":     bool(made),
+            "p_by":       by,
+            "p_at":       stamp,
+        }).execute()
+        if resp.data:
+            return
+        raise RuntimeError(
+            "That line was not found on the order. It may have been "
+            "changed or removed since this screen was opened.")
+    except Exception as exc:
+        if "set_order_line_made" not in str(exc):
+            raise
+        # PostgREST doesn't know the function: migration not applied yet.
+
+    resp = (get_client().table("orders")
+            .select("items").eq("id", order_id).single().execute())
+    items = list((resp.data or {}).get("items") or [])
+    hit = False
+    for line in items:
+        if str(line.get(LINE_ID)) == str(line_id):
+            line["made"] = bool(made)
+            line["made_by"] = by if made else ""
+            line["made_at"] = stamp
+            hit = True
+    if not hit:
+        raise RuntimeError(
+            "That line was not found on the order. It may have been "
+            "changed or removed since this screen was opened.")
+    out = (get_client().table("orders")
+           .update({"items": items}).eq("id", order_id).execute())
+    if not (out.data or []):
+        raise RuntimeError(
+            "The database did not change that order. It may have been "
+            "deleted, or your account may not be allowed to change it.")
+
+
 def save_order(header: dict, items: list, order_type: str) -> "str | None":
     """Insert an order and return its new id (or None if it can't be read)."""
     user = _current_user
     if not user:
         raise RuntimeError("Not logged in.")
+    items = with_line_ids(items)
     prof = current_profile()
     data = {
         "user_id":       str(user.id),
@@ -488,13 +591,32 @@ def get_order(order_id: str) -> "dict | None":
 
 
 def get_order_items(order_id: str) -> list:
-    """One order's line items, fetched when something actually needs them."""
+    """One order's line items, fetched when something actually needs them.
+
+    Orders written before lines had ids get them here, so an order taken
+    last month can still be ticked off line by line. The ids are written
+    back the first time, once: an id made up fresh on every read would be a
+    different id every time, and a tick would go looking for one the
+    database has never seen.
+    """
     try:
         resp = (get_client().table("orders")
                 .select("items").eq("id", order_id).single().execute())
-        return (resp.data or {}).get("items") or []
+        stored = (resp.data or {}).get("items") or []
     except Exception:
         return []
+
+    items = with_line_ids(stored)
+    if any(not line.get(LINE_ID) for line in stored):
+        try:
+            get_client().table("orders").update(
+                {"items": items}).eq("id", order_id).execute()
+        except Exception:
+            # Read-only account, or no connection. The lines still come back
+            # with ids so the screen draws; a tick will say it could not find
+            # the line, which is true and tells them to reopen it.
+            pass
+    return items
 
 
 def media_usage_since(since) -> dict:
