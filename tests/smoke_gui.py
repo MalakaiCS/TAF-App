@@ -566,6 +566,41 @@ def _steps(app, gui, root):
             _pills(child, found)
         return found
 
+    def _settings_rows_are_one_per_widget():
+        """The rows in Settings are written out by hand, so inserting a group
+        in the middle is how two cards end up stacked in one cell with one of
+        them invisible. Only a real window can tell a card gridded into the
+        settings frame from one nested inside another card, which is why this
+        lives here rather than in a source check."""
+        frame = app._tab_frames.get("settings")
+        if frame is None:
+            raise AssertionError("Settings was never built")
+        # The scrolling frame everything is gridded into.
+        holder = None
+        for kid in frame.winfo_children():
+            for inner in [kid] + list(kid.winfo_children()):
+                if [w for w in inner.winfo_children() if w.grid_info()]:
+                    holder = inner
+        if holder is None:
+            raise AssertionError("could not find the settings frame")
+        seen = {}
+        for w in holder.winfo_children():
+            info = w.grid_info()
+            if not info:
+                continue
+            row = int(info.get("row", -1))
+            if row in seen:
+                raise AssertionError(
+                    f"two things share row {row} of Settings: "
+                    f"{seen[row]} and {w.winfo_class()} — one is invisible")
+            seen[row] = w.winfo_class()
+        if len(seen) < 10:
+            raise AssertionError(
+                f"only found {len(seen)} rows in Settings; the check is "
+                f"looking at the wrong frame")
+    add("settings: nothing is hidden under anything else",
+        _settings_rows_are_one_per_widget)
+
     def _button_weights():
         """Supporting actions are quiet, and each row of buttons has a point.
 

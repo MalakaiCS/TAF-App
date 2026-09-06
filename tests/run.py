@@ -21,7 +21,8 @@ MODULES = ["tests.test_rules", "tests.test_db_and_updates", "tests.test_orders",
            "tests.test_migrations", "tests.test_quoting",
            "tests.test_bulk_status",
            "tests.test_line_progress",
-           "tests.test_recurring_jobs"]
+           "tests.test_recurring_jobs",
+           "tests.test_customer_emails"]
 
 
 def main() -> int:

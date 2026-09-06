@@ -541,13 +541,16 @@ def test_there_is_one_card_style():
 def test_settings_is_grouped_and_nothing_shares_a_cell():
     src = _gui_source()
     block = src.split("def _build_settings_tab")[1].split("\n    def _local_storage_info")[0]
-    for heading in ("Filters and media", "Products and stock", "Printing",
-                    "This computer", "Accounts", "About"):
+    headings = ("Filters and media", "Products and stock", "Printing",
+                "This computer", "Accounts", "Emails to customers", "About")
+    for heading in headings:
         assert heading in block, f"Settings has no {heading!r} group"
     # Every widget put straight into the settings frame gets its own row.
     rows = [int(m) for m in re.findall(r"\.grid\(row=(\d+), column=0, sticky=\"w\",\n"
                                        r"\s+pady=\(px\(18\)", block)]
-    assert len(rows) == len(set(rows)) == 6, rows
+    assert len(rows) == len(set(rows)) == len(headings), rows
+
+
 
 
 def test_the_settings_frame_sits_where_every_other_tab_does():

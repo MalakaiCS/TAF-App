@@ -255,6 +255,42 @@ where anyone could extract it.
 Costs a few cents per page. Skip this and the rest of the app works normally —
 the Import button just explains that the reader isn't set up yet.
 
+### Enable emails to customers (optional)
+
+Sends a customer an order received slip when their order is generated, with a
+link to follow the job in their portal. **It ships switched off**, and the
+switch is company-wide — Settings → Emails to customers, manager only. Until
+somebody turns it on, nothing is sent and generating an order is unchanged.
+
+The mail provider's key lives as a function secret for the same reason the
+Anthropic one does: anything in the installer can be pulled back out and used
+to send mail as Total Air Filtration.
+
+1. Get an API key from a mail provider — the function is written for
+   [Resend](https://resend.com), whose free tier is ample for this. You'll need
+   a domain you can verify, so the mail comes from your own address rather than
+   a stranger's.
+2. Deploy the function and give it the key:
+
+   ```bash
+   supabase secrets set RESEND_API_KEY=re_...
+   supabase secrets set MAIL_FROM="Total Air Filtration <orders@yourdomain>"
+   supabase secrets set PORTAL_URL="https://malakaics.github.io/TAF-App/portal/"
+   supabase functions deploy send-order-email
+   ```
+
+   No terminal? **Edge Functions → Deploy a new function**, name it
+   `send-order-email`, paste in
+   `supabase/functions/send-order-email/index.ts`, then add the three secrets
+   under **Edge Functions → Secrets**.
+3. Turn it on in Settings when you're ready.
+
+A customer with no email address on their record is skipped, and the order is
+unaffected either way — an order that couldn't be confirmed by email is still
+an order. The switch is checked again inside the function before anything is
+sent, so a PC that has been left open since yesterday can't send on
+yesterday's answer.
+
 ### Enable sending from a phone (optional)
 
 Lets staff photograph a purchase order on their phone and have it arrive in the

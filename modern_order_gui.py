@@ -28,6 +28,7 @@ from taf_order_app import part_numbers as _pn
 from taf_order_app import stock_usage as _stock_usage
 from taf_order_app import pricing as _pricing
 from taf_order_app import delivery as _delivery
+from taf_order_app import emails as _emails
 from taf_order_app import backup as _backup
 from taf_order_app import labels as _labels
 from taf_order_app.bag_filler import (
@@ -518,6 +519,10 @@ PO_CORRECTIONS = {"filter_types": {}, "media_types": {}}
 # never recovers. Shared through the catalogue, so it is switched on once for
 # the company rather than on each PC.
 STOCK_SETTINGS = {"auto_deduct": False}
+# Shared with every PC, and off until somebody turns it on. Loaded from the
+# catalogue at start-up like the rest, so nothing reaches for the network
+# while a screen is being drawn.
+EMAIL_SETTINGS = dict(_emails.DEFAULTS)
 
 # Kinds of thing this business sells, beyond the filters the app was built
 # around. A quote has to be able to carry a bag filter, a roll of media, a
@@ -581,6 +586,11 @@ def _apply_catalog(data: dict) -> None:
     stock = data.get("stock_settings")
     if isinstance(stock, dict) and "auto_deduct" in stock:
         STOCK_SETTINGS["auto_deduct"] = bool(stock["auto_deduct"])
+    mail = data.get(_emails.SETTINGS_KEY)
+    if isinstance(mail, dict):
+        EMAIL_SETTINGS.update(mail)
+        EMAIL_SETTINGS["order_received"] = _emails._really_on(
+            mail.get("order_received"))
     kinds = data.get("product_types")
     if isinstance(kinds, list) and kinds:
         cleaned = [{"name": str(k.get("name", "")).strip(),
@@ -10025,12 +10035,47 @@ class ModernOrderApp(tk.Frame):
         tk.Label(frm, text="Accounts", bg=CBG, fg=CMU, font=F_BOLD,
                  anchor="w").grid(row=15, column=0, sticky="w",
                                   pady=(px(18), px(4)))
-        tk.Label(frm, text="About", bg=CBG, fg=CMU, font=F_BOLD,
+        tk.Label(frm, text="Emails to customers", bg=CBG, fg=CMU, font=F_BOLD,
                  anchor="w").grid(row=18, column=0, sticky="w",
                                   pady=(px(18), px(4)))
+        tk.Label(frm, text="About", bg=CBG, fg=CMU, font=F_BOLD,
+                 anchor="w").grid(row=20, column=0, sticky="w",
+                                  pady=(px(18), px(4)))
+
+        # ── Emails to customers (row 19) ──────────────────────────────────
+        em_card = tk.Frame(frm, bg=CCA, relief="flat", bd=0,
+                           highlightthickness=1, highlightbackground=CBR,
+                           padx=16, pady=12)
+        em_card.grid(row=19, column=0, sticky="ew", pady=(12, 0))
+        tk.Label(em_card, text="Emails to customers", bg=CCA, fg=CA,
+                 font=F_SEC, anchor="w").pack(anchor="w")
+        tk.Label(em_card,
+                 text="When an order is generated, send the customer a "
+                      "receipt for it with a link to follow the job.\n"
+                      "This is set for the whole company, not just this PC.",
+                 bg=CCA, fg=CMU, font=F_SM, justify="left",
+                 anchor="w").pack(anchor="w", pady=(2, 8))
+
+        self._email_on_var = tk.BooleanVar(
+            value=bool(EMAIL_SETTINGS.get("order_received")))
+        self._email_chk = tk.Checkbutton(
+            em_card, text="  Send an order received slip",
+            variable=self._email_on_var, command=self._toggle_customer_emails,
+            bg=CCA, fg=CTX, font=F_BODY, activebackground=CCA,
+            selectcolor=CCA, anchor="w", relief="flat", bd=0,
+            highlightthickness=0, cursor="hand2")
+        self._email_chk.pack(anchor="w")
+
+        self._email_note_lbl = tk.Label(
+            em_card, text="", bg=CCA, fg=CMU, font=F_SM, justify="left",
+            anchor="w", wraplength=px(640))
+        self._email_note_lbl.pack(anchor="w", pady=(px(6), 0))
+        self._refresh_email_note()
+        if not _emails.can_change():
+            self._email_chk.config(state="disabled")
         # row 2 – Software Update  (always visible to everyone)
         upd_card = tk.Frame(frm, bg=CCA, relief="flat", bd=0, highlightthickness=1, highlightbackground=CBR, padx=16, pady=12)
-        upd_card.grid(row=19, column=0, sticky="ew", pady=(12, 0))
+        upd_card.grid(row=21, column=0, sticky="ew", pady=(12, 0))
 
         upd_top = tk.Frame(upd_card, bg=CCA)
         upd_top.pack(fill="x")
@@ -11093,6 +11138,47 @@ class ModernOrderApp(tk.Frame):
         W, H = 520, 430
         dlg.geometry(f"{W}x{H}+{self.master.winfo_rootx() + 120}"
                      f"+{self.master.winfo_rooty() + 80}")
+
+    def _refresh_email_note(self):
+        """Say plainly what the switch is doing, and what else is needed."""
+        lbl = getattr(self, "_email_note_lbl", None)
+        if lbl is None or not lbl.winfo_exists():
+            return
+        if not EMAIL_SETTINGS.get("order_received"):
+            text = ("Off. Nothing is sent to customers, and generating an "
+                    "order works exactly as it does now.")
+        else:
+            text = ("On. A customer with an email address on their record "
+                    "gets a receipt when their order is generated. Anyone "
+                    "without one is skipped, and the order is unaffected "
+                    "either way.\n"
+                    "This needs the 'send-order-email' function deployed to "
+                    "Supabase with a mail provider key set — until it is, "
+                    "orders still generate and the app says nothing was "
+                    "sent.")
+        if not _emails.can_change():
+            text += "\nOnly a manager can change this."
+        lbl.config(text=text)
+
+    def _toggle_customer_emails(self):
+        """Turn the order received slip on or off for the whole company."""
+        on = bool(self._email_on_var.get())
+        try:
+            _emails.set_on(on)
+        except Exception as exc:
+            # Put the tick back where it was: a switch that looks flipped but
+            # saved nowhere is worse than one that refused.
+            self._email_on_var.set(not on)
+            messagebox.showerror(
+                "Emails to customers",
+                f"That could not be saved for everyone, so nothing has "
+                f"changed:\n\n{exc}")
+            return
+        EMAIL_SETTINGS["order_received"] = on
+        self._refresh_email_note()
+        self.status_var.set(
+            "Customer emails are on — a receipt goes out with each order."
+            if on else "Customer emails are off. Nothing is sent.")
 
     def _toggle_auto_deduct(self):
         """Turn automatic stock deduction on or off for the whole company."""
@@ -13095,6 +13181,35 @@ class ModernOrderApp(tk.Frame):
         except Exception:
             pass
 
+    def _email_order_received(self, order_id) -> str:
+        """Tell the customer we have it. Returns a line to show, or "".
+
+        Runs on the generating thread and never raises, for the same reason
+        the stock deduction doesn't: an order that could not be confirmed by
+        email is still an order, and a customer who has to be rung instead is
+        a far smaller problem than a job that did not get made.
+
+        Silent when it is switched off, which is how it ships. Nobody wants a
+        system that starts writing to their customers the day it is
+        installed.
+        """
+        if not order_id:
+            return ""
+        try:
+            # The cached answer, not a fresh look — this runs in the middle of
+            # generating an order and must not wait on the network to decide
+            # not to send anything. The function checks the real setting
+            # again before any mail actually leaves.
+            if not EMAIL_SETTINGS.get("order_received"):
+                return ""
+            out = _emails.send_order_received(str(order_id))
+        except Exception as exc:
+            return f"Could not send the confirmation — {exc}"
+        if out.get("sent"):
+            return f"Order received slip sent to {out.get('to', 'the customer')}."
+        reason = out.get("reason") or "not sent"
+        return f"No confirmation sent — {reason}"
+
     def _deduct_stock_for_order(self, header, items) -> str:
         """Take an order's materials out of stock. Returns a line to show.
 
@@ -13329,6 +13444,11 @@ class ModernOrderApp(tk.Frame):
                         f"Type: {order_type}  Items: {len(all_items)}")
                     self._last_stock_note = self._deduct_stock_for_order(
                         header, all_items)
+                    # Off unless somebody has switched it on, and never a
+                    # reason for the order itself to fail: an order that was
+                    # not confirmed by email is still an order.
+                    self._last_email_note = self._email_order_received(
+                        new_order_id)
                 except Exception as exc:
                     # Couldn't reach the shared database — queue the order
                     # locally and let the background sync push it through
@@ -13380,6 +13500,9 @@ class ModernOrderApp(tk.Frame):
                 stock_note = getattr(self, "_last_stock_note", "")
                 if stock_note:
                     msg += (("\n\n" if msg else "") + f"Stock:\n  {stock_note}")
+                email_note = getattr(self, "_last_email_note", "")
+                if email_note:
+                    msg += (("\n\n" if msg else "") + f"Email:\n  {email_note}")
 
                 # Send to the printer on a background thread so the UI stays
                 # responsive while the job spools (printing can take seconds).
