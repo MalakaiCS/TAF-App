@@ -47,6 +47,12 @@ log, stock management and a customer database.
 - **Products** — the priced catalogue: search it, correct a price, add a
   product, import price spreadsheets. The part numbers here are the item codes
   in Xero.
+- **Margin** — what a job costs next to what it sells for. A cost against a
+  part number and a cost per square metre for the media, shown per product and
+  totalled on a quote before it goes out. A line nobody has costed is reported
+  as unknown, never as pure profit — and importing a price spreadsheet can't
+  wipe costs already entered. Managers only: it's the one figure on that
+  screen that must never reach a customer.
 - **Customer portal** — send a customer a link and they see their own orders
   and what stage each is at (received / being made / ready for delivery /
   ready for pick up / delivered), their quotes, and their account details.
@@ -197,6 +203,7 @@ just run it — nothing is lost and nothing is duplicated.
 | 23 | `migrate_bulk_status.sql` | Marking a batch of orders complete | recommended |
 | 24 | `migrate_line_progress.sql` | Ticking an order off line by line | recommended |
 | 25 | `migrate_recurring_jobs.sql` | Jobs that come round every 3 or 6 months | optional |
+| 26 | `migrate_margin.sql` | What a job costs, next to what it sells for | optional |
 
 **Step 16 is the one that matters most.** Every policy in the older scripts is
 `TO authenticated USING (true)` — meaning *anyone Supabase counts as signed

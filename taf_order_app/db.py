@@ -1716,6 +1716,27 @@ def get_price_list() -> dict:
     return out
 
 
+def get_cost_list() -> dict:
+    """Part number → what we pay for it.
+
+    A part with no cost recorded is left out rather than stored as 0, so the
+    difference between "costs nothing" and "nobody has said" survives all the
+    way to the margin figure.
+    """
+    out = {}
+    for row in get_price_rows():
+        part = (row.get("part_number") or "").strip().upper()
+        if not part:
+            continue
+        try:
+            cost = float(row.get("unit_cost") or 0)
+        except (TypeError, ValueError):
+            continue
+        if cost > 0:
+            out[part] = cost
+    return out
+
+
 def upsert_prices(rows: list) -> int:
     """Save priced part numbers, replacing any that are already there.
 
@@ -1729,28 +1750,43 @@ def upsert_prices(rows: list) -> int:
         part = (row.get("part_number") or "").strip().upper()
         if not part:
             continue
-        payload.append({
+        entry = {
             "part_number":     part,
             "name":            (row.get("name") or "")[:300],
             "description":     (row.get("description") or "")[:500],
             "unit_price":      round(float(row.get("unit_price") or 0), 4),
             "updated_by_name": who,
             "updated_at":      now,
-        })
+        }
+        # Only sent when there is one, so importing a price spreadsheet with
+        # no cost column can never wipe costs somebody has already entered.
+        if row.get("unit_cost") not in (None, "", 0, 0.0):
+            entry["unit_cost"] = round(float(row["unit_cost"]), 4)
+        payload.append(entry)
     saved = 0
     for i in range(0, len(payload), 500):
         chunk = payload[i:i + 500]
-        get_client().table("price_list").upsert(
-            chunk, on_conflict="part_number").execute()
+        try:
+            get_client().table("price_list").upsert(
+                chunk, on_conflict="part_number").execute()
+        except Exception as exc:
+            if "unit_cost" not in str(exc):
+                raise
+            # migrate_margin.sql not run yet — save the prices, which is what
+            # the app did before, rather than refusing the whole import.
+            get_client().table("price_list").upsert(
+                [{k: v for k, v in c.items() if k != "unit_cost"}
+                 for c in chunk], on_conflict="part_number").execute()
         saved += len(chunk)
     return saved
 
 
 def set_price(part_number: str, unit_price: float, name: str = "",
-              description: str = "") -> None:
+              description: str = "", unit_cost: float = 0.0) -> None:
     """Add or correct one priced part number."""
     upsert_prices([{"part_number": part_number, "unit_price": unit_price,
-                    "name": name, "description": description}])
+                    "name": name, "description": description,
+                    "unit_cost": unit_cost}])
 
 
 def delete_price(part_number: str) -> None:
@@ -1772,15 +1808,27 @@ def get_price_rate_rows() -> list:
         return []
 
 
-def set_price_rate(filter_type: str, media_type: str, rate: float) -> None:
+def set_price_rate(filter_type: str, media_type: str, rate: float,
+                   cost: float = 0.0) -> None:
     import datetime as _dt
-    get_client().table("price_rates").upsert({
+    row = {
         "filter_type":     (filter_type or "").strip(),
         "media_type":      (media_type or "").strip(),
         "rate_per_sqm":    round(float(rate or 0), 4),
         "updated_by_name": current_username(),
         "updated_at":      _dt.datetime.utcnow().isoformat(),
-    }, on_conflict="filter_type,media_type").execute()
+    }
+    try:
+        get_client().table("price_rates").upsert(
+            {**row, "cost_per_sqm": round(float(cost or 0), 4)},
+            on_conflict="filter_type,media_type").execute()
+    except Exception as exc:
+        if "cost_per_sqm" not in str(exc):
+            raise
+        # migrate_margin.sql not run yet: save the rate, which is what the
+        # app did before, rather than refusing to save anything.
+        get_client().table("price_rates").upsert(
+            row, on_conflict="filter_type,media_type").execute()
 
 
 def delete_price_rate(rate_id: str) -> None:

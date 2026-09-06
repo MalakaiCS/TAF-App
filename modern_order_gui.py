@@ -111,6 +111,25 @@ TICK_FULL  = "☑"
 TICK_SOME  = "▪"        # some of what's on screen, not all
 
 
+def _price_cost_cells(row: dict) -> tuple:
+    """The Cost and Margin cells for one product.
+
+    A product nobody has costed shows a dash in both, not a zero and not a
+    100% margin. Reading "100%" off a row that simply has no cost against it
+    is how a price list ends up trusted for a decision it cannot support.
+    """
+    try:
+        price = float(row.get("unit_price") or 0)
+        cost = float(row.get("unit_cost") or 0)
+    except (TypeError, ValueError):
+        return ("—", "—")
+    if cost <= 0:
+        return ("—", "—")
+    if price <= 0:
+        return (f"{cost:,.2f}", "—")
+    return (f"{cost:,.2f}", f"{(price - cost) / price * 100:.0f}%")
+
+
 def _items_cell(row: dict) -> str:
     """The # Items column: how many lines, and how many are made.
 
@@ -6449,9 +6468,18 @@ class ModernOrderApp(tk.Frame):
             self._quote_warn_var.set("")
             return
         t = _pricing.quote_totals(lines)
-        self._quote_totals_var.set(
-            f"Subtotal  ${t['subtotal']:,.2f}      GST  ${t['gst']:,.2f}      "
-            f"Total  ${t['total']:,.2f}")
+        totals = (f"Subtotal  ${t['subtotal']:,.2f}      "
+                  f"GST  ${t['gst']:,.2f}      Total  ${t['total']:,.2f}")
+        # What the job makes, next to what it sells for. Only for the people
+        # who set prices — it is the one number on this screen that must
+        # never end up in front of a customer.
+        if _db.can_manage_prices():
+            costs, cost_rates = self._cost_data()
+            if costs or cost_rates:
+                _pricing.with_margin(lines, costs, cost_rates)
+                totals += "      " + _pricing.margin_label(
+                    _pricing.margin_summary(lines))
+        self._quote_totals_var.set(totals)
         missing = _pricing.unpriced(lines)
         self._quote_warn_var.set(
             f"⚠  {len(missing)} line{'s' if len(missing) != 1 else ''} "
@@ -7507,13 +7535,15 @@ class ModernOrderApp(tk.Frame):
         wrap.grid(row=2, column=0, sticky="nsew")
         wrap.rowconfigure(0, weight=1)
         wrap.columnconfigure(0, weight=1)
-        cols = ("part", "name", "price", "updated")
+        cols = ("part", "name", "price", "cost", "margin", "updated")
         self.products_tree = ttk.Treeview(wrap, columns=cols, show="headings",
                                           style="TAF.Treeview")
         for col, (hd, wd, anc, stretch) in {
                 "part":    ("Part Number", 160, "w", False),
-                "name":    ("Product",     460, "w", True),
-                "price":   ("Price ex GST", 110, "e", False),
+                "name":    ("Product",     420, "w", True),
+                "price":   ("Price ex GST", 130, "e", False),
+                "cost":    ("Cost",         90, "e", False),
+                "margin":  ("Margin",       90, "e", False),
                 "updated": ("Updated",     150, "center", False)}.items():
             self.products_tree.heading(col, text=hd)
             self.products_tree.column(col, width=px(wd), anchor=anc, stretch=stretch)
@@ -7588,6 +7618,7 @@ class ModernOrderApp(tk.Frame):
                                 (r.get("name") or r.get("description") or "")
                                 .replace("\n", " · "),
                                 f'{float(r.get("unit_price") or 0):,.2f}',
+                                *_price_cost_cells(r),
                                 (r.get("updated_at") or "")[:10],
                             ))
             if total < 0:
@@ -7654,11 +7685,15 @@ class ModernOrderApp(tk.Frame):
         v_price = tk.StringVar(
             value=f'{float((row or {}).get("unit_price") or 0):.2f}'
             if editing else "")
+        _cost = float((row or {}).get("unit_cost") or 0)
+        v_cost = tk.StringVar(value=f"{_cost:.2f}" if _cost > 0 else "")
         for r, (label, var, hint) in enumerate((
                 ("Part number", v_part, "e.g. FPFG425-020"),
                 ("Product",     v_name, "What it is, for this list"),
                 ("Invoice text", v_desc, "What Xero puts on the line (optional)"),
-                ("Price ex GST", v_price, "e.g. 27.00"))):
+                ("Price ex GST", v_price, "e.g. 27.00"),
+                ("Cost ex GST", v_cost,
+                 "What we pay. Leave empty if you'd rather not say."))):
             tk.Label(body, text=label, bg=CBG, fg=CTX, font=F_BODY,
                      anchor="w").grid(row=r, column=0, sticky="w", pady=4)
             ent = field_entry(body, textvariable=var, width=40)
@@ -7684,9 +7719,27 @@ class ModernOrderApp(tk.Frame):
                                      "Enter the price as a number, e.g. 27.00.",
                                      parent=dlg)
                 return
+            raw_cost = v_cost.get().strip().lstrip("$")
+            try:
+                # Empty is "nobody has said", which the margin shows as
+                # unknown. Zero would read as "this costs us nothing".
+                cost = float(raw_cost) if raw_cost else 0.0
+            except ValueError:
+                messagebox.showerror("Product",
+                                     "Enter the cost as a number, or leave "
+                                     "it empty.", parent=dlg)
+                return
+            if cost > price > 0:
+                if not messagebox.askyesno(
+                        "Product",
+                        f"{part} costs more than it sells for "
+                        f"(${cost:,.2f} against ${price:,.2f}).\n\n"
+                        "Save it anyway?", parent=dlg, icon="warning",
+                        default="no"):
+                    return
             try:
                 _db.set_price(part, price, v_name.get().strip(),
-                              v_desc.get().strip())
+                              v_desc.get().strip(), cost)
             except Exception as exc:
                 messagebox.showerror("Product", f"Could not save:\n{exc}",
                                      parent=dlg)
@@ -11042,8 +11095,11 @@ class ModernOrderApp(tk.Frame):
         tk.Label(hdr, text="Rates per square metre", bg=CA, fg="white",
                  font=F_BOLD).pack(anchor="w")
         tk.Label(hdr, text="Used only where a part number has no listed price. "
-                           "Leave the media blank to cover every grade.",
-                 bg=CA, fg="#A9CCE3", font=F_SM).pack(anchor="w")
+                           "Leave the media blank to cover every grade.\n"
+                           "The cost is what the media costs us — leave it "
+                           "empty if you would rather not say, and the "
+                           "margin is shown as unknown rather than guessed.",
+                 bg=CA, fg="#A9CCE3", font=F_SM, justify="left").pack(anchor="w")
 
         body = tk.Frame(dlg, bg=CBG, padx=16, pady=12)
         body.pack(fill="both", expand=True)
@@ -11065,8 +11121,17 @@ class ModernOrderApp(tk.Frame):
                 pass
             for r in rows:
                 media = (r.get("media_type") or "").strip() or "any media"
-                lb.insert("end", f"  {r.get('filter_type') or '—'}  ·  {media}"
-                                 f"   —   ${float(r.get('rate_per_sqm') or 0):,.2f} / m²")
+                sell = float(r.get("rate_per_sqm") or 0)
+                cost = float(r.get("cost_per_sqm") or 0)
+                line = (f"  {r.get('filter_type') or '—'}  ·  {media}"
+                        f"   —   sell ${sell:,.2f} / m²")
+                if cost > 0:
+                    line += f"   ·   cost ${cost:,.2f}"
+                    if sell > 0:
+                        line += f"   ·   margin {(sell - cost) / sell * 100:.0f}%"
+                else:
+                    line += "   ·   cost not set"
+                lb.insert("end", line)
             if not rows:
                 lb.insert("end", "  No rates set.")
 
@@ -11076,11 +11141,14 @@ class ModernOrderApp(tk.Frame):
                  font=F_SM).grid(row=0, column=0, sticky="w")
         tk.Label(entry, text="Media (blank = any)", bg=CBG, fg=CTX,
                  font=F_SM).grid(row=0, column=1, sticky="w", padx=(8, 0))
-        tk.Label(entry, text="$ per m²", bg=CBG, fg=CTX,
+        tk.Label(entry, text="Sell $ per m²", bg=CBG, fg=CTX,
                  font=F_SM).grid(row=0, column=2, sticky="w", padx=(8, 0))
+        tk.Label(entry, text="Cost $ per m²", bg=CBG, fg=CTX,
+                 font=F_SM).grid(row=0, column=3, sticky="w", padx=(8, 0))
         ft_var = tk.StringVar(value=self.all_filter_types[0])
         mt_var = tk.StringVar(value="")
         rate_var = tk.StringVar(value="")
+        cost_var = tk.StringVar(value="")
         ttk.Combobox(entry, textvariable=ft_var, values=self.all_filter_types,
                      state="readonly", width=16).grid(row=1, column=0, sticky="w")
         ttk.Combobox(entry, textvariable=mt_var,
@@ -11089,6 +11157,8 @@ class ModernOrderApp(tk.Frame):
                      ).grid(row=1, column=1, sticky="w", padx=(8, 0))
         field_entry(entry, textvariable=rate_var, width=10
                     ).grid(row=1, column=2, sticky="w", padx=(8, 0))
+        field_entry(entry, textvariable=cost_var, width=10
+                    ).grid(row=1, column=3, sticky="w", padx=(8, 0))
 
         def _save():
             try:
@@ -11097,12 +11167,21 @@ class ModernOrderApp(tk.Frame):
                 messagebox.showerror("Rate", "Enter the rate as a number, "
                                              "e.g. 34.50.", parent=dlg)
                 return
+            raw_cost = str(cost_var.get()).strip().lstrip("$")
             try:
-                _db.set_price_rate(ft_var.get(), mt_var.get(), rate)
+                # Blank is "nobody has said", which is not the same as free.
+                cost = float(raw_cost) if raw_cost else 0.0
+            except ValueError:
+                messagebox.showerror("Rate", "Enter the cost as a number, or "
+                                             "leave it empty.", parent=dlg)
+                return
+            try:
+                _db.set_price_rate(ft_var.get(), mt_var.get(), rate, cost)
             except Exception as exc:
                 messagebox.showerror("Rate", f"Could not save:\n{exc}", parent=dlg)
                 return
             rate_var.set("")
+            cost_var.set("")
             _reload()
             self._load_prices(force=True)
 
@@ -12807,21 +12886,39 @@ class ModernOrderApp(tk.Frame):
                  < self._PRICE_TTL)
         if force or not hasattr(self, "_price_cache") or not fresh:
             prices, rates = {}, {}
+            # What it costs comes back on the same rows as what it sells for,
+            # and is keyed by the same function. Two places deciding
+            # separately how a rate is named is how a cost silently stops
+            # matching its price.
+            costs, cost_rates = {}, {}
             try:
                 prices = _db.get_price_list()
+                costs = _db.get_cost_list()
                 for row in _db.get_price_rate_rows():
                     key = _pricing._rate_key(row.get("filter_type") or "",
                                              row.get("media_type") or "")
                     try:
                         rates[key] = float(row.get("rate_per_sqm") or 0)
                     except (TypeError, ValueError):
-                        continue
+                        pass
+                    try:
+                        cost = float(row.get("cost_per_sqm") or 0)
+                    except (TypeError, ValueError):
+                        cost = 0.0
+                    if cost > 0:      # 0 means nobody has said, not free
+                        cost_rates[key] = cost
             except Exception:
                 pass
             import time as _time
             self._price_cache = (prices, rates)
+            self._cost_cache = (costs, cost_rates)
             self._price_cache_at = _time.monotonic()
         return self._price_cache
+
+    def _cost_data(self, force: bool = False):
+        """What things cost, alongside what they sell for."""
+        self._price_data(force=force)          # fills both caches together
+        return getattr(self, "_cost_cache", ({}, {}))
 
     def _open_quote(self, header, items, customer=None):
         """Price a set of items and show the quote."""

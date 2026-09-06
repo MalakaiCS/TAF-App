@@ -451,6 +451,110 @@ def quote_lines(items: Iterable[Dict[str, Any]],
     return out
 
 
+def cost_for_item(item: Dict[str, Any],
+                  costs: Optional[Dict[str, float]] = None,
+                  cost_rates: Optional[Dict[str, float]] = None) -> Tuple[float, str]:
+    """What one of these costs to make, and where the figure came from.
+
+    Deliberately the same shape as price_for_item, and deliberately narrower
+    in one way: there is no "near" fallback. Pricing a 48mm filter as the
+    50mm is a decision somebody can look at on a quote and correct. Costing
+    it that way would quietly move a margin figure nobody is checking.
+
+    Returns ``(unit_cost, source)`` where source is "list", "rate" or "".
+    An empty source means nobody has said what this costs — which is not the
+    same as it being free, and the caller must not treat it as zero.
+    """
+    if item.get("item_kind") == "catalogue":
+        try:
+            own = float(item.get("Unit Cost") or 0)
+        except (TypeError, ValueError):
+            own = 0.0
+        if own > 0:
+            return (round(own, 4), "list")
+
+    part = (item.get("Part Number") or "").strip().upper()
+    if part and costs:
+        listed = costs.get(part)
+        if listed:                       # 0 means "not known", not "free"
+            return (round(float(listed), 4), "list")
+
+    if cost_rates:
+        ftype = (item.get("Filter Type") or "").strip()
+        media = (item.get("Media Type") or "").strip()
+        rate = cost_rates.get(_rate_key(ftype, media))
+        if rate is None:
+            rate = cost_rates.get(_rate_key(ftype, ""))
+        if rate:
+            area = _pn.nominal_square_metres(_pn.effective_area(item))
+            if area > 0:
+                return (round(float(rate) * area, 4), "rate")
+    return (0.0, "")
+
+
+def with_margin(lines: List[Dict[str, Any]],
+                costs: Optional[Dict[str, float]] = None,
+                cost_rates: Optional[Dict[str, float]] = None
+                ) -> List[Dict[str, Any]]:
+    """Add cost and margin to priced lines, in place, and hand them back."""
+    for line in lines:
+        item = line.get("item") or {}
+        unit_cost, source = cost_for_item(item, costs, cost_rates)
+        qty = line.get("quantity") or 0
+        line["unit_cost"] = unit_cost
+        line["cost_source"] = source
+        line["line_cost"] = round(unit_cost * qty, 2)
+        if source and line.get("source"):
+            line["margin"] = round(line.get("line_total", 0) - line["line_cost"], 2)
+        else:
+            # Either end unknown means the margin is unknown. Not zero.
+            line["margin"] = None
+    return lines
+
+
+def margin_summary(lines: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """Totals for a quote or an order, and how much of it is guesswork.
+
+    `known` is the part that has both a price and a cost. Anything missing
+    either is counted separately and reported, because a margin worked out
+    over half the lines and presented as the margin is worse than no figure
+    at all — it reads as fact and it is not.
+    """
+    sell = cost = 0.0
+    known = unknown = 0
+    for line in lines:
+        if line.get("margin") is None:
+            unknown += 1
+            continue
+        known += 1
+        sell += float(line.get("line_total") or 0)
+        cost += float(line.get("line_cost") or 0)
+    margin = round(sell - cost, 2)
+    return {
+        "sell":     round(sell, 2),
+        "cost":     round(cost, 2),
+        "margin":   margin,
+        "percent":  round(margin / sell * 100, 1) if sell else None,
+        "known":    known,
+        "unknown":  unknown,
+    }
+
+
+def margin_label(summary: Dict[str, Any]) -> str:
+    """The one line a person reads off the bottom of a quote."""
+    if not summary.get("known"):
+        return "Margin unknown — no line has both a price and a cost."
+    pct = summary.get("percent")
+    text = f"Margin ${summary['margin']:,.2f}"
+    if pct is not None:
+        text += f"  ({pct:g}%)"
+    if summary.get("unknown"):
+        n = summary["unknown"]
+        text += (f"  ·  {n} line{'s' if n != 1 else ''} not costed, "
+                 f"so not counted")
+    return text
+
+
 def source_label(line: Dict[str, Any]) -> str:
     """Where a line's price came from, as shown to whoever reads the quote."""
     source = line.get("source")

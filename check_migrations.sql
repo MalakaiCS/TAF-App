@@ -101,7 +101,12 @@ WITH checks(step, file, purpose, needed, present) AS (VALUES
                WHERE n.nspname='public' AND p.proname='set_order_line_made')),
 
   (25, 'migrate_recurring_jobs.sql', 'Jobs that come round every 3 or 6 months', 'optional',
-      to_regclass('public.recurring_jobs') IS NOT NULL)
+      to_regclass('public.recurring_jobs') IS NOT NULL),
+
+  (26, 'migrate_margin.sql', 'What a job costs, next to what it sells for', 'optional',
+      EXISTS (SELECT 1 FROM information_schema.columns
+               WHERE table_schema='public' AND table_name='price_list'
+                 AND column_name='unit_cost'))
 )
 SELECT step,
        CASE WHEN present THEN 'already done' ELSE 'RUN THIS' END AS status,
