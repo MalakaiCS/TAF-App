@@ -999,6 +999,138 @@ def append_order_note(order_id: str, note_text: str, author: str = "") -> None:
     merge_order_header(order_id, {"order_notes": existing})
 
 
+# ── Jobs that come round again ────────────────────────────────────────────────
+
+REPEAT_INTERVALS = [("Every 3 months", 3), ("Every 6 months", 6),
+                    ("Every 12 months", 12)]
+
+
+def add_months(when, months: int):
+    """The same day of the month, `months` later.
+
+    Calendar arithmetic, not 90 days: a job done on the 15th is due on the
+    15th, and "every 3 months" from 30 November is the end of February, not
+    the 2nd of March. Days are clamped to the length of the target month for
+    the same reason — there is no 31st of the month after a 31st.
+    """
+    import calendar as _cal
+    total = when.month - 1 + int(months)
+    year = when.year + total // 12
+    month = total % 12 + 1
+    return when.replace(year=year, month=month,
+                        day=min(when.day, _cal.monthrange(year, month)[1]))
+
+
+def list_recurring_jobs(include_paused: bool = False) -> list:
+    """Every standing job, soonest due first."""
+    try:
+        q = get_client().table("recurring_jobs").select("*")
+        if not include_paused:
+            q = q.eq("active", True)
+        return (q.order("next_due").execute().data) or []
+    except Exception:
+        return []          # migrate_recurring_jobs.sql not run yet
+
+
+def recurring_jobs_due(on_date=None) -> list:
+    """The ones due on or before a date — today, unless told otherwise.
+
+    Due *or overdue*: a job nobody raised last month has not stopped being
+    due, and dropping it off the list the day after is how it gets missed
+    for a year.
+    """
+    import datetime as _dt
+    when = on_date or _dt.date.today()
+    out = []
+    for job in list_recurring_jobs():
+        due = as_date(job.get("next_due"))
+        if due and due <= when:
+            out.append(job)
+    return out
+
+
+def as_date(value):
+    """A date out of the database, whatever shape it arrives in."""
+    import datetime as _dt
+    if isinstance(value, _dt.date):
+        return value
+    for fmt in ("%Y-%m-%d", "%d/%m/%Y", "%d/%m/%y"):
+        try:
+            return _dt.datetime.strptime(str(value)[:10], fmt).date()
+        except (ValueError, TypeError):
+            continue
+    return None
+
+
+def save_recurring_job(job: dict) -> "str | None":
+    """Create or update a standing job. Returns its id."""
+    import datetime as _dt
+    data = {
+        "customer_name":     job.get("customer_name", ""),
+        "job":               job.get("job", ""),
+        "location":          job.get("location", ""),
+        "every_months":      int(job.get("every_months") or 3),
+        "next_due":          str(job.get("next_due") or _dt.date.today()),
+        "template_order_id": job.get("template_order_id") or None,
+        "active":            bool(job.get("active", True)),
+        "note":              job.get("note", ""),
+    }
+    if job.get("id"):
+        resp = (get_client().table("recurring_jobs")
+                .update(data).eq("id", job["id"]).execute())
+        if not (resp.data or []):
+            raise RuntimeError(
+                "That repeating job was not changed. It may have been "
+                "removed, or your account may not be allowed to change it.")
+        return job["id"]
+    data["created_by"] = current_full_name() or current_username()
+    resp = get_client().table("recurring_jobs").insert(data).execute()
+    rows = resp.data or []
+    if not rows:
+        raise RuntimeError("The repeating job was not saved.")
+    return rows[0].get("id")
+
+
+def delete_recurring_job(job_id: str) -> None:
+    resp = (get_client().table("recurring_jobs")
+            .delete().eq("id", job_id).execute())
+    if not (resp.data or []):
+        raise RuntimeError(
+            "That repeating job was not removed. It may already be gone, or "
+            "your account may not be allowed to remove it.")
+
+
+def mark_recurring_raised(job_id: str, every_months: int, when=None) -> str:
+    """Move a job on to its next turn, and say when that is.
+
+    Counted from the date it was due, not from today: a quarterly job raised
+    a fortnight late is still due at the end of that quarter, and measuring
+    from today would walk the whole schedule later every time anyone was
+    busy. If it has slipped so far that the next date is already behind us,
+    it keeps stepping until it isn't.
+    """
+    import datetime as _dt
+    today = when or _dt.date.today()
+    months = max(1, int(every_months or 3))
+
+    resp = (get_client().table("recurring_jobs")
+            .select("next_due").eq("id", job_id).single().execute())
+    due = as_date((resp.data or {}).get("next_due")) or today
+
+    nxt = add_months(due, months)
+    while nxt <= today:
+        nxt = add_months(nxt, months)
+
+    out = (get_client().table("recurring_jobs")
+           .update({"next_due": str(nxt), "last_raised": str(today)})
+           .eq("id", job_id).execute())
+    if not (out.data or []):
+        raise RuntimeError(
+            "The order was raised, but the repeating job was not moved on. "
+            "Check its next date, or it will show as due again.")
+    return str(nxt)
+
+
 # ── Customer Database ─────────────────────────────────────────────────────────
 
 PAYMENT_TERMS = ["Net 7", "Net 14", "Net 30", "Net 60", "COD", "EOM", "Prepaid"]

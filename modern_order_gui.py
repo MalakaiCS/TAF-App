@@ -1123,6 +1123,22 @@ def card_frame(parent, title="", bg_hdr=CNV, **inner_kw):
     return card, card.body
 
 
+def _centre_on_parent(dlg, parent, w: int, h: int) -> None:
+    """Put a dialog in the middle of the window it belongs to.
+
+    The same four lines of arithmetic were written out at every dialog. It
+    is not hard arithmetic, but it is easy to get one term wrong and end up
+    with a window half off the screen, and nobody reads it closely enough to
+    notice which one.
+    """
+    try:
+        x = parent.winfo_rootx() + parent.winfo_width() // 2 - w // 2
+        y = parent.winfo_rooty() + parent.winfo_height() // 2 - h // 2
+    except Exception:
+        x = y = 100
+    dlg.geometry(f"{w}x{h}+{max(0, x)}+{max(0, y)}")
+
+
 def field_entry(parent, textvariable=None, width=None, **kw) -> tk.Entry:
     """Brand input: field-bg fill, 1px border that turns brand-blue on focus."""
     e = tk.Entry(parent,
@@ -5799,6 +5815,7 @@ class ModernOrderApp(tk.Frame):
             ("Regenerate worksheets",  self._regen_prev_order),
             ("Quote from this order",  self._quote_prev_order),
             ("Invoice to Xero",        self._invoice_selected_orders),
+            ("Repeat this job…",       self._repeat_this_job),
             None,
             ("Change status…",         self._change_order_status),
             ("Toggle high priority",   self._toggle_order_priority),
@@ -8258,6 +8275,17 @@ class ModernOrderApp(tk.Frame):
             ("Quotes awaiting reply", quotes_waiting, CA,
              lambda: self._show_tab("quotes")),
         ]
+        # Only when something is actually due. A standing job is a handful of
+        # sites, not a daily concern, and a permanent zero beside the work
+        # that changes every morning is just something else to look past.
+        jobs_due = 0
+        try:
+            jobs_due = len(_db.recurring_jobs_due())
+        except Exception:
+            jobs_due = 0
+        if jobs_due:
+            tiles.append(("Jobs due again", jobs_due, "#7B5EA7",
+                          self._show_jobs_due))
         if photos:
             tiles.append(("From a phone, to check", photos, CA2,
                           self._open_phone_inbox))
@@ -13870,6 +13898,274 @@ class ModernOrderApp(tk.Frame):
         cust = row.get("customer", "")
         self.status_var.set(
             f"Duplicated order from {cust} — enter a new Order # and generate.")
+
+    # ── Jobs that come round again ────────────────────────────────────────
+
+    def _repeat_this_job(self):
+        """Make a standing job out of the selected order.
+
+        Set up from an order rather than typed in from scratch, because the
+        order already knows the customer, the job, the site and every filter
+        on it. There is nothing to re-enter and nothing to get wrong.
+        """
+        row = self._get_selected_order()
+        if row is None:
+            messagebox.showinfo("Repeat this job",
+                                "Select the order this job repeats from.")
+            return
+        if row.get("source") != "db" or not row.get("db_id"):
+            messagebox.showinfo(
+                "Repeat this job",
+                "This order is only on this PC. A repeating job has to be "
+                "shared, so it needs an order that is in the database.")
+            return
+
+        header = dict(row.get("db_header") or {})
+        dlg = tk.Toplevel(self.master)
+        dlg.title("Repeat this job")
+        dlg.transient(self.master); dlg.grab_set(); dlg.configure(bg=CBG)
+        dlg.resizable(False, False)
+
+        hdr = tk.Frame(dlg, bg=CA, padx=px(16), pady=px(12)); hdr.pack(fill="x")
+        tk.Label(hdr, text="Repeat this job", bg=CA, fg="white",
+                 font=F_BOLD).pack(anchor="w")
+        tk.Label(hdr, text=f"{row.get('customer','')}  ·  "
+                           f"{header.get('Job','') or 'no job name'}",
+                 bg=CA, fg="#DCEFFA", font=F_SM).pack(anchor="w")
+
+        body = tk.Frame(dlg, bg=CBG, padx=px(16), pady=px(14))
+        body.pack(fill="both", expand=True)
+        tk.Label(body, text="How often does this job come round?", bg=CBG,
+                 fg=CTX, font=F_BODY).pack(anchor="w", pady=(0, px(6)))
+
+        every = tk.StringVar(value=_db.REPEAT_INTERVALS[0][0])
+        ttk.Combobox(body, textvariable=every, state="readonly", width=22,
+                     values=[lbl for lbl, _ in _db.REPEAT_INTERVALS]
+                     ).pack(anchor="w", pady=(0, px(12)))
+
+        months_of = dict(_db.REPEAT_INTERVALS)
+        last = _parse_date(row.get("date_ordered", "")) or datetime.date.today()
+        due_var = tk.StringVar(
+            value=_db.add_months(last, months_of[every.get()]).strftime("%d/%m/%Y"))
+
+        def _retime(*_a):
+            due_var.set(_db.add_months(
+                last, months_of[every.get()]).strftime("%d/%m/%Y"))
+        every.trace_add("write", _retime)
+
+        tk.Label(body, text="Next due", bg=CBG, fg=CTX,
+                 font=F_BODY).pack(anchor="w")
+        tk.Label(body, text="Counted from when this order was placed.",
+                 bg=CBG, fg=CMU, font=F_SM).pack(anchor="w", pady=(0, px(4)))
+        field_entry(body, textvariable=due_var, width=16).pack(anchor="w")
+
+        foot = tk.Frame(dlg, bg=CBG, padx=px(16), pady=px(12)); foot.pack(fill="x")
+
+        def _save():
+            due = _parse_date(due_var.get())
+            if due is None:
+                messagebox.showerror("Repeat this job",
+                                     "Give the next due date as dd/mm/yyyy.",
+                                     parent=dlg)
+                return
+            try:
+                _db.save_recurring_job({
+                    "customer_name":     row.get("customer", ""),
+                    "job":               header.get("Job", ""),
+                    "location":          header.get("Location", ""),
+                    "every_months":      months_of[every.get()],
+                    "next_due":          due.isoformat(),
+                    "template_order_id": str(row["db_id"]),
+                })
+            except Exception as exc:
+                messagebox.showerror("Repeat this job", str(exc), parent=dlg)
+                return
+            dlg.destroy()
+            self.status_var.set(
+                f"{row.get('customer','')} — {every.get().lower()}, "
+                f"next due {due.strftime('%d/%m/%Y')}.")
+            self._refresh_worklist()
+
+        flat_btn(foot, "Cancel", dlg.destroy, variant="secondary",
+                 pady=6).pack(side="right", padx=(px(6), 0))
+        flat_btn(foot, "Save", _save, bg=CGR, pady=6).pack(side="right")
+        dlg.bind("<Escape>", lambda _e: dlg.destroy())
+        _centre_on_parent(dlg, self.master, px(380), px(300))
+
+    def _show_jobs_due(self):
+        """The standing jobs that are due, and raising the next order."""
+        try:
+            jobs = _db.recurring_jobs_due()
+        except Exception as exc:
+            messagebox.showerror("Jobs due", str(exc))
+            return
+        if not jobs:
+            messagebox.showinfo("Jobs due", "Nothing is due to come round yet.")
+            return
+
+        dlg = tk.Toplevel(self.master)
+        dlg.title("Jobs due again")
+        dlg.transient(self.master); dlg.configure(bg=CBG)
+
+        hdr = tk.Frame(dlg, bg=CA, padx=px(16), pady=px(12)); hdr.pack(fill="x")
+        tk.Label(hdr, text="Jobs due again", bg=CA, fg="white",
+                 font=F_BOLD).pack(anchor="w")
+        tk.Label(hdr, text="Raise the next order with the same lines on it.",
+                 bg=CA, fg="#DCEFFA", font=F_SM).pack(anchor="w")
+
+        # The buttons are packed before the table and anchored to the bottom.
+        # A Treeview asks for the height of its rows, and if that is more than
+        # the window has, whatever was packed last is the thing squeezed off
+        # the edge — which would be the button this window exists for.
+        foot = tk.Frame(dlg, bg=CBG, padx=px(14), pady=px(10))
+        foot.pack(side="bottom", fill="x")
+
+        wrap = tk.Frame(dlg, bg=CCA, padx=px(1), pady=px(1))
+        wrap.pack(fill="both", expand=True, padx=px(14), pady=px(12))
+        cols = ("customer", "job", "site", "every", "due")
+        tree = ttk.Treeview(wrap, columns=cols, show="headings",
+                            style="TAF.Treeview", height=8)
+        for col, (hd, wd, anc) in {
+            "customer": ("Customer",  200, "w"),
+            "job":      ("Job",       160, "w"),
+            "site":     ("Site",      160, "w"),
+            "every":    ("Every",      90, "center"),
+            "due":      ("Due",       110, "center"),
+        }.items():
+            tree.heading(col, text=hd, anchor="center" if anc == "center" else "w")
+            tree.column(col, width=px(wd), anchor=anc, minwidth=px(50))
+        tree.pack(fill="both", expand=True)
+        tree.tag_configure("late", background="#FADBD8", foreground="#922B21")
+        tree.tag_configure("even", background=CRE)
+        tree.tag_configure("odd",  background=CCA)
+
+        today = datetime.date.today()
+
+        def _fill():
+            tree.delete(*tree.get_children())
+            for i, job in enumerate(jobs):
+                due = _db.as_date(job.get("next_due"))
+                late = bool(due and due < today)
+                tree.insert("", "end", iid=str(i),
+                            tags=("late",) if late else
+                                 ("even" if i % 2 == 0 else "odd",),
+                            values=(job.get("customer_name", ""),
+                                    job.get("job", "") or "—",
+                                    job.get("location", "") or "—",
+                                    f"{job.get('every_months', 3)} mo",
+                                    (f"⚠ {due.strftime('%d/%m/%Y')}" if late
+                                     else due.strftime("%d/%m/%Y")) if due else "—"))
+        _fill()
+
+        def _selected():
+            sel = tree.selection()
+            return jobs[int(sel[0])] if sel else None
+
+        def _raise_order():
+            job = _selected()
+            if job is None:
+                messagebox.showinfo("Jobs due", "Pick a job first.", parent=dlg)
+                return
+            tmpl = job.get("template_order_id")
+            if not tmpl:
+                messagebox.showinfo(
+                    "Jobs due",
+                    "The order this job was copied from has been deleted, so "
+                    "there are no lines to copy. Open a recent order for this "
+                    "customer and use Repeat this job on that one instead.",
+                    parent=dlg)
+                return
+            full = _db.get_order(str(tmpl))
+            if not full:
+                messagebox.showerror(
+                    "Jobs due", "Could not read the order this job copies "
+                                "from.", parent=dlg)
+                return
+            self._load_repeat_into_new_order(full, job)
+            try:
+                nxt = _db.mark_recurring_raised(job["id"], job.get("every_months"))
+                self.status_var.set(
+                    f"{job.get('customer_name','')} — lines copied in. This "
+                    f"job comes round again on {_db.as_date(nxt).strftime('%d/%m/%Y')}.")
+            except Exception as exc:
+                # The order is on screen either way; say what did not happen.
+                messagebox.showwarning("Jobs due", str(exc), parent=dlg)
+            dlg.destroy()
+
+        def _snooze():
+            job = _selected()
+            if job is None:
+                return
+            try:
+                nxt = _db.mark_recurring_raised(job["id"], job.get("every_months"))
+            except Exception as exc:
+                messagebox.showerror("Jobs due", str(exc), parent=dlg)
+                return
+            jobs.remove(job)
+            _fill()
+            self.status_var.set(
+                f"Skipped this turn — due again "
+                f"{_db.as_date(nxt).strftime('%d/%m/%Y')}.")
+            if not jobs:
+                dlg.destroy()
+            self._refresh_worklist()
+
+        def _stop():
+            job = _selected()
+            if job is None:
+                return
+            if not messagebox.askyesno(
+                    "Stop repeating",
+                    f"Stop repeating this job for "
+                    f"{job.get('customer_name','')}?", parent=dlg):
+                return
+            try:
+                _db.delete_recurring_job(job["id"])
+            except Exception as exc:
+                messagebox.showerror("Jobs due", str(exc), parent=dlg)
+                return
+            jobs.remove(job)
+            _fill()
+            self._refresh_worklist()
+            if not jobs:
+                dlg.destroy()
+
+        flat_btn(foot, "Close", dlg.destroy, variant="secondary",
+                 pady=6).pack(side="right")
+        menu_btn(foot, "This job  ▾", [
+            ("Skip this turn", _snooze),
+            None,
+            ("Stop repeating it", _stop),
+        ], variant="secondary", pady=6).pack(side="left", padx=(0, px(8)))
+        flat_btn(foot, "＋  Raise the order", _raise_order, bg=CGR,
+                 pady=6).pack(side="left")
+        dlg.bind("<Escape>", lambda _e: dlg.destroy())
+        _centre_on_parent(dlg, self.master, px(820), px(440))
+
+    def _load_repeat_into_new_order(self, full: dict, job: dict):
+        """Put the standing job's lines into New Order, ready to send."""
+        header = dict(full.get("header") or {})
+        items = _db.with_line_ids(list(full.get("items") or []))
+        for it in items:
+            if "item_kind" not in it:
+                it["item_kind"] = "bag" if "product_type" in it else "filter"
+            # A repeat is a fresh job in the shop: nothing on it is made yet.
+            it.pop("made", None); it.pop("made_by", None); it.pop("made_at", None)
+            it.pop(_db.LINE_ID, None)
+
+        header["Order Number"] = ""
+        header["Date Ordered"] = datetime.date.today().strftime("%d/%m/%y")
+        header["Date Due"] = "ASAP"
+        header["Job"] = job.get("job", "") or header.get("Job", "")
+        header["Location"] = job.get("location", "") or header.get("Location", "")
+
+        for k, var in self.hvars.items():
+            var.set(str(header.get(k, "")))
+        self.txt_header_notes.delete("1.0", "end")
+        self.txt_header_notes.insert("1.0", header.get("Notes", "") or "")
+        self.items = items
+        self._refresh_items_tree()
+        self._show_tab("new_order")
 
     def _load_from_db_row(self, row: dict):
         header = row.get("db_header") or {}

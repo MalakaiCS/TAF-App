@@ -98,7 +98,10 @@ WITH checks(step, file, purpose, needed, present) AS (VALUES
 
   (24, 'migrate_line_progress.sql', 'Ticking an order off one line at a time', 'recommended',
       EXISTS (SELECT 1 FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace
-               WHERE n.nspname='public' AND p.proname='set_order_line_made'))
+               WHERE n.nspname='public' AND p.proname='set_order_line_made')),
+
+  (25, 'migrate_recurring_jobs.sql', 'Jobs that come round every 3 or 6 months', 'optional',
+      to_regclass('public.recurring_jobs') IS NOT NULL)
 )
 SELECT step,
        CASE WHEN present THEN 'already done' ELSE 'RUN THIS' END AS status,

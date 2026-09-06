@@ -196,6 +196,7 @@ just run it — nothing is lost and nothing is duplicated.
 | 22 | `migrate_avatars.sql` | Profile pictures on accounts | optional |
 | 23 | `migrate_bulk_status.sql` | Marking a batch of orders complete | recommended |
 | 24 | `migrate_line_progress.sql` | Ticking an order off line by line | recommended |
+| 25 | `migrate_recurring_jobs.sql` | Jobs that come round every 3 or 6 months | optional |
 
 **Step 16 is the one that matters most.** Every policy in the older scripts is
 `TO authenticated USING (true)` — meaning *anyone Supabase counts as signed

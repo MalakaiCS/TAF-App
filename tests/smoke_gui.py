@@ -170,7 +170,8 @@ PERMISSIONS = ("can_manage_stock_alerts", "can_manage_prices",
 # no client, so replacing them with a canned answer tests nothing and hides
 # what the screen really does — line_progress stubbed to an empty tuple made
 # "3 of 8 made" unpack a pair from nothing.
-PURE = ("line_progress", "with_line_ids", "item_signature")
+PURE = ("line_progress", "with_line_ids", "item_signature",
+        "progress_cell", "as_date", "add_months")
 
 ROLES = ("manager", "employee")
 
