@@ -1,0 +1,43 @@
+name: Web app
+
+# The staff web app is served straight off GitHub Pages out of docs/, so it is
+# never built by the release workflow and nothing there would notice it break.
+# This drives the real page in a real browser against a stubbed Supabase:
+# signs in, lists orders, ticks a line off, and checks a refused write is
+# reported rather than silently swallowed.
+#
+# Its own workflow, on Linux, because the release build runs on Windows where
+# there is no Chromium — and putting a browser install in front of every
+# release to test a page that release does not contain would be the wrong
+# trade.
+
+on:
+  push:
+    paths:
+      - 'docs/**'
+      - 'tests/web_app.py'
+      - '.github/workflows/web.yml'
+  pull_request:
+    paths:
+      - 'docs/**'
+      - 'tests/web_app.py'
+  workflow_dispatch:
+
+jobs:
+  drive-it:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install Playwright and Chromium
+        run: |
+          python -m pip install --upgrade pip
+          pip install playwright
+          python -m playwright install --with-deps chromium
+
+      - name: Drive the web app
+        run: python tests/web_app.py

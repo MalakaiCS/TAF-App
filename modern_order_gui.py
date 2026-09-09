@@ -4924,6 +4924,7 @@ class ModernOrderApp(tk.Frame):
         items += [
             ("Change my password…", self._do_change_password),
             None,
+            ("Open on a phone…",    self._web_app_link),
             ("Products and prices", lambda: self._show_tab("products")),
             ("Settings",            lambda: self._show_tab("settings")),
         ]
@@ -12349,6 +12350,82 @@ class ModernOrderApp(tk.Frame):
         base = self._phone_page_base()
         joiner = "" if base.endswith("/") else "/"
         return f"{base}{joiner}?{q}"
+
+    def _web_app_base(self) -> str:
+        override = (self._settings.get("web_app_url") or "").strip()
+        if override:
+            return override.rstrip("/") + "/"
+        try:
+            from taf_order_app.updater import GITHUB_REPO
+            owner, repo = GITHUB_REPO.split("/", 1)
+        except Exception:
+            owner, repo = "MalakaiCS", "TAF-App"
+        return f"https://{owner.lower()}.github.io/{repo}/app/"
+
+    def _web_app_link(self):
+        """The link that opens the same orders on a phone or a tablet.
+
+        The link carries the publishable key, the way the customer portal and
+        the phone uploader do, so the page itself holds no configuration and
+        the device remembers it after the first visit. It is not a way in on
+        its own — whoever opens it still has to sign in with their own
+        account, and the database decides what they can see.
+        """
+        from urllib.parse import urlencode
+        key = ""
+        try:
+            key = _db.current_anon_key()
+        except Exception:
+            key = ""
+        if not key:
+            messagebox.showinfo(
+                "Open on a phone",
+                "This PC has no Supabase key configured, so there is nothing "
+                "to hand the phone.")
+            return
+        url = f"{self._web_app_base()}?{urlencode({'k': key})}"
+
+        dlg = tk.Toplevel(self.master)
+        dlg.title("Open on a phone")
+        dlg.transient(self.master); dlg.grab_set(); dlg.configure(bg=CBG)
+
+        hdr = tk.Frame(dlg, bg=CA, padx=px(16), pady=px(12)); hdr.pack(fill="x")
+        tk.Label(hdr, text="Open on a phone", bg=CA, fg="white",
+                 font=F_BOLD).pack(anchor="w")
+        tk.Label(hdr, text="The same orders, on the floor. Scan it once and "
+                           "the phone remembers.",
+                 bg=CA, fg="#DCEFFA", font=F_SM).pack(anchor="w")
+
+        body = tk.Frame(dlg, bg=CBG, padx=px(16), pady=px(14))
+        body.pack(fill="both", expand=True)
+        try:
+            import qrcode
+            from PIL import ImageTk
+            img = qrcode.make(url, box_size=6, border=2)
+            img = getattr(img, "_img", img)
+            self._web_qr_img = ImageTk.PhotoImage(img)
+            tk.Label(body, image=self._web_qr_img, bg=CBG).pack()
+        except Exception:
+            tk.Label(body, text="Copy the link instead — this PC has no QR "
+                                "library installed.",
+                     bg=CBG, fg=CMU, font=F_SM,
+                     wraplength=px(360), justify="left").pack(anchor="w")
+
+        tk.Label(body, text="Everyone signs in with their own account.",
+                 bg=CBG, fg=CMU, font=F_SM).pack(anchor="w", pady=(px(8), 0))
+
+        foot = tk.Frame(dlg, bg=CBG, padx=px(16), pady=px(12)); foot.pack(fill="x")
+
+        def _copy():
+            self.master.clipboard_clear()
+            self.master.clipboard_append(url)
+            self.status_var.set("Web app link copied.")
+
+        flat_btn(foot, "Close", dlg.destroy, variant="secondary",
+                 pady=6).pack(side="right", padx=(px(6), 0))
+        flat_btn(foot, "Copy the link", _copy, bg=CA, pady=6).pack(side="right")
+        dlg.bind("<Escape>", lambda _e: dlg.destroy())
+        _centre_on_parent(dlg, self.master, px(420), px(430))
 
     def _show_phone_qr(self):
         """Show the QR code a phone scans to link to this PC, and wait for

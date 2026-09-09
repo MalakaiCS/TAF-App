@@ -262,6 +262,26 @@ where anyone could extract it.
 Costs a few cents per page. Skip this and the rest of the app works normally —
 the Import button just explains that the reader isn't set up yet.
 
+### The web app (optional)
+
+`docs/app/` is a staff web app served off GitHub Pages alongside the customer
+portal — the same orders, on a phone or a tablet on the factory floor. Sign in
+with the usual staff account; the database decides what each one can see.
+
+Open it from the desktop app once: **your name, top right → Open on a phone**.
+The link carries the publishable key the same way portal links do, the phone
+remembers it, and after that it is a bookmark. Everyone still signs in
+themselves.
+
+It does **not** generate worksheets. Those are made by driving Excel and Word
+through COM, which runs on Windows and nowhere else, so an order's paperwork
+stays on the desktop app.
+
+**Run `migrate_staff_access.sql` before this goes live.** Without it anyone who
+can register can read every order, customer, quote and price — which is bad on
+a PC in the office and considerably worse with a login box on the open
+internet.
+
 ### Enable emails to customers (optional)
 
 Sends a customer an order received slip when their order is generated, with a

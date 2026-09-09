@@ -433,6 +433,14 @@ def _steps(app, gui, root):
             w.destroy()
     add("dialog: Print Barcode Labels", _labels_dialog)
 
+    def _web_link_dialog():
+        before = set(root.winfo_children())
+        app._web_app_link()
+        for w in set(root.winfo_children()) - before:
+            w.update_idletasks()
+            w.destroy()
+    add("dialog: Open on a phone", _web_link_dialog)
+
     def _product_types_dialog():
         before = set(root.winfo_children())
         app._manage_product_types()
