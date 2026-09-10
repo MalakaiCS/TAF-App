@@ -19,6 +19,7 @@ var TAFAPP = (function () {
     { key: "dashboard",   label: "Today" },
     { key: "orders",      label: "Orders" },
     { key: "delivery",    label: "Delivery" },
+    { key: "quotes",      label: "Quotes" },
     { key: "customers",   label: "Customers" },
     { key: "stock",       label: "Stock" }
   ];
@@ -543,15 +544,431 @@ var TAFAPP = (function () {
     actions.appendChild(U.button("Close", close, "quiet"));
   }
 
-  /* Not built yet — say so rather than showing an empty screen. */
-  ["delivery", "customers", "stock"].forEach(function (key) {
-    SCREENS[key] = function (main) {
+  /* ── Delivery ────────────────────────────────────────────────────────
+     Only work somebody has marked Complete is ready to go, and the oldest
+     promise is loaded first — the same two rules the run sheet is built on,
+     so the driver's sheet and this screen never disagree. */
+
+  SCREENS.delivery = function (main) {
+    loadOrders().then(function (rows) {
       U.clear(main);
-      main.appendChild(U.card(null, [U.empty(
-        "Not on the web yet",
-        "This screen is still only in the Windows app.")]));
-    };
-  });
+      var ready = rows.filter(function (r) { return r.status === "Complete"; })
+                      .sort(function (a, b) {
+        return dueSort(a) - dueSort(b) ||
+               String(a.customer).localeCompare(String(b.customer));
+      });
+      if (!ready.length) {
+        main.appendChild(U.card(null, [U.empty(
+          "Nothing is ready to go out",
+          "Orders appear here once they are marked Complete.")]));
+        return;
+      }
+      var byRegion = {};
+      ready.forEach(function (r) {
+        var region = (r.location || "").trim() || "Unassigned";
+        (byRegion[region] = byRegion[region] || []).push(r);
+      });
+      Object.keys(byRegion).sort().forEach(function (region) {
+        var list = byRegion[region];
+        main.appendChild(U.card(
+          region + "  ·  " + list.length + " order"
+          + (list.length === 1 ? "" : "s"),
+          [U.table(["Customer", "Order #", "Due", { text: "Lines", num: true }],
+            list.map(function (r) {
+              return U.el("tr", {
+                cls: "row " + (U.dueBucket(r) === "overdue" ? "late" : ""),
+                on: { click: function () { openOrder(r); } },
+                kids: [U.cell(r.customer), U.cell(r.order_no),
+                       U.cell(r.date_due || "—"),
+                       U.cell(progressCell(r.n_items, r.n_made), { num: true })]
+              });
+            })),
+           dispatchAll(region, list, main)]));
+      });
+    }).catch(function (err) { U.clear(main); U.notice(main, err.message); });
+  };
+
+  function dueSort(row) {
+    var raw = String(row.date_due || "").trim();
+    if (/^asap$/i.test(raw)) { return -Infinity; }   // asap goes first
+    var d = U.parseDate(raw);
+    return d ? d.getTime() : Infinity;
+  }
+
+  function dispatchAll(region, list, main) {
+    var wrap = U.el("div", { cls: "row-actions" });
+    wrap.appendChild(U.button("Mark this run dispatched", function () {
+      if (!window.confirm("Mark " + list.length + " order"
+          + (list.length === 1 ? "" : "s") + " in " + region
+          + " as dispatched?")) { return; }
+      var problems = [];
+      // One at a time, and it keeps going. Stopping at the first failure
+      // leaves nobody knowing which half of the run went through.
+      var chain = Promise.resolve();
+      list.forEach(function (r) {
+        chain = chain.then(function () {
+          return D.rpc("merge_order_header", {
+            p_order_id: r.id, p_patch: { status: "Dispatched" }
+          }).then(function (out) {
+            if (!out) { throw new Error("not changed"); }
+          }).catch(function (err) {
+            problems.push(r.order_no + ": " + err.message);
+          });
+        });
+      });
+      chain.then(function () {
+        loadedAt = 0;
+        if (problems.length) {
+          U.notice(main, (list.length - problems.length) + " of " + list.length
+                   + " dispatched. These did not: " + problems.join("; "));
+        } else {
+          U.notice(main, region + " marked dispatched.", "ok");
+          show("delivery");
+        }
+      });
+    }, "go"));
+    return wrap;
+  }
+
+  /* ── Quotes ──────────────────────────────────────────────────────────
+     Read here, written on the desktop. Pricing a line means deriving a
+     part number and an area from its dimensions, which lives in Python
+     today — a second copy of that in JavaScript would put different part
+     numbers on Xero invoices depending on which screen someone used. */
+
+  var QUOTE_STATE = ["All", "draft", "sent", "accepted", "declined", "expired"];
+
+  SCREENS.quotes = function (main) {
+    D.select("quotes", {
+      "select": "id,quote_number,customer_name,reference,status,total,"
+              + "unpriced_count,valid_until,created_at,items,notes,"
+              + "created_by_name",
+      "order": "created_at.desc", "limit": 500
+    }).then(function (rows) {
+      U.clear(main);
+      var state = U.el("select", {
+        kids: QUOTE_STATE.map(function (s) {
+          return U.el("option", { text: s === "All" ? "All" : titled(s),
+                                  attr: { value: s } });
+        })
+      });
+      var search = U.el("input", {
+        attr: { type: "search", placeholder: "Customer, quote or reference" }
+      });
+      var out = U.el("div");
+      function redraw() {
+        var q = search.value.trim().toLowerCase();
+        var list = rows.filter(function (r) {
+          if (state.value !== "All" && r.status !== state.value) { return false; }
+          return !q || [r.customer_name, r.quote_number, r.reference]
+            .join(" ").toLowerCase().indexOf(q) !== -1;
+        });
+        U.clear(out);
+        if (!list.length) {
+          out.appendChild(U.card(null, [U.empty("No quotes match")]));
+          return;
+        }
+        out.appendChild(U.card(list.length + " quote"
+          + (list.length === 1 ? "" : "s"),
+          [U.table(["Customer", "Quote #", "Status",
+                    { text: "Total", num: true }],
+            list.slice(0, 300).map(function (r) {
+              return U.el("tr", {
+                cls: "row",
+                on: { click: function () { openQuote(r); } },
+                kids: [U.cell(r.customer_name || ""),
+                       U.cell(r.quote_number || ""),
+                       U.cell(titled(r.status)),
+                       U.cell(U.money(r.total), { num: true })]
+              });
+            }))]));
+      }
+      [search, state].forEach(function (n) {
+        n.addEventListener("input", redraw);
+        n.addEventListener("change", redraw);
+      });
+      main.appendChild(U.card(null, [U.el("div", { cls: "filters", kids: [
+        U.el("label", { cls: "f", kids: [
+          U.el("span", { text: "Search" }), search] }),
+        U.el("label", { cls: "f", kids: [
+          U.el("span", { text: "Status" }), state] })
+      ] })]));
+      main.appendChild(out);
+      redraw();
+    }).catch(function (err) { U.clear(main); U.notice(main, err.message); });
+  };
+
+  function titled(s) {
+    s = String(s || "");
+    return s ? s.charAt(0).toUpperCase() + s.slice(1) : "";
+  }
+
+  function openQuote(q) {
+    U.openSheet(function (body, close) {
+      body.appendChild(U.el("h2", { text: q.customer_name || "Quote" }));
+      body.appendChild(U.el("div", { cls: "muted",
+        text: [q.quote_number ? "Quote " + q.quote_number : "",
+               q.reference ? "Their ref " + q.reference : "",
+               titled(q.status),
+               q.valid_until ? "Valid until " + q.valid_until : ""]
+              .filter(Boolean).join("   ·   ") }));
+
+      var items = q.items || [];
+      body.appendChild(U.card("Lines", items.length
+        ? [U.table([{ text: "Qty" }, "Item", { text: "Each", num: true },
+                    { text: "Total", num: true }],
+            items.map(function (l) {
+              var priced = Number(l.unit_price || 0) > 0;
+              return U.el("tr", { kids: [
+                U.cell(l.quantity || ""),
+                U.cell(l.description || ""),
+                U.cell(priced ? U.money(l.unit_price) : "to be confirmed",
+                       { num: true }),
+                U.cell(priced ? U.money(l.line_total) : "—", { num: true })
+              ] });
+            })),
+           U.el("div", { attr: { style: "text-align:right;margin-top:10px;"
+                                      + "font-weight:700" },
+                         text: "Total " + U.money(q.total) })]
+        : [U.empty("No lines on this quote")]));
+
+      if (q.unpriced_count) {
+        U.notice(body, q.unpriced_count + " line"
+          + (q.unpriced_count === 1 ? " has" : "s have")
+          + " no price and are left out of the total.");
+      }
+      if (String(q.notes || "").trim()) {
+        body.appendChild(U.card("Notes", [
+          U.el("div", { text: q.notes })]));
+      }
+      body.appendChild(U.el("div", { cls: "muted",
+        text: "Quotes are written on the desktop app — pricing a line needs "
+            + "the part number worked out from its size." }));
+      body.appendChild(U.el("div", { cls: "row-actions",
+        kids: [U.button("Close", close, "quiet")] }));
+    });
+  }
+
+  /* ── Customers ───────────────────────────────────────────────────────── */
+
+  SCREENS.customers = function (main) {
+    D.select("customers", { "select": "*", "order": "name", "limit": 2000 })
+      .then(function (rows) {
+        U.clear(main);
+        var search = U.el("input", {
+          attr: { type: "search", placeholder: "Name, suburb or email" }
+        });
+        var out = U.el("div");
+        function redraw() {
+          var q = search.value.trim().toLowerCase();
+          var list = rows.filter(function (c) {
+            return !q || [c.name, c.short_name, c.email, c.suburb, c.address]
+              .join(" ").toLowerCase().indexOf(q) !== -1;
+          });
+          U.clear(out);
+          if (!list.length) {
+            out.appendChild(U.card(null, [U.empty("No customers match")]));
+            return;
+          }
+          out.appendChild(U.card(list.length + " customer"
+            + (list.length === 1 ? "" : "s"),
+            [U.table(["Name", "Phone", "Email"],
+              list.slice(0, 400).map(function (c) {
+                return U.el("tr", {
+                  cls: "row",
+                  on: { click: function () { openCustomer(c); } },
+                  kids: [U.cell(c.short_name || c.name || ""),
+                         U.cell(c.phone || ""), U.cell(c.email || "")]
+                });
+              }))]));
+        }
+        search.addEventListener("input", redraw);
+        main.appendChild(U.card(null, [U.el("label", { cls: "f", kids: [
+          U.el("span", { text: "Search" }), search] })]));
+        main.appendChild(out);
+        redraw();
+      }).catch(function (err) { U.clear(main); U.notice(main, err.message); });
+  };
+
+  function openCustomer(c) {
+    U.openSheet(function (body, close) {
+      body.appendChild(U.el("h2", { text: c.name || c.short_name || "Customer" }));
+      var rows = [
+        ["Trading name", c.short_name], ["Legal name", c.legal_name],
+        ["Phone", c.phone], ["Email", c.email],
+        ["Address", c.address], ["Suburb", c.suburb],
+        ["Region", c.region], ["Payment terms", c.payment_terms],
+        ["Notes", c.notes]
+      ].filter(function (r) { return String(r[1] || "").trim(); });
+      body.appendChild(U.card(null, rows.length
+        ? [U.table(["", ""], rows.map(function (r) {
+            return U.el("tr", { kids: [U.cell(r[0]), U.cell(r[1])] });
+          }))]
+        : [U.empty("Nothing recorded against this customer.")]));
+
+      // Their orders, from the list already in hand.
+      var theirs = ORDERS.filter(function (o) {
+        return String(o.customer || "").trim().toLowerCase()
+             === String(c.name || "").trim().toLowerCase()
+            || String(o.customer || "").trim().toLowerCase()
+             === String(c.short_name || "").trim().toLowerCase();
+      }).slice(0, 20);
+      body.appendChild(U.card("Their orders (" + theirs.length + ")",
+        theirs.length
+          ? [U.table(["Order #", "Due", "Status"], theirs.map(function (o) {
+              return U.el("tr", {
+                cls: "row",
+                on: { click: function () { close(); openOrder(o); } },
+                kids: [U.cell(o.order_no), U.cell(o.date_due || "—"),
+                       U.cell(null, { node: U.pill(o.status) })]
+              });
+            }))]
+          : [U.empty("No orders loaded for them.")]));
+      body.appendChild(U.el("div", { cls: "row-actions",
+        kids: [U.button("Close", close, "quiet")] }));
+    });
+  }
+
+  /* ── Stock ───────────────────────────────────────────────────────────── */
+
+  SCREENS.stock = function (main) {
+    D.select("stock_items", { "select": "*", "order": "name", "limit": 2000 })
+      .then(function (rows) {
+        U.clear(main);
+        var search = U.el("input", {
+          attr: { type: "search", placeholder: "Item, SKU or media" }
+        });
+        var lowOnly = U.el("input", { attr: { type: "checkbox" } });
+        var out = U.el("div");
+
+        function isLow(s) {
+          var min = Number(s.minimum_level || s.min_level || 0);
+          return min > 0 && Number(s.stock_on_hand || 0) <= min;
+        }
+        function redraw() {
+          var q = search.value.trim().toLowerCase();
+          var list = rows.filter(function (s) {
+            if (lowOnly.checked && !isLow(s)) { return false; }
+            return !q || [s.name, s.sku, s.media_type]
+              .join(" ").toLowerCase().indexOf(q) !== -1;
+          });
+          U.clear(out);
+          if (!list.length) {
+            out.appendChild(U.card(null, [U.empty("Nothing matches")]));
+            return;
+          }
+          out.appendChild(U.card(list.length + " item"
+            + (list.length === 1 ? "" : "s"),
+            [U.table(["Item", "SKU", { text: "On hand", num: true },
+                      { text: "Minimum", num: true }],
+              list.slice(0, 400).map(function (s) {
+                return U.el("tr", {
+                  cls: "row " + (isLow(s) ? "late" : ""),
+                  on: { click: function () { openStock(s, rows); } },
+                  kids: [U.cell(s.name || ""), U.cell(s.sku || ""),
+                         U.cell(s.stock_on_hand, { num: true }),
+                         U.cell(s.minimum_level || s.min_level || "",
+                                { num: true })]
+                });
+              }))]));
+        }
+        [search, lowOnly].forEach(function (n) {
+          n.addEventListener("input", redraw);
+          n.addEventListener("change", redraw);
+        });
+        main.appendChild(U.card(null, [
+          U.el("label", { cls: "f", kids: [
+            U.el("span", { text: "Search" }), search] }),
+          U.el("label", {
+            attr: { style: "display:flex;gap:8px;align-items:center;"
+                         + "font-size:14px;color:var(--muted)" },
+            kids: [lowOnly, U.el("span", { text: "Only what is low" })] })
+        ]));
+        main.appendChild(out);
+        redraw();
+      }).catch(function (err) { U.clear(main); U.notice(main, err.message); });
+  };
+
+  function openStock(item, all) {
+    U.openSheet(function (body, close) {
+      body.appendChild(U.el("h2", { text: item.name || "Stock item" }));
+      body.appendChild(U.el("div", { cls: "muted",
+        text: [item.sku ? "SKU " + item.sku : "",
+               item.media_type ? "Media " + item.media_type : "",
+               item.unit ? "Per " + item.unit : ""]
+              .filter(Boolean).join("   ·   ") }));
+
+      var onHand = U.el("div", {
+        text: String(item.stock_on_hand || 0),
+        attr: { style: "font-size:30px;font-weight:700" } });
+      body.appendChild(U.card("On hand", [onHand,
+        U.el("div", { cls: "muted",
+          text: "Minimum " + (item.minimum_level || item.min_level || 0) })]));
+
+      if (!D.canManageStock()) {
+        body.appendChild(U.el("div", { cls: "muted",
+          text: "Only a manager can adjust stock." }));
+        body.appendChild(U.el("div", { cls: "row-actions",
+          kids: [U.button("Close", close, "quiet")] }));
+        return;
+      }
+
+      var kind = U.el("select", { kids: [
+        U.el("option", { text: "Used", attr: { value: "use" } }),
+        U.el("option", { text: "Received", attr: { value: "receive" } }),
+        U.el("option", { text: "Counted (set to)", attr: { value: "count" } }),
+        U.el("option", { text: "Written off", attr: { value: "writeoff" } })
+      ] });
+      var qty = U.el("input", { attr: { type: "text", inputmode: "decimal",
+                                        placeholder: "e.g. 4" } });
+      var note = U.el("input", { attr: { type: "text",
+                                         placeholder: "What for (optional)" } });
+      var go = U.button("Save the adjustment", function () {
+        var n = parseFloat(String(qty.value).trim());
+        if (!isFinite(n)) {
+          U.notice(body, "Give the amount as a number.");
+          return;
+        }
+        go.disabled = true;
+        // The same reference twice is applied once, so a tap that looked
+        // like it did nothing and got tapped again cannot double-count.
+        var ref = "web-" + Date.now() + "-"
+                + Math.random().toString(16).slice(2, 8);
+        D.rpc("adjust_stock_atomic", {
+          p_item_id: item.id, p_type: kind.value, p_quantity: n,
+          p_notes: note.value || "", p_client_ref: ref,
+          p_username: D.cachedProfile().username
+                   || D.cachedProfile().full_name || "",
+          p_device: "web"
+        }).then(function (out) {
+          var row = Array.isArray(out) ? out[0] : out;
+          var after = row && row.quantity_after;
+          if (after === null || after === undefined) {
+            throw new Error("The database did not report a new figure. "
+                            + "Check the count before adjusting again.");
+          }
+          item.stock_on_hand = after;
+          onHand.textContent = String(after);
+          qty.value = ""; note.value = "";
+          U.notice(body, "Now " + after + " on hand.", "ok");
+          void all;
+        }).catch(function (err) {
+          U.notice(body, err.message);
+        }).then(function () { go.disabled = false; });
+      }, "go");
+
+      body.appendChild(U.card("Adjust it", [
+        U.el("label", { cls: "f", kids: [
+          U.el("span", { text: "What happened" }), kind] }),
+        U.el("label", { cls: "f", kids: [
+          U.el("span", { text: "How much" }), qty] }),
+        U.el("label", { cls: "f", kids: [
+          U.el("span", { text: "Note" }), note] })
+      ]));
+      body.appendChild(U.el("div", { cls: "row-actions",
+        kids: [go, U.button("Close", close, "quiet")] }));
+    });
+  }
 
   return {
     start: start,

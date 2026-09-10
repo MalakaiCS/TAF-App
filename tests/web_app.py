@@ -52,6 +52,13 @@ ORDERS = [
      "archived": False, "created_at": "2026-09-02T00:00:00Z",
      "n_items": 2, "n_made": 2, "full_name": "Kai Brown",
      "header": {"status": "Complete"}},
+    # Still being made. It must never appear on a delivery run, which is the
+    # only thing keeping a driver from being sent out with an empty box.
+    {"id": "o3", "customer_name": "Pelican Waters", "order_number": "PO-9100",
+     "date_ordered": "03/09/2026", "date_due": "31/12/2026",
+     "archived": False, "created_at": "2026-09-03T00:00:00Z",
+     "n_items": 5, "n_made": 0, "full_name": "Kai Brown",
+     "header": {"status": "Pending"}},
 ]
 
 ITEMS = {
@@ -66,6 +73,41 @@ ITEMS = {
     ],
     "o2": [],
 }
+
+
+CUSTOMERS = [
+    {"id": "c1", "name": "Bells Creek Pty Ltd", "short_name": "Bells Creek",
+     "phone": "07 5555 1234", "email": "jobs@bellscreek.com.au",
+     "address": "12 Industrial Ave", "suburb": "Caloundra",
+     "region": "Sunshine Coast", "payment_terms": "Net 30"},
+    {"id": "c2", "name": "CAS - Tweed", "short_name": "CAS - Tweed",
+     "phone": "", "email": "", "region": "Northern NSW"},
+]
+
+STOCK = [
+    {"id": "s1", "name": "G4 media roll 1m", "sku": "MED-G4-1M",
+     "media_type": "G4", "unit": "m", "stock_on_hand": 42,
+     "minimum_level": 20},
+    {"id": "s2", "name": "F5 media roll 1m", "sku": "MED-F5-1M",
+     "media_type": "F5", "unit": "m", "stock_on_hand": 6,
+     "minimum_level": 25},          # low
+]
+
+QUOTES = [
+    {"id": "q1", "quote_number": "Q-1041", "customer_name": "Bells Creek",
+     "reference": "PO-9001", "status": "sent", "total": 1287.5,
+     "unpriced_count": 1, "valid_until": "2026-10-31",
+     "created_at": "2026-09-01T00:00:00Z", "notes": "Site access via gate 3",
+     "items": [
+         {"quantity": 4, "description": "V-form G4 500 x 600 x 45",
+          "unit_price": 88.5, "line_total": 354.0},
+         {"quantity": 2, "description": "Stepped Filter WASH",
+          "unit_price": 0, "line_total": 0},
+     ]},
+    {"id": "q2", "quote_number": "Q-1042", "customer_name": "CAS - Tweed",
+     "reference": "", "status": "draft", "total": 210.0, "unpriced_count": 0,
+     "created_at": "2026-09-02T00:00:00Z", "items": []},
+]
 
 
 class Stub:
@@ -102,6 +144,12 @@ class Stub:
             return send([PROFILE])
         if "/rest/v1/orders_list" in url:
             return send(ORDERS)
+        if "/rest/v1/customers" in url:
+            return send(CUSTOMERS)
+        if "/rest/v1/stock_items" in url:
+            return send(STOCK)
+        if "/rest/v1/quotes" in url:
+            return send(QUOTES)
         if "/rest/v1/orders" in url:
             oid = ""
             for part in url.split("&"):
@@ -122,6 +170,20 @@ class Stub:
                         it["made"] = bool(body.get("p_made"))
                         return send("o1")
                 return send(None)
+            if name == "adjust_stock_atomic":
+                item = next((s for s in STOCK
+                             if s["id"] == body.get("p_item_id")), None)
+                if item is None:
+                    return send(None)
+                qty = float(body.get("p_quantity") or 0)
+                kind = body.get("p_type")
+                if kind == "count":
+                    item["stock_on_hand"] = qty
+                elif kind in ("use", "writeoff"):
+                    item["stock_on_hand"] -= abs(qty)
+                else:
+                    item["stock_on_hand"] += abs(qty)
+                return send([{"quantity_after": item["stock_on_hand"]}])
             if name == "merge_order_header":
                 row = next((o for o in ORDERS
                             if o["id"] == body.get("p_order_id")), None)
@@ -261,7 +323,7 @@ def run() -> int:
         page.click('#tabs button[data-tab="orders"]')
         page.wait_for_selector("#screen table")
         rows = page.locator("#screen tbody tr")
-        check("both orders are listed", rows.count() == 2, str(rows.count()))
+        check("every order is listed", rows.count() == 3, str(rows.count()))
         check("progress shows as a fraction",
               "1/3" in page.locator("#screen").inner_text())
         check("a finished order shows a tick",
@@ -340,12 +402,87 @@ def run() -> int:
               sheet.locator(".pill").first.inner_text())
         check("and Complete is no longer on offer",
               sheet.locator("button", has_text="Complete").count() == 0)
+        page.locator("#sheet-body button", has_text="Close").first.click()
+        page.wait_for_selector("#sheet.hidden", state="attached")
+
+        print("\n── delivery ──")
+        page.click('#tabs button[data-tab="delivery"]')
+        page.wait_for_selector("#screen .card")
+        text = page.locator("#screen").inner_text()
+        # Only Complete work is ready to go — the same rule the run sheet is
+        # built on, so the driver's sheet and this screen cannot disagree.
+        check("completed work is on the run", "CAS - Tweed" in text)
+        check("work still being made is not",
+              "Pelican Waters" not in text, text[:250])
+
+        print("\n── quotes ──")
+        page.click('#tabs button[data-tab="quotes"]')
+        page.wait_for_selector("#screen table")
+        check("quotes are listed",
+              page.locator("#screen tbody tr").count() == 2)
+        page.locator("#screen tbody tr", has_text="Q-1041").first.click()
+        page.wait_for_selector("#sheet:not(.hidden)")
+        qsheet = page.locator("#sheet-body")
+        check("its lines are shown", qsheet.locator("tbody tr").count() == 2)
+        check("an unpriced line says so, rather than showing nothing",
+              "to be confirmed" in qsheet.inner_text())
+        check("and the quote warns how many were left out",
+              "1 line has no price" in qsheet.inner_text(),
+              qsheet.inner_text()[:300])
+        page.locator("#sheet-body button", has_text="Close").first.click()
+        page.wait_for_selector("#sheet.hidden", state="attached")
+
+        print("\n── customers ──")
+        page.click('#tabs button[data-tab="customers"]')
+        page.wait_for_selector("#screen table")
+        check("customers are listed",
+              page.locator("#screen tbody tr").count() == 2)
+        page.fill('#screen input[type="search"]', "caloundra")
+        page.wait_for_timeout(150)
+        check("search reaches the suburb, not just the name",
+              page.locator("#screen tbody tr").count() == 1)
+        page.locator("#screen tbody tr").first.click()
+        page.wait_for_selector("#sheet:not(.hidden)")
+        csheet = page.locator("#sheet-body")
+        check("their details are shown",
+              "jobs@bellscreek.com.au" in csheet.inner_text())
+        check("and their orders", "PO-8842" in csheet.inner_text())
+        page.locator("#sheet-body button", has_text="Close").first.click()
+        page.wait_for_selector("#sheet.hidden", state="attached")
+
+        print("\n── stock ──")
+        page.click('#tabs button[data-tab="stock"]')
+        page.wait_for_selector("#screen table")
+        check("stock is listed", page.locator("#screen tbody tr").count() == 2)
+        check("what is low is flagged",
+              page.locator("#screen tbody tr.late").count() == 1)
+        page.check('#screen input[type="checkbox"]')
+        page.wait_for_timeout(150)
+        check("and can be shown on its own",
+              page.locator("#screen tbody tr").count() == 1)
+
+        page.locator("#screen tbody tr").first.click()
+        page.wait_for_selector("#sheet:not(.hidden)")
+        ssheet = page.locator("#sheet-body")
+        before = STOCK[1]["stock_on_hand"]
+        page.select_option("#sheet-body select", "receive")
+        page.fill('#sheet-body input[inputmode="decimal"]', "30")
+        page.locator("#sheet-body button", has_text="Save the adjustment").click()
+        page.wait_for_timeout(400)
+        check("an adjustment reaches the database",
+              STOCK[1]["stock_on_hand"] == before + 30,
+              str(STOCK[1]["stock_on_hand"]))
+        check("and the new figure is shown back",
+              str(before + 30) in ssheet.inner_text())
+        check("every adjustment carries a reference, so a double tap "
+              "cannot double-count",
+              all(b.get("p_client_ref") for _u, b in stub.calls
+                  if "p_item_id" in b))
+        page.locator("#sheet-body button", has_text="Close").first.click()
+        page.wait_for_selector("#sheet.hidden", state="attached")
 
         print("\n── signing out ──")
-        page.locator("#sheet-body button", has_text="Close").first.click()
-        # attached, not visible — a hidden element never becomes visible.
-        page.wait_for_selector("#sheet.hidden", state="attached")
-        check("closing the sheet gets out of the way",
+        check("nothing is left covering the app",
               page.locator("#sheet").is_hidden())
         page.click("#signout")
         page.wait_for_selector("#signin-form", timeout=8000)
