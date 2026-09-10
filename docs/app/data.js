@@ -65,6 +65,11 @@ var TAFDATA = (function () {
       method: "POST",
       headers: { "apikey": KEY, "Content-Type": "application/json" },
       body: JSON.stringify({ email: email, password: password })
+    }).catch(function () {
+      var err = new Error("No signal, so we cannot check that yet. "
+                        + "Get into wifi or data and try again.");
+      err.offline = true;
+      throw err;
     }).then(function (r) {
       return r.json().then(function (body) {
         if (!r.ok) {
@@ -86,6 +91,7 @@ var TAFDATA = (function () {
     var token = signedIn() ? SESSION.access_token : "";
     remember(null);
     PROFILE = null;
+    keep(null);
     if (!token) { return Promise.resolve(); }
     return fetch(URLBASE + "/auth/v1/logout", {
       method: "POST",
@@ -107,8 +113,14 @@ var TAFDATA = (function () {
       method: "POST",
       headers: { "apikey": KEY, "Content-Type": "application/json" },
       body: JSON.stringify({ refresh_token: SESSION.refresh_token })
+    }).catch(function () {
+      throw noSignal();
     }).then(function (r) {
-      if (!r.ok) { throw new Error("Signed out."); }
+      if (!r.ok) {
+        var no = new Error("Signed out.");
+        no.signedOut = true;
+        throw no;
+      }
       return r.json();
     }).then(function (body) {
       remember({
@@ -120,7 +132,10 @@ var TAFDATA = (function () {
       return SESSION;
     }).catch(function (err) {
       refreshing = null;
-      remember(null);
+      // A dropout is not a sign-out. Throwing the session away because the
+      // wifi went would put somebody at the back of the factory on a login
+      // screen they cannot get past, with unsent work on the phone.
+      if (!err || !err.offline) { remember(null); }
       throw err;
     });
     return refreshing;
@@ -128,12 +143,25 @@ var TAFDATA = (function () {
 
   /* ── Asking the database for things ─────────────────────────────────── */
 
+  /* A request that never left the phone and a request the database refused
+     are different problems with different answers: one is worth keeping and
+     sending later, the other has to be shown to somebody now. fetch tells
+     them apart by rejecting outright, so that is where the difference gets
+     recorded - on the error itself, for TAFSYNC to read. */
+  function noSignal() {
+    var err = new Error("No signal. That has not been sent yet.");
+    err.offline = true;
+    return err;
+  }
+
   function request(path, options, retried) {
     var opts = options || {};
     return fetch(URLBASE + path, {
       method: opts.method || "GET",
       headers: headers(opts.headers),
       body: opts.body ? JSON.stringify(opts.body) : undefined
+    }).catch(function () {
+      throw noSignal();
     }).then(function (r) {
       if (r.status === 401 && !retried && SESSION && SESSION.refresh_token) {
         return refresh().then(function () {
@@ -144,7 +172,9 @@ var TAFDATA = (function () {
         return r.text().then(function (text) {
           var detail = text;
           try { detail = (JSON.parse(text).message || text); } catch (e) {}
-          throw new Error(friendly(r.status, detail));
+          var err = new Error(friendly(r.status, detail));
+          if (r.status === 401) { err.signedOut = true; }
+          throw err;
         });
       }
       if (r.status === 204) { return null; }
@@ -227,6 +257,10 @@ var TAFDATA = (function () {
         "x-upsert": "true"
       },
       body: blob
+    }).catch(function () {
+      // A photo is not queued for later: it is megabytes, and the phone's
+      // own camera roll is a better place to keep it than this app's.
+      throw noSignal();
     }).then(function (r) {
       if (!r.ok) {
         return r.text().then(function (text) {
@@ -251,6 +285,25 @@ var TAFDATA = (function () {
      have been approved all live there. */
 
   var PROFILE = null;
+  var KEPT = "taf_staff_profile";
+
+  function keep(row) {
+    try {
+      if (row && row.id) { localStorage.setItem(KEPT, JSON.stringify(row)); }
+      else { localStorage.removeItem(KEPT); }
+    } catch (e) { /* private window */ }
+  }
+
+  /* Kept on the phone so that opening the app out of signal still knows
+     whose it is and what they are. It decides nothing: every rule that
+     matters is a row-level security policy, and a role edited in browser
+     storage buys exactly the extra buttons and none of the access. */
+  function kept() {
+    try {
+      var raw = localStorage.getItem(KEPT);
+      return raw ? JSON.parse(raw) : null;
+    } catch (e) { return null; }
+  }
 
   function profile(force) {
     if (PROFILE && !force) { return Promise.resolve(PROFILE); }
@@ -259,9 +312,17 @@ var TAFDATA = (function () {
     return select("profiles", { "id": "eq." + id, "select": "*" })
       .then(function (rows) {
         PROFILE = (rows && rows[0]) || {};
+        keep(PROFILE);
         return PROFILE;
       })
-      .catch(function () { PROFILE = {}; return PROFILE; });
+      .catch(function (err) {
+        // No signal is not "we do not know who you are". Anything else is:
+        // an account that has been removed must not keep working off a copy
+        // it saved of itself.
+        var mine = (err && err.offline) ? (kept() || {}) : {};
+        PROFILE = mine;
+        return PROFILE;
+      });
   }
 
   function cachedProfile() { return PROFILE || {}; }

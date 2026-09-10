@@ -274,9 +274,35 @@ The link carries the publishable key the same way portal links do, the phone
 remembers it, and after that it is a bookmark. Everyone still signs in
 themselves.
 
-Today, New order, Orders, Delivery, Quotes, Customers and Stock. You can raise
-an order, tick its lines off as they're made, change a status, add stock
-adjustments, look anything up.
+Today, New order, Orders, Scan, Delivery, Quotes, Customers and Stock. You can
+raise an order, tick its lines off as they're made, change a status, add stock
+adjustments, photograph a job, take a signature at the drop, look anything up.
+
+**It keeps working with no signal.** The app installs itself on the phone the
+first time it's opened, so it starts at the back of the factory where the wifi
+doesn't reach. Anything done out of range — a line ticked, a status changed, a
+stock count — is kept on the phone and sent when the signal comes back; a bar
+under the tabs says how many are waiting and gives you a **Send now**. A tick
+that hasn't gone yet is drawn with a dashed box, so what's real and what's
+still on the phone are never the same picture.
+
+Lists you've already looked at (orders, customers, stock) come back out of
+range too, and say when the phone last saw them rather than passing themselves
+off as today's. Nothing from the database is ever cached silently: an hour-old
+stock figure looks exactly like this minute's, and that is worse than an error
+message.
+
+Signing out with work still waiting stops and asks, because the next person to
+use that phone must not send the last person's ticks under their own account.
+
+**Scan** reads the Code 128 barcodes the app already prints — on a worksheet,
+on a rack label — through the phone's camera, and opens the order or the stock
+item it names. There's a box to type or scan a code into as well: a handheld
+scanner in keyboard mode types straight into it, and it's the way in on any
+browser without a barcode reader, which today means every iPhone. What a code
+means is decided by `resolve_scan` in the database, so the handheld, the phone
+and the desktop can't drift apart. Out of signal it still resolves anything the
+phone has already seen.
 
 It does **not** generate worksheets. Those are made by driving Excel and Word
 through COM, which runs on Windows and nowhere else, so an order's paperwork
@@ -295,6 +321,11 @@ without seeing its square metreage as you type.
 can register can read every order, customer, quote and price — which is bad on
 a PC in the office and considerably worse with a login box on the open
 internet.
+
+Scan needs `migrate_scanning.sql`, ticking lines off needs
+`migrate_line_progress.sql`, and photos and signatures need
+`migrate_order_files.sql`. Run `check_migrations.sql` to see what's still
+outstanding.
 
 ### Enable emails to customers (optional)
 
@@ -537,6 +568,8 @@ fonts/                     Bundled Public Sans (OFL)
 price_lists/               The priced catalogue (import under Settings)
 *.sql                      Schema + migrations
 docs/phone/index.html      The page phones open (served by GitHub Pages)
+docs/app/                  The staff web app — orders, scanning, works offline
+docs/sw.js                 Keeps the web app on the phone with no signal
 docs/quote/index.html      The quote page customers open
 docs/portal/index.html     The customer portal (orders, quotes, account)
 docs/company.js            Phone, email, address, hours — fill this in

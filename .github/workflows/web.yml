@@ -16,11 +16,13 @@ on:
     paths:
       - 'docs/**'
       - 'tests/web_app.py'
+      - 'tests/test_offline.py'
       - '.github/workflows/web.yml'
   pull_request:
     paths:
       - 'docs/**'
       - 'tests/web_app.py'
+      - 'tests/test_offline.py'
   workflow_dispatch:
 
 jobs:
@@ -38,6 +40,13 @@ jobs:
           python -m pip install --upgrade pip
           pip install playwright
           python -m playwright install --with-deps chromium
+
+      # The rules that hold whether or not there is a browser: what the
+      # service worker is allowed to keep, and what may go in the offline
+      # queue. A change to docs/ alone never reaches the Windows build, so
+      # these would otherwise not run at all.
+      - name: Check the offline rules
+        run: python tests/test_offline.py
 
       - name: Drive the web app
         run: python tests/web_app.py

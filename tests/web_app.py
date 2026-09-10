@@ -15,8 +15,12 @@ where they are missing, the way the GUI smoke test does.
 """
 from __future__ import annotations
 
+import functools
+import http.server
 import json
+import socketserver
 import sys
+import threading
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -217,6 +221,21 @@ class Stub:
                 else:
                     item["stock_on_hand"] += abs(qty)
                 return send([{"quantity_after": item["stock_on_hand"]}])
+            if name == "resolve_scan":
+                code = str(body.get("p_code") or "").strip().upper()
+                hits = []
+                for s in STOCK:
+                    if str(s.get("sku") or "").upper() == code:
+                        hits.append({"kind": "stock", "ref": s["id"],
+                                     "label": s["name"], "detail": "Rack A",
+                                     "extra": {}})
+                for o in ORDERS:
+                    if str(o.get("order_number") or "").upper() == code:
+                        hits.append({"kind": "order", "ref": o["id"],
+                                     "label": o["customer_name"],
+                                     "detail": o["header"].get("status", ""),
+                                     "extra": {}})
+                return send(hits)
             if name == "merge_order_header":
                 row = next((o for o in ORDERS
                             if o["id"] == body.get("p_order_id")), None)
@@ -635,6 +654,181 @@ def run() -> int:
         page.locator("#sheet-body button", has_text="Close").first.click()
         page.wait_for_selector("#sheet.hidden", state="attached")
 
+        print("\n── scanning a code ──")
+
+        def newest():
+            """The card for the code most recently scanned."""
+            return page.locator("#scans .card").first
+
+        page.click('#tabs button[data-tab="scan"]')
+        page.wait_for_selector("#screen .code")
+        page.fill("#screen input.code", "PO-8842")
+        page.press("#screen input.code", "Enter")
+        page.wait_for_selector("#screen button.hit")
+        check("a scanned order number finds the order",
+              "Bells Creek" in newest().inner_text())
+        page.click("#screen button.hit")
+        page.wait_for_selector("#sheet:not(.hidden)")
+        check("and opens it, ready to tick off",
+              "Bells Creek" in page.locator("#sheet-body h2").first.inner_text())
+        page.locator("#sheet-body button", has_text="Close").first.click()
+        page.wait_for_selector("#sheet.hidden", state="attached")
+
+        page.fill("#screen input.code", "MED-G4-1M")
+        page.press("#screen input.code", "Enter")
+        page.wait_for_timeout(300)
+        check("a scanned rack label finds the stock item",
+              "G4 media roll" in newest().inner_text())
+
+        page.fill("#screen input.code", "NOT-A-CODE")
+        page.press("#screen input.code", "Enter")
+        page.wait_for_timeout(300)
+        check("a code that means nothing says so, rather than nothing at all",
+              "Nothing here answers to that code" in newest().inner_text())
+
+        # Every iPhone today, and Firefox. The camera button must not sit
+        # there doing nothing with no explanation.
+        page.evaluate("window.__BD = window.BarcodeDetector;"
+                      "delete window.BarcodeDetector;")
+        page.click('#tabs button[data-tab="orders"]')
+        page.click('#tabs button[data-tab="scan"]')
+        page.wait_for_selector("#screen .code")
+        check("a browser that cannot read barcodes says what to do instead",
+              "cannot read a barcode" in page.locator("#screen").inner_text())
+        check("and does not offer a camera button that would do nothing",
+              page.locator('#screen button:has-text("Use the camera")')
+              .is_disabled())
+
+        print("\n── the camera ──")
+        # A stubbed detector and a canvas for a camera: the point being
+        # tested is the loop around them, not Chromium's barcode support.
+        page.evaluate("""() => {
+          window.BarcodeDetector = function () {
+            this.detect = function () {
+              return Promise.resolve([{ rawValue: "TAF-ON-0002" }]);
+            };
+          };
+          window.BarcodeDetector.getSupportedFormats =
+            () => Promise.resolve(["code_128"]);
+          // A fresh stream each time it is asked for, all of them kept, so
+          // a camera left running on the second go cannot hide behind the
+          // first one having been stopped.
+          window.__streams = [];
+          navigator.mediaDevices.getUserMedia = function () {
+            const c = document.createElement("canvas");
+            c.width = 320; c.height = 240;
+            const s = c.captureStream(5);
+            window.__streams.push(s);
+            return Promise.resolve(s);
+          };
+        }""")
+        ended = ("window.__streams.length === %d && window.__streams.every("
+                 "s => s.getTracks().every(t => t.readyState === 'ended'))")
+        page.click('#tabs button[data-tab="orders"]')
+        page.click('#tabs button[data-tab="scan"]')
+        page.wait_for_selector('#screen button:not([disabled]):has-text("Use the camera")')
+        scans_before = len([1 for u, _b in stub.calls if "resolve_scan" in u])
+        page.click('#screen button:has-text("Use the camera")')
+        page.wait_for_selector('#scans .card:has-text("TAF-ON-0002")',
+                               timeout=6000)
+        check("the camera reads a code and looks it up",
+              "CAS - Tweed" in newest().inner_text())
+        # It sees the same label thirty times a second. Every frame must not
+        # become a request.
+        page.wait_for_timeout(1500)
+        scans = len([1 for u, _b in stub.calls if "resolve_scan" in u]) - scans_before
+        check("one label held in front of it is one lookup, not thirty",
+              scans <= 2, f"{scans} lookups in 1.8 seconds")
+        page.click('#screen button:has-text("Stop the camera")')
+        page.wait_for_timeout(200)
+        check("stopping it puts the camera down", page.evaluate(ended % 1))
+        # Leaving the tab must do the same, or the light on the back of the
+        # phone stays on for the rest of the day.
+        page.click('#screen button:has-text("Use the camera")')
+        page.wait_for_timeout(500)
+        page.click('#tabs button[data-tab="orders"]')
+        page.wait_for_timeout(300)
+        check("and so does walking away from the tab",
+              page.evaluate(ended % 2),
+              page.evaluate("window.__streams.map(s =>"
+                            " s.getTracks().map(t => t.readyState).join())"
+                            ".join(' | ')"))
+
+        print("\n── no signal ──")
+        page.wait_for_selector("#screen table")
+        page.locator("#screen tbody tr", has_text="Bells Creek").first.click()
+        page.wait_for_selector("#sheet-body button.tick")
+        ticks = page.locator("#sheet-body button.tick")
+        was = ITEMS["o1"][1].get("made")
+
+        # The wifi at the back of the factory, as the browser sees it: the
+        # request never arrives anywhere.
+        page.route("**/rest/v1/rpc/set_order_line_made*",
+                   lambda r: r.abort("internetdisconnected"))
+        ticks.nth(1).click()
+        page.wait_for_timeout(400)
+        check("a tick out of signal says it is kept, not that it failed",
+              "Kept on this phone" in page.locator("#sheet-body").inner_text())
+        check("the line shows as ticked all the same",
+              ticks.nth(1).get_attribute("aria-pressed") == "true")
+        check("and marked as not gone yet",
+              "waiting" in (ticks.nth(1).get_attribute("class") or ""))
+        check("nothing reached the database",
+              ITEMS["o1"][1].get("made") == was)
+        check("the bar under the tabs says one change is waiting",
+              "1 change waiting" in page.locator("#state").inner_text())
+
+        page.locator("#sheet-body button", has_text="Close").first.click()
+        page.wait_for_selector("#sheet.hidden", state="attached")
+
+        # The signal comes back, but nothing has been flushed yet. A change
+        # made now must go behind what is already waiting, not overtake it —
+        # a tick and the untick that followed it arriving the wrong way round
+        # would leave the order saying the opposite of what happened.
+        page.unroute("**/rest/v1/rpc/set_order_line_made*")
+        page.locator("#screen tbody tr", has_text="Bells Creek").first.click()
+        page.wait_for_selector("#sheet-body button.tick")
+        page.locator("#sheet-body button.tick").nth(2).click()
+        page.wait_for_timeout(400)
+        check("with signal back, a new change still goes behind the queue",
+              "2 changes waiting" in page.locator("#state").inner_text(),
+              page.locator("#state").inner_text())
+        check("and does not reach the database ahead of it",
+              ITEMS["o1"][2].get("made") is not True)
+        page.locator("#sheet-body button", has_text="Close").first.click()
+        page.wait_for_selector("#sheet.hidden", state="attached")
+
+        page.locator('#state button:has-text("Send now")').click()
+        page.wait_for_timeout(600)
+        check("back in signal, what was waiting goes through",
+              ITEMS["o1"][1].get("made") is True
+              and ITEMS["o1"][2].get("made") is True)
+        check("and the bar goes away", page.locator("#state").is_hidden())
+
+        print("\n── what the phone remembers ──")
+        page.route("**/rest/v1/orders_list*",
+                   lambda r: r.abort("internetdisconnected"))
+        page.evaluate("TAFAPP._stale()")
+        page.click('#tabs button[data-tab="dashboard"]')
+        page.click('#tabs button[data-tab="orders"]')
+        page.wait_for_selector("#screen table")
+        check("with no signal the last list it saw is still there",
+              page.locator("#screen tbody tr").count() >= 3)
+        check("and it says so, rather than passing it off as today's",
+              "what the phone last saw" in page.locator("#screen").inner_text())
+        page.unroute("**/rest/v1/orders_list*")
+
+        page.route("**/rest/v1/rpc/resolve_scan*",
+                   lambda r: r.abort("internetdisconnected"))
+        page.click('#tabs button[data-tab="scan"]')
+        page.wait_for_selector("#screen .code")
+        page.fill("#screen input.code", "MED-G4-1M")
+        page.press("#screen input.code", "Enter")
+        page.wait_for_timeout(300)
+        check("a rack label still resolves with no signal at all",
+              "G4 media roll" in page.locator("#scans .card").first.inner_text())
+        page.unroute("**/rest/v1/rpc/resolve_scan*")
+
         print("\n── signing out ──")
         check("nothing is left covering the app",
               page.locator("#sheet").is_hidden())
@@ -644,6 +838,78 @@ def run() -> int:
               page.locator("#app").is_hidden())
         check("and the session is forgotten",
               page.evaluate("localStorage.getItem('taf_staff_session')") is None)
+
+        print("\n── kept on the phone ──")
+        # A service worker needs a real origin, and file:// has none — so
+        # this last part is served over http out of the same folder GitHub
+        # Pages serves, which is the only way to prove the thing the whole
+        # feature rests on: that the app opens with the network off.
+        class Quiet(http.server.SimpleHTTPRequestHandler):
+            def log_message(self, *a):    # noqa: D102 - a silent test server
+                pass
+
+        handler = functools.partial(Quiet, directory=str(ROOT / "docs"))
+        httpd = socketserver.TCPServer(("127.0.0.1", 0), handler)
+        port = httpd.server_address[1]
+        threading.Thread(target=httpd.serve_forever, daemon=True).start()
+        crashes: list = []
+        try:
+            ctx = browser.new_context()
+            p2 = ctx.new_page()
+            p2.on("pageerror", lambda e: crashes.append(str(e)))
+            p2.route("**/rest/v1/**", stub.route)
+            p2.route("**/auth/v1/**", stub.route)
+            p2.goto(f"http://127.0.0.1:{port}/app/index.html?k=test-anon-key")
+            p2.wait_for_function(
+                "navigator.serviceWorker && navigator.serviceWorker.controller",
+                timeout=20000)
+            check("the app puts itself on the phone", True)
+
+            paths = p2.evaluate("""async () => {
+              const names = await caches.keys();
+              const c = await caches.open(names[0]);
+              return (await c.keys()).map(r => new URL(r.url).pathname);
+            }""")
+            need = ["/app/index.html", "/app/screens.js", "/app/offline.js",
+                    "/app/data.js", "/app/ui.js", "/company.js",
+                    "/taf-shared.js", "/app/manifest.webmanifest",
+                    "/app/icon-192.png"]
+            check("everything it is made of is kept there",
+                  all(f in paths for f in need),
+                  "missing " + str([f for f in need if f not in paths]))
+            # The one thing that must never be cached. A stock figure served
+            # from yesterday looks exactly like today's and is not.
+            check("and nothing from the database is",
+                  not any("/rest/" in p or "/auth/" in p or "/storage/" in p
+                          for p in paths), str(paths))
+
+            ctx.set_offline(True)
+            # A plain reload proves nothing: Chromium would serve that out of
+            # its own HTTP cache whether or not any of this works. An address
+            # it has never fetched cannot come from there, so if this opens,
+            # the worker is what opened it.
+            opened, why = True, ""
+            try:
+                p2.goto(f"http://127.0.0.1:{port}/app/index.html?fresh=1")
+                p2.wait_for_selector("#signin-form", timeout=20000)
+            except Exception as exc:
+                opened, why = False, str(exc).splitlines()[0]
+            check("with the network off it still opens", opened, why)
+            if opened:
+                check("styled and working, not a page of raw text",
+                      p2.evaluate("typeof TAFSYNC") == "object"
+                      and p2.evaluate("typeof TAFAPP") == "object")
+                check("and its scripts come from the phone, not the cupboard",
+                      p2.evaluate("() => fetch('screens.js',"
+                                  " {cache: 'no-store'}).then(r => r.ok)"
+                                  ".catch(() => false)"))
+            check("and the worker did not throw on the way", not crashes,
+                  "; ".join(crashes[:3]))
+            ctx.set_offline(False)
+            ctx.close()
+        finally:
+            httpd.shutdown()
+            httpd.server_close()
 
         real_errors = [e for e in errors if "favicon" not in e.lower()]
         check("no script errors anywhere", not real_errors,

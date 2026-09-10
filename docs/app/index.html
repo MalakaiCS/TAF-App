@@ -6,6 +6,11 @@
 <meta name="theme-color" content="#1B3A5C">
 <meta name="robots" content="noindex, nofollow">
 <title>Total Air Filtration &middot; Orders</title>
+<!-- Added to a home screen it opens on its own, without a browser's address
+     bar taking a fifth of a phone screen — and, with the service worker, it
+     opens whether or not there is any signal. -->
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" href="icon-192.png" sizes="192x192">
 <link rel="apple-touch-icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Crect width='100' height='100' fill='%231B3A5C'/%3E%3Ctext x='50' y='68' font-size='54' font-family='sans-serif' font-weight='bold' fill='white' text-anchor='middle'%3ET%3C/text%3E%3C/svg%3E">
 <!--
   The staff web app: the same orders, customers and stock as the Windows app,
@@ -107,12 +112,42 @@
           background:#fff; cursor:pointer; font-size:18px; line-height:1;
           color:var(--green); padding:0; }
   .tick[aria-pressed="true"] { background:#E4F4EA; border-color:var(--green); }
+  /* Ticked here, not yet at the database. Dashed until it has actually gone. */
+  .tick.waiting { border-style:dashed; border-color:#B8891F; color:#8A6D00; }
   tr.made td { background:#EAF7EE; }
 
   .filetile { background:var(--tint); border:1px solid var(--line);
               border-radius:10px; padding:16px 8px; cursor:pointer;
               font:inherit; min-height:74px; }
   .filetile:hover { border-color:var(--brand); }
+
+  /* No signal, or work waiting to go. Always in the same place, right under
+     the tabs, so it is not something you have to go looking for. */
+  #state { display:flex; gap:10px; align-items:center; cursor:pointer;
+           padding:10px 14px; font-size:13px; font-weight:600;
+           background:#FDF3E0; color:#6B5200;
+           border-bottom:1px solid #E8D08A; }
+  #state.bad { background:#FCE9E6; color:#8A2A1E; border-bottom-color:#E9BDB5; }
+  #state.new { background:#E4EEF8; color:#1B4E7E; border-bottom-color:#B9D2EA; }
+  #state span.grow { flex:1; }
+  #state button { background:rgba(0,0,0,.08); border:0; color:inherit;
+                  font:700 12px/1 inherit; padding:8px 11px; border-radius:7px;
+                  cursor:pointer; }
+
+  /* Scanning. The picture fills the width and nothing else competes with it —
+     somebody is holding a phone at arm's length in front of a rack. */
+  .scanbox { position:relative; background:#000; border-radius:12px;
+             overflow:hidden; aspect-ratio:4/3; max-width:100%; }
+  .scanbox video { width:100%; height:100%; object-fit:cover; display:block; }
+  .scanbox .reticle { position:absolute; left:8%; right:8%; top:30%; bottom:30%;
+                      border:3px solid rgba(255,255,255,.85); border-radius:10px;
+                      box-shadow:0 0 0 2000px rgba(0,0,0,.28); }
+  .hit { border:1px solid var(--line); border-radius:10px; padding:12px;
+         margin-bottom:8px; background:#fff; cursor:pointer; width:100%;
+         text-align:left; font:inherit; }
+  .hit strong { display:block; font-size:15px; }
+  .code { font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+          font-size:15px; letter-spacing:.04em; }
 
   .muted { color:var(--muted); font-size:13px; }
   .empty { text-align:center; color:var(--muted); padding:30px 10px; }
@@ -179,6 +214,9 @@
     <button id="signout" type="button">Sign out</button>
   </header>
   <nav id="tabs" role="tablist"></nav>
+  <!-- No signal, work waiting to send, a new version to pick up. Empty and
+       out of the way when there is nothing to say. -->
+  <div id="state" class="hidden"></div>
   <main id="screen"></main>
 </div>
 
@@ -191,6 +229,7 @@
 <script src="config.js" onerror="void 0"></script>
 <script src="data.js"></script>
 <script src="ui.js"></script>
+<script src="offline.js"></script>
 <script src="screens.js"></script>
 <script>
 "use strict";
@@ -199,10 +238,12 @@
   exactly as the customer portal does it — and then taken out of the address
   bar, so it is not left behind in a screenshot or a shared browser history.
 
-  It is not committed to this repository. It is public in the sense that it
-  ships inside the Windows installer and rides in every portal link, but
-  writing it into a file in a public repo is a different thing: it would then
-  outlive any decision to rotate it. The desktop app hands out the link.
+  config.js, where the key normally comes from, is written and committed by
+  the "Publish the web app key" workflow — see that file for why putting a
+  publishable key in a public repo is the right trade and a secret key never
+  is. The ?k= route stays because it is what the desktop app's "Open on a
+  phone" hands out, and what makes a second Supabase project testable
+  without editing anything.
 */
 var params = new URLSearchParams(location.search);
 
@@ -226,6 +267,27 @@ if (params.get("k")) {
 
 TAFDATA.boot("https://djexdkwohkylunnwbxpf.supabase.co", KEY);
 TAFAPP.start(KEY);
+
+/*
+  Keeping the app on the phone. The worker lives one level up so that
+  company.js and taf-shared.js are inside its scope; it answers only for the
+  files it put there itself, and never for Supabase, which is another origin
+  and falls straight through to the network.
+
+  file:// has no service workers at all — no origin to scope one to — so this
+  is skipped there rather than throwing on a page opened straight off disk.
+*/
+if ("serviceWorker" in navigator && location.protocol !== "file:") {
+  window.addEventListener("load", function () {
+    navigator.serviceWorker.register("../sw.js").catch(function () {
+      // Nothing to tell anybody: the app works, it just will not work with
+      // the wifi off.
+    });
+  });
+  navigator.serviceWorker.addEventListener("message", function (e) {
+    if (e.data && e.data.type === "updated") { TAFAPP.updateReady(); }
+  });
+}
 </script>
 </body>
 </html>

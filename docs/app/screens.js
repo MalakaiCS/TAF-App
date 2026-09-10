@@ -14,11 +14,12 @@
 
 var TAFAPP = (function () {
 
-  var U = TAFUI, D = TAFDATA;
+  var U = TAFUI, D = TAFDATA, S = TAFSYNC;
   var TABS = [
     { key: "dashboard",   label: "Today" },
     { key: "new",         label: "New order" },
     { key: "orders",      label: "Orders" },
+    { key: "scan",        label: "Scan" },
     { key: "delivery",    label: "Delivery" },
     { key: "quotes",      label: "Quotes" },
     { key: "customers",   label: "Customers" },
@@ -27,6 +28,8 @@ var TAFAPP = (function () {
   var active = "dashboard";
   var ORDERS = [];              // the loaded list, newest first
   var loadedAt = 0;
+  var ordersFrom = 0;           // when the list on screen was last true
+  var newVersion = false;
 
   /* ── Starting up ─────────────────────────────────────────────────────── */
 
@@ -58,6 +61,11 @@ var TAFAPP = (function () {
       });
     document.getElementById("signout")
       .addEventListener("click", function () {
+        // Work waiting on the phone belongs to whoever did it. Handing the
+        // phone on with somebody else's ticks still queued would send them
+        // under the next person's account, so this stops here.
+        if (S.pending()) { leaving(); return; }
+        stopCamera();
         D.signOut().then(function () { location.reload(); });
       });
 
@@ -78,9 +86,150 @@ var TAFAPP = (function () {
       app.classList.remove("hidden");
       buildTabs();
       whoBar();
+      S.onChange(stateBar);
+      S.start();
+      stateBar();
       show(active);
     }
     start._showApp = showApp;
+  }
+
+  /* ── The bar under the tabs ──────────────────────────────────────────
+     Three things it can have to say, and it says the most pressing one:
+     something did not save, there is no signal, or there is a new version
+     sitting on the phone waiting for a reload. Nothing to say and it is not
+     there at all - a permanent status bar becomes wallpaper within a day. */
+
+  function stateBar() {
+    var bar = document.getElementById("state");
+    if (!bar) { return; }
+    U.clear(bar);
+    bar.className = "";
+
+    var bad = S.failed(), n = S.pending(), off = !S.online();
+    var text = "", act = null;
+
+    if (bad.length) {
+      bar.classList.add("bad");
+      text = bad.length + (bad.length === 1 ? " change was" : " changes were")
+           + " not saved";
+      act = ["See what", function () { outbox(); }];
+    } else if (n) {
+      text = n + (n === 1 ? " change waiting" : " changes waiting")
+           + (off ? " · no signal" : " to send");
+      act = off ? ["See what", function () { outbox(); }]
+                : ["Send now", function () { S.flush().then(stateBar); }];
+    } else if (off) {
+      text = "No signal. You can carry on — what you do is kept and sent "
+           + "when it comes back.";
+    } else if (newVersion) {
+      bar.classList.add("new");
+      text = "There is a newer version of this app on the phone.";
+      act = ["Reload", function () { location.reload(); }];
+    } else {
+      bar.classList.add("hidden");
+      return;
+    }
+
+    bar.appendChild(U.el("span", { cls: "grow", text: text }));
+    if (act) {
+      bar.appendChild(U.el("button", {
+        text: act[0], attr: { type: "button" },
+        on: { click: function (e) { e.stopPropagation(); act[1](); } }
+      }));
+    }
+    bar.onclick = function () { outbox(); };
+  }
+
+  function updateReady() { newVersion = true; stateBar(); }
+
+  function leaving() {
+    U.openSheet(function (body, close) {
+      var n = S.pending();
+      body.appendChild(U.el("h2", { cls: "title", text: "Not sent yet" }));
+      body.appendChild(U.el("div", {
+        text: n + (n === 1 ? " change has" : " changes have") + " not reached "
+            + "the database. They are yours, under your account — if you "
+            + "sign out and somebody else signs in on this phone, they "
+            + "cannot be sent."
+      }));
+      body.appendChild(U.el("div", { cls: "row-actions", kids: [
+        U.button("Send them now", function () {
+          U.notice(body, "Sending…", "ok");
+          S.flush().then(function (out) {
+            stateBar();
+            if (out.kept) {
+              U.notice(body, out.kept + " still will not go. There is no "
+                           + "signal — stay signed in until there is.");
+              return;
+            }
+            U.closeAllSheets();
+            D.signOut().then(function () { location.reload(); });
+          }).catch(function (err) { U.notice(body, err.message); });
+        }, "go"),
+        U.button("Stay signed in", close, "quiet"),
+        U.button("Throw them away", function () {
+          if (!window.confirm("Throw away " + n + " unsent "
+                + (n === 1 ? "change" : "changes") + "? They will not "
+                + "happen at all.")) { return; }
+          S.discard();
+          U.closeAllSheets();
+          D.signOut().then(function () { location.reload(); });
+        }, "quiet")
+      ] }));
+    });
+  }
+
+  /* What is actually waiting, and what went wrong with anything that failed.
+     A number in a bar is not enough to act on: somebody has to be able to
+     see that it was the tick on Bells Creek that the database refused. */
+  function outbox() {
+    U.openSheet(function (body, close) {
+      body.appendChild(U.el("h2", { cls: "title", text: "Waiting to send" }));
+
+      var bad = S.failed();
+      if (bad.length) {
+        body.appendChild(U.card("Not saved", [
+          U.table(["What", "Why"], bad.map(function (f) {
+            return U.el("tr", { kids: [U.cell(f.label), U.cell(f.why)] });
+          })),
+          U.el("div", { cls: "muted",
+            text: "These were refused by the database, so they did not "
+                + "happen. Do them again, or ask a manager why." }),
+          U.el("div", { cls: "row-actions", kids: [
+            U.button("Clear the list", function () {
+              S.forget(); U.closeSheet(); outbox();
+            }, "quiet")] })
+        ]));
+      }
+
+      var queue = S.waiting();
+      body.appendChild(U.card("Queued (" + queue.length + ")",
+        queue.length
+          ? [U.table(["What", "When"], queue.map(function (j) {
+              return U.el("tr", {
+                kids: [U.cell(j.label || j.rpc),
+                       U.cell(String(j.at || "").replace("T", " ").slice(0, 16))]
+              });
+            }))]
+          : [U.empty("Nothing is waiting.",
+                     "Everything you have done has gone through.")]));
+
+      body.appendChild(U.el("div", { cls: "row-actions", kids: [
+        queue.length
+          ? U.button("Try sending now", function () {
+              U.notice(body, "Sending…", "ok");
+              S.flush().then(function (out) {
+                stateBar();
+                U.notice(body, out.kept
+                  ? out.kept + " still waiting."
+                  : "All sent.", out.kept ? "err" : "ok");
+              }).catch(function (err) { U.notice(body, err.message); });
+            }, "go")
+          : null,
+        U.button("Close", close, "quiet")
+      ].filter(Boolean) }));
+    });
   }
 
   function doSignIn() {
@@ -129,6 +278,10 @@ var TAFAPP = (function () {
   }
 
   function show(key) {
+    // Leaving the Scan tab has to put the camera down. Clearing the screen
+    // removes the picture but not the stream: the light on the back of the
+    // phone stays on, and so does the battery drain.
+    if (active === "scan" && key !== "scan") { stopCamera(); }
     active = key;
     buildTabs();
     var main = U.clear(document.getElementById("screen"));
@@ -150,9 +303,7 @@ var TAFAPP = (function () {
       "select": "*", "archived": "eq.false",
       "order": "created_at.desc", "limit": 1000
     }).then(function (rows) {
-      ORDERS = rows.map(shapeOrder);
-      loadedAt = Date.now();
-      return ORDERS;
+      return settle(rows);
     }).catch(function (err) {
       // A project without migrate_performance.sql has no orders_list view.
       if (/not there any more|does not exist|relation/i.test(err.message || "")) {
@@ -160,13 +311,55 @@ var TAFAPP = (function () {
           "select": "id,customer_name,order_number,date_ordered,date_due,"
                   + "header,order_type,created_at,archived,full_name",
           "archived": "eq.false", "order": "created_at.desc", "limit": 1000
-        }).then(function (rows) {
-          ORDERS = rows.map(shapeOrder);
+        }).then(settle);
+      }
+      // No signal. Whatever this phone was last shown is better than a blank
+      // screen, as long as nobody is left thinking it is today's list - so
+      // ordersFrom is set and every screen drawn from it says when it is
+      // from. The 300 is a phone's storage, not a judgement about how many
+      // orders matter: the list is newest first.
+      if (err && err.offline) {
+        var box = S.recall("orders");
+        if (box) {
+          ORDERS = box.v.map(shapeOrder);
           loadedAt = Date.now();
+          ordersFrom = box.at;
           return ORDERS;
-        });
+        }
       }
       throw err;
+    });
+
+    function settle(rows) {
+      ORDERS = rows.map(shapeOrder);
+      loadedAt = Date.now();
+      ordersFrom = 0;
+      S.remember("orders", rows.slice(0, 300));
+      return ORDERS;
+    }
+  }
+
+  /* A list that has to be usable with no signal. Fetched when it can be and
+     remembered afterwards; out of range, the remembered copy is handed back
+     with the time it was taken, so the screen can say so. */
+  function loadKept(key, get) {
+    return get().then(function (rows) {
+      S.remember(key, rows.slice(0, 400));
+      return { rows: rows, at: 0 };
+    }).catch(function (err) {
+      var box = (err && err.offline) ? S.recall(key) : null;
+      if (box) { return { rows: box.v, at: box.at }; }
+      throw err;
+    });
+  }
+
+  /* Said once, the same way, wherever a list might be a remembered one. */
+  function staleNote(at) {
+    if (!at) { return null; }
+    return U.el("div", {
+      cls: "err",
+      text: "No signal. This is what the phone last saw, " + S.since(at)
+          + " — it may have moved on since."
     });
   }
 
@@ -206,6 +399,8 @@ var TAFAPP = (function () {
   SCREENS.dashboard = function (main) {
     loadOrders().then(function (rows) {
       U.clear(main);
+      var stale = staleNote(ordersFrom);
+      if (stale) { main.appendChild(stale); }
       var counts = { overdue: 0, today: 0, week: 0 };
       rows.forEach(function (r) {
         var b = U.dueBucket(r);
@@ -277,6 +472,8 @@ var TAFAPP = (function () {
   SCREENS.orders = function (main) {
     loadOrders().then(function (rows) {
       U.clear(main);
+      var stale = staleNote(ordersFrom);
+      if (stale) { main.appendChild(stale); }
       var search = U.el("input", {
         attr: { type: "search", placeholder: "Customer, order number or job" }
       });
@@ -446,23 +643,34 @@ var TAFAPP = (function () {
       tick.addEventListener("click", function () {
         var want = !it.made;
         tick.disabled = true;
-        D.rpc("set_order_line_made", {
-          p_order_id: row.id,
-          p_line_id: it.line_id || "",
-          p_made: want,
-          p_by: D.cachedProfile().full_name || D.cachedProfile().username || "",
-          p_at: want ? stamp() : ""
-        }).then(function (out) {
-          if (!out) {
-            throw new Error("That line was not found on the order. "
-                            + "Close this and open it again.");
+        // The filter is made whether or not the wifi reaches this corner of
+        // the factory. Setting a line to made is the same done twice as
+        // done once, so this is safe to keep and send later.
+        S.send({
+          rpc: "set_order_line_made",
+          label: (row.customer || "Order") + " · line " + (idx + 1)
+               + (want ? " made" : " not made"),
+          needs_row: true,
+          gone: "That line is not on the order any more.",
+          body: {
+            p_order_id: row.id,
+            p_line_id: it.line_id || "",
+            p_made: want,
+            p_by: D.cachedProfile().full_name
+               || D.cachedProfile().username || "",
+            p_at: want ? stamp() : ""
           }
+        }).then(function (out) {
           it.made = want;
           tick.textContent = want ? "✓" : "";
           tick.setAttribute("aria-pressed", String(want));
           tr.className = want ? "made" : "";
+          if (out.queued) { tick.classList.add("waiting"); }
           tally();
-          U.notice(body, "");
+          U.notice(body, out.queued
+            ? "Kept on this phone. It will send itself when the signal is "
+              + "back — you can carry on."
+            : "", out.queued ? "ok" : "");
           loadedAt = 0;                 // the list's count is now stale
         }).catch(function (err) {
           U.notice(body, err.message);
@@ -737,20 +945,276 @@ var TAFAPP = (function () {
     ["In Production", "Complete", "Dispatched"].forEach(function (want) {
       if (row.status === want) { return; }
       actions.appendChild(U.button(want, function () {
-        D.rpc("merge_order_header", {
-          p_order_id: row.id, p_patch: { status: want }
+        // merge_order_header patches the header rather than writing a whole
+        // one back, so the same patch arriving twice leaves the same status
+        // and nobody's notes are lost on the way.
+        S.send({
+          rpc: "merge_order_header",
+          label: (row.customer || "Order") + " → " + want,
+          needs_row: true,
+          gone: "That order is not there any more.",
+          body: { p_order_id: row.id, p_patch: { status: want } }
         }).then(function (out) {
-          if (!out) { throw new Error("That order was not changed."); }
           row.status = want;
           pill.className = "pill s-" + want.replace(/\s+/g, "");
           pill.textContent = want;
           loadedAt = 0;
           drawStatus(actions, row, body, pill, close);
-          U.notice(body, "Status set to " + want + ".", "ok");
+          U.notice(body, out.queued
+            ? "Set to " + want + " on this phone, and waiting for signal."
+            : "Status set to " + want + ".", "ok");
         }).catch(function (err) { U.notice(body, err.message); });
       }, want === "Complete" ? "go" : "quiet"));
     });
     actions.appendChild(U.button("Close", close, "quiet"));
+  }
+
+  /* ── Scanning ────────────────────────────────────────────────────────
+     The barcodes are the ones the desktop app already prints: Code 128 on a
+     worksheet and on a rack label. One place decides what a code means -
+     resolve_scan, in the database - so a phone, a handheld gun and the
+     desktop can never disagree about which order PO-8842 is.
+
+     Two ways in, because a factory has both. The camera, where the browser
+     can read one; and a plain text box, which is what a Zebra handheld in
+     keyboard mode types into anyway - it sends the digits and an Enter, so
+     the box below works with a gun without knowing a gun exists. That box is
+     also the answer on any browser without BarcodeDetector, which today
+     means every iPhone. */
+
+  var SCAN = { stop: null, last: "", at: 0, recent: [] };
+
+  SCREENS.scan = function (main) {
+    U.clear(main);
+    var out = U.el("div", { attr: { id: "scans" } });
+
+    var box = U.el("div", { cls: "scanbox hidden", kids: [
+      U.el("video", { attr: { playsinline: "", muted: "", autoplay: "" } }),
+      U.el("div", { cls: "reticle" })
+    ] });
+    var camMsg = U.el("div", { cls: "muted" });
+    var camBtn = U.button("📷  Use the camera", function () {
+      if (SCAN.stop) { stopCamera(); camBtn.textContent = "📷  Use the camera"; }
+      else {
+        camBtn.textContent = "Stop the camera";
+        startCamera(box, camMsg, function (code) { lookUp(code, out); });
+      }
+    });
+
+    var typed = U.el("input", {
+      attr: { type: "text", autocapitalize: "characters", autocorrect: "off",
+              spellcheck: "false", placeholder: "e.g. PO-8842 or MED-G4-1M" },
+      cls: "code"
+    });
+    var form = U.el("form", { on: { submit: function (e) {
+      e.preventDefault();
+      lookUp(typed.value, out);
+      typed.value = "";
+      typed.focus();
+    } } });
+    form.appendChild(U.el("label", { cls: "f", kids: [
+      U.el("span", { text: "Code" }), typed] }));
+    form.appendChild(U.el("div", { cls: "row-actions", kids: [
+      U.el("button", { cls: "btn", text: "Look it up",
+                       attr: { type: "submit" } })] }));
+
+    main.appendChild(U.card("Point it at a code", [box, camMsg,
+      U.el("div", { cls: "row-actions", kids: [camBtn] })]));
+    main.appendChild(U.card("Or type it in", [form,
+      U.el("div", { cls: "muted",
+        text: "A handheld scanner types into this box on its own — tap it "
+            + "once so it has the cursor, then scan." })]));
+    main.appendChild(out);
+    drawRecent(out);
+    if (!window.BarcodeDetector) {
+      camMsg.textContent = "This browser cannot read a barcode through the "
+        + "camera, so type the code in below or use a handheld scanner.";
+      camBtn.disabled = true;
+    }
+    typed.focus();
+  };
+
+  function startCamera(box, msg, found) {
+    var Detector = window.BarcodeDetector;
+    if (!Detector) { return; }
+    msg.textContent = "Opening the camera…";
+    var media = navigator.mediaDevices;
+    if (!media || !media.getUserMedia) {
+      msg.textContent = "This browser will not hand over the camera. Type "
+                      + "the code in instead.";
+      return;
+    }
+    media.getUserMedia({ video: { facingMode: { ideal: "environment" } } })
+      .then(function (stream) {
+        var video = box.querySelector("video");
+        video.srcObject = stream;
+        box.classList.remove("hidden");
+        msg.textContent = "Hold the code inside the box.";
+        var play = video.play();
+        if (play && play.catch) { play.catch(function () {}); }
+        return formats(Detector).then(function (want) {
+          var det = want.length ? new Detector({ formats: want })
+                                : new Detector();
+          var timer = setInterval(function () {
+            det.detect(video).then(function (hits) {
+              if (!hits || !hits.length) { return; }
+              var code = String(hits[0].rawValue || "").trim();
+              // A camera sees the same label thirty times a second. Without
+              // this, one barcode becomes thirty lookups and the screen
+              // never settles long enough to read.
+              if (code && (code !== SCAN.last
+                           || Date.now() - SCAN.at > 2500)) {
+                SCAN.last = code;
+                SCAN.at = Date.now();
+                if (navigator.vibrate) { navigator.vibrate(40); }
+                found(code);
+              }
+            }).catch(function () { /* a blurred frame is not an error */ });
+          }, 300);
+          SCAN.stop = function () {
+            clearInterval(timer);
+            stream.getTracks().forEach(function (t) { t.stop(); });
+            video.srcObject = null;
+            box.classList.add("hidden");
+            SCAN.stop = null;
+          };
+        });
+      })
+      .catch(function (err) {
+        msg.textContent = "The camera did not open (" + (err.message || err)
+          + "). Type the code in instead.";
+      });
+  }
+
+  function stopCamera() { if (SCAN.stop) { SCAN.stop(); } }
+
+  var WANTED = ["code_128", "code_39", "qr_code", "ean_13"];
+
+  function formats(Detector) {
+    if (!Detector.getSupportedFormats) { return Promise.resolve([]); }
+    return Detector.getSupportedFormats().then(function (have) {
+      return WANTED.filter(function (f) { return have.indexOf(f) !== -1; });
+    }).catch(function () { return []; });
+  }
+
+  /* One code in, one answer out. Out of signal it is answered from what the
+     phone was last shown, which covers the two things a code is nearly
+     always for - which rack this is, and which order this worksheet is. */
+  function lookUp(code, into) {
+    code = String(code || "").trim();
+    if (!code) { return; }
+    if (!S.online()) { show_(remembered(code), code, true); return; }
+    D.rpc("resolve_scan", { p_code: code }).then(function (rows) {
+      show_(rows && rows.length ? rows : remembered(code), code,
+            !(rows && rows.length));
+    }).catch(function (err) {
+      if (err && err.offline) { show_(remembered(code), code, true); return; }
+      U.clear(into);
+      U.notice(into, err.message);
+    });
+
+    function show_(hits, forCode, fromPhone) {
+      SCAN.recent = [{ code: forCode, hits: hits }]
+        .concat(SCAN.recent.filter(function (r) { return r.code !== forCode; }))
+        .slice(0, 8);
+      drawRecent(into);
+    }
+  }
+
+  function remembered(code) {
+    var want = code.toUpperCase();
+    var hits = [];
+    var stock = S.recall("stock");
+    (stock ? stock.v : []).forEach(function (s) {
+      if (String(s.sku || "").trim().toUpperCase() === want) {
+        hits.push({ kind: "stock", ref: s.id, label: s.name || "Stock item",
+                    detail: s.location || "No location", row: s });
+      }
+    });
+    var orders = S.recall("orders");
+    (orders ? orders.v : []).forEach(function (o) {
+      if (String(o.order_number || "").trim().toUpperCase() === want) {
+        hits.push({ kind: "order", ref: o.id,
+                    label: o.customer_name || "Order",
+                    detail: (o.header && o.header.status) || "Pending",
+                    row: o });
+      }
+    });
+    return hits;
+  }
+
+  function drawRecent(into) {
+    U.clear(into);
+    if (!SCAN.recent.length) {
+      into.appendChild(U.card(null, [U.empty("Nothing scanned yet.",
+        "A code opens the rack it labels or the order it belongs to.")]));
+      return;
+    }
+    SCAN.recent.forEach(function (r, i) {
+      var kids = [];
+      if (!r.hits.length) {
+        kids.push(U.empty("Nothing here answers to that code.",
+          S.online() ? "Check it against the label."
+                     : "There is no signal, so only what this phone has "
+                       + "already seen can be looked up."));
+      }
+      r.hits.forEach(function (h) {
+        var btn = U.el("button", {
+          cls: "hit", attr: { type: "button" },
+          kids: [U.el("strong", { text: h.label || h.ref }),
+                 U.el("span", { cls: "muted",
+                                text: kindOf(h) + " · " + (h.detail || "") })]
+        });
+        btn.addEventListener("click", function () { openHit(h, into); });
+        kids.push(btn);
+      });
+      into.appendChild(U.card((i ? "" : "Scanned  ") + r.code, kids));
+    });
+  }
+
+  function kindOf(h) {
+    if (h.kind === "stock")   { return "Stock"; }
+    if (h.kind === "order")   { return "Order"; }
+    if (h.kind === "product") { return "Price list"; }
+    return h.kind || "";
+  }
+
+  function openHit(h, into) {
+    if (h.kind === "order") {
+      var known = ORDERS.filter(function (o) { return o.id === h.ref; })[0];
+      if (known) { openOrder(known); return; }
+      if (h.row) { openOrder(shapeOrder(h.row)); return; }
+      loadOrders(true).then(function (rows) {
+        var one = rows.filter(function (o) { return o.id === h.ref; })[0];
+        if (one) { openOrder(one); }
+        else { U.notice(into, "That order is not in the list any more."); }
+      }).catch(function (err) { U.notice(into, err.message); });
+      return;
+    }
+    if (h.kind === "stock") {
+      if (h.row) { openStock(h.row, []); return; }
+      D.select("stock_items", { "id": "eq." + h.ref, "select": "*" })
+        .then(function (rows) {
+          if (rows && rows[0]) { openStock(rows[0], rows); }
+          else { U.notice(into, "That stock item is not there any more."); }
+        }).catch(function (err) { U.notice(into, err.message); });
+      return;
+    }
+    // A price-list code is a thing we sell, not a thing to open. Say what it
+    // is and what it costs, which is what somebody with the label in their
+    // hand is asking.
+    U.openSheet(function (body, close) {
+      body.appendChild(U.el("h2", { cls: "title", text: h.label || h.ref }));
+      body.appendChild(U.el("div", { cls: "muted", text: h.detail || "" }));
+      var price = h.extra && h.extra.unit_price;
+      body.appendChild(U.card("Price list", [
+        U.el("div", { attr: { style: "font-size:26px;font-weight:700" },
+                      text: price ? U.money(price) : "No price set" }),
+        U.el("div", { cls: "muted", text: "Part number " + (h.ref || "") })
+      ]));
+      body.appendChild(U.el("div", { cls: "row-actions",
+        kids: [U.button("Close", close, "quiet")] }));
+    });
   }
 
   /* ── Raising an order ────────────────────────────────────────────────
@@ -1181,9 +1645,15 @@ var TAFAPP = (function () {
   /* ── Customers ───────────────────────────────────────────────────────── */
 
   SCREENS.customers = function (main) {
-    D.select("customers", { "select": "*", "order": "name", "limit": 2000 })
-      .then(function (rows) {
+    loadKept("customers", function () {
+      return D.select("customers",
+        { "select": "*", "order": "name", "limit": 2000 });
+    })
+      .then(function (got) {
+        var rows = got.rows;
         U.clear(main);
+        var stale = staleNote(got.at);
+        if (stale) { main.appendChild(stale); }
         var search = U.el("input", {
           attr: { type: "search", placeholder: "Name, suburb or email" }
         });
@@ -1262,9 +1732,15 @@ var TAFAPP = (function () {
   /* ── Stock ───────────────────────────────────────────────────────────── */
 
   SCREENS.stock = function (main) {
-    D.select("stock_items", { "select": "*", "order": "name", "limit": 2000 })
-      .then(function (rows) {
+    loadKept("stock", function () {
+      return D.select("stock_items",
+        { "select": "*", "order": "name", "limit": 2000 });
+    })
+      .then(function (got) {
+        var rows = got.rows;
         U.clear(main);
+        var stale = staleNote(got.at);
+        if (stale) { main.appendChild(stale); }
         var search = U.el("input", {
           attr: { type: "search", placeholder: "Item, SKU or media" }
         });
@@ -1362,17 +1838,34 @@ var TAFAPP = (function () {
         }
         go.disabled = true;
         // The same reference twice is applied once, so a tap that looked
-        // like it did nothing and got tapped again cannot double-count.
-        var ref = "web-" + Date.now() + "-"
-                + Math.random().toString(16).slice(2, 8);
-        D.rpc("adjust_stock_atomic", {
-          p_item_id: item.id, p_type: kind.value, p_quantity: n,
-          p_notes: note.value || "", p_client_ref: ref,
-          p_username: D.cachedProfile().username
-                   || D.cachedProfile().full_name || "",
-          p_device: "web"
-        }).then(function (out) {
-          var row = Array.isArray(out) ? out[0] : out;
+        // like it did nothing and got tapped again cannot double-count -
+        // and neither can a queued movement that was sent, lost its answer
+        // to a dropout, and got sent again.
+        var ref = S.newRef();
+        var what = kind.options[kind.selectedIndex].text;
+        S.send({
+          rpc: "adjust_stock_atomic",
+          label: (item.name || "Stock") + " · " + what + " " + n,
+          body: {
+            p_item_id: item.id, p_type: kind.value, p_quantity: n,
+            p_notes: note.value || "", p_client_ref: ref,
+            p_username: D.cachedProfile().username
+                     || D.cachedProfile().full_name || "",
+            p_device: "web"
+          }
+        }).then(function (res) {
+          qty.value = ""; note.value = "";
+          if (res.queued) {
+            // Deliberately not guessing the new figure. Two people counting
+            // the same rack out of signal would both be shown a number that
+            // is right about their own count and wrong about the shelf.
+            U.notice(body, "Kept on this phone. The count will go through "
+                         + "when the signal is back, and the figure above "
+                         + "will be right once it has.", "ok");
+            onHand.textContent = String(item.stock_on_hand || 0) + " ?";
+            return;
+          }
+          var row = Array.isArray(res.out) ? res.out[0] : res.out;
           var after = row && row.quantity_after;
           if (after === null || after === undefined) {
             throw new Error("The database did not report a new figure. "
@@ -1380,7 +1873,6 @@ var TAFAPP = (function () {
           }
           item.stock_on_hand = after;
           onHand.textContent = String(after);
-          qty.value = ""; note.value = "";
           U.notice(body, "Now " + after + " on hand.", "ok");
           void all;
         }).catch(function (err) {
@@ -1403,7 +1895,11 @@ var TAFAPP = (function () {
 
   return {
     start: start,
+    updateReady: updateReady,
     _screens: SCREENS,
+    _stateBar: stateBar,
+    _lookUp: lookUp,
+    _outbox: outbox,
     _progressCell: progressCell,
     _shapeOrder: shapeOrder,
     _openOrder: openOrder,
