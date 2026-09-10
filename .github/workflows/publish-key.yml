@@ -45,13 +45,28 @@ jobs:
                  "Settings → Secrets and variables → Actions."
             exit 1
           fi
-          # A service-role key would hand the whole database to anyone who
-          # opened the page. Refuse rather than publish one by mistake.
-          if printf '%s' "$SUPABASE_ANON_KEY" | grep -q 'service_role'; then
-            echo "::error::That secret is a service-role key, not the" \
-                 "publishable one. Refusing to publish it."
+          # A secret key would hand the whole database to anyone who opened
+          # the page, so refuse rather than publish one by mistake. Supabase
+          # has two generations of key and this has to know both: the legacy
+          # JWTs carry "service_role" in their payload, while the current
+          # ones are sb_secret_… against sb_publishable_….
+          KEY="$SUPABASE_ANON_KEY"
+          if printf '%s' "$KEY" | grep -q 'service_role' \
+             || case "$KEY" in sb_secret_*) true ;; *) false ;; esac; then
+            echo "::error::That secret is a Supabase SECRET key, not the" \
+                 "publishable one. Refusing to publish it. Use the" \
+                 "publishable key (sb_publishable_… or the anon JWT)."
             exit 1
           fi
+          # And a positive check, so an unrecognised shape stops the run
+          # rather than being published on the assumption it is harmless.
+          case "$KEY" in
+            sb_publishable_*) ;;
+            *.*.*) ;;                      # a legacy JWT; checked above
+            *) echo "::error::That secret is not a shape this knows" \
+                    "(expected sb_publishable_… or a JWT). Refusing."
+               exit 1 ;;
+          esac
           mkdir -p docs/app
           cat > docs/app/config.js <<EOF
           /*
