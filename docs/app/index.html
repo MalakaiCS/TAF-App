@@ -47,7 +47,9 @@
            padding-top:calc(14px + env(safe-area-inset-top));
            display:flex; align-items:center; gap:12px; }
   header h1 { margin:0; font-size:17px; flex:1; }
-  header .who { font-size:13px; color:#A9CCE3; text-align:right; }
+  header .who { font-size:13px; color:#A9CCE3; text-align:right;
+                background:none; border:0; padding:4px 2px; cursor:pointer;
+                font-family:inherit; }
   header .who strong { display:block; color:#fff; font-size:14px; }
   header button { background:rgba(255,255,255,.14); border:0; color:#fff;
                   font:600 13px/1 inherit; padding:9px 12px; border-radius:8px;
@@ -210,7 +212,8 @@
 <div id="app" class="hidden">
   <header>
     <h1 id="app-title">Total Air Filtration</h1>
-    <div class="who"><strong id="who-name">—</strong><span id="who-role"></span></div>
+    <button class="who" id="who" type="button" aria-label="You and your settings">
+      <strong id="who-name">—</strong><span id="who-role"></span></button>
     <button id="signout" type="button">Sign out</button>
   </header>
   <nav id="tabs" role="tablist"></nav>

@@ -65,7 +65,12 @@ log, stock management and a customer database.
 - **Stock** — items with images, on-hand / minimum levels, adjustments &
   history, and optional automatic deduction as orders are generated.
 - **Customers** — full customer database with delivery/billing details.
-- **Audit Log** — every significant action recorded.
+- **Audit Log** — every significant action recorded, from the desktop and
+  from the web app in the same words.
+- **A morning summary** — what's overdue, what's due today, what's low on
+  stock and which repeat jobs have come round, emailed each weekday morning.
+  Off until the company switches it on *and* you ask for one; nobody is signed
+  up by anybody else. **Send mine now** works straight away.
 - **Part numbers & square metreage** — every filter line gets its area and a
   part number derived automatically (`FPFCARB25-020`, `PPFG495-040`,
   `STPPFW50-030`, `FPF09-040`), shown in the app and printed on the worksheet.
@@ -205,6 +210,7 @@ just run it — nothing is lost and nothing is duplicated.
 | 25 | `migrate_recurring_jobs.sql` | Jobs that come round every 3 or 6 months | optional |
 | 26 | `migrate_margin.sql` | What a job costs, next to what it sells for | optional |
 | 27 | `migrate_order_files.sql` | Photos and a signature kept with an order | optional |
+| 28 | `migrate_notifications.sql` | A morning summary of what needs doing | optional |
 
 **Step 16 is the one that matters most.** Every policy in the older scripts is
 `TO authenticated USING (true)` — meaning *anyone Supabase counts as signed
@@ -375,6 +381,42 @@ unaffected either way — an order that couldn't be confirmed by email is still
 an order. The switch is checked again inside the function before anything is
 sent, so a PC that has been left open since yesterday can't send on
 yesterday's answer.
+
+### A morning summary (optional)
+
+What's overdue, what's due today, what's low on stock and which repeat jobs
+have come round — emailed each weekday morning. Everything in it is already on
+the Dashboard; the trouble with a Dashboard is that it only says anything to
+somebody who opens it, and the morning it mattered most is the morning nobody
+did.
+
+**Two switches, and both have to be on.** The company one (Settings → Email,
+manager only) decides whether this system sends staff mail at all. Each person
+then decides whether they want one — on the desktop under Settings, on a phone
+behind their own name, top right. Nobody is signed up by anybody else.
+
+1. Run `migrate_notifications.sql`.
+2. Deploy the function. It reuses the same mail provider key as the customer
+   emails above, so if that's already set up there's nothing new to configure:
+
+   ```bash
+   supabase functions deploy daily-summary
+   ```
+
+   No terminal? **Edge Functions → Deploy a new function**, name it
+   `daily-summary`, paste in `supabase/functions/daily-summary/index.ts`.
+3. Turn the company switch on, tick your own, and press **Send mine now** —
+   which works straight away and is how you find out today, rather than at
+   seven tomorrow morning, whether the mail side is right.
+4. To have it arrive by itself each morning, schedule it. That needs pg_cron
+   and pg_net, and the service-role key in Vault rather than in a file — the
+   whole recipe is written out at the bottom of `migrate_notifications.sql`.
+
+Sending to everybody is something only that schedule can ask for: it's the
+only caller holding the service-role key, and a signed-in account asking for
+it is refused. Each person's copy goes to their address alone — a summary of
+the whole factory bcc'd around is one wrong address away from being a list of
+every customer's late job in a stranger's inbox.
 
 ### Enable sending from a phone (optional)
 
@@ -586,7 +628,8 @@ docs/sw.js                 Keeps the web app on the phone with no signal
 docs/quote/index.html      The quote page customers open
 docs/portal/index.html     The customer portal (orders, quotes, account)
 docs/company.js            Phone, email, address, hours — fill this in
-supabase/functions/        Edge Functions (extract-orders)
+supabase/functions/        Edge Functions (order reading, email, the
+                           morning summary)
 TAFOrderEntry.spec         PyInstaller build spec
 installer.iss              Inno Setup installer script
 ```

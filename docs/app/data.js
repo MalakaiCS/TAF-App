@@ -278,6 +278,32 @@ var TAFDATA = (function () {
     });
   }
 
+  /* An Edge Function, called as the person signed in. The function reads
+     that to decide what they may ask for — sending yourself your own
+     summary is not the same as sending one to the whole company. */
+  function callFunction(name, body) {
+    return fetch(URLBASE + "/functions/v1/" + name, {
+      method: "POST",
+      headers: headers(),
+      body: JSON.stringify(body || {})
+    }).catch(function () {
+      throw noSignal();
+    }).then(function (r) {
+      return r.text().then(function (text) {
+        var out = {};
+        try { out = text ? JSON.parse(text) : {}; } catch (e) {}
+        if (r.status === 404) {
+          throw new Error("The '" + name + "' function is not deployed to "
+                        + "this Supabase project yet.");
+        }
+        if (!r.ok || out.error) {
+          throw new Error(out.error || friendly(r.status, text));
+        }
+        return out;
+      });
+    });
+  }
+
   function signedUrl(bucket, path, seconds) {
     return request("/storage/v1/object/sign/" + bucket + "/" + path, {
       method: "POST", body: { expiresIn: seconds || 3600 }
@@ -357,7 +383,7 @@ var TAFDATA = (function () {
     canManageStaff: canManageStaff,
     select: select, rpc: rpc, insert: insert, update: update, remove: remove,
     request: request, friendly: friendly,
-    upload: upload, signedUrl: signedUrl,
+    upload: upload, signedUrl: signedUrl, callFunction: callFunction,
     _session: function () { return SESSION; }
   };
 })();

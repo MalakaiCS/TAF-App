@@ -88,14 +88,22 @@ CUSTOMERS = [
      "phone": "", "email": "", "region": "Northern NSW"},
 ]
 
+# minimum_on_hand, spelled the way stock_schema.sql spells it. It used to
+# say minimum_level here, which is not a column the database has — so the
+# page read undefined, nothing was ever low, and this test agreed with it.
 STOCK = [
     {"id": "s1", "name": "G4 media roll 1m", "sku": "MED-G4-1M",
      "media_type": "G4", "unit": "m", "stock_on_hand": 42,
-     "minimum_level": 20},
+     "minimum_on_hand": 20},
     {"id": "s2", "name": "F5 media roll 1m", "sku": "MED-F5-1M",
      "media_type": "F5", "unit": "m", "stock_on_hand": 6,
-     "minimum_level": 25},          # low
+     "minimum_on_hand": 25},          # low
 ]
+
+# Off until somebody says otherwise, and off unless the company switch is on
+# as well — which is the whole point of there being two of them.
+NOTIFY = {"on": False, "company": True}
+SUMMARIES: list = []   # summaries the function was asked to send
 
 LOGGED: list = []      # audit_log entries the web app wrote
 AUDIT = [
@@ -166,6 +174,14 @@ class Stub:
             return send({})
         if "/rest/v1/profiles" in url:
             return send([PROFILE])
+        if "/rest/v1/notify_settings" in url:
+            return send([{"daily_summary": NOTIFY["on"]}])
+        if "/functions/v1/daily-summary" in url:
+            if not NOTIFY["company"]:
+                return send({"sent": 0,
+                             "reason": "The morning summary is switched off."})
+            SUMMARIES.append(dict(body))
+            return send({"sent": 1})
         if "/rest/v1/audit_log" in url and req.method == "POST":
             # audit_log lets everyone write and only managers read, so
             # asking for the row back on the way in is asking to read
@@ -248,6 +264,9 @@ class Stub:
                 else:
                     item["stock_on_hand"] += abs(qty)
                 return send([{"quantity_after": item["stock_on_hand"]}])
+            if name == "set_my_daily_summary":
+                NOTIFY["on"] = bool(body.get("p_on"))
+                return send(NOTIFY["on"])
             if name == "resolve_scan":
                 code = str(body.get("p_code") or "").strip().upper()
                 hits = []
@@ -297,6 +316,7 @@ def run() -> int:
         page.route("**/rest/v1/**", stub.route)
         page.route("**/auth/v1/**", stub.route)
         page.route("**/storage/v1/**", stub.route)
+        page.route("**/functions/v1/**", stub.route)
 
         # A thrown exception is a bug. A 400 in the console is not — two of
         # them are this test's own doing, refusing a password and refusing an
@@ -902,6 +922,43 @@ def run() -> int:
         check("or to one order",
               "PO-8842" in page.locator("#screen").inner_text()
               and "Prices imported" not in page.locator("#screen").inner_text())
+
+        print("\n── being told, rather than going to look ──")
+        page.click("#who")
+        page.wait_for_selector("#sheet:not(.hidden)")
+        mine = page.locator('#sheet-body input[type="checkbox"]')
+        page.wait_for_function(
+            "() => { const b = document.querySelector"
+            "('#sheet-body input[type=checkbox]'); return b && !b.disabled; }")
+        check("your own name opens what is yours",
+              "Kai Brown" in page.locator("#sheet-body").inner_text())
+        check("and the summary starts off", not mine.is_checked())
+        check("saying so plainly",
+              "not on the list" in page.locator("#sheet-body").inner_text())
+        mine.check()
+        page.wait_for_timeout(300)
+        check("ticking it puts you on the list", NOTIFY["on"] is True)
+        check("and says the company switch still has to be on too",
+              "on the list" in page.locator("#sheet-body").inner_text())
+
+        page.locator("#sheet-body button", has_text="Send mine now").click()
+        page.wait_for_timeout(400)
+        check("you can send yourself one there and then", len(SUMMARIES) == 1)
+        check("without asking to send everybody one",
+              SUMMARIES[0].get("everyone") is None, str(SUMMARIES[0]))
+        check("and it says it went", "Check your inbox"
+              in page.locator("#sheet-body").inner_text())
+
+        # Switched off for the company, nothing is sent, and it is not
+        # reported as a failure — nothing is wrong, nobody has turned it on.
+        NOTIFY["company"] = False
+        page.locator("#sheet-body button", has_text="Send mine now").click()
+        page.wait_for_timeout(400)
+        check("with the company switch off it says so rather than failing",
+              "switched off" in page.locator("#sheet-body").inner_text())
+        NOTIFY["company"] = True
+        page.locator("#sheet-body button", has_text="Close").first.click()
+        page.wait_for_selector("#sheet.hidden", state="attached")
 
         print("\n── a phone left on the bench ──")
         page.evaluate("TAFAPP._stillThere()")

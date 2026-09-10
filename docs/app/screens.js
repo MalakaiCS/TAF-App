@@ -87,9 +87,16 @@ var TAFAPP = (function () {
       app.classList.remove("hidden");
       buildTabs();
       whoBar();
-      S.onChange(stateBar);
-      S.start();
-      watchIdle();
+      // Once, however many times somebody signs in and out of this tab.
+      // Wiring these up twice means two idle timers and a sheet that opens
+      // on top of itself.
+      document.getElementById("who").onclick = meSheet;
+      if (!showApp._wired) {
+        showApp._wired = true;
+        S.onChange(stateBar);
+        S.start();
+        watchIdle();
+      }
       stateBar();
       show(active);
     }
@@ -156,6 +163,96 @@ var TAFAPP = (function () {
       action: action,
       details: details || ""
     }, true).catch(function () { /* the log is a bonus, never a blocker */ });
+  }
+
+  /* ── You ─────────────────────────────────────────────────────────────
+     Behind your own name, top right. The only thing on a phone that is
+     yours rather than the company's: whether the morning summary comes to
+     you. Off until you say otherwise, and it stays off unless a manager has
+     also turned the whole thing on. */
+
+  function meSheet() {
+    U.openSheet(function (body, close) {
+      var me = D.cachedProfile();
+      body.appendChild(U.el("h2", { cls: "title",
+        text: me.full_name || me.username || "You" }));
+      body.appendChild(U.el("div", { cls: "muted",
+        text: [me.role || "", D.whoami().email || ""]
+              .filter(Boolean).join("   ·   ") }));
+
+      var box = U.el("input", { attr: { type: "checkbox" } });
+      var note = U.el("div", { cls: "muted",
+        text: "Reading whether you have this on…" });
+      var card = U.card("A morning summary", [
+        U.el("div", {
+          text: "What is overdue, what is due today, what is low on stock "
+              + "and which repeat jobs have come round — emailed to you each "
+              + "weekday morning." }),
+        U.el("label", {
+          attr: { style: "display:flex;gap:10px;align-items:center;"
+                       + "margin:12px 0 0;font-size:15px" },
+          kids: [box, U.el("span", { text: "Email one to me" })] }),
+        note
+      ]);
+      body.appendChild(card);
+
+      box.disabled = true;
+      D.select("notify_settings", {
+        "user_id": "eq." + D.whoami().id, "select": "daily_summary"
+      }).then(function (rows) {
+        box.checked = !!(rows && rows[0] && rows[0].daily_summary);
+        box.disabled = false;
+        note.textContent = box.checked
+          ? "You are on the list. It only arrives if a manager has the "
+            + "company switch on as well."
+          : "You are not on the list.";
+      }).catch(function (err) {
+        // Not a tick left half on: a switch nobody could read must not look
+        // like a switch that is off, or somebody turns off a thing they
+        // never had and believes they have dealt with it.
+        note.textContent = /not there any more|does not exist/i
+          .test(err.message || "")
+          ? "This needs migrate_notifications.sql running against the "
+            + "database first."
+          : err.message;
+      });
+
+      box.addEventListener("change", function () {
+        var want = box.checked;
+        box.disabled = true;
+        D.rpc("set_my_daily_summary", { p_on: want }).then(function (out) {
+          var now = Array.isArray(out) ? out[0] : out;
+          if (now && typeof now === "object") { now = now.set_my_daily_summary; }
+          box.checked = !!now;
+          note.textContent = box.checked
+            ? "You are on the list." : "You are not on the list.";
+        }).catch(function (err) {
+          box.checked = !want;
+          note.textContent = err.message;
+        }).then(function () { box.disabled = false; });
+      });
+
+      body.appendChild(U.el("div", { cls: "row-actions", kids: [
+        U.button("Send mine now", function (e) {
+          var btn = e.target;
+          btn.disabled = true;
+          U.notice(body, "Sending…", "ok");
+          D.callFunction("daily-summary", {}).then(function (out) {
+            U.notice(body, out.sent
+              ? "Sent. Check your inbox."
+              : (out.reason || "Nothing was sent."), out.sent ? "ok" : "err");
+          }).catch(function (err) {
+            U.notice(body, err.message);
+          }).then(function () { btn.disabled = false; });
+        }, "quiet"),
+        S.pending()
+          ? U.button(S.pending() + " waiting to send", function () {
+              U.closeSheet(); outbox();
+            }, "quiet")
+          : null,
+        U.button("Close", close, "quiet")
+      ].filter(Boolean) }));
+    });
   }
 
   function leaving() {
@@ -1988,7 +2085,10 @@ var TAFAPP = (function () {
         var out = U.el("div");
 
         function isLow(s) {
-          var min = Number(s.minimum_level || s.min_level || 0);
+          // minimum_on_hand is what the column is actually called, in
+          // stock_schema.sql and in the desktop app. This used to read
+          // minimum_level, which is nothing, so nothing was ever low.
+          var min = Number(s.minimum_on_hand || 0);
           return min > 0 && Number(s.stock_on_hand || 0) <= min;
         }
         function redraw() {
@@ -2013,7 +2113,7 @@ var TAFAPP = (function () {
                   on: { click: function () { openStock(s, rows); } },
                   kids: [U.cell(s.name || ""), U.cell(s.sku || ""),
                          U.cell(s.stock_on_hand, { num: true }),
-                         U.cell(s.minimum_level || s.min_level || "",
+                         U.cell(s.minimum_on_hand || "",
                                 { num: true })]
                 });
               }))]));
@@ -2050,7 +2150,7 @@ var TAFAPP = (function () {
         attr: { style: "font-size:30px;font-weight:700" } });
       body.appendChild(U.card("On hand", [onHand,
         U.el("div", { cls: "muted",
-          text: "Minimum " + (item.minimum_level || item.min_level || 0) })]));
+          text: "Minimum " + (item.minimum_on_hand || 0) })]));
 
       if (!D.canManageStock()) {
         body.appendChild(U.el("div", { cls: "muted",

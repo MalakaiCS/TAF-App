@@ -29,6 +29,7 @@ from taf_order_app import stock_usage as _stock_usage
 from taf_order_app import pricing as _pricing
 from taf_order_app import delivery as _delivery
 from taf_order_app import emails as _emails
+from taf_order_app import notify as _notify
 from taf_order_app import backup as _backup
 from taf_order_app import labels as _labels
 from taf_order_app.bag_filler import (
@@ -608,8 +609,11 @@ def _apply_catalog(data: dict) -> None:
     mail = data.get(_emails.SETTINGS_KEY)
     if isinstance(mail, dict):
         EMAIL_SETTINGS.update(mail)
+        # Both switches through the same strict reading: bool("no") is True
+        # in Python, and a hand-edited "false" would have turned mail on.
         EMAIL_SETTINGS["order_received"] = _emails._really_on(
             mail.get("order_received"))
+        EMAIL_SETTINGS[_notify.KEY] = _emails._really_on(mail.get(_notify.KEY))
     kinds = data.get("product_types")
     if isinstance(kinds, list) and kinds:
         cleaned = [{"name": str(k.get("name", "")).strip(),
@@ -10089,7 +10093,7 @@ class ModernOrderApp(tk.Frame):
         tk.Label(frm, text="Accounts", bg=CBG, fg=CMU, font=F_BOLD,
                  anchor="w").grid(row=15, column=0, sticky="w",
                                   pady=(px(18), px(4)))
-        tk.Label(frm, text="Emails to customers", bg=CBG, fg=CMU, font=F_BOLD,
+        tk.Label(frm, text="Email", bg=CBG, fg=CMU, font=F_BOLD,
                  anchor="w").grid(row=18, column=0, sticky="w",
                                   pady=(px(18), px(4)))
         tk.Label(frm, text="About", bg=CBG, fg=CMU, font=F_BOLD,
@@ -10127,6 +10131,57 @@ class ModernOrderApp(tk.Frame):
         self._refresh_email_note()
         if not _emails.can_change():
             self._email_chk.config(state="disabled")
+
+        # ── The morning summary, in the same card ─────────────────────────
+        # Everything in it is already on the Dashboard. The Dashboard only
+        # says anything to somebody who opens it, and the morning it
+        # mattered most is the morning nobody did.
+        tk.Frame(em_card, bg=CBR, height=1).pack(fill="x", pady=(px(14), px(12)))
+        tk.Label(em_card, text="A morning summary, to you", bg=CCA, fg=CA,
+                 font=F_SEC, anchor="w").pack(anchor="w")
+        tk.Label(em_card,
+                 text="What is overdue, what is due today, what is low on "
+                      "stock and which repeat jobs have come round.\n"
+                      "Two switches: whether the company sends these at all, "
+                      "and whether you want one.",
+                 bg=CCA, fg=CMU, font=F_SM, justify="left",
+                 anchor="w").pack(anchor="w", pady=(2, 8))
+
+        self._sum_company_var = tk.BooleanVar(
+            value=bool(EMAIL_SETTINGS.get(_notify.KEY)))
+        self._sum_company_chk = tk.Checkbutton(
+            em_card, text="  Send morning summaries (whole company)",
+            variable=self._sum_company_var, command=self._toggle_summaries,
+            bg=CCA, fg=CTX, font=F_BODY, activebackground=CCA,
+            selectcolor=CCA, anchor="w", relief="flat", bd=0,
+            highlightthickness=0, cursor="hand2")
+        self._sum_company_chk.pack(anchor="w")
+        if not _notify.can_change():
+            self._sum_company_chk.config(state="disabled")
+
+        self._sum_mine_var = tk.BooleanVar(value=False)
+        self._sum_mine_chk = tk.Checkbutton(
+            em_card, text="  Email one to me", variable=self._sum_mine_var,
+            command=self._toggle_my_summary,
+            bg=CCA, fg=CTX, font=F_BODY, activebackground=CCA,
+            selectcolor=CCA, anchor="w", relief="flat", bd=0,
+            highlightthickness=0, cursor="hand2")
+        self._sum_mine_chk.pack(anchor="w")
+
+        sum_row = tk.Frame(em_card, bg=CCA)
+        sum_row.pack(anchor="w", pady=(px(8), 0))
+        flat_btn(sum_row, "Send mine now", self._send_my_summary,
+                 bg=CNE, pady=5, padx=10, font=F_BODY).pack(side="left")
+
+        self._sum_note_lbl = tk.Label(
+            em_card, text="", bg=CCA, fg=CMU, font=F_SM, justify="left",
+            anchor="w", wraplength=px(640))
+        self._sum_note_lbl.pack(anchor="w", pady=(px(6), 0))
+        self._refresh_summary_note()
+        # Whether this person wants one is a row in the database, so it is
+        # read off the main thread. Unticked until it answers: showing it on
+        # before we know is how somebody turns off something they never had.
+        self._load_my_summary()
         # row 2 – Software Update  (always visible to everyone)
         upd_card = tk.Frame(frm, bg=CCA, relief="flat", bd=0, highlightthickness=1, highlightbackground=CBR, padx=16, pady=12)
         upd_card.grid(row=21, column=0, sticky="ew", pady=(12, 0))
@@ -11259,6 +11314,101 @@ class ModernOrderApp(tk.Frame):
         self.status_var.set(
             "Customer emails are on — a receipt goes out with each order."
             if on else "Customer emails are off. Nothing is sent.")
+
+    # ── The morning summary ───────────────────────────────────────────────
+
+    def _refresh_summary_note(self):
+        """Say what the two switches add up to, in one sentence."""
+        lbl = getattr(self, "_sum_note_lbl", None)
+        if lbl is None or not lbl.winfo_exists():
+            return
+        if not EMAIL_SETTINGS.get(_notify.KEY):
+            text = ("Off for everyone. Nobody is emailed a summary, whatever "
+                    "they have ticked for themselves.")
+        elif not bool(self._sum_mine_var.get()):
+            text = ("On for the company, off for you. Tick 'Email one to me' "
+                    "to start getting one.")
+        else:
+            text = ("You will get one each weekday morning, once somebody "
+                    "has scheduled it in Supabase — see "
+                    "migrate_notifications.sql. 'Send mine now' works "
+                    "whether or not that has been done.")
+        if not _notify.can_change():
+            text += "\nOnly a manager can change the company switch."
+        lbl.config(text=text)
+
+    def _toggle_summaries(self):
+        """Turn the morning summary on or off for the whole company."""
+        on = bool(self._sum_company_var.get())
+        try:
+            _notify.set_on(on)
+        except Exception as exc:
+            self._sum_company_var.set(not on)
+            messagebox.showerror(
+                "Morning summary",
+                f"That could not be saved for everyone, so nothing has "
+                f"changed:\n\n{exc}")
+            return
+        EMAIL_SETTINGS[_notify.KEY] = on
+        self._refresh_summary_note()
+        self.status_var.set(
+            "Morning summaries are on for anyone who asks for one."
+            if on else "Morning summaries are off. Nothing is sent.")
+
+    def _load_my_summary(self):
+        """Read this person's own switch, off the main thread."""
+        def _work():
+            try:
+                want = _notify.mine()
+            except Exception:
+                want = False
+            self.master.after(0, lambda: self._show_my_summary(want))
+
+        threading.Thread(target=_work, daemon=True).start()
+
+    def _show_my_summary(self, want: bool):
+        chk = getattr(self, "_sum_mine_chk", None)
+        if chk is None or not chk.winfo_exists():
+            return
+        self._sum_mine_var.set(bool(want))
+        self._refresh_summary_note()
+
+    def _toggle_my_summary(self):
+        """Yours alone. Whose inbox a thing lands in is theirs to decide."""
+        want = bool(self._sum_mine_var.get())
+        try:
+            now = _notify.set_mine(want)
+        except Exception as exc:
+            self._sum_mine_var.set(not want)
+            messagebox.showerror(
+                "Morning summary",
+                f"That could not be saved, so nothing has changed:\n\n{exc}\n\n"
+                f"If this is a project without migrate_notifications.sql run "
+                f"against it yet, that is why.")
+            return
+        self._sum_mine_var.set(bool(now))
+        self._refresh_summary_note()
+        self.status_var.set("You will get a morning summary." if now
+                            else "You will not get a morning summary.")
+
+    def _send_my_summary(self):
+        """Send yourself this morning's, now — and find out today rather
+        than at seven tomorrow whether the mail side is set up."""
+        self.status_var.set("Sending your summary…")
+
+        def _work():
+            out = _notify.send_mine()
+            self.master.after(0, lambda: self._summary_sent(out))
+
+        threading.Thread(target=_work, daemon=True).start()
+
+    def _summary_sent(self, out: dict):
+        if out.get("sent"):
+            self.status_var.set("Sent. Check your inbox.")
+            return
+        reason = out.get("reason") or "Nothing was sent."
+        self.status_var.set(reason)
+        messagebox.showinfo("Morning summary", reason)
 
     def _toggle_auto_deduct(self):
         """Turn automatic stock deduction on or off for the whole company."""
