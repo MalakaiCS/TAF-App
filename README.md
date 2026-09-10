@@ -204,6 +204,7 @@ just run it — nothing is lost and nothing is duplicated.
 | 24 | `migrate_line_progress.sql` | Ticking an order off line by line | recommended |
 | 25 | `migrate_recurring_jobs.sql` | Jobs that come round every 3 or 6 months | optional |
 | 26 | `migrate_margin.sql` | What a job costs, next to what it sells for | optional |
+| 27 | `migrate_order_files.sql` | Photos and a signature kept with an order | optional |
 
 **Step 16 is the one that matters most.** Every policy in the older scripts is
 `TO authenticated USING (true)` — meaning *anyone Supabase counts as signed

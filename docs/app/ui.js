@@ -152,10 +152,16 @@ var TAFUI = (function () {
       minimumFractionDigits: 2, maximumFractionDigits: 2 });
   }
 
-  /* ── The sheet that slides over the list ─────────────────────────────── */
+  /* ── The sheet that slides over the list ─────────────────────────────
+     A stack, not one panel. Signing for a delivery opens over the order it
+     belongs to, and closing that has to go back to the order rather than
+     throwing away the screen the person was working on. */
+
+  var STACK = [];
 
   function openSheet(build) {
     var wrap = document.getElementById("sheet");
+    STACK.push(build);
     var body = clear(document.getElementById("sheet-body"));
     build(body, closeSheet);
     wrap.classList.remove("hidden");
@@ -167,6 +173,21 @@ var TAFUI = (function () {
   function escClose(e) { if (e.key === "Escape") { closeSheet(); } }
 
   function closeSheet() {
+    STACK.pop();
+    var back = STACK[STACK.length - 1];
+    if (back) {
+      // Rebuilt rather than remembered, so what it shows is what is true
+      // now — a photo added underneath is there when you come back to it.
+      var body = clear(document.getElementById("sheet-body"));
+      back(body, closeSheet);
+      return;
+    }
+    document.getElementById("sheet").classList.add("hidden");
+    document.removeEventListener("keydown", escClose);
+  }
+
+  function closeAllSheets() {
+    STACK.length = 0;
     document.getElementById("sheet").classList.add("hidden");
     document.removeEventListener("keydown", escClose);
   }
@@ -179,6 +200,7 @@ var TAFUI = (function () {
     el: el, clear: clear, card: card, table: table, cell: cell,
     button: button, pill: pill, empty: empty, notice: notice,
     parseDate: parseDate, dueBucket: dueBucket, today: today, money: money,
-    openSheet: openSheet, closeSheet: closeSheet, sheetOpen: sheetOpen
+    openSheet: openSheet, closeSheet: closeSheet,
+    closeAllSheets: closeAllSheets, sheetOpen: sheetOpen
   };
 })();

@@ -94,6 +94,8 @@ STOCK = [
 ]
 
 RAISED: list = []      # orders the web app raised
+FILES: list = []       # photos and signatures kept against an order
+UPLOADED: list = []    # what actually reached Storage
 
 QUOTES = [
     {"id": "q1", "quote_number": "Q-1041", "customer_name": "Bells Creek",
@@ -122,10 +124,16 @@ class Stub:
     def route(self, route):
         req = route.request
         url = req.url
+        # post_data itself throws on a binary body — an uploaded photo is not
+        # text and asking Playwright to decode it as such raises.
         body = {}
-        if req.post_data:
+        try:
+            raw = req.post_data
+        except Exception:
+            raw = None
+        if raw:
             try:
-                body = json.loads(req.post_data)
+                body = json.loads(raw)
             except Exception:
                 body = {}
         self.calls.append((url, body))
@@ -152,6 +160,23 @@ class Stub:
             return send(STOCK)
         if "/rest/v1/quotes" in url:
             return send(QUOTES)
+        if "/rest/v1/order_files" in url and req.method == "POST":
+            row = dict(body)
+            row["id"] = "f" + str(len(FILES))
+            row["created_at"] = "2026-09-10T00:00:00Z"
+            FILES.append(row)
+            return send([row])
+        if "/rest/v1/order_files" in url:
+            oid = ""
+            for part in url.replace("?", "&").split("&"):
+                if part.startswith("order_id=eq."):
+                    oid = part.split("eq.", 1)[1]
+            return send([f for f in FILES if f["order_id"] == oid])
+        if "/storage/v1/object/sign/" in url:
+            return send({"signedURL": "/object/signed/fake.png?token=x"})
+        if "/storage/v1/object/" in url:
+            UPLOADED.append(url.rsplit("/object/", 1)[1])
+            return send({"Key": "ok"})
         if "/rest/v1/orders" in url and req.method == "POST":
             row = dict(body)
             row["id"] = "new-" + str(len(ORDERS))
@@ -225,6 +250,7 @@ def run() -> int:
         stub = Stub()
         page.route("**/rest/v1/**", stub.route)
         page.route("**/auth/v1/**", stub.route)
+        page.route("**/storage/v1/**", stub.route)
 
         # A thrown exception is a bug. A 400 in the console is not — two of
         # them are this test's own doing, refusing a password and refusing an
@@ -443,6 +469,63 @@ def run() -> int:
         ticks.nth(1).click()
         page.wait_for_timeout(300)
         check("unticking works too", ITEMS["o1"][1]["made"] is False)
+
+        print("\n── photos and proof of delivery ──")
+        check("it starts with nothing kept",
+              "Nothing kept against this order" in sheet.inner_text())
+
+        # A photo, the way a phone gives one: through the file input.
+        sheet.locator('input[type="file"]').set_input_files({
+            "name": "plantroom.jpg", "mimeType": "image/jpeg",
+            "buffer": b"\xff\xd8\xff\xe0 not really a jpeg, but a file"})
+        page.wait_for_timeout(600)
+        check("the photo reaches Storage", len(UPLOADED) == 1, str(UPLOADED))
+        check("filed under the order it belongs to",
+              UPLOADED and UPLOADED[0].startswith("order-files/o1/"),
+              str(UPLOADED))
+        check("and a row says what it is",
+              len(FILES) == 1 and FILES[0]["kind"] == "photo")
+        check("with who took it",
+              FILES and FILES[0]["taken_by"] == "Kai Brown")
+        check("and it appears against the order",
+              sheet.locator("button.filetile").count() == 1)
+
+        # A signature, drawn on the pad.
+        sheet.locator("button", has_text="Signed for").click()
+        page.wait_for_selector("#sheet-body canvas")
+        sign = page.locator("#sheet-body")
+        sign.locator("button", has_text="Keep it").click()
+        page.wait_for_timeout(250)
+        check("an unsigned pad is refused",
+              "Nothing has been signed" in sign.locator(".err").inner_text())
+
+        pad = sign.locator("canvas")
+        box = pad.bounding_box()
+        page.mouse.move(box["x"] + 40, box["y"] + 90)
+        page.mouse.down()
+        page.mouse.move(box["x"] + 150, box["y"] + 130)
+        page.mouse.move(box["x"] + 240, box["y"] + 70)
+        page.mouse.up()
+        sign.locator("button", has_text="Keep it").click()
+        page.wait_for_timeout(250)
+        check("a signature with no name is refused",
+              "Whose signature" in sign.locator(".err").inner_text())
+        check("and nothing was uploaded on a refusal", len(UPLOADED) == 1)
+
+        sign.locator('input[type="text"]').first.fill("D. Nguyen")
+        sign.locator("button", has_text="Keep it").click()
+        page.wait_for_timeout(800)
+        check("the signature is kept", len(FILES) == 2)
+        if len(FILES) == 2:
+            check("as a signature, with the name",
+                  FILES[1]["kind"] == "signature"
+                  and FILES[1]["signed_by"] == "D. Nguyen")
+        # Closing the pad has to go back to the order, not shut everything.
+        check("it steps back to the order underneath",
+              "Bells Creek" in page.locator("#sheet-body").inner_text(),
+              page.locator("#sheet-body").inner_text()[:120])
+        check("and the order shows both",
+              page.locator("#sheet-body button.filetile").count() == 2)
 
         print("\n── when the database says no ──")
         stub.refuse["set_order_line_made"] = (

@@ -373,6 +373,7 @@ var TAFAPP = (function () {
     U.openSheet(function (body, close) {
       var pill = U.pill(row.status);
       body.appendChild(U.el("h2", {
+        cls: "title",
         kids: [U.el("span", { text: row.customer || "Order" }), pill]
       }));
       body.appendChild(U.el("div", {
@@ -392,11 +393,15 @@ var TAFAPP = (function () {
       // buttons finish the window instead of interrupting it half way down.
       var actions = U.el("div", { cls: "row-actions" });
 
+      var files = U.el("div");
+      body.appendChild(files);
+
       D.select("orders", { "id": "eq." + row.id, "select": "items,header" })
         .then(function (rows) {
           var order = (rows && rows[0]) || {};
           drawLines(lines, row, order.items || [], body);
           drawNotes(body, row, order.header || {});
+          drawFiles(files, row, body);
           body.appendChild(actions);
           drawStatus(actions, row, body, pill, close);
         })
@@ -498,6 +503,209 @@ var TAFAPP = (function () {
     }
     if (kind === "catalogue") { return ""; }
     return [it.Short, it.Long, it.Channel].filter(Boolean).join(" × ");
+  }
+
+  /* ── Photos, and proof that it arrived ───────────────────────────────
+     The same shape for both: a file against the order, with who and when.
+     A photo of the plant room and a signature at the drop are the same
+     thing to the database and different things to whoever looks later. */
+
+  var FILE_BUCKET = "order-files";
+
+  function drawFiles(into, row, body) {
+    U.clear(into);
+    var card = U.el("div");
+    into.appendChild(card);
+
+    function load() {
+      D.select("order_files", {
+        "order_id": "eq." + row.id, "select": "*",
+        "order": "created_at.desc"
+      }).then(function (rows) { render(rows); })
+        .catch(function (err) {
+          // No migration yet, or no permission. Neither is worth a red box
+          // on an order somebody opened to tick a line off.
+          render([], err.message);
+        });
+    }
+
+    function render(rows, why) {
+      U.clear(card);
+      var kids = [];
+      if (rows.length) {
+        var grid = U.el("div", {
+          attr: { style: "display:grid;gap:8px;"
+                       + "grid-template-columns:repeat(auto-fill,minmax(110px,1fr))" }
+        });
+        rows.forEach(function (f) {
+          var tile = U.el("button", {
+            cls: "filetile",
+            attr: { type: "button",
+                    title: f.caption || f.kind },
+            kids: [U.el("div", { cls: "muted", text: label(f) })]
+          });
+          tile.addEventListener("click", function () { openFile(f, body); });
+          grid.appendChild(tile);
+        });
+        kids.push(grid);
+      } else {
+        kids.push(U.empty(why ? "No photos yet" : "Nothing kept against this order",
+                          why ? "" : "Photograph the filters, the plant room "
+                                   + "or the damage."));
+      }
+      kids.push(addRow(row, load, body));
+      card.appendChild(U.card("Photos and proof (" + rows.length + ")", kids));
+    }
+
+    function label(f) {
+      if (f.kind === "signature") {
+        return "✍  " + (f.signed_by || "Signed");
+      }
+      return "📷  " + (f.caption || "Photo");
+    }
+    load();
+  }
+
+  function addRow(row, reload, body) {
+    var wrap = U.el("div", { cls: "row-actions" });
+
+    // A file input rather than getUserMedia: on a phone this opens the
+    // camera, and on a PC it opens the file picker, which is what each of
+    // them wants without asking which one is being used.
+    var pick = U.el("input", {
+      attr: { type: "file", accept: "image/*", capture: "environment",
+              style: "display:none" }
+    });
+    pick.addEventListener("change", function () {
+      var file = pick.files && pick.files[0];
+      if (!file) { return; }
+      sendFile(row, file, "photo", "", "", body).then(function (ok) {
+        if (ok) { reload(); }
+      });
+      pick.value = "";
+    });
+    wrap.appendChild(pick);
+    wrap.appendChild(U.button("📷  Add a photo", function () { pick.click(); },
+                              "quiet"));
+    wrap.appendChild(U.button("✍  Signed for", function () {
+      signFor(row, reload, body);
+    }, "quiet"));
+    return wrap;
+  }
+
+  /* Returns a promise, because the caller has to be able to wait. Closing a
+     signature pad before the upload lands would send the order underneath
+     off to redraw itself from a database that does not have the file yet,
+     and the signature somebody just took would not be there. */
+  function sendFile(row, blob, kind, caption, signedBy, body) {
+    var ext = kind === "signature" ? "png"
+            : ((blob.type || "").split("/")[1] || "jpg").split("+")[0];
+    var path = row.id + "/" + Date.now() + "-" + kind + "." + ext;
+    U.notice(body, "Sending…", "ok");
+    return D.upload(FILE_BUCKET, path, blob, blob.type).then(function () {
+      return D.insert("order_files", {
+        order_id: row.id, kind: kind, path: path,
+        caption: caption || "", signed_by: signedBy || "",
+        taken_by: D.cachedProfile().full_name
+               || D.cachedProfile().username || ""
+      });
+    }).then(function () {
+      U.notice(body, kind === "signature"
+        ? "Signature kept against this order." : "Photo kept against this order.",
+        "ok");
+      return true;
+    }).catch(function (err) {
+      U.notice(body, err.message);
+      return false;
+    });
+  }
+
+  function openFile(f, body) {
+    D.signedUrl(FILE_BUCKET, f.path, 3600).then(function (url) {
+      if (!url) { throw new Error("That file could not be opened."); }
+      U.openSheet(function (inner, closeInner) {
+        inner.appendChild(U.el("h2", {
+          text: f.kind === "signature"
+            ? "Signed by " + (f.signed_by || "—") : (f.caption || "Photo") }));
+        inner.appendChild(U.el("div", { cls: "muted",
+          text: [f.taken_by, (f.created_at || "").slice(0, 10)]
+                .filter(Boolean).join(" · ") }));
+        inner.appendChild(U.el("img", {
+          attr: { src: url, alt: f.caption || f.kind,
+                  style: "width:100%;border-radius:10px;margin-top:10px;"
+                       + "background:#fff" } }));
+        inner.appendChild(U.el("div", { cls: "row-actions",
+          kids: [U.button("Close", closeInner, "quiet")] }));
+      });
+    }).catch(function (err) { U.notice(body, err.message); });
+  }
+
+  /* A signature drawn with a finger. The run sheet has had a column for one
+     for years; it just went back to the office in a ute. */
+  function signFor(row, reload, body) {
+    U.openSheet(function (inner, closeInner) {
+      inner.appendChild(U.el("h2", { text: "Signed for" }));
+      inner.appendChild(U.el("div", { cls: "muted",
+        text: "Have them sign below, and put their name to it." }));
+
+      var who = U.el("input", { attr: { type: "text",
+                                        placeholder: "Their name" } });
+      inner.appendChild(U.el("label", { cls: "f", kids: [
+        U.el("span", { text: "Name" }), who] }));
+
+      var pad = U.el("canvas", {
+        attr: { width: "600", height: "260",
+                style: "width:100%;height:200px;background:#fff;"
+                     + "border:1px solid var(--line);border-radius:10px;"
+                     + "touch-action:none" } });
+      inner.appendChild(pad);
+      var ctx = pad.getContext("2d");
+      ctx.lineWidth = 3; ctx.lineCap = "round"; ctx.strokeStyle = "#1F2933";
+      var drawing = false, drew = false;
+
+      function at(e) {
+        var r = pad.getBoundingClientRect();
+        var p = e.touches ? e.touches[0] : e;
+        return { x: (p.clientX - r.left) * (pad.width / r.width),
+                 y: (p.clientY - r.top) * (pad.height / r.height) };
+      }
+      function down(e) { e.preventDefault(); drawing = true; drew = true;
+                         var p = at(e); ctx.beginPath(); ctx.moveTo(p.x, p.y); }
+      function move(e) { if (!drawing) { return; } e.preventDefault();
+                         var p = at(e); ctx.lineTo(p.x, p.y); ctx.stroke(); }
+      function up() { drawing = false; }
+      ["mousedown", "touchstart"].forEach(function (n) {
+        pad.addEventListener(n, down, { passive: false }); });
+      ["mousemove", "touchmove"].forEach(function (n) {
+        pad.addEventListener(n, move, { passive: false }); });
+      ["mouseup", "mouseleave", "touchend"].forEach(function (n) {
+        pad.addEventListener(n, up); });
+
+      inner.appendChild(U.el("div", { cls: "row-actions", kids: [
+        U.button("Keep it", function () {
+          if (!drew) {
+            U.notice(inner, "Nothing has been signed yet.");
+            return;
+          }
+          if (!who.value.trim()) {
+            U.notice(inner, "Whose signature is it?");
+            return;
+          }
+          pad.toBlob(function (blob) {
+            sendFile(row, blob, "signature", "", who.value.trim(), inner)
+              .then(function (ok) {
+                // Only step back to the order once it is actually saved, so
+                // the order redraws from a database that has it.
+                if (ok) { closeInner(); }
+              });
+          }, "image/png");
+        }, "go"),
+        U.button("Clear", function () {
+          ctx.clearRect(0, 0, pad.width, pad.height); drew = false;
+        }, "quiet"),
+        U.button("Cancel", closeInner, "quiet")
+      ] }));
+    });
   }
 
   function drawNotes(body, row, header) {
@@ -925,7 +1133,8 @@ var TAFAPP = (function () {
 
   function openQuote(q) {
     U.openSheet(function (body, close) {
-      body.appendChild(U.el("h2", { text: q.customer_name || "Quote" }));
+      body.appendChild(U.el("h2", { cls: "title",
+        text: q.customer_name || "Quote" }));
       body.appendChild(U.el("div", { cls: "muted",
         text: [q.quote_number ? "Quote " + q.quote_number : "",
                q.reference ? "Their ref " + q.reference : "",
@@ -1012,7 +1221,8 @@ var TAFAPP = (function () {
 
   function openCustomer(c) {
     U.openSheet(function (body, close) {
-      body.appendChild(U.el("h2", { text: c.name || c.short_name || "Customer" }));
+      body.appendChild(U.el("h2", { cls: "title",
+        text: c.name || c.short_name || "Customer" }));
       var rows = [
         ["Trading name", c.short_name], ["Legal name", c.legal_name],
         ["Phone", c.phone], ["Email", c.email],
@@ -1111,7 +1321,8 @@ var TAFAPP = (function () {
 
   function openStock(item, all) {
     U.openSheet(function (body, close) {
-      body.appendChild(U.el("h2", { text: item.name || "Stock item" }));
+      body.appendChild(U.el("h2", { cls: "title",
+        text: item.name || "Stock item" }));
       body.appendChild(U.el("div", { cls: "muted",
         text: [item.sku ? "SKU " + item.sku : "",
                item.media_type ? "Media " + item.media_type : "",

@@ -106,7 +106,10 @@ WITH checks(step, file, purpose, needed, present) AS (VALUES
   (26, 'migrate_margin.sql', 'What a job costs, next to what it sells for', 'optional',
       EXISTS (SELECT 1 FROM information_schema.columns
                WHERE table_schema='public' AND table_name='price_list'
-                 AND column_name='unit_cost'))
+                 AND column_name='unit_cost')),
+
+  (27, 'migrate_order_files.sql', 'Photos and a signature kept with an order', 'optional',
+      to_regclass('public.order_files') IS NOT NULL)
 )
 SELECT step,
        CASE WHEN present THEN 'already done' ELSE 'RUN THIS' END AS status,

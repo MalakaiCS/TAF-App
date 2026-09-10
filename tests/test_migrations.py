@@ -46,6 +46,7 @@ ORDER = [
     "migrate_line_progress.sql",
     "migrate_recurring_jobs.sql",
     "migrate_margin.sql",
+    "migrate_order_files.sql",
 ]
 
 

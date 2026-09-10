@@ -109,6 +109,11 @@
   .tick[aria-pressed="true"] { background:#E4F4EA; border-color:var(--green); }
   tr.made td { background:#EAF7EE; }
 
+  .filetile { background:var(--tint); border:1px solid var(--line);
+              border-radius:10px; padding:16px 8px; cursor:pointer;
+              font:inherit; min-height:74px; }
+  .filetile:hover { border-color:var(--brand); }
+
   .muted { color:var(--muted); font-size:13px; }
   .empty { text-align:center; color:var(--muted); padding:30px 10px; }
   .err { background:#FCE9E6; border:1px solid #E9BDB5; color:#8A2A1E;
@@ -133,6 +138,10 @@
                  max-height:92vh; overflow:auto; border-radius:14px 14px 0 0;
                  padding:16px; padding-bottom:calc(16px + env(safe-area-inset-bottom)); }
   #sheet h2 { display:flex; align-items:center; gap:10px; }
+  /* A customer's name is data, not a section label. The heading rule
+     uppercases labels; "BELLS CREEK" is not how anybody writes it. */
+  h2.title { text-transform:none; letter-spacing:normal;
+             font-size:18px; color:var(--text); }
   @media (min-width:700px) {
     #sheet { align-items:center; }
     #sheet > div { border-radius:14px; max-height:88vh; }

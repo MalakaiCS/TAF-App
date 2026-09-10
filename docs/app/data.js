@@ -211,6 +211,41 @@ var TAFDATA = (function () {
     });
   }
 
+  /* ── Files ──────────────────────────────────────────────────────────────
+     Photos and signatures live in a private bucket. Reading one back needs
+     a signed URL: the pictures are a customer's plant room and somebody's
+     name in their own hand, and neither belongs on a public address that
+     never expires. */
+
+  function upload(bucket, path, blob, contentType) {
+    return fetch(URLBASE + "/storage/v1/object/" + bucket + "/" + path, {
+      method: "POST",
+      headers: {
+        "apikey": KEY,
+        "Authorization": "Bearer " + (signedIn() ? SESSION.access_token : KEY),
+        "Content-Type": contentType || blob.type || "application/octet-stream",
+        "x-upsert": "true"
+      },
+      body: blob
+    }).then(function (r) {
+      if (!r.ok) {
+        return r.text().then(function (text) {
+          throw new Error(friendly(r.status, text));
+        });
+      }
+      return path;
+    });
+  }
+
+  function signedUrl(bucket, path, seconds) {
+    return request("/storage/v1/object/sign/" + bucket + "/" + path, {
+      method: "POST", body: { expiresIn: seconds || 3600 }
+    }).then(function (out) {
+      var signed = out && (out.signedURL || out.signedUrl);
+      return signed ? URLBASE + "/storage/v1" + signed : "";
+    });
+  }
+
   /* ── Who is signed in ───────────────────────────────────────────────────
      The profile row, not the auth user: the name, the role and whether they
      have been approved all live there. */
@@ -254,6 +289,7 @@ var TAFDATA = (function () {
     canManageStaff: canManageStaff,
     select: select, rpc: rpc, insert: insert, update: update, remove: remove,
     request: request, friendly: friendly,
+    upload: upload, signedUrl: signedUrl,
     _session: function () { return SESSION; }
   };
 })();
