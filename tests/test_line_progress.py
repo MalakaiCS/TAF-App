@@ -242,3 +242,43 @@ def test_the_window_and_the_list_agree_on_the_wording():
     src = (ROOT / "modern_order_gui.py").read_text(encoding="utf-8")
     fn = src.split("def _items_cell")[1].split("\ndef ")[0]
     assert "progress_cell" in fn, "the list has its own copy of the rule"
+
+
+# ── An order raised on the web ───────────────────────────────────────────────
+# The web app saves the dimensions somebody typed and nothing worked out from
+# them: deriving a part number takes a thousand lines of rules that live in
+# Python, and a second copy of those in JavaScript would put different part
+# numbers on Xero invoices depending on which screen an order was raised on.
+#
+# So the desktop fills them in when it opens the order. If it did not, a
+# web-raised order would reach Xero with no item code on its lines and the
+# invoice would be wrong in a way nobody would notice until the customer rang.
+
+def test_the_desktop_fills_in_what_the_web_could_not():
+    src = (ROOT / "modern_order_gui.py").read_text(encoding="utf-8")
+    fn = src.split("def _order_header_items")[1].split("\n    def ")[0]
+    assert "needs_part_number" in fn and "_stamp_item" in fn, \
+        "nothing derives a part number for an order raised on the web"
+
+
+def test_it_only_fills_in_what_is_missing():
+    """Re-deriving a part number already on a line would quietly rewrite the
+    codes on old orders every time the media list changed."""
+    src = (ROOT / "modern_order_gui.py").read_text(encoding="utf-8")
+    fn = src.split("def _order_header_items")[1].split("\n    def ")[0]
+    assert "if _pn.needs_part_number(it):" in fn
+
+
+def test_a_web_raised_line_really_does_get_a_part_number():
+    """Not a claim about the code — run a line shaped the way the web app
+    saves one through the real derivation and check what comes out."""
+    from taf_order_app import part_numbers as _pn
+    line = {"item_kind": "filter", "Quantity": 4, "Filter Type": "V-form",
+            "Media Type": "G4", "Short": 500, "Long": 600, "Channel": 45,
+            "Notes": ""}
+    assert _pn.needs_part_number(line), \
+        "the web's shape is not recognised as needing a part number"
+    _pn.apply_derived_fields(line, {})
+    # Exactly what a 500 x 600 x 45 V-form in G4 is: 0.3 m², PPFG4 at 45mm.
+    assert line.get("Part Number") == "PPFG445-030", line.get("Part Number")
+    assert float(line.get("Square Metres") or 0) == 0.3, line.get("Square Metres")

@@ -17,6 +17,7 @@ var TAFAPP = (function () {
   var U = TAFUI, D = TAFDATA;
   var TABS = [
     { key: "dashboard",   label: "Today" },
+    { key: "new",         label: "New order" },
     { key: "orders",      label: "Orders" },
     { key: "delivery",    label: "Delivery" },
     { key: "quotes",      label: "Quotes" },
@@ -542,6 +543,225 @@ var TAFAPP = (function () {
       }, want === "Complete" ? "go" : "quiet"));
     });
     actions.appendChild(U.button("Close", close, "quiet"));
+  }
+
+  /* ── Raising an order ────────────────────────────────────────────────
+     This saves the dimensions somebody typed and nothing worked out from
+     them. Part numbers and square metreage come from a thousand lines of
+     rules that live in Python, and a second copy of those in JavaScript
+     would put different part numbers on Xero invoices depending on which
+     screen the order happened to be raised on.
+
+     So the desktop fills them in when it opens the order — which it has to
+     do anyway, because the worksheets are made by driving Excel and Word
+     and that only runs on Windows. Nothing is lost: an order raised here is
+     always finished there. */
+
+  var DRAFT = { header: {}, items: [] };
+
+  SCREENS["new"] = function (main) {
+    U.clear(main);
+    var f = {};
+    function field(label, key, opts) {
+      var o = opts || {};
+      var input = U.el("input", {
+        attr: { type: "text", value: DRAFT.header[key] || "",
+                placeholder: o.hint || "", inputmode: o.inputmode || null }
+      });
+      input.addEventListener("input", function () {
+        DRAFT.header[key] = input.value;
+      });
+      f[key] = input;
+      return U.el("label", { cls: "f", kids: [
+        U.el("span", { text: label }), input] });
+    }
+
+    main.appendChild(U.card("Who it is for", [
+      field("Customer name", "Customer Name", { hint: "As it goes on the order" }),
+      field("Their order number", "Order Number", { hint: "Leave blank for one of ours" }),
+      field("Date due", "Date Due", { hint: "dd/mm/yyyy, or ASAP" }),
+      field("Attention", "Attention"),
+      field("Job", "Job"),
+      field("Location", "Location", { hint: "Delivery region" })
+    ]));
+
+    var lines = U.el("div");
+    main.appendChild(lines);
+
+    var notes = U.el("textarea", { attr: { rows: "3" } });
+    notes.value = DRAFT.header.Notes || "";
+    notes.addEventListener("input", function () {
+      DRAFT.header.Notes = notes.value;
+    });
+    main.appendChild(U.card("Notes", [notes]));
+
+    var save = U.button("Save the order", function () { saveDraft(main); }, "go");
+    main.appendChild(U.el("div", { cls: "row-actions", kids: [
+      save,
+      U.button("Start again", function () {
+        if (!DRAFT.items.length && !DRAFT.header["Customer Name"]) { return; }
+        if (!window.confirm("Throw this order away and start again?")) { return; }
+        DRAFT = { header: {}, items: [] };
+        show("new");
+      }, "quiet")
+    ] }));
+
+    drawDraftLines(lines, main);
+    SCREENS["new"]._save = save;
+  };
+
+  function drawDraftLines(into, main) {
+    U.clear(into);
+    var rows = DRAFT.items.map(function (it, i) {
+      return U.el("tr", { kids: [
+        U.cell(it.Quantity),
+        U.cell(it["Filter Type"]),
+        U.cell([it.Short, it.Long, it.Channel].filter(Boolean).join(" × ")),
+        U.cell(it["Media Type"]),
+        U.cell(null, { node: U.el("button", {
+          cls: "btn quiet", text: "Remove",
+          attr: { type: "button" },
+          on: { click: function () {
+            DRAFT.items.splice(i, 1);
+            drawDraftLines(into, main);
+          } }
+        }) })
+      ] });
+    });
+    into.appendChild(U.card(
+      "Lines (" + DRAFT.items.length + ")",
+      [rows.length
+        ? U.table([{ text: "Qty" }, "Type", "Size (mm)", "Media", " "], rows)
+        : U.empty("Nothing on this order yet"),
+       U.el("div", { cls: "row-actions", kids: [
+         U.button("Add a line", function () { addLine(into, main); })] })]));
+  }
+
+  var FILTER_TYPES = ["V-form", "Flat Panel", "Stepped Filter", "Flyscreen",
+                      "Header"];
+  var MEDIA_TYPES = ["G4", "180", "WASH", "F5", "GREY", "E-MESH"];
+
+  function addLine(into, main) {
+    U.openSheet(function (body, close) {
+      body.appendChild(U.el("h2", { text: "Add a line" }));
+      var v = {};
+      function pick(label, key, values) {
+        var sel = U.el("select", { kids: values.map(function (t) {
+          return U.el("option", { text: t });
+        }) });
+        v[key] = sel;
+        return U.el("label", { cls: "f", kids: [
+          U.el("span", { text: label }), sel] });
+      }
+      function num(label, key, hint) {
+        var input = U.el("input", {
+          attr: { type: "text", inputmode: "numeric", placeholder: hint || "" }
+        });
+        v[key] = input;
+        return U.el("label", { cls: "f", kids: [
+          U.el("span", { text: label }), input] });
+      }
+      body.appendChild(U.card(null, [
+        num("Quantity", "Quantity", "e.g. 4"),
+        pick("Filter type", "Filter Type", FILTER_TYPES),
+        pick("Media", "Media Type", MEDIA_TYPES),
+        num("Short side (mm)", "Short"),
+        num("Long side (mm)", "Long"),
+        num("Depth (mm)", "Channel"),
+        U.el("label", { cls: "f", kids: [
+          U.el("span", { text: "Notes" }),
+          U.el("input", { attr: { type: "text" } })] })
+      ]));
+      var noteInput = body.querySelectorAll("input")[
+        body.querySelectorAll("input").length - 1];
+
+      body.appendChild(U.el("div", { cls: "muted",
+        text: "The part number and square metreage are worked out by the "
+            + "desktop app when it opens this order to make the worksheets." }));
+
+      body.appendChild(U.el("div", { cls: "row-actions", kids: [
+        U.button("Add it", function () {
+          var qty = parseInt(String(v.Quantity.value).trim(), 10);
+          if (!(qty > 0)) {
+            U.notice(body, "How many? Give a whole number above zero.");
+            return;
+          }
+          var dims = ["Short", "Long", "Channel"].map(function (k) {
+            return parseFloat(String(v[k].value).trim());
+          });
+          if (dims.some(function (d) { return !isFinite(d) || d <= 0; })) {
+            U.notice(body,
+              "All three measurements are needed — they are what the part "
+              + "number and the square metreage are worked out from.");
+            return;
+          }
+          DRAFT.items.push({
+            item_kind: "filter",
+            Quantity: qty,
+            "Filter Type": v["Filter Type"].value,
+            "Media Type": v["Media Type"].value,
+            Short: dims[0], Long: dims[1], Channel: dims[2],
+            Notes: noteInput.value || "",
+            "Pleat Insert": false, Header: false,
+            "Use Stock V-form": false, "Use Stock Flyscreen": false
+          });
+          close();
+          drawDraftLines(into, main);
+        }, "go"),
+        U.button("Cancel", close, "quiet")
+      ] }));
+    });
+  }
+
+  function saveDraft(main) {
+    var h = DRAFT.header;
+    if (!String(h["Customer Name"] || "").trim()) {
+      U.notice(main, "Which customer is this for?");
+      return;
+    }
+    if (!DRAFT.items.length) {
+      U.notice(main, "There are no lines on this order.");
+      return;
+    }
+    var btn = SCREENS["new"]._save;
+    btn.disabled = true;
+    var now = new Date();
+    function two(n) { return (n < 10 ? "0" : "") + n; }
+    var ordered = two(now.getDate()) + "/" + two(now.getMonth() + 1) + "/"
+                + String(now.getFullYear()).slice(2);
+    h["Date Ordered"] = h["Date Ordered"] || ordered;
+    h["Date Due"] = String(h["Date Due"] || "").trim() || "ASAP";
+    h.status = "Pending";
+
+    var who = D.cachedProfile();
+    D.insert("orders", {
+      user_id: D.whoami().id,
+      user_email: D.whoami().email || "",
+      username: who.username || "",
+      full_name: who.full_name || "",
+      customer_name: h["Customer Name"],
+      order_number: h["Order Number"] || "",
+      date_ordered: h["Date Ordered"],
+      date_due: h["Date Due"],
+      attention: h["Attention"] || "",
+      job: h["Job"] || "",
+      location: h["Location"] || "",
+      notes: h["Notes"] || "",
+      order_type: "filter",
+      header: h,
+      items: DRAFT.items
+    }).then(function (rows) {
+      var made = (rows && rows[0]) || {};
+      DRAFT = { header: {}, items: [] };
+      loadedAt = 0;
+      show("new");
+      U.notice(document.getElementById("screen"),
+        "Saved. Open it on the desktop app to print the worksheets — that is "
+        + "where the part numbers are filled in."
+        + (made.order_number ? " Order " + made.order_number + "." : ""), "ok");
+    }).catch(function (err) {
+      U.notice(main, err.message);
+    }).then(function () { btn.disabled = false; });
   }
 
   /* ── Delivery ────────────────────────────────────────────────────────

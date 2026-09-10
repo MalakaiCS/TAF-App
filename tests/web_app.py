@@ -93,6 +93,8 @@ STOCK = [
      "minimum_level": 25},          # low
 ]
 
+RAISED: list = []      # orders the web app raised
+
 QUOTES = [
     {"id": "q1", "quote_number": "Q-1041", "customer_name": "Bells Creek",
      "reference": "PO-9001", "status": "sent", "total": 1287.5,
@@ -150,6 +152,12 @@ class Stub:
             return send(STOCK)
         if "/rest/v1/quotes" in url:
             return send(QUOTES)
+        if "/rest/v1/orders" in url and req.method == "POST":
+            row = dict(body)
+            row["id"] = "new-" + str(len(ORDERS))
+            row["order_number"] = row.get("order_number") or "TAF-ON-0009"
+            RAISED.append(row)
+            return send([row])
         if "/rest/v1/orders" in url:
             oid = ""
             for part in url.split("&"):
@@ -318,6 +326,69 @@ def run() -> int:
         text = page.locator("#screen").inner_text()
         check("an overdue order is counted", "Overdue" in text)
         check("the late one is named", "Bells Creek" in text)
+
+        print("\n── raising an order ──")
+        page.click('#tabs button[data-tab="new"]')
+        page.wait_for_selector("#screen .card")
+
+        # It must not save an order with no customer, and must not save one
+        # with no lines — both are orders nobody can make.
+        page.locator("#screen button", has_text="Save the order").click()
+        page.wait_for_timeout(200)
+        check("it refuses an order with no customer",
+              "Which customer" in page.locator("#screen .err").inner_text())
+        check("and saved nothing", len(RAISED) == 0)
+
+        page.locator('#screen input').first.fill("Pelican Waters")
+        page.locator("#screen button", has_text="Save the order").click()
+        page.wait_for_timeout(200)
+        check("it refuses an order with no lines",
+              "no lines" in page.locator("#screen .err").inner_text())
+        check("and still saved nothing", len(RAISED) == 0)
+
+        page.locator("#screen button", has_text="Add a line").click()
+        page.wait_for_selector("#sheet:not(.hidden)")
+        lsheet = page.locator("#sheet-body")
+        # A line with no measurements has nothing to derive a part number
+        # from, so it must not be accepted.
+        lsheet.locator('input[inputmode="numeric"]').first.fill("4")
+        lsheet.locator("button", has_text="Add it").click()
+        page.wait_for_timeout(200)
+        check("a line with no measurements is refused",
+              "measurements are needed" in lsheet.locator(".err").inner_text())
+
+        nums = lsheet.locator('input[inputmode="numeric"]')
+        nums.nth(1).fill("500")
+        nums.nth(2).fill("600")
+        nums.nth(3).fill("45")
+        lsheet.locator("select").first.select_option("V-form")
+        lsheet.locator("button", has_text="Add it").click()
+        page.wait_for_selector("#sheet.hidden", state="attached")
+        check("the line is added", "500 × 600 × 45"
+              in page.locator("#screen").inner_text(),
+              page.locator("#screen").inner_text()[:250])
+
+        page.locator("#screen button", has_text="Save the order").click()
+        page.wait_for_timeout(400)
+        check("the order reaches the database", len(RAISED) == 1)
+        if RAISED:
+            saved = RAISED[0]
+            check("with the customer on it",
+                  saved.get("customer_name") == "Pelican Waters")
+            check("and the line's real measurements",
+                  saved["items"][0]["Short"] == 500
+                  and saved["items"][0]["Long"] == 600
+                  and saved["items"][0]["Channel"] == 45)
+            # The whole point of the split: the web does not invent these.
+            check("and no part number invented in the browser",
+                  not saved["items"][0].get("Part Number"))
+            check("it starts as Pending, not made",
+                  saved["header"]["status"] == "Pending")
+            check("and it says where to finish it",
+                  "desktop" in page.locator("#screen .ok").inner_text(),
+                  page.locator("#screen .ok").inner_text())
+            check("the form is cleared for the next one",
+                  page.locator('#screen input').first.input_value() == "")
 
         print("\n── the order list ──")
         page.click('#tabs button[data-tab="orders"]')

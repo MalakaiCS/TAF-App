@@ -15436,6 +15436,18 @@ class ModernOrderApp(tk.Frame):
                 # The list doesn't carry the lines. Fetch them the first time
                 # this order is opened, and keep them on the row after that.
                 items = _db.get_order_items(row.get("db_id") or "")
+                # An order raised on the web carries the dimensions but no
+                # part number — deriving one needs rules that only exist
+                # here. This is the way in for View Order, Print and Invoice
+                # alike, so filling them in here is what stops a web-raised
+                # order reaching Xero with no item code on its lines.
+                #
+                # Only where one is missing. Re-deriving a part number that
+                # is already on a line would quietly rewrite the codes on old
+                # orders every time the media list changed.
+                for it in items or []:
+                    if _pn.needs_part_number(it):
+                        self._stamp_item(it)
                 row["db_items"] = items
             return dict(row.get("db_header") or {}), list(items or [])
         try:

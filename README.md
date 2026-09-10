@@ -273,9 +273,22 @@ The link carries the publishable key the same way portal links do, the phone
 remembers it, and after that it is a bookmark. Everyone still signs in
 themselves.
 
+Today, New order, Orders, Delivery, Quotes, Customers and Stock. You can raise
+an order, tick its lines off as they're made, change a status, add stock
+adjustments, look anything up.
+
 It does **not** generate worksheets. Those are made by driving Excel and Word
 through COM, which runs on Windows and nowhere else, so an order's paperwork
 stays on the desktop app.
+
+**An order raised on the web carries the dimensions and no part number.**
+Working one out takes about a thousand lines of rules that live in Python, and
+a second copy of those in JavaScript would put different part numbers on Xero
+invoices depending on which screen an order happened to be raised on. The
+desktop fills them in when it opens the order — which it has to do anyway to
+print the worksheets — so there is one copy of the rules and nothing to drift.
+Quoting stays on the desktop for the same reason: you can't price a line
+without seeing its square metreage as you type.
 
 **Run `migrate_staff_access.sql` before this goes live.** Without it anyone who
 can register can read every order, customer, quote and price — which is bad on
