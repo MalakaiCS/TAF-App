@@ -97,6 +97,16 @@ STOCK = [
      "minimum_level": 25},          # low
 ]
 
+LOGGED: list = []      # audit_log entries the web app wrote
+AUDIT = [
+    {"id": 1, "username": "kai", "action": "order_created",
+     "details": "O/N: PO-8842 | Customer: Bells Creek | 3 lines",
+     "created_at": "2026-09-01T09:00:00Z"},
+    {"id": 2, "username": "dan", "action": "prices_imported",
+     "details": "412 part numbers",
+     "created_at": "2026-09-02T11:20:00Z"},
+]
+
 RAISED: list = []      # orders the web app raised
 FILES: list = []       # photos and signatures kept against an order
 UPLOADED: list = []    # what actually reached Storage
@@ -156,6 +166,23 @@ class Stub:
             return send({})
         if "/rest/v1/profiles" in url:
             return send([PROFILE])
+        if "/rest/v1/audit_log" in url and req.method == "POST":
+            # audit_log lets everyone write and only managers read, so
+            # asking for the row back on the way in is asking to read
+            # something the writer may not read. PostgREST refuses the whole
+            # statement, and the entry is never written at all.
+            if "return=minimal" not in (req.headers.get("prefer") or ""):
+                return send({"message": "permission denied for table"
+                                        " audit_log"}, 401)
+            LOGGED.append(dict(body))
+            return route.fulfill(status=201, headers={
+                "Access-Control-Allow-Origin": "*"}, body="")
+        if "/rest/v1/audit_log" in url:
+            if str(PROFILE.get("role", "")).lower() not in (
+                    "manager", "admin", "director"):
+                return send({"message": "permission denied for table"
+                                        " audit_log"}, 401)
+            return send(AUDIT + LOGGED)
         if "/rest/v1/orders_list" in url:
             return send(ORDERS)
         if "/rest/v1/customers" in url:
@@ -829,6 +856,88 @@ def run() -> int:
               "G4 media roll" in page.locator("#scans .card").first.inner_text())
         page.unroute("**/rest/v1/rpc/resolve_scan*")
 
+        print("\n── who did what ──")
+        # Nothing was returned on the way in: audit_log lets everyone write
+        # and only managers read, so asking for the row back would have the
+        # database refuse the whole insert. The stub above enforces that, so
+        # an entry being here at all is the proof.
+        ticks = [e for e in LOGGED if e.get("action") in
+                 ("line_made", "line_unmade")]
+        check("ticking a line off is written down", bool(ticks),
+              str(LOGGED[-3:]))
+        check("with the order and the line on it",
+              any("PO-8842" in (e.get("details") or "")
+                  and "Line" in (e.get("details") or "") for e in ticks))
+        check("a status change too",
+              any(e.get("action") == "order_status" for e in LOGGED))
+        # The two that were queued out of signal. Sent later, so the entry
+        # has to say when they were actually done.
+        check("and something done out of signal says when it was done",
+              any("sent when the signal came back" in (e.get("details") or "")
+                  for e in LOGGED), str([e.get("details") for e in ticks]))
+        check("under the account that did it",
+              all(e.get("user_id") == "u1" for e in LOGGED))
+
+        page.click('#tabs button[data-tab="log"]')
+        page.wait_for_selector("#screen table")
+        who = page.locator("#screen select").nth(0)
+        when = page.locator("#screen select").nth(1)
+        check("it opens on today, not on everything ever",
+              "Prices imported" not in page.locator("#screen").inner_text())
+        check("the day's work is there, ticks and all",
+              "Line made" in page.locator("#screen").inner_text()
+              or "Line unmade" in page.locator("#screen").inner_text())
+        when.select_option("Everything")
+        page.wait_for_timeout(200)
+        check("a manager can read back further",
+              "Prices imported" in page.locator("#screen").inner_text())
+        who.select_option("dan")
+        page.wait_for_timeout(200)
+        text = page.locator("#screen").inner_text()
+        check("and it can be narrowed to one person",
+              "Prices imported" in text and "Order created" not in text)
+        who.select_option("Everyone")
+        page.fill('#screen input[type="search"]', "PO-8842")
+        page.wait_for_timeout(200)
+        check("or to one order",
+              "PO-8842" in page.locator("#screen").inner_text()
+              and "Prices imported" not in page.locator("#screen").inner_text())
+
+        print("\n── a phone left on the bench ──")
+        page.evaluate("TAFAPP._stillThere()")
+        page.wait_for_selector("#sheet:not(.hidden)")
+        check("after a long time untouched it asks before signing out",
+              "Still there?" in page.locator("#sheet-body").inner_text())
+        page.locator("#sheet-body button", has_text="I am still here").click()
+        page.wait_for_selector("#sheet.hidden", state="attached")
+        check("and saying so keeps you in", page.locator("#app").is_visible())
+
+        # It must not sign out over work that is still on the phone: nobody
+        # else could ever send it.
+        page.click('#tabs button[data-tab="orders"]')
+        page.wait_for_selector("#screen table")
+        page.route("**/rest/v1/rpc/set_order_line_made*",
+                   lambda r: r.abort("internetdisconnected"))
+        page.locator("#screen tbody tr", has_text="Bells Creek").first.click()
+        page.wait_for_selector("#sheet-body button.tick")
+        page.locator("#sheet-body button.tick").nth(1).click()
+        page.wait_for_timeout(300)
+        page.locator("#sheet-body button", has_text="Close").first.click()
+        page.wait_for_selector("#sheet.hidden", state="attached")
+        page.evaluate("TAFAPP._stillThere()")
+        page.wait_for_selector("#sheet:not(.hidden)")
+        page.locator("#sheet-body button", has_text="Sign me out").click()
+        page.wait_for_timeout(500)
+        check("it will not sign out over work that has not been sent",
+              page.locator("#app").is_visible()
+              and "cannot be sent" in page.locator("#sheet-body").inner_text(),
+              page.locator("#sheet-body").inner_text()[:200])
+        page.unroute("**/rest/v1/rpc/set_order_line_made*")
+        page.evaluate("TAFSYNC.flush()")
+        page.wait_for_timeout(500)
+        page.keyboard.press("Escape")
+        page.wait_for_selector("#sheet.hidden", state="attached")
+
         print("\n── signing out ──")
         check("nothing is left covering the app",
               page.locator("#sheet").is_hidden())
@@ -838,6 +947,21 @@ def run() -> int:
               page.locator("#app").is_hidden())
         check("and the session is forgotten",
               page.evaluate("localStorage.getItem('taf_staff_session')") is None)
+
+        print("\n── what an employee sees ──")
+        # The database refuses them the log either way. This is about not
+        # offering a tab whose only possible content is a refusal.
+        PROFILE["role"] = "Employee"
+        page.fill("#email", "kai@taf.local")
+        page.fill("#password", "correct-horse")
+        page.click("#signin-go")
+        page.wait_for_selector("#app:not(.hidden)")
+        check("an employee is not offered the log",
+              page.locator('#tabs button[data-tab="log"]').count() == 0)
+        check("but everything they do use is still there",
+              page.locator('#tabs button[data-tab="orders"]').count() == 1
+              and page.locator('#tabs button[data-tab="scan"]').count() == 1)
+        PROFILE["role"] = "Manager"
 
         print("\n── kept on the phone ──")
         # A service worker needs a real origin, and file:// has none — so

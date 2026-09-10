@@ -17,12 +17,14 @@ on:
       - 'docs/**'
       - 'tests/web_app.py'
       - 'tests/test_offline.py'
+      - 'tests/test_web_audit.py'
       - '.github/workflows/web.yml'
   pull_request:
     paths:
       - 'docs/**'
       - 'tests/web_app.py'
       - 'tests/test_offline.py'
+      - 'tests/test_web_audit.py'
   workflow_dispatch:
 
 jobs:
@@ -47,6 +49,9 @@ jobs:
       # these would otherwise not run at all.
       - name: Check the offline rules
         run: python tests/test_offline.py
+
+      - name: Check the log and the shared-phone rules
+        run: python tests/test_web_audit.py
 
       - name: Drive the web app
         run: python tests/web_app.py

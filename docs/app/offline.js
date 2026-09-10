@@ -107,6 +107,7 @@ var TAFSYNC = (function () {
       if (job.needs_row && empty(out)) {
         throw new Error(job.gone || "That is not there any more.");
       }
+      trail(job, false);
       return { sent: true, out: out };
     }).catch(function (err) {
       if (err && err.offline) { return hold(job); }
@@ -137,6 +138,7 @@ var TAFSYNC = (function () {
         if (job.needs_row && empty(out)) {
           note(job, job.gone || "That is not there any more.");
         } else {
+          trail(job, true);
           sent += 1;
         }
         return step();
@@ -163,6 +165,44 @@ var TAFSYNC = (function () {
       throw err;
     });
     return sending;
+  }
+
+  /* One line in the log for what just went through.
+
+     The database stamps the time, not the phone: a queue that has been
+     waiting since the morning must not be able to rewrite the order of the
+     day, and a phone with the wrong clock must not either. So when a change
+     was made earlier than it was sent, that gap is written into the entry
+     instead - visible, rather than smoothed over.
+
+     Under the account signed in now, which is the same account that made
+     the change: the app refuses to sign out while anything is still
+     waiting, precisely so that stays true.
+
+     Swallowed on failure. The change went through; the log is a bonus, and
+     losing it must not turn a done job into an error on somebody's screen. */
+  function trail(job, delayed) {
+    if (!job.log) { return; }
+    var me = TAFDATA.cachedProfile();
+    var details = job.log.details || "";
+    if (delayed && job.at) {
+      details += "  ·  done " + clock(job.at) + ", sent when the signal "
+               + "came back";
+    }
+    TAFDATA.insert("audit_log", {
+      user_id: (TAFDATA.whoami() || {}).id,
+      username: me.username || me.full_name || "",
+      action: job.log.action,
+      details: details
+    }, true).catch(function () {});
+  }
+
+  function clock(iso) {
+    var d = new Date(iso);
+    if (isNaN(d.getTime())) { return String(iso); }
+    function two(n) { return (n < 10 ? "0" : "") + n; }
+    return two(d.getHours()) + ":" + two(d.getMinutes()) + " on "
+         + two(d.getDate()) + "/" + two(d.getMonth() + 1);
   }
 
   function drop() {

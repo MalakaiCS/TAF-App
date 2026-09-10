@@ -220,10 +220,17 @@ var TAFDATA = (function () {
     return request("/rest/v1/rpc/" + name, { method: "POST", body: body || {} });
   }
 
-  function insert(table, row) {
+  /* `quiet` asks the database not to hand the row back.
+
+     That is not an optimisation. audit_log lets everyone write and only
+     managers read, so asking for the row back on the way in is asking to
+     read something you are not allowed to read - and PostgREST refuses the
+     whole statement, so the entry never gets written at all. Anywhere the
+     writer may not read what they wrote, this has to be quiet. */
+  function insert(table, row, quiet) {
     return request("/rest/v1/" + table, {
       method: "POST", body: row,
-      headers: { "Prefer": "return=representation" }
+      headers: { "Prefer": quiet ? "return=minimal" : "return=representation" }
     });
   }
 

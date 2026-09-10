@@ -15681,6 +15681,17 @@ class ModernOrderApp(tk.Frame):
             except Exception as exc:
                 messagebox.showerror("Mark as made", str(exc), parent=dlg)
                 return "break"
+            # The web app writes the same two actions with the same wording,
+            # so a manager reading the log sees one list rather than two
+            # halves of one depending on which screen each tick came from.
+            try:
+                _db.log_action(
+                    "line_made" if want else "line_unmade",
+                    f"O/N: {row.get('order_no','')} | "
+                    f"Customer: {row.get('customer','')} | "
+                    f"Line {int(iid) + 1}")
+            except Exception:
+                pass          # the tick did land; the log is a bonus
             line["made"] = want
             tree.set(iid, "made", TICK_FULL if want else TICK_EMPTY)
             tree.item(iid, tags=("made",) if want else

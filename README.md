@@ -295,6 +295,19 @@ message.
 Signing out with work still waiting stops and asks, because the next person to
 use that phone must not send the last person's ticks under their own account.
 
+**Log** (managers and above) is the same audit log the desktop's Audit Log tab
+reads, filtered by person, by day and by search. Raising an order, changing a
+status and ticking a line off are written there from either screen in the same
+words, so one day's work reads as one list. Something done out of signal says
+when it was actually done as well as when it reached the database — the
+database still stamps the time, so a phone with a wrong clock can't reorder
+anybody else's day.
+
+**A phone left on a bench signs itself out.** After half an hour untouched it
+asks, waits a minute, then signs out — so whoever picks it up next isn't
+signed in as the last person. It won't do that over work that hasn't been
+sent: that would strand it under an account nobody else can send it with.
+
 **Scan** reads the Code 128 barcodes the app already prints — on a worksheet,
 on a rack label — through the phone's camera, and opens the order or the stock
 item it names. There's a box to type or scan a code into as well: a handheld

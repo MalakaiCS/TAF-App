@@ -23,7 +23,8 @@ var TAFAPP = (function () {
     { key: "delivery",    label: "Delivery" },
     { key: "quotes",      label: "Quotes" },
     { key: "customers",   label: "Customers" },
-    { key: "stock",       label: "Stock" }
+    { key: "stock",       label: "Stock" },
+    { key: "log",         label: "Log", from: 3 }
   ];
   var active = "dashboard";
   var ORDERS = [];              // the loaded list, newest first
@@ -88,6 +89,7 @@ var TAFAPP = (function () {
       whoBar();
       S.onChange(stateBar);
       S.start();
+      watchIdle();
       stateBar();
       show(active);
     }
@@ -142,6 +144,19 @@ var TAFAPP = (function () {
   }
 
   function updateReady() { newVersion = true; stateBar(); }
+
+  /* One line in the log, for something that went straight through. Anything
+     that can be queued carries its entry on the job instead, so it is
+     written when the change actually lands rather than when it was tapped. */
+  function logIt(action, details) {
+    var me = D.cachedProfile();
+    D.insert("audit_log", {
+      user_id: D.whoami().id,
+      username: me.username || me.full_name || "",
+      action: action,
+      details: details || ""
+    }, true).catch(function () { /* the log is a bonus, never a blocker */ });
+  }
 
   function leaving() {
     U.openSheet(function (body, close) {
@@ -268,6 +283,10 @@ var TAFAPP = (function () {
   function buildTabs() {
     var nav = U.clear(document.getElementById("tabs"));
     TABS.forEach(function (t) {
+      // A tab nobody below a manager can read anything on is a tab that only
+      // ever shows an empty table and a permission error. The database is
+      // still what decides — this only stops us offering it.
+      if (t.from && D.roleLevel() < t.from) { return; }
       nav.appendChild(U.el("button", {
         text: t.label,
         attr: { role: "tab", "aria-selected": String(t.key === active),
@@ -652,6 +671,12 @@ var TAFAPP = (function () {
                + (want ? " made" : " not made"),
           needs_row: true,
           gone: "That line is not on the order any more.",
+          log: {
+            action: want ? "line_made" : "line_unmade",
+            details: "O/N: " + (row.order_no || "") + " | Customer: "
+                   + (row.customer || "") + " | Line " + (idx + 1) + ": "
+                   + lineName(it) + " " + lineSize(it)
+          },
           body: {
             p_order_id: row.id,
             p_line_id: it.line_id || "",
@@ -953,6 +978,12 @@ var TAFAPP = (function () {
           label: (row.customer || "Order") + " → " + want,
           needs_row: true,
           gone: "That order is not there any more.",
+          log: {
+            action: "order_status",
+            details: "O/N: " + (row.order_no || "") + " | Customer: "
+                   + (row.customer || "") + " | Status: " + row.status
+                   + " → " + want
+          },
           body: { p_order_id: row.id, p_patch: { status: want } }
         }).then(function (out) {
           row.status = want;
@@ -967,6 +998,207 @@ var TAFAPP = (function () {
       }, want === "Complete" ? "go" : "quiet"));
     });
     actions.appendChild(U.button("Close", close, "quiet"));
+  }
+
+  /* ── Who did what ────────────────────────────────────────────────────
+     The same audit_log the desktop's Audit Log tab reads, and the same
+     wording in it, so one day's work reads as one list whichever screen
+     each thing was done on. Managers and above only, which the database
+     enforces — the tab is simply not offered below that. */
+
+  SCREENS.log = function (main) {
+    D.select("audit_log", {
+      "select": "*", "order": "created_at.desc", "limit": 500
+    }).then(function (rows) {
+      U.clear(main);
+      var search = U.el("input", {
+        attr: { type: "search", placeholder: "Order number, customer, action" }
+      });
+      var people = [];
+      rows.forEach(function (r) {
+        var who = r.username || "";
+        if (who && people.indexOf(who) === -1) { people.push(who); }
+      });
+      people.sort();
+      var who = U.el("select", {
+        kids: ["Everyone"].concat(people).map(function (t) {
+          return U.el("option", { text: t });
+        })
+      });
+      var when = U.el("select", {
+        kids: ["Today", "Last 7 days", "Everything"].map(function (t) {
+          return U.el("option", { text: t });
+        })
+      });
+
+      var out = U.el("div");
+
+      function redraw() {
+        var q = search.value.trim().toLowerCase();
+        var cut = 0;
+        if (when.value === "Today") { cut = U.today().getTime(); }
+        else if (when.value === "Last 7 days") {
+          cut = U.today().getTime() - 6 * 86400000;
+        }
+        var list = rows.filter(function (r) {
+          if (who.value !== "Everyone" && (r.username || "") !== who.value) {
+            return false;
+          }
+          if (cut && new Date(r.created_at).getTime() < cut) { return false; }
+          if (!q) { return true; }
+          return [r.username, r.action, r.details].join(" ")
+                 .toLowerCase().indexOf(q) !== -1;
+        });
+        U.clear(out);
+        if (!list.length) {
+          out.appendChild(U.card(null, [U.empty("Nothing here",
+            "Nobody has done anything matching that.")]));
+          return;
+        }
+        out.appendChild(U.card(list.length + " entr"
+          + (list.length === 1 ? "y" : "ies"),
+          [U.table(["When", "Who", "What", "Details"],
+            list.slice(0, 400).map(function (r) {
+              return U.el("tr", {
+                kids: [U.cell(stampOf(r.created_at)),
+                       U.cell(r.username || "—"),
+                       U.cell(wording(r.action)),
+                       U.cell(r.details || "")]
+              });
+            }))]));
+      }
+
+      [search, who, when].forEach(function (n) {
+        n.addEventListener("input", redraw);
+        n.addEventListener("change", redraw);
+      });
+      main.appendChild(U.card(null, [
+        U.el("div", { cls: "filters", kids: [
+          U.el("label", { cls: "f", kids: [
+            U.el("span", { text: "Search" }), search] }),
+          U.el("label", { cls: "f", kids: [
+            U.el("span", { text: "Who" }), who] }),
+          U.el("label", { cls: "f", kids: [
+            U.el("span", { text: "When" }), when] })
+        ] })
+      ]));
+      main.appendChild(out);
+      redraw();
+    }).catch(function (err) {
+      U.clear(main);
+      U.notice(main, /not allowed/i.test(err.message || "")
+        ? "Only a manager can read the log."
+        : err.message);
+    });
+  };
+
+  function stampOf(iso) {
+    var d = new Date(iso);
+    if (isNaN(d.getTime())) { return String(iso || "").slice(0, 16); }
+    function two(n) { return (n < 10 ? "0" : "") + n; }
+    var day = two(d.getDate()) + "/" + two(d.getMonth() + 1);
+    var time = two(d.getHours()) + ":" + two(d.getMinutes());
+    return d >= U.today() ? time : day + "  " + time;
+  }
+
+  /* order_status becomes "Order status". The desktop does the same, and the
+     two lists sit next to each other on somebody's desk. */
+  function wording(action) {
+    var text = String(action || "").replace(/_/g, " ").trim();
+    return text ? text.charAt(0).toUpperCase() + text.slice(1) : "";
+  }
+
+  /* ── A phone left on the bench ───────────────────────────────────────
+     These are shared. One gets put down next to a machine with somebody
+     signed in, and the next person to pick it up is them as far as the log
+     is concerned. So after half an hour of nothing at all it asks, and then
+     signs out.
+
+     It will not sign out over unsent work: that would strand it on the
+     phone under an account nobody can send it with. In that case it says so
+     and stays put, which out of signal is the honest answer anyway. */
+
+  var IDLE_MS = 30 * 60 * 1000;
+  var GRACE_S = 60;
+  var touched = Date.now();
+  var asking = false;
+
+  function watchIdle() {
+    ["pointerdown", "keydown", "touchstart", "focus"].forEach(function (e) {
+      window.addEventListener(e, function () {
+        if (!asking) { touched = Date.now(); }
+      }, true);
+    });
+    document.addEventListener("visibilitychange", function () {
+      if (!document.hidden && !asking) { touched = Date.now(); }
+    });
+    // Checked against the clock rather than counted down, so a phone that
+    // slept for an hour comes back knowing it slept for an hour.
+    setInterval(function () {
+      if (!asking && Date.now() - touched > IDLE_MS) { stillThere(); }
+    }, 15000);
+  }
+
+  function stillThere() {
+    asking = true;
+    stopCamera();
+    var left = GRACE_S;
+    var timer = null;
+
+    U.openSheet(function (body, close) {
+      var count = U.el("div", { cls: "muted" });
+      body.appendChild(U.el("h2", { cls: "title", text: "Still there?" }));
+      body.appendChild(U.el("div", {
+        text: "This has not been touched for half an hour. It will sign "
+            + (D.cachedProfile().full_name || "you") + " out, so that "
+            + "whoever picks the phone up next is not signed in as them."
+      }));
+      body.appendChild(count);
+      body.appendChild(U.el("div", { cls: "row-actions", kids: [
+        U.button("I am still here", function () {
+          clearInterval(timer);
+          asking = false;
+          touched = Date.now();
+          close();
+        }, "go"),
+        U.button("Sign me out", function () {
+          clearInterval(timer);
+          goodnight(body);
+        }, "quiet")
+      ] }));
+
+      function tick() {
+        count.textContent = "Signing out in " + left + " second"
+                          + (left === 1 ? "" : "s") + ".";
+        if (left <= 0) { clearInterval(timer); goodnight(body); return; }
+        left -= 1;
+      }
+      tick();
+      timer = setInterval(tick, 1000);
+    });
+  }
+
+  function goodnight(body) {
+    if (!S.pending()) {
+      U.closeAllSheets();
+      D.signOut().then(function () { location.reload(); });
+      return;
+    }
+    S.flush().then(function (out) {
+      if (!out.kept) {
+        U.closeAllSheets();
+        D.signOut().then(function () { location.reload(); });
+        return;
+      }
+      throw new Error(out.kept + " change"
+        + (out.kept === 1 ? "" : "s") + " still cannot be sent, so you are "
+        + "being left signed in. Get back into signal, then sign out.");
+    }).catch(function (err) {
+      asking = false;
+      touched = Date.now();
+      U.notice(body, err.message);
+      stateBar();
+    });
   }
 
   /* ── Scanning ────────────────────────────────────────────────────────
@@ -1397,6 +1629,7 @@ var TAFAPP = (function () {
     }
     var btn = SCREENS["new"]._save;
     btn.disabled = true;
+    var count = DRAFT.items.length;      // DRAFT is emptied on the way back
     var now = new Date();
     function two(n) { return (n < 10 ? "0" : "") + n; }
     var ordered = two(now.getDate()) + "/" + two(now.getMonth() + 1) + "/"
@@ -1426,6 +1659,13 @@ var TAFAPP = (function () {
       var made = (rows && rows[0]) || {};
       DRAFT = { header: {}, items: [] };
       loadedAt = 0;
+      // Same wording the desktop writes, so one log reads as one log
+      // whichever screen the order was raised on.
+      logIt("order_created",
+            "O/N: " + (made.order_number || h["Order Number"] || "")
+            + " | Customer: " + h["Customer Name"]
+            + " | " + count + " line" + (count === 1 ? "" : "s")
+            + " | Raised on the web");
       show("new");
       U.notice(document.getElementById("screen"),
         "Saved. Open it on the desktop app to print the worksheets — that is "
@@ -1900,6 +2140,8 @@ var TAFAPP = (function () {
     _stateBar: stateBar,
     _lookUp: lookUp,
     _outbox: outbox,
+    _idle: function () { touched = 0; },      // for the tests
+    _stillThere: stillThere,
     _progressCell: progressCell,
     _shapeOrder: shapeOrder,
     _openOrder: openOrder,
