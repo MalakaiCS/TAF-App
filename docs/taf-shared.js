@@ -35,10 +35,43 @@ var TAF = (function () {
     parent.appendChild(el);
   }
 
+  /* The footer used to depend on the page defining .taf-contact and
+     .taf-detail as flex rows. Every page that had them looked right and the
+     first page that forgot ran the phone number, the email and the website
+     together into one unreadable line - on a phone, which is where these are
+     read. A component that only works if you also remember to style it is a
+     trap, so it brings its own.
+
+     Put in as the FIRST thing in <head>, so a page that does define its own
+     still wins: the pages that already carry these rules are unchanged. */
+  var STYLED = false;
+
+  function defaultStyles() {
+    if (STYLED || !document.head) { return; }
+    STYLED = true;
+    var css = document.createElement("style");
+    css.textContent =
+      ".taf-footer{max-width:900px;margin:0 auto;padding:18px 16px 30px;" +
+      "text-align:center;font-size:13px;color:#6B7A8C}" +
+      ".taf-footer strong{display:block;color:#1B3A5C;font-size:14px;" +
+      "margin-bottom:6px}" +
+      ".taf-contact{display:flex;flex-wrap:wrap;gap:6px 16px;" +
+      "justify-content:center}" +
+      ".taf-contact a,.taf-contact span{color:#2E6DA4;font-weight:600;" +
+      "text-decoration:none}" +
+      ".taf-detail{display:flex;flex-wrap:wrap;gap:2px 14px;" +
+      "justify-content:center;margin-top:6px}" +
+      ".taf-safety{margin:12px auto 0;max-width:520px;font-size:12px;" +
+      "line-height:1.5}" +
+      ".taf-logo{height:34px}";
+    document.head.insertBefore(css, document.head.firstChild);
+  }
+
   /* Who we are and how to reach us. Rendered even when a link is broken,
      because that is exactly when someone needs to ring. */
   function footer(el) {
     if (!el) { return; }
+    defaultStyles();
     el.innerHTML = "";
     el.className = "taf-footer";
 

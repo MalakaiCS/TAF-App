@@ -25,12 +25,12 @@ window.TAF_COMPANY = {
   abn:     "",              // e.g. "12 345 678 901"
 
   // Where post goes.
-  address: "Unit 1/19 Tradelink Road, hillcrest QLD 4118",              // e.g. "19 Trade Link Road, Hillcrest QLD 4118"
+  address: "Unit 1/19 Tradelink Road, Hillcrest QLD 4118",              // e.g. "19 Trade Link Road, Hillcrest QLD 4118"
 
   // Where customers collect an order marked "Ready for pick up", and when.
   // Shown on exactly those orders, which is where it is actually needed.
   pickup: {
-    address: "Unit 1/19 Tradelink Road, hillcrest QLD 4118",            // e.g. "19 Trade Link Road, Hillcrest QLD 4118"
+    address: "Unit 1/19 Tradelink Road, Hillcrest QLD 4118",            // e.g. "19 Trade Link Road, Hillcrest QLD 4118"
     hours:   "Monday to Thursday 7am to 3:30pm & Friday 7am to 12:30pm",            // e.g. "Monday to Friday, 7am - 3.30pm"
     note:    "Ask at the front office and quote your order number."             // e.g. "Ask at the front office and quote your order number."
   },

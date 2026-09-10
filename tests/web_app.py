@@ -166,8 +166,27 @@ def run() -> int:
                 if (m.type == "error"
                     and "Failed to load resource" not in m.text) else None)
 
-        print("\n── signing in ──")
+        print("\n── the contact footer ──")
+        # It used to depend on the page defining .taf-contact as a flex row.
+        # The page that forgot ran the phone number, the email and the website
+        # together into one unreadable line — on a phone, which is where these
+        # are read, and next to a sentence telling people to ring us.
         page.goto(PAGE)
+        page.wait_for_selector(".taf-footer")
+        shape = page.evaluate("""() => {
+          const c = document.querySelector('.taf-contact');
+          const kids = [...c.children].map(k => k.getBoundingClientRect());
+          return {
+            display: getComputedStyle(c).display,
+            touching: kids.some((k, i) => i && Math.abs(k.left - kids[i-1].right) < 2)
+          };
+        }""")
+        check("the contact details are laid out, not run together",
+              shape["display"] == "flex" and not shape["touching"], str(shape))
+        check("the phone number is there to ring",
+              "3800 3448" in page.locator(".taf-footer").inner_text())
+
+        print("\n── signing in ──")
         page.wait_for_selector("#signin-form")
         check("the app does not show before signing in",
               page.locator("#app").is_hidden())
