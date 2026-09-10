@@ -38,9 +38,13 @@ var TAFAPP = (function () {
     }
 
     if (!key) {
+      // Nothing the person holding the phone can do about this, so tell
+      // whoever they are about to ring what to do instead of telling them.
       U.notice(document.getElementById("signin").querySelector(".card"),
-        "This link is missing its set-up key. Open the web app from the "
-        + "desktop app once and it will be remembered on this device.");
+        "This site has not been set up yet. Someone with access to the "
+        + "GitHub repository needs to run the \"Publish the web app key\" "
+        + "action once. Until then, opening it from the desktop app "
+        + "(your name, top right → Open on a phone) also works.");
       document.getElementById("signin-form").classList.add("hidden");
       return;
     }

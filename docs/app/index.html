@@ -149,7 +149,6 @@
       <p class="sub">Orders, stock and customers. Sign in with your usual
         account.</p>
     </header>
-    <div id="signin-err" class="err hidden"></div>
     <form id="signin-form">
       <label class="f"><span>Email</span>
         <input type="email" id="email" autocomplete="username" required></label>
@@ -178,6 +177,9 @@
 
 <script src="../company.js"></script>
 <script src="../taf-shared.js"></script>
+<!-- Written by the "Publish the web app key" workflow. Missing until that
+     has been run once, which is why this is allowed to 404 quietly. -->
+<script src="config.js" onerror="void 0"></script>
 <script src="data.js"></script>
 <script src="ui.js"></script>
 <script src="screens.js"></script>
@@ -204,7 +206,11 @@ function remembered(param, store) {
   try { return localStorage.getItem(store) || ""; } catch (e) { return ""; }
 }
 
-var KEY = remembered("k", "taf_staff_key");
+// config.js is written by CI from the same secret the installer is built
+// with, so opening this address on any phone just works — no PC, nothing to
+// scan, nothing to paste. A key on the link still wins, which is what makes
+// a second Supabase project testable without editing anything.
+var KEY = remembered("k", "taf_staff_key") || (window.TAF_KEY || "").trim();
 if (params.get("k")) {
   try { history.replaceState({}, "", location.pathname); } catch (e) {}
 }

@@ -166,6 +166,46 @@ def run() -> int:
                 if (m.type == "error"
                     and "Failed to load resource" not in m.text) else None)
 
+        print("\n── opening it on a phone, with no PC ──")
+        # config.js is written by the "Publish the web app key" workflow, so
+        # a bare bookmark works on any phone. It is not in the repo, so this
+        # writes and removes one to test both states.
+        bare = (ROOT / "docs" / "app" / "index.html").as_uri()
+        cfg = ROOT / "docs" / "app" / "config.js"
+        had_cfg = cfg.exists()
+        if had_cfg:
+            keep = cfg.read_text(encoding="utf-8")
+        try:
+            if had_cfg:
+                cfg.unlink()
+            page.goto(bare)
+            page.wait_for_selector("#signin .err")
+            check("with no key it names who can fix it",
+                  "Publish the web app key"
+                  in page.locator("#signin .err").inner_text())
+            check("and does not offer a form that cannot work",
+                  page.locator("#signin-form").is_hidden())
+
+            cfg.write_text('window.TAF_KEY = "test-anon-key";\n', encoding="utf-8")
+            page.goto(bare)
+            page.wait_for_selector("#signin-form:not(.hidden)")
+            check("once published, a bare bookmark is enough",
+                  page.locator("#signin-form").is_visible())
+            check("and nothing warns about set-up",
+                  page.locator("#signin .err").count() == 0)
+
+            page.evaluate("localStorage.clear()")
+            page.goto(bare + "?k=from-the-link")
+            page.wait_for_selector("#signin-form:not(.hidden)")
+            check("a key on the link still wins",
+                  page.evaluate("localStorage.getItem('taf_staff_key')")
+                  == "from-the-link")
+        finally:
+            if had_cfg:
+                cfg.write_text(keep, encoding="utf-8")
+            elif cfg.exists():
+                cfg.unlink()
+
         print("\n── the contact footer ──")
         # It used to depend on the page defining .taf-contact as a flex row.
         # The page that forgot ran the phone number, the email and the website

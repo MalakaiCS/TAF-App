@@ -1,0 +1,80 @@
+name: Publish the web app key
+
+# Writes docs/app/config.js from the SUPABASE_ANON_KEY secret, so the staff
+# web app opens on any phone with nothing to scan and nothing to paste.
+#
+# On putting a key in a public repository, deliberately:
+#
+# This is the publishable key. It is already inside TAFOrderEntry_Setup.exe,
+# which anyone can download from the releases page of this same public repo
+# and unzip, and it already rides in the query string of every customer
+# portal link that has ever been emailed. Committing it changes what an
+# attacker has to do from "download the installer" to "read a file", which is
+# no change worth the trouble it causes staff.
+#
+# What actually keeps the data safe is row-level security. On its own this
+# key opens nothing: the anonymous role has no access to any table, and a
+# signed-in account sees exactly what the policies allow. That is why
+# migrate_staff_access.sql matters more than where this key is written down,
+# not less.
+#
+# The service-role key is a completely different thing and must never go
+# anywhere near this repo or any page in it.
+#
+# Run it from the Actions tab - the GitHub web UI works on a phone, so this
+# needs no PC either.
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Write docs/app/config.js
+        env:
+          SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
+        run: |
+          if [ -z "$SUPABASE_ANON_KEY" ]; then
+            echo "::error::SUPABASE_ANON_KEY is not set. Add it under" \
+                 "Settings → Secrets and variables → Actions."
+            exit 1
+          fi
+          # A service-role key would hand the whole database to anyone who
+          # opened the page. Refuse rather than publish one by mistake.
+          if printf '%s' "$SUPABASE_ANON_KEY" | grep -q 'service_role'; then
+            echo "::error::That secret is a service-role key, not the" \
+                 "publishable one. Refusing to publish it."
+            exit 1
+          fi
+          mkdir -p docs/app
+          cat > docs/app/config.js <<EOF
+          /*
+            Written by the "Publish the web app key" workflow. Do not edit by
+            hand - the next run overwrites it.
+
+            This is the publishable key. It opens nothing on its own: the
+            anonymous role has no access to any table, and whoever opens the
+            page still has to sign in with their own account. Row-level
+            security decides what they can then see.
+          */
+          window.TAF_KEY = "${SUPABASE_ANON_KEY}";
+          EOF
+          echo "config.js written (key hidden)."
+
+      - name: Commit it if it changed
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add docs/app/config.js
+          if git diff --cached --quiet; then
+            echo "Already published and unchanged."
+            exit 0
+          fi
+          git commit -m "Publish the web app key so a phone needs no PC"
+          git push origin "HEAD:${{ github.ref_name }}"
