@@ -67,14 +67,29 @@ log, stock management and a customer database.
 - **Customers** — full customer database with delivery/billing details.
 - **Filter calculator** — the three ways to bend a frame (U, sideways U, G),
   which one gets the most filters out of a 2440 length of channel, and the
-  marks to strike off the tape. It counts the saw blade, uses what's on the
-  offcut rack first, and says what it turned down and by how much. A cut list
-  for a whole order comes off the Actions menu in View Order.
+  marks to strike off the tape. **The lip is part of the sum**: it's nominally
+  20mm but anything down to 10mm still closes the filter, so where shortening
+  it wins a whole extra frame it does — two G frames of a 295 × 310 are 2444
+  against a 2440 stick, and 2mm off each lip makes them 2440 exactly with
+  nothing on the floor. It never trims a lip for nothing, every length prints
+  its own marks (a part-full one keeps the full 20), it works the offcut rack
+  before opening new channel, and it says what it turned down and by how much.
+  A cut list for a whole order comes off the Actions menu in View Order, and
+  **Today's cut list** does every outstanding order at once, grouped by size.
+- **The offcut rack** — what's left and how long, written down in ten seconds
+  at the saw by whoever cut it. The calculator works the rack first. Used
+  pieces are marked, never deleted.
+- **How each customer wants them** — some always want a G. Stored against the
+  customer and honoured, with what the preference costs reported rather than
+  hidden.
 - **Features, switched on when you're ready** — thirty things arriving one at
   a time, each behind its own switch, all off to start with. A Director or an
-  Admin turns one on for the whole company under Settings → Features. Nothing
-  there grants access to anything: what a person may read or change is
-  row-level security in the database, which has no off switch.
+  Admin turns one on for the whole company under Settings → Features, and
+  everything new lives under **Testable Features** in the account menu — off
+  ones greyed rather than hidden, so somebody who's been told about one can
+  find out where to turn it on. Nothing there grants access to anything: what
+  a person may read or change is row-level security in the database, which has
+  no off switch.
 - **Audit Log** — every significant action recorded, from the desktop and
   from the web app in the same words.
 - **A morning summary** — what's overdue, what's due today, what's low on
@@ -406,16 +421,18 @@ not built yet is listed and locked: a switch that does nothing is worse than
 no switch.
 
 The same screen holds **How the workshop cuts** — the length channel comes in
-(2440), what the saw blade takes, the shortest offcut worth keeping (400), the
-lip on a U (20) and what's taken off every side (2). A manager can change
+(2440), what the saw blade takes (0), the shortest offcut worth keeping (400),
+the lip (20), the shortest lip that still closes a filter (10) and what's
+taken off every side (2). A manager can change
 those; the filter calculator works to them, and they're shared so a cut list
 worked out on one PC matches the next. Re-running the migration never
 overwrites what you've set.
 
-**Measure your kerf.** It ships at 3mm as a guess. Seven pieces off a stick is
-six cuts, and at 3mm that's 18mm gone — routinely the difference between
-seven frames and six, and between an offcut that makes a cap and one that
-doesn't.
+**Kerf ships at nothing, deliberately.** A frame isn't cut into pieces at its
+marks — the two 45° notches and the lip cut come off the flanges, not the
+running length — so the only cut through the channel is the one separating one
+strip from the next on the stick. Set it above zero only if your saw really
+does eat into the next piece.
 
 ### A morning summary (optional)
 

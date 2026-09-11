@@ -2134,3 +2134,125 @@ def get_known_customers() -> list[str]:
         return sorted(result, key=str.upper)
     except Exception:
         return []
+
+
+# ── The offcut rack (see migrate_features.sql) ───────────────────────────────
+# Channel that came off a stick and is long enough to be worth keeping. The
+# calculator works the rack before it opens anything new, which is the whole
+# point: a 900mm piece nobody reaches for is a 900mm piece that gets thrown
+# out, and the same channel gets bought twice.
+
+def list_offcuts(profile: str = "", on_rack: bool = True) -> list:
+    """What is on the rack, longest first."""
+    try:
+        q = (get_client().table("channel_offcuts").select("*")
+             .order("length_mm", desc=True).limit(500))
+        if on_rack:
+            q = q.eq("used", False)
+        if profile:
+            q = q.eq("profile", profile)
+        return q.execute().data or []
+    except Exception:
+        return []
+
+
+def add_offcut(length_mm: float, profile: str = "", note: str = "") -> dict:
+    """Write one down. The moment to do it is the moment it comes off the
+    stick, which is why anyone at the saw may, not only a manager."""
+    length = float(length_mm)
+    if length <= 0:
+        raise ValueError("An offcut has to be longer than nothing.")
+    resp = get_client().table("channel_offcuts").insert({
+        "length_mm":  length,
+        "profile":    str(profile or "").strip(),
+        "note":       str(note or "").strip(),
+        "created_by": current_full_name() or current_username(),
+    }).execute()
+    rows = resp.data or []
+    return rows[0] if rows else {}
+
+
+def use_offcut(offcut_id: str, used: bool = True) -> None:
+    """Mark one as taken off the rack, or put it back.
+
+    Marked, never deleted: "where did that 1300 go" is a question somebody
+    asks, and a row that vanished cannot answer it.
+    """
+    import datetime as _dt
+    get_client().table("channel_offcuts").update({
+        "used":    bool(used),
+        "used_at": _dt.datetime.now(_dt.timezone.utc).isoformat() if used else None,
+        "used_by": (current_full_name() or current_username()) if used else "",
+    }).eq("id", str(offcut_id)).execute()
+
+
+def offcut_lengths(profile: str = "") -> list:
+    """Just the lengths, for handing to the calculator."""
+    return [float(r.get("length_mm") or 0)
+            for r in list_offcuts(profile) if r.get("length_mm")]
+
+
+# ── Which way a customer's filters get made ──────────────────────────────────
+
+def frame_preference(customer_name: str) -> str:
+    """'u', 'sideways_u', 'g', or '' for whichever is cheapest that day."""
+    name = str(customer_name or "").strip()
+    if not name:
+        return ""
+    try:
+        resp = (get_client().table("customers")
+                .select("frame_preference,name,short_name").execute())
+        wanted = name.upper()
+        for row in resp.data or []:
+            if wanted in (str(row.get("name") or "").strip().upper(),
+                          str(row.get("short_name") or "").strip().upper()):
+                pref = str(row.get("frame_preference") or "").strip().lower()
+                return pref if pref in ("u", "sideways_u", "g") else ""
+    except Exception:
+        pass
+    return ""
+
+
+def set_frame_preference(customer_id: str, preference: str) -> None:
+    pref = str(preference or "").strip().lower()
+    if pref not in ("", "u", "sideways_u", "g"):
+        raise ValueError(f"{preference!r} is not a way of making a filter.")
+    get_client().table("customers").update(
+        {"frame_preference": pref}).eq("id", str(customer_id)).execute()
+
+
+# ── Sizes we already make ────────────────────────────────────────────────────
+
+def made_sizes(limit: int = 400) -> list:
+    """Every filter size that has been ordered, and how often.
+
+    Used to spot a 597 x 497 that is two millimetres off something we run
+    every week, while somebody is still typing rather than after the channel
+    has been cut.
+    """
+    try:
+        resp = (get_client().table("orders").select("items")
+                .eq("archived", False)
+                .order("created_at", desc=True).limit(limit).execute())
+    except Exception:
+        return []
+    counts: dict = {}
+    for row in resp.data or []:
+        for item in (row.get("items") or []):
+            if not isinstance(item, dict):
+                continue
+            if str(item.get("item_kind", "filter")) != "filter":
+                continue
+            try:
+                short = float(item.get("Short") or 0)
+                long = float(item.get("Long") or 0)
+            except (TypeError, ValueError):
+                continue
+            if short <= 0 or long <= 0:
+                continue
+            if short > long:
+                short, long = long, short
+            key = (short, long)
+            counts[key] = counts.get(key, 0) + 1
+    return [{"short": s, "long": l, "seen": n}
+            for (s, l), n in sorted(counts.items(), key=lambda kv: -kv[1])]

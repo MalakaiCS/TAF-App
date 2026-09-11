@@ -4953,10 +4953,9 @@ class ModernOrderApp(tk.Frame):
             ("Change my password…", self._do_change_password),
             None,
             ("Open on a phone…",    self._web_app_link),
-        ]
-        if _features.is_on("channel_calculator"):
-            items.append(("Filter calculator…", self._filter_calculator))
-        items += [
+            None,
+            ("Testable Features", self._testable_features()),
+            None,
             ("Products and prices", lambda: self._show_tab("products")),
             ("Settings",            lambda: self._show_tab("settings")),
         ]
@@ -4983,6 +4982,23 @@ class ModernOrderApp(tk.Frame):
                 menu.add_separator()
                 continue
             label, command = entry
+            # A list rather than a callable is a submenu. Everything new goes
+            # in one, so the account menu does not grow a line every time a
+            # feature is switched on.
+            if isinstance(command, list):
+                sub = tk.Menu(menu, tearoff=0, bg=CCA, fg=CTX,
+                              activebackground=CA, activeforeground="white",
+                              font=F_BODY, bd=0, relief="flat",
+                              activeborderwidth=0)
+                for kid in command:
+                    if kid is None:
+                        sub.add_separator()
+                        continue
+                    kid_label, kid_cmd, enabled = kid
+                    sub.add_command(label=f"  {kid_label}  ", command=kid_cmd,
+                                    state="normal" if enabled else "disabled")
+                menu.add_cascade(label=f"  {label}  ", menu=sub)
+                continue
             menu.add_command(label=f"  {label}  ", command=command)
         anchor = getattr(self, "_profile_anchor", None)
         try:
@@ -11357,6 +11373,40 @@ class ModernOrderApp(tk.Frame):
             "Customer emails are on — a receipt goes out with each order."
             if on else "Customer emails are off. Nothing is sent.")
 
+    # ── Testable Features ─────────────────────────────────────────────────
+    # Everything new lives here rather than being sprinkled up the account
+    # menu, so trying one out is a decision somebody makes on purpose and the
+    # menu does not grow a line every time a switch is flipped.
+    #
+    # Features that are off are listed and greyed, not hidden. Somebody who
+    # has been told about one and cannot find it will decide the update did
+    # not arrive; seeing it greyed tells them where to go instead.
+
+    # Which switch opens what. A feature with no screen of its own — one that
+    # only changes what an existing screen shows — has no entry here.
+    FEATURE_SCREENS = [
+        ("channel_calculator", "Filter calculator…",     "_filter_calculator"),
+        ("cut_list_day",       "Today's cut list…",      "_day_cut_list"),
+        ("offcut_register",    "The offcut rack…",       "_offcut_rack"),
+        ("frame_preference",   "How each customer wants them…",
+                                                         "_frame_preferences"),
+    ]
+
+    def _testable_features(self) -> list:
+        out = []
+        for key, label, method in self.FEATURE_SCREENS:
+            feature = _features.BY_KEY.get(key)
+            on = _features.is_on(key)
+            text = label if on else f"{label}   (off)"
+            out.append((text, getattr(self, method), on))
+        out.append(None)
+        waiting = sum(1 for f in _features.CATALOGUE
+                      if f.built and not _features.is_on(f.key))
+        coming = sum(1 for f in _features.CATALOGUE if not f.built)
+        note = f"{waiting} built and switched off · {coming} still to build"
+        out.append((note, lambda: self._show_tab("settings"), True))
+        return out
+
     # ── The filter calculator ─────────────────────────────────────────────
     # Three ways to bend a frame, and which is cheapest is not the same
     # question as which uses less material. See taf_order_app/cutting.py for
@@ -11381,15 +11431,21 @@ class ModernOrderApp(tk.Frame):
                           "qty": it.get("Quantity") or 1,
                           "media": it.get("Media Type", ""),
                           "depth": it.get("Channel", "")})
+        prefer = ""
+        if _features.is_on("frame_preference"):
+            try:
+                prefer = _db.frame_preference(row.get("customer", ""))
+            except Exception:
+                prefer = ""
         if not lines:
             messagebox.showinfo(
                 "Cut list",
                 "Nothing on this order is a made-to-measure filter, so there "
                 "is no channel to work out.")
             return
-        self._cut_list_window(lines, row.get("order_no", ""))
+        self._cut_list_window(lines, row.get("order_no", ""), prefer)
 
-    def _cut_list_window(self, lines, order_no: str = ""):
+    def _cut_list_window(self, lines, order_no: str = "", prefer: str = ""):
         dlg = tk.Toplevel(self.master, bg=CBG)
         dlg.title(f"Cut list — O/N {order_no}" if order_no else "Cut list")
         dlg.transient(self.master)
@@ -11416,7 +11472,16 @@ class ModernOrderApp(tk.Frame):
         bar.pack(side="right", fill="y")
         text.pack(fill="both", expand=True)
 
-        plan = _cutting.plan(lines, w)
+        # The rack first, when it is being kept. Channel already paid for
+        # and sitting against a wall is cheaper than channel on a shelf at
+        # the supplier's.
+        rack = []
+        if _features.is_on("offcut_register"):
+            try:
+                rack = _db.offcut_lengths()
+            except Exception:
+                rack = []
+        plan = _cutting.plan(lines, w, rack, prefer)
         for out in plan["lines"]:
             line = out["line"]
             size = f"{_fmt_mm(line['short'])} x {_fmt_mm(line['long'])}"
@@ -11426,31 +11491,62 @@ class ModernOrderApp(tk.Frame):
                 continue
             answer = out["answer"]
             won = answer["best"]
-            shape = won["shape"]
+            if answer.get("forced"):
+                text.insert("end", "")     # the reason is already in `why`
             text.insert("end", f"{qty} x {size}"
                                f"{'  ' + str(line['media']) if line.get('media') else ''}\n")
             text.insert("end", f"    {answer['why']}\n")
-            text.insert("end", "    Mark at  "
-                               + "   ".join(str(m) for m in shape["marks"])
-                               + "\n")
-            if shape["cap"]:
-                text.insert("end", f"    Cap      {shape['cap']}   "
+            if won["full"]["cap"]:
+                text.insert("end", f"    Cap      {won['full']['cap']}   "
                                    f"(x{qty})\n")
-            for i, stick in enumerate(won["packed"]["lengths"], 1):
+            runs = list(won["frame_sticks"])
+            if won.get("caps"):
+                runs += [b for b in won["caps"]["lengths"]
+                         if not any(b is x for x in runs)]
+            for i, stick in enumerate(runs, 1):
                 where = "from the rack" if stick["from_offcut"] else "new"
                 keep = (f"  keep {stick['offcut']}" if stick["keep"]
                         else (f"  scrap {stick['offcut']}"
                               if stick["offcut"] else ""))
+                lip = (f"  lip {_fmt_mm(stick['lip'])}"
+                       if stick.get("lip") and stick["lip"] != w["lip_mm"]
+                       else "")
                 text.insert("end", f"      {i}. {_fmt_mm(stick['length'])} "
                                    f"{where}: "
                                    + " + ".join(str(p) for p in stick["pieces"])
-                                   + keep + "\n")
+                                   + lip + keep + "\n")
+                # Each length carries its own marks, because a part-full one
+                # keeps the full lip and its last mark is not the same.
+                if stick.get("marks"):
+                    text.insert("end", "         mark at  "
+                                       + "   ".join(str(m)
+                                                    for m in stick["marks"])
+                                       + "\n")
+            # What it turned down, in full, for anyone who wants to argue
+            # with it — which is the point of showing it at all.
+            if _features.is_on("show_alternative"):
+                for other in answer["others"]:
+                    text.insert("end", f"      ({other['name']}: "
+                                       f"{other['sticks']} length"
+                                       f"{'' if other['sticks'] == 1 else 's'}, "
+                                       + "   ".join(str(m) for m in
+                                                    other["shape"]["marks"])
+                                       + (f", cap {other['full']['cap']}"
+                                          if other["full"]["cap"] else "")
+                                       + ")\n")
             text.insert("end", "\n")
 
         text.insert("end", f"\n{plan['sticks']} length"
                            f"{'' if plan['sticks'] == 1 else 's'} of channel, "
-                           f"{_fmt_mm(plan['channel'])}mm of it into filter "
-                           f"({plan['scrap_pct']}% off the end).\n")
+                           f"{_fmt_mm(plan['channel'])}mm of it into filter.\n")
+        if _features.is_on("scrap_rate"):
+            text.insert("end", f"{plan['scrap_pct']}% of what was opened did "
+                               f"not become filter.\n")
+        if plan["offcuts_kept"]:
+            text.insert("end", "Worth keeping: "
+                               + ", ".join(f"{_fmt_mm(x)}mm"
+                                           for x in plan["offcuts_kept"])
+                               + "\n")
         text.config(state="disabled")
 
         foot = tk.Frame(dlg, bg=CBG, padx=px(16), pady=px(12))
@@ -11460,6 +11556,267 @@ class ModernOrderApp(tk.Frame):
         flat_btn(foot, "Copy", lambda: self._copy_text(
             text.get("1.0", "end")), bg=CNE, pady=px(6),
             variant="secondary").pack(side="right", padx=(0, px(8)))
+
+    # ── Today's cut list ──────────────────────────────────────────────────
+
+    def _day_cut_list(self):
+        """Every filter due, as one list to work down at the saw.
+
+        Grouped by size across all of today's orders rather than kept per
+        order, because the saw does not care whose job it is - twelve of a
+        size off one stick beats four off three sticks three times over.
+        """
+        done = ("Complete", "Dispatched", "Delivered", "Collected")
+        rows = [r for r in (getattr(self, "_all_orders_data", None) or [])
+                if str(r.get("status") or "Pending") not in done]
+        if not rows:
+            messagebox.showinfo(
+                "Today's cut list",
+                "Open Previous Orders first so the list has something to "
+                "work from.")
+            return
+        sizes: dict = {}
+        skipped = 0
+        for row in rows:
+            try:
+                _header, items = self._order_header_items(row, "Cut list")
+            except Exception:
+                continue
+            for it in items or []:
+                if str(it.get("item_kind", "filter")) != "filter":
+                    continue
+                try:
+                    short = float(it.get("Short") or 0)
+                    long = float(it.get("Long") or 0)
+                    qty = int(it.get("Quantity") or 1)
+                except (TypeError, ValueError):
+                    continue
+                if short <= 0 or long <= 0:
+                    skipped += 1
+                    continue
+                if short > long:
+                    short, long = long, short
+                key = (short, long, str(it.get("Media Type") or ""))
+                sizes[key] = sizes.get(key, 0) + qty
+        if not sizes:
+            messagebox.showinfo(
+                "Today's cut list",
+                "Nothing outstanding has a made-to-measure filter on it, so "
+                "there is no channel to work out."
+                + (f"\n\n{skipped} line(s) had no sizes on them."
+                   if skipped else ""))
+            return
+        lines = [{"short": s, "long": l, "qty": n, "media": m}
+                 for (s, l, m), n in sorted(sizes.items(),
+                                            key=lambda kv: -kv[1])]
+        self._cut_list_window(lines, "everything outstanding")
+
+    # ── The offcut rack ───────────────────────────────────────────────────
+
+    def _offcut_rack(self):
+        """What is on the rack, and a way to write one down as it comes off.
+
+        Writing it down has to be the work of ten seconds at the saw. Anything
+        slower and it does not happen, and the channel gets bought twice.
+        """
+        dlg = tk.Toplevel(self.master, bg=CBG)
+        dlg.title("The offcut rack")
+        dlg.transient(self.master)
+        _centre_on_parent(dlg, self.master, px(680), px(560))
+
+        head = tk.Frame(dlg, bg=CBG, padx=px(16), pady=px(12))
+        head.pack(fill="x")
+        tk.Label(head, text="The offcut rack", bg=CBG, fg=CA,
+                 font=F_TTL).pack(side="left")
+        total = tk.Label(head, text="", bg=CBG, fg=CMU, font=F_SM)
+        total.pack(side="right")
+
+        add = tk.Frame(dlg, bg=CBG, padx=px(16))
+        add.pack(fill="x")
+        v_len = tk.StringVar()
+        v_prof = tk.StringVar()
+        tk.Label(add, text="Length (mm)", bg=CBG, fg=CTX,
+                 font=F_BODY).pack(side="left")
+        e_len = tk.Entry(add, textvariable=v_len, width=8, font=F_BODY,
+                         bg=CRE, fg=CTX, relief="flat", highlightthickness=1,
+                         highlightbackground=CBR)
+        e_len.pack(side="left", padx=(px(6), px(12)))
+        tk.Label(add, text="Channel", bg=CBG, fg=CTX,
+                 font=F_BODY).pack(side="left")
+        tk.Entry(add, textvariable=v_prof, width=12, font=F_BODY, bg=CRE,
+                 fg=CTX, relief="flat", highlightthickness=1,
+                 highlightbackground=CBR).pack(side="left", padx=(px(6), px(12)))
+
+        wrap = tk.Frame(dlg, bg=CCA, highlightbackground=CBR,
+                        highlightthickness=1)
+        wrap.pack(fill="both", expand=True, padx=px(16), pady=px(12))
+        tree = ttk.Treeview(wrap, columns=("len", "profile", "who", "when"),
+                            show="headings", style="TAF.Treeview",
+                            selectmode="browse")
+        for col, hd, wd, anc in [("len", "Length", 90, "e"),
+                                 ("profile", "Channel", 120, "w"),
+                                 ("who", "Put there by", 160, "w"),
+                                 ("when", "When", 130, "w")]:
+            tree.heading(col, text=hd)
+            tree.column(col, width=px(wd), anchor=anc, minwidth=px(50))
+        tree.pack(fill="both", expand=True)
+
+        note = tk.Label(dlg, text="", bg=CBG, fg=CMU, font=F_SM,
+                        wraplength=px(620), justify="left")
+        note.pack(anchor="w", padx=px(16))
+
+        def _reload():
+            for iid in tree.get_children():
+                tree.delete(iid)
+            try:
+                rows = _db.list_offcuts()
+            except Exception as exc:
+                note.config(text=str(exc))
+                return
+            keep = _features.workshop().get("keep_offcut_mm", 400)
+            for r in rows:
+                tree.insert("", "end", iid=str(r.get("id")), values=(
+                    _fmt_mm(r.get("length_mm")),
+                    r.get("profile") or "—",
+                    r.get("created_by") or "—",
+                    str(r.get("created_at") or "")[:10]))
+            run = sum(float(r.get("length_mm") or 0) for r in rows)
+            total.config(text=f"{len(rows)} piece"
+                              f"{'' if len(rows) == 1 else 's'} · "
+                              f"{_fmt_mm(run)}mm · "
+                              f"{run / max(1, _features.workshop()['stick_length_mm']):.1f} "
+                              f"lengths' worth")
+            note.config(text=f"Anything under {_fmt_mm(keep)}mm is not worth "
+                             f"walking back with. The calculator works this "
+                             f"rack before it opens a new length.")
+
+        def _add():
+            try:
+                length = float(str(v_len.get()).strip())
+            except ValueError:
+                note.config(text="Give the length as a number.")
+                return
+            try:
+                _db.add_offcut(length, v_prof.get())
+            except Exception as exc:
+                note.config(text=f"Could not write that down: {exc}")
+                return
+            v_len.set("")
+            e_len.focus_set()
+            _reload()
+
+        def _used():
+            picked = tree.selection()
+            if not picked:
+                note.config(text="Pick the piece you have used.")
+                return
+            try:
+                _db.use_offcut(picked[0])
+            except Exception as exc:
+                note.config(text=f"Could not mark that: {exc}")
+                return
+            _reload()
+
+        flat_btn(add, "Put it on the rack", _add, bg=CA,
+                 pady=px(5)).pack(side="left")
+        dlg.bind("<Return>", lambda _e: _add())
+
+        foot = tk.Frame(dlg, bg=CBG, padx=px(16), pady=px(12))
+        foot.pack(fill="x")
+        flat_btn(foot, "Close", dlg.destroy, bg=CNE,
+                 pady=px(6)).pack(side="right")
+        flat_btn(foot, "Used it", _used, bg=CNE, pady=px(6),
+                 variant="secondary").pack(side="right", padx=(0, px(8)))
+        _reload()
+        e_len.focus_set()
+
+    # ── How each customer wants them made ─────────────────────────────────
+
+    def _frame_preferences(self):
+        """Some customers always want a G, or have a spec that says so.
+
+        Stored against the customer so it stops being a question every time,
+        and so the calculator does not cheerfully recommend something that
+        will be sent back. What it costs is still reported rather than hidden.
+        """
+        dlg = tk.Toplevel(self.master, bg=CBG)
+        dlg.title("How each customer wants them made")
+        dlg.transient(self.master)
+        _centre_on_parent(dlg, self.master, px(640), px(560))
+
+        tk.Label(dlg, text="How each customer wants them made", bg=CBG, fg=CA,
+                 font=F_TTL).pack(anchor="w", padx=px(16), pady=(px(12), 0))
+        tk.Label(dlg, text="Blank means whichever way is cheapest that day.",
+                 bg=CBG, fg=CMU, font=F_SM).pack(anchor="w", padx=px(16),
+                                                 pady=(px(2), px(10)))
+
+        wrap = tk.Frame(dlg, bg=CCA, highlightbackground=CBR,
+                        highlightthickness=1)
+        wrap.pack(fill="both", expand=True, padx=px(16))
+        tree = ttk.Treeview(wrap, columns=("name", "pref"), show="headings",
+                            style="TAF.Treeview", selectmode="browse")
+        tree.heading("name", text="Customer")
+        tree.heading("pref", text="Make them as")
+        tree.column("name", width=px(340), anchor="w")
+        tree.column("pref", width=px(160), anchor="w")
+        tree.pack(fill="both", expand=True)
+
+        note = tk.Label(dlg, text="", bg=CBG, fg=CMU, font=F_SM,
+                        wraplength=px(600), justify="left")
+        note.pack(anchor="w", padx=px(16), pady=(px(8), 0))
+
+        rows: list = []
+
+        def _reload():
+            nonlocal rows
+            for iid in tree.get_children():
+                tree.delete(iid)
+            try:
+                rows = _db.get_customers() or []
+            except Exception as exc:
+                note.config(text=str(exc))
+                return
+            for c in sorted(rows, key=lambda r: str(r.get("name") or "").upper()):
+                pref = str(c.get("frame_preference") or "").lower()
+                tree.insert("", "end", iid=str(c.get("id")), values=(
+                    c.get("name") or c.get("short_name") or "—",
+                    _cutting.NAMES.get(pref, "whichever is cheapest")))
+
+        def _set(pref):
+            picked = tree.selection()
+            if not picked:
+                note.config(text="Pick a customer first.")
+                return
+            try:
+                _db.set_frame_preference(picked[0], pref)
+            except Exception as exc:
+                note.config(text=f"Could not save that: {exc}")
+                return
+            _reload()
+            note.config(text="Saved. Cut lists for them use it from now on.")
+
+        foot = tk.Frame(dlg, bg=CBG, padx=px(16), pady=px(12))
+        foot.pack(fill="x")
+        flat_btn(foot, "Close", dlg.destroy, bg=CNE,
+                 pady=px(6)).pack(side="right")
+        for label, pref in (("Whichever is cheapest", ""), ("G", "g"),
+                            ("Sideways U", "sideways_u"), ("U", "u")):
+            flat_btn(foot, label, lambda p=pref: _set(p), bg=CNE, pady=px(6),
+                     variant="secondary").pack(side="left", padx=(0, px(6)))
+        _reload()
+
+    def _made_sizes(self):
+        """Sizes already ordered, read once and kept for the session.
+
+        It is a sweep of the order history, so doing it on every keystroke
+        would make the calculator feel broken.
+        """
+        if getattr(self, "_made_sizes_cache", None) is None:
+            try:
+                self._made_sizes_cache = _db.made_sizes()
+            except Exception:
+                self._made_sizes_cache = []
+        return self._made_sizes_cache
 
     def _copy_text(self, what: str):
         try:
@@ -11524,20 +11881,42 @@ class ModernOrderApp(tk.Frame):
             if not answer.get("ok"):
                 out.config(text=answer["why"])
                 return
-            shape = answer["best"]["shape"]
-            lines = [answer["why"], "",
-                     "Mark at  " + "   ".join(str(m) for m in shape["marks"])]
-            if shape["cap"]:
-                lines.append(f"Cap      {shape['cap']}")
+            won = answer["best"]
+            lines = [answer["why"], ""]
+            # The marks that belong to the lengths actually being cut. The
+            # shape that fits most on a stick is not the shape of a part-full
+            # one, and printing the shortened marks against a single filter
+            # would have somebody cut it 2mm short for nothing.
+            for i, stick in enumerate(won["frame_sticks"], 1):
+                head = f"Mark at  " if len(won["frame_sticks"]) == 1 else \
+                       f"Length {i}, {len(stick['pieces'])} off:  "
+                lines.append(head
+                             + "   ".join(str(m) for m in stick["marks"])
+                             + (f"   (lip {_fmt_mm(stick['lip'])})"
+                                if stick["lip"] != won["full"]["lip"] else ""))
+            if won["full"]["cap"]:
+                lines.append(f"Cap      {won['full']['cap']}")
             lines.append("")
             for other in answer["others"]:
+                marks = other["frame_sticks"][0]["marks"]
                 lines.append(f"{other['name']}: {other['sticks']} length"
                              f"{'' if other['sticks'] == 1 else 's'}, "
-                             f"marks "
-                             + "   ".join(str(m)
-                                          for m in other["shape"]["marks"])
-                             + (f", cap {other['shape']['cap']}"
-                                if other["shape"]["cap"] else ""))
+                             f"marks " + "   ".join(str(m) for m in marks)
+                             + (f", cap {other['full']['cap']}"
+                                if other["full"]["cap"] else ""))
+            # A 597 x 497 that is two millimetres off something we run every
+            # week is worth a phone call, and now is when it is cheap to make
+            # one. It never changes the size — it only says so.
+            if _features.is_on("near_standard"):
+                close = _cutting.near_standard(short, long, self._made_sizes())
+                if close:
+                    lines.append("")
+                    for c in close:
+                        lines.append(
+                            f"Near a size we already make: "
+                            f"{_fmt_mm(c['short'])} x {_fmt_mm(c['long'])}"
+                            f"  ({c['off_by']}mm out, made {c['seen']} time"
+                            f"{'' if c['seen'] == 1 else 's'})")
             out.config(text="\n".join(lines))
 
         row = tk.Frame(pad, bg=CBG)

@@ -528,16 +528,69 @@ def _steps(app, gui, root):
         dlg.update_idletasks()
         said = " ".join(str(w.cget("text")) for w in _walk(dlg)
                         if isinstance(w, tk.Label))
-        # The worksheet's own numbers, so a wrong answer is caught here
-        # rather than at the saw. A 295 x 310 is a G at one-off, and the G's
-        # marks are the ones printed on O/N 12576.
-        for mark in ("308", "601", "909", "1202", "1222"):
-            if mark not in said:
-                raise AssertionError(f"the marks are wrong: {said[-400:]}")
+        # Whichever way it decided, those are the marks that have to be on
+        # the screen — and for a 295 x 310 they are the worksheet's own, so a
+        # wrong answer is caught here rather than at the saw.
+        from taf_order_app import cutting as _cut
+        from taf_order_app import features as _f2
+        won = _cut.best(295, 310, 1, _f2.workshop())["best"]
+        for mark in won["frame_sticks"][0]["marks"]:
+            if str(mark) not in said:
+                raise AssertionError(f"{mark} is missing: {said[-400:]}")
         for w in opened:
             w.destroy()
         _feat._switches = {}
     add("dialog: filter calculator", _calculator)
+
+    def _testable_menu():
+        """The one place everything new lives. It must build whether the
+        features are on or off, and say which are which."""
+        from taf_order_app import features as _feat
+        _feat._switches = {}
+        items = app._testable_features()
+        if not items:
+            raise AssertionError("Testable Features is empty")
+        named = [i for i in items if i]
+        if not any("(off)" in i[0] for i in named):
+            raise AssertionError("a feature that is off does not say so")
+        if any(i[2] for i in named[:-1]):
+            raise AssertionError("something is enabled with every switch off")
+        _feat._switches = {"channel_calculator": True}
+        items = [i for i in app._testable_features() if i]
+        calc = [i for i in items if "Filter calculator" in i[0]][0]
+        if not calc[2] or "(off)" in calc[0]:
+            raise AssertionError("switched on and still greyed out")
+        app._account_menu()          # it has to build with a submenu in it
+        _feat._switches = {}
+    add("menu: Testable Features", _testable_menu)
+
+    def _offcut_rack():
+        from taf_order_app import features as _feat
+        _feat._switches = {"offcut_register": True}
+        before = set(root.winfo_children())
+        app._offcut_rack()
+        opened = set(root.winfo_children()) - before
+        if not opened:
+            raise AssertionError("the offcut rack opened nothing")
+        for w in opened:
+            w.update_idletasks()
+            w.destroy()
+        _feat._switches = {}
+    add("dialog: the offcut rack", _offcut_rack)
+
+    def _frame_prefs():
+        from taf_order_app import features as _feat
+        _feat._switches = {"frame_preference": True}
+        before = set(root.winfo_children())
+        app._frame_preferences()
+        opened = set(root.winfo_children()) - before
+        if not opened:
+            raise AssertionError("frame preferences opened nothing")
+        for w in opened:
+            w.update_idletasks()
+            w.destroy()
+        _feat._switches = {}
+    add("dialog: frame preferences", _frame_prefs)
 
     def _cut_list():
         from taf_order_app import features as _feat

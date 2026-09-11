@@ -208,3 +208,59 @@ def test_re_running_never_overwrites_what_the_workshop_set():
     puts 3mm back. Every cut list after that is quietly wrong."""
     seed = SQL.split("INSERT INTO public.workshop_settings")[1]
     assert "ON CONFLICT (key) DO NOTHING" in seed
+
+
+# ── The offcut rack ──────────────────────────────────────────────────────────
+
+def test_anyone_at_the_saw_can_write_an_offcut_down():
+    """The moment to do it is the moment it comes off the stick. Making that
+    a manager's job is how it stops happening, and then the same channel gets
+    bought twice."""
+    block = SQL.split('CREATE POLICY "Staff add offcuts"')[1].split(";")[0]
+    assert "public.is_staff()" in block
+    assert "is_manager" not in block
+
+
+def test_a_used_offcut_is_marked_not_deleted():
+    """"Where did that 1300 go" is a question somebody asks, and a row that
+    vanished cannot answer it."""
+    assert "used       boolean" in SQL
+    assert "used_by    text" in SQL
+    block = SQL.split('CREATE POLICY "Managers bin offcuts"')[1].split(";")[0]
+    assert "public.is_manager()" in block, \
+        "anyone can delete the record of a piece of channel"
+
+
+def test_an_offcut_cannot_be_no_length_at_all():
+    assert "CHECK (length_mm > 0)" in SQL
+
+
+# ── Which way a customer wants them ──────────────────────────────────────────
+
+def test_a_customer_with_no_preference_gets_whichever_is_cheapest():
+    assert "frame_preference text NOT NULL DEFAULT ''" in SQL
+
+
+def test_only_a_real_way_of_making_one_can_be_stored():
+    from taf_order_app import db as _real_db
+    try:
+        _real_db.set_frame_preference("c1", "sideways")
+    except ValueError as exc:
+        assert "not a way of making a filter" in str(exc)
+    else:
+        raise AssertionError("it stored a method that does not exist")
+
+
+# ── What the menu offers ─────────────────────────────────────────────────────
+
+def test_every_screen_in_the_menu_belongs_to_a_real_feature():
+    """A menu entry keyed to a feature that does not exist would be an entry
+    nobody can ever switch on."""
+    import re as _re
+    src = (ROOT / "modern_order_gui.py").read_text(encoding="utf-8")
+    block = src.split("FEATURE_SCREENS = [")[1].split("]")[0]
+    for key, method in _re.findall(r'\("([a-z_]+)",\s*"[^"]*",\s*"(_[a-z_]+)"',
+                                   block):
+        assert key in _feat.BY_KEY, f"the menu offers {key}, which is not a feature"
+        assert _feat.BY_KEY[key].built, f"{key} is in the menu but not built"
+        assert f"def {method}(self" in src, f"{method} is in the menu and missing"

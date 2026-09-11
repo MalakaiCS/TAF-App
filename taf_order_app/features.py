@@ -53,11 +53,11 @@ CATALOGUE: List[Feature] = [
     Feature("cut_list_day", "The day's cut list",
             "Every filter due, grouped by depth and nested across sticks, as "
             "a list to work down at the saw.",
-            "Making it"),
+            "Making it", built=True),
     Feature("offcut_register", "Offcut register",
             "What is left on the rack and how long, checked before a new "
             "stick is opened.",
-            "Making it"),
+            "Making it", built=True),
     Feature("media_nesting", "Media nesting",
             "The same maths for the media roll as for the channel: roll "
             "width against filter face.",
@@ -69,11 +69,11 @@ CATALOGUE: List[Feature] = [
     Feature("show_alternative", "Show what it rejected",
             "\"U, 7 per stick - G would be 5\", so the person at the saw can "
             "overrule it knowing what they are overruling.",
-            "Making it"),
+            "Making it", built=True),
     Feature("near_standard", "Near a size we already make",
             "Flags a 597 x 497 as 2mm off a size you run constantly, while "
             "there is still time to ring and ask.",
-            "Making it"),
+            "Making it", built=True),
     Feature("cutlist_on_worksheet", "Cut list on the worksheet",
             "The marks printed on the worksheet that already goes out with "
             "the job.",
@@ -107,7 +107,7 @@ CATALOGUE: List[Feature] = [
     Feature("scrap_rate", "Scrap rate per job",
             "What percentage of the stick became filter. The only way to "
             "know the nesting is doing anything.",
-            "Knowing where you stand"),
+            "Knowing where you stand", built=True),
     Feature("planned_vs_actual", "Planned against actual",
             "What the calculator said it would use, against what stock "
             "actually moved.",
@@ -163,7 +163,7 @@ CATALOGUE: List[Feature] = [
     Feature("frame_preference", "Per-customer frame preference",
             "Some customers always want a G. Store it and stop it being a "
             "question.",
-            "The floor"),
+            "The floor", built=True),
 
     # ── Admin ────────────────────────────────────────────────────────────
     Feature("email_orders", "Orders straight from email",
@@ -280,9 +280,10 @@ def set_on(key: str, enabled: bool) -> bool:
 
 WORKSHOP_DEFAULTS: Dict[str, float] = {
     "stick_length_mm":   2440.0,
-    "kerf_mm":              3.0,
+    "kerf_mm":              0.0,
     "keep_offcut_mm":     400.0,
     "lip_mm":              20.0,
+    "min_lip_mm":          10.0,
     "side_allowance_mm":    2.0,
 }
 
