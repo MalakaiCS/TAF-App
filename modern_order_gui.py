@@ -32,6 +32,7 @@ from taf_order_app import emails as _emails
 from taf_order_app import notify as _notify
 from taf_order_app import features as _features
 from taf_order_app import cutting as _cutting
+from taf_order_app import insights as _insights
 from taf_order_app import backup as _backup
 from taf_order_app import labels as _labels
 from taf_order_app.bag_filler import (
@@ -11390,6 +11391,12 @@ class ModernOrderApp(tk.Frame):
         ("offcut_register",    "The offcut rack…",       "_offcut_rack"),
         ("frame_preference",   "How each customer wants them…",
                                                          "_frame_preferences"),
+        ("media_nesting",      "Media across the roll…",  "_media_nesting"),
+        ("batch_by_material",  "Batch by material…",      "_batch_by_material"),
+        ("wip_board",          "Where everything has got to…", "_wip_board"),
+        ("capacity",           "What you can promise…",   "_capacity"),
+        ("month_end",          "End of month…",           "_month_end"),
+        ("search_all",         "Search everything…",      "_search_all"),
     ]
 
     def _testable_features(self) -> list:
@@ -11566,23 +11573,19 @@ class ModernOrderApp(tk.Frame):
         order, because the saw does not care whose job it is - twelve of a
         size off one stick beats four off three sticks three times over.
         """
-        done = ("Complete", "Dispatched", "Delivered", "Collected")
-        rows = [r for r in (getattr(self, "_all_orders_data", None) or [])
-                if str(r.get("status") or "Pending") not in done]
-        if not rows:
-            messagebox.showinfo(
-                "Today's cut list",
-                "Open Previous Orders first so the list has something to "
-                "work from.")
+        # Read fresh rather than from the list on screen: what is left to
+        # cut is not "whatever filter somebody left set on Previous Orders".
+        try:
+            rows = [r for r in _db.get_all_orders()
+                    if str((r.get("header") or {}).get("status") or "Pending")
+                    not in _insights.DONE and not r.get("archived")]
+        except Exception as exc:
+            messagebox.showerror("Today's cut list", str(exc))
             return
         sizes: dict = {}
         skipped = 0
         for row in rows:
-            try:
-                _header, items = self._order_header_items(row, "Cut list")
-            except Exception:
-                continue
-            for it in items or []:
+            for it in (row.get("items") or []):
                 if str(it.get("item_kind", "filter")) != "filter":
                     continue
                 try:
@@ -11817,6 +11820,438 @@ class ModernOrderApp(tk.Frame):
             except Exception:
                 self._made_sizes_cache = []
         return self._made_sizes_cache
+
+    # ── A table in a window ───────────────────────────────────────────────
+    # Six of these features are the same shape: fetch, work something out,
+    # put it in a table. One helper rather than six near-identical windows,
+    # so they all behave the same and a fix to one is a fix to all.
+
+    def _table_window(self, title: str, note: str, columns, build,
+                      width: int = 880, height: int = 620, on_row=None):
+        """`build` runs off the main thread and returns (rows, footer)."""
+        dlg = tk.Toplevel(self.master, bg=CBG)
+        dlg.title(title)
+        dlg.transient(self.master)
+        _centre_on_parent(dlg, self.master, px(width), px(height))
+
+        head = tk.Frame(dlg, bg=CBG, padx=px(16), pady=px(12))
+        head.pack(fill="x")
+        tk.Label(head, text=title, bg=CBG, fg=CA, font=F_TTL).pack(side="left")
+        if note:
+            tk.Label(head, text=note, bg=CBG, fg=CMU, font=F_SM,
+                     wraplength=px(width - 60), justify="left").pack(
+                         anchor="w", pady=(px(4), 0))
+
+        wrap = tk.Frame(dlg, bg=CCA, highlightbackground=CBR,
+                        highlightthickness=1)
+        wrap.pack(fill="both", expand=True, padx=px(16))
+        keys = [c[0] for c in columns]
+        tree = ttk.Treeview(wrap, columns=keys, show="headings",
+                            style="TAF.Treeview", selectmode="browse")
+        for key, label, wd, anc in columns:
+            tree.heading(key, text=label)
+            tree.column(key, width=px(wd), anchor=anc, minwidth=px(50))
+        bar = ttk.Scrollbar(wrap, orient="vertical", command=tree.yview)
+        tree.configure(yscrollcommand=bar.set)
+        bar.pack(side="right", fill="y")
+        tree.pack(fill="both", expand=True)
+        tree.tag_configure("even", background=CRE)
+        tree.tag_configure("odd", background=CCA)
+        tree.tag_configure("late", background="#FCE9E6")
+        tree.tag_configure("head", background=CSP)
+
+        foot_lbl = tk.Label(dlg, text="Working it out…", bg=CBG, fg=CMU,
+                            font=F_SM, justify="left",
+                            wraplength=px(width - 40))
+        foot_lbl.pack(anchor="w", padx=px(16), pady=(px(8), 0))
+
+        def _fill(result):
+            rows, footer = result
+            for iid in tree.get_children():
+                tree.delete(iid)
+            for i, (values, tag, ref) in enumerate(rows):
+                tree.insert("", "end", iid=str(ref if ref is not None else i),
+                            tags=(tag or ("even" if i % 2 == 0 else "odd"),),
+                            values=values)
+            foot_lbl.config(text=footer)
+
+        def _work():
+            try:
+                result = build()
+            except Exception as exc:
+                self.master.after(0, lambda e=exc: foot_lbl.config(
+                    text=f"Could not work that out: {e}"))
+                return
+            self.master.after(0, lambda r=result: _fill(r))
+
+        if on_row:
+            tree.bind("<Double-1>",
+                      lambda _e: on_row(tree.focus(), dlg) if tree.focus()
+                      else None)
+
+        bottom = tk.Frame(dlg, bg=CBG, padx=px(16), pady=px(12))
+        bottom.pack(fill="x")
+        flat_btn(bottom, "Close", dlg.destroy, bg=CNE,
+                 pady=px(6)).pack(side="right")
+        threading.Thread(target=_work, daemon=True).start()
+        return dlg, tree, foot_lbl
+
+    def _outstanding_orders(self):
+        """Every live order, with its lines. Read fresh rather than from the
+        list on screen, because these screens are about everything rather
+        than about whatever filter somebody left set."""
+        return _db.get_all_orders()
+
+    # ── What you can promise ──────────────────────────────────────────────
+
+    def _capacity(self):
+        def build():
+            rows = self._outstanding_orders()
+            load = _insights.capacity(rows, weeks=8)
+            rate = _insights.throughput(rows)
+            out = []
+            late = load["overdue"]
+            if late["orders"]:
+                out.append(((f"Overdue", late["orders"], late["filters"],
+                             f"{late['sqm']:.1f}", late["customers"], ""),
+                            "late", "overdue"))
+            for w in load["weeks"]:
+                weeks_of_work = ("—" if not rate["sqm_avg"]
+                                 else f"{w['sqm'] / rate['sqm_avg']:.1f}")
+                out.append(((w["week"].strftime("w/c %d/%m"), w["orders"],
+                             w["filters"], f"{w['sqm']:.1f}", w["customers"],
+                             weeks_of_work), None, str(w["week"])))
+            none = load["no_date"]
+            if none["orders"]:
+                out.append((("No date / ASAP", none["orders"],
+                             none["filters"], f"{none['sqm']:.1f}",
+                             none["customers"], ""), "head", "nodate"))
+            footer = (
+                f"Lately you have been getting through {rate['sqm_avg']:.1f} m² "
+                f"and {rate['filters_avg']:.0f} filters a week, over "
+                f"{rate['weeks']} week{'' if rate['weeks'] == 1 else 's'}. "
+                f"The last column is how many of those weeks each row is.")
+            if load["unreadable"]:
+                footer += (f"  {load['unreadable']} order(s) had no lines I "
+                           f"could read.")
+            return out, footer
+
+        self._table_window(
+            "What you can promise",
+            "What is already promised, week by week, next to what you "
+            "actually get through. Weeks start on Monday.",
+            [("when", "Week", 150, "w"), ("orders", "Orders", 80, "e"),
+             ("filters", "Filters", 90, "e"), ("sqm", "m²", 90, "e"),
+             ("customers", "Customers", 100, "e"),
+             ("weeks", "Weeks of work", 120, "e")],
+            build, width=820, height=520)
+
+    # ── Batch by material ─────────────────────────────────────────────────
+
+    def _batch_by_material(self):
+        def build():
+            groups = _insights.by_material(self._outstanding_orders())
+            out = []
+            for g in groups:
+                out.append(((f"{g['media']}  ·  {g['depth']}mm",
+                             g["filters"], f"{g['sqm']:.1f}", g["customers"],
+                             g["due"].strftime("%d/%m/%Y") if g["due"] else "—",
+                             ""), "head", None))
+                for line in g["lines"]:
+                    out.append((("    " + line["customer"], line["qty"], "",
+                                 "", line["due"].strftime("%d/%m/%Y")
+                                 if line["due"] else "—",
+                                 f"{line['short']} x {line['long']} "
+                                 f"{line['type']}"), None, None))
+            footer = (f"{len(groups)} setup"
+                      f"{'' if len(groups) == 1 else 's'} to get through. "
+                      f"Earliest promise first — that is the machine to set "
+                      f"up now.")
+            return out, footer
+
+        self._table_window(
+            "Batch by material",
+            "The same outstanding work as the run sheet, sorted for the "
+            "person at the machine instead of the person in the van.",
+            [("what", "Media / depth / customer", 260, "w"),
+             ("qty", "Filters", 80, "e"), ("sqm", "m²", 80, "e"),
+             ("cust", "Customers", 90, "e"), ("due", "Due", 110, "w"),
+             ("size", "Size", 180, "w")],
+            build)
+
+    # ── End of month ──────────────────────────────────────────────────────
+
+    def _month_end(self):
+        def build():
+            data = _insights.month_end(_db.get_all_orders())
+            out = [(("By month", "", "", ""), "head", None)]
+            for m in data["months"]:
+                out.append(((m["month"], m["orders"], m["filters"],
+                             f"{m['sqm']:.1f}"), None, None))
+            out.append((("By customer", "", "", ""), "head", None))
+            for c in data["customers"][:25]:
+                out.append(((c["customer"], c["orders"], c["filters"],
+                             f"{c['sqm']:.1f}"), None, None))
+            out.append((("By filter type", "", "", ""), "head", None))
+            for t in data["types"]:
+                out.append(((t["type"], "", t["filters"],
+                             f"{t['sqm']:.1f}"), None, None))
+            this, last = data["this_month"], data["same_month_last_year"]
+            if this and last:
+                shift = this["filters"] - last["filters"]
+                footer = (f"This month: {this['filters']} filters. Same month "
+                          f"last year: {last['filters']}. "
+                          f"{'Up' if shift >= 0 else 'Down'} {abs(shift)}.")
+            elif this:
+                footer = (f"This month: {this['filters']} filters. Nothing "
+                          f"from the same month last year to compare with.")
+            else:
+                footer = "Nothing this month yet."
+            if data["unreadable"]:
+                footer += (f"  {data['unreadable']} order(s) had no date I "
+                           f"could read and are left out.")
+            return out, footer
+
+        self._table_window(
+            "End of month",
+            "Counted on the date ordered, so an order that took six weeks "
+            "belongs to the month it came in.",
+            [("what", "", 300, "w"), ("orders", "Orders", 90, "e"),
+             ("filters", "Filters", 90, "e"), ("sqm", "m²", 90, "e")],
+            build, width=720)
+
+    # ── One search box ────────────────────────────────────────────────────
+
+    def _search_all(self):
+        dlg = tk.Toplevel(self.master, bg=CBG)
+        dlg.title("Search everything")
+        dlg.transient(self.master)
+        _centre_on_parent(dlg, self.master, px(760), px(560))
+
+        top = tk.Frame(dlg, bg=CBG, padx=px(16), pady=px(12))
+        top.pack(fill="x")
+        tk.Label(top, text="Search everything", bg=CBG, fg=CA,
+                 font=F_TTL).pack(anchor="w")
+        term = tk.StringVar()
+        box = tk.Entry(top, textvariable=term, font=(FAM, 13), bg=CRE, fg=CTX,
+                       relief="flat", highlightthickness=1,
+                       highlightbackground=CBR)
+        box.pack(fill="x", pady=(px(8), 0))
+        tk.Label(top, text="A customer, an order number, a part number, a "
+                           "rack label — anything.",
+                 bg=CBG, fg=CMU, font=F_SM).pack(anchor="w", pady=(px(4), 0))
+
+        wrap = tk.Frame(dlg, bg=CCA, highlightbackground=CBR,
+                        highlightthickness=1)
+        wrap.pack(fill="both", expand=True, padx=px(16), pady=px(12))
+        tree = ttk.Treeview(wrap, columns=("kind", "what", "detail"),
+                            show="headings", style="TAF.Treeview")
+        for key, label, wd, anc in [("kind", "", 90, "w"),
+                                    ("what", "", 300, "w"),
+                                    ("detail", "", 300, "w")]:
+            tree.heading(key, text=label)
+            tree.column(key, width=px(wd), anchor=anc)
+        tree.pack(fill="both", expand=True)
+
+        state = {"orders": None, "customers": None, "stock": None,
+                 "prices": None, "hits": []}
+
+        def _load():
+            try:
+                state["orders"] = _db.get_all_orders()
+            except Exception:
+                state["orders"] = []
+            for key, fn in (("customers", _db.get_customers),
+                            ("stock", _db.get_stock_items),
+                            ("prices", _db.get_price_list)):
+                try:
+                    state[key] = fn()
+                except Exception:
+                    state[key] = [] if key != "prices" else {}
+
+        def _redraw(*_a):
+            if state["orders"] is None:
+                return
+            hits = _insights.search(term.get(), state["orders"],
+                                    state["customers"], state["stock"],
+                                    state["prices"])
+            state["hits"] = hits
+            for iid in tree.get_children():
+                tree.delete(iid)
+            for i, h in enumerate(hits):
+                tree.insert("", "end", iid=str(i), values=(
+                    h["kind"].title(), h["label"], h["detail"]))
+
+        def _open(_e=None):
+            picked = tree.focus()
+            if not picked:
+                return
+            hit = state["hits"][int(picked)]
+            if hit["kind"] == "order" and hit.get("row"):
+                dlg.destroy()
+                self._show_tab("prev_orders")
+                try:
+                    self.search_var.set(hit["ref"] or hit["label"])
+                    self._filter_orders_list()
+                except Exception:
+                    pass          # the tab is open either way
+            elif hit["kind"] == "stock":
+                dlg.destroy()
+                self._show_tab("stock")
+            elif hit["kind"] == "customer":
+                dlg.destroy()
+                self._show_tab("customers")
+
+        term.trace_add("write", _redraw)
+        tree.bind("<Double-1>", _open)
+        box.focus_set()
+
+        foot = tk.Frame(dlg, bg=CBG, padx=px(16), pady=px(12))
+        foot.pack(fill="x")
+        flat_btn(foot, "Close", dlg.destroy, bg=CNE,
+                 pady=px(6)).pack(side="right")
+        threading.Thread(
+            target=lambda: (_load(), self.master.after(0, _redraw)),
+            daemon=True).start()
+
+    # ── Where everything has got to ───────────────────────────────────────
+
+    def _wip_board(self):
+        def build():
+            board = _insights.wip_board(self._outstanding_orders())
+            out = []
+            for col in board["columns"]:
+                out.append(((col["label"], len(col["orders"]),
+                             col["filters"], ""), "head", None))
+                for o in col["orders"]:
+                    out.append(((f"    {o['customer']}  {o['order_no']}", "",
+                                 o["filters"],
+                                 o["due"].strftime("%d/%m/%Y")
+                                 if o["due"] else "—"),
+                                None, o["id"]))
+            footer = ("Double-click a job to move it on. "
+                      + (f"The jam is at {board['jam']}."
+                         if board["jam"]
+                         else "Nothing is obviously banked up."))
+            return out, footer
+
+        def _move(iid, parent):
+            if not iid or iid.startswith("I"):
+                return
+            self._move_stage(iid, parent)
+
+        self._table_window(
+            "Where everything has got to",
+            "The five boxes already printed down the side of every "
+            "worksheet: marked, cut, drilled, assembled, packed.",
+            [("what", "Stage / job", 340, "w"), ("orders", "Jobs", 80, "e"),
+             ("filters", "Filters", 90, "e"), ("due", "Due", 120, "w")],
+            build, width=760, on_row=_move)
+
+    def _move_stage(self, order_id: str, parent):
+        dlg = tk.Toplevel(parent, bg=CBG)
+        dlg.title("Move it on")
+        dlg.transient(parent)
+        _centre_on_parent(dlg, parent, px(360), px(320))
+        tk.Label(dlg, text="Tick what has been done", bg=CBG, fg=CA,
+                 font=F_SEC).pack(anchor="w", padx=px(16), pady=(px(14), px(8)))
+        note = tk.Label(dlg, text="", bg=CBG, fg=CMU, font=F_SM,
+                        wraplength=px(320), justify="left")
+
+        def _set(stage):
+            try:
+                _db.set_order_stage(order_id, stage, True)
+            except Exception as exc:
+                note.config(text=str(exc))
+                return
+            note.config(text="Moved. Close and reopen the board to see it.")
+            self.status_var.set("Marked as " + stage + ".")
+
+        for key, label in _db.STAGES:
+            flat_btn(dlg, label, lambda k=key: _set(k), bg=CNE, pady=px(6),
+                     variant="secondary").pack(anchor="w", padx=px(16),
+                                               pady=px(3))
+        note.pack(anchor="w", padx=px(16), pady=(px(8), 0))
+        flat_btn(dlg, "Close", dlg.destroy, bg=CNE,
+                 pady=px(6)).pack(anchor="e", padx=px(16), pady=px(12))
+
+    # ── The media, across the roll ────────────────────────────────────────
+
+    def _media_nesting(self):
+        dlg = tk.Toplevel(self.master, bg=CBG)
+        dlg.title("Media across the roll")
+        dlg.transient(self.master)
+        _centre_on_parent(dlg, self.master, px(560), px(440))
+        pad = tk.Frame(dlg, bg=CBG, padx=px(18), pady=px(16))
+        pad.pack(fill="both", expand=True)
+        tk.Label(pad, text="Media across the roll", bg=CBG, fg=CA,
+                 font=F_TTL).pack(anchor="w")
+        tk.Label(pad,
+                 text="The media cut size off the worksheet, and how much "
+                      "roll a batch of them takes.",
+                 bg=CBG, fg=CMU, font=F_SM,
+                 justify="left").pack(anchor="w", pady=(px(2), px(12)))
+
+        form = tk.Frame(pad, bg=CBG)
+        form.pack(anchor="w")
+        v = {}
+        for i, (key, label, default) in enumerate([
+                ("w", "Media cut, across (mm)", ""),
+                ("l", "Media cut, along (mm)", ""),
+                ("qty", "How many", "1"),
+                ("roll", "Roll width (mm)", "1000")]):
+            tk.Label(form, text=label, bg=CBG, fg=CTX, font=F_BODY,
+                     anchor="w").grid(row=i, column=0, sticky="w",
+                                      padx=(0, px(10)), pady=px(3))
+            var = tk.StringVar(value=default)
+            v[key] = var
+            tk.Entry(form, textvariable=var, width=10, font=F_BODY, bg=CRE,
+                     fg=CTX, relief="flat", highlightthickness=1,
+                     highlightbackground=CBR).grid(row=i, column=1,
+                                                   sticky="w", pady=px(3))
+        turn = tk.BooleanVar(value=False)
+        tk.Checkbutton(pad, text="  This media can be turned sideways",
+                       variable=turn, bg=CBG, fg=CTX, font=F_BODY,
+                       activebackground=CBG, selectcolor=CBG, anchor="w",
+                       relief="flat", bd=0, highlightthickness=0,
+                       cursor="hand2").pack(anchor="w", pady=(px(8), 0))
+        tk.Label(pad, text="Off by default: most media has a direction, and "
+                           "turning half the pieces to save a metre would be "
+                           "an expensive saving.",
+                 bg=CBG, fg=CMU, font=F_SM, wraplength=px(480),
+                 justify="left").pack(anchor="w")
+
+        out = tk.Label(pad, text="", bg=CBG, fg=CTX, font=F_BODY,
+                       justify="left", anchor="w", wraplength=px(500))
+        out.pack(anchor="w", pady=(px(12), 0))
+
+        def _work():
+            try:
+                nums = [float(str(v[k].get()).strip())
+                        for k in ("w", "l", "roll")]
+                qty = int(float(str(v["qty"].get()).strip() or 1))
+            except ValueError:
+                out.config(text="Give the sizes as numbers.")
+                return
+            try:
+                answer = _cutting.media_across_roll(
+                    nums[0], nums[1], qty, nums[2], turn.get())
+            except ValueError as exc:
+                out.config(text=str(exc))
+                return
+            if not answer.get("ok"):
+                out.config(text=answer["why"])
+                return
+            out.config(text=answer["why"]
+                       + f"\n{answer['waste_pct']}% of what comes off the "
+                         f"roll is not filter.")
+
+        row = tk.Frame(pad, bg=CBG)
+        row.pack(anchor="w", pady=(px(12), 0))
+        flat_btn(row, "Work it out", _work, bg=CA, pady=px(6)).pack(side="left")
+        flat_btn(row, "Close", dlg.destroy, bg=CNE, pady=px(6),
+                 variant="secondary").pack(side="left", padx=(px(8), 0))
+        dlg.bind("<Return>", lambda _e: _work())
 
     def _copy_text(self, what: str):
         try:

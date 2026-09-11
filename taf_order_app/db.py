@@ -2256,3 +2256,74 @@ def made_sizes(limit: int = 400) -> list:
             counts[key] = counts.get(key, 0) + 1
     return [{"short": s, "long": l, "seen": n}
             for (s, l), n in sorted(counts.items(), key=lambda kv: -kv[1])]
+
+
+# ── Where a job has got to (see the worksheet's own tick boxes) ──────────────
+# Marked channel, cut channel, drilled channel, assembled, packed. These are
+# not stages invented for a screen - they are the five boxes already printed
+# down the side of every worksheet, so a board built on them matches what
+# somebody is already ticking with a pen.
+
+STAGES = [
+    ("marked",    "Marked channel"),
+    ("cut",       "Cut channel"),
+    ("drilled",   "Drilled channel"),
+    ("assembled", "Assembled"),
+    ("packed",    "Packed"),
+]
+
+STAGE_KEYS = [k for k, _ in STAGES]
+
+
+def order_stages(header: dict) -> dict:
+    """Which boxes are ticked on one order."""
+    got = (header or {}).get("stages") or {}
+    if not isinstance(got, dict):
+        return {k: False for k in STAGE_KEYS}
+    return {k: bool(got.get(k)) for k in STAGE_KEYS}
+
+
+def stage_reached(header: dict) -> str:
+    """The furthest box ticked, or '' for nothing started.
+
+    Furthest rather than "the first one not ticked": somebody who ticks
+    Assembled without ticking Drilled has still assembled it, and a board
+    that put that job back at the saw would be arguing with the person who
+    did the work.
+    """
+    got = order_stages(header)
+    reached = ""
+    for key in STAGE_KEYS:
+        if got.get(key):
+            reached = key
+    return reached
+
+
+def set_order_stage(order_id: str, stage: str, done: bool = True) -> str:
+    """Tick or untick one box, without touching anything else on the header.
+
+    Through merge_order_header for the usual reason: two benches ticking two
+    different boxes on the same job is the normal case, and a read-change-
+    write from here would have whoever saved second wipe the other's tick.
+    """
+    if stage not in STAGE_KEYS:
+        raise ValueError(f"There is no stage called {stage!r}.")
+    header = {}
+    try:
+        resp = (get_client().table("orders").select("header")
+                .eq("id", str(order_id)).limit(1).execute())
+        rows = resp.data or []
+        header = (rows[0].get("header") or {}) if rows else {}
+    except Exception:
+        header = {}
+    stages = order_stages(header)
+    stages[stage] = bool(done)
+    stages["at"] = _now_stamp()
+    stages["by"] = current_full_name() or current_username()
+    return merge_order_header(str(order_id), {"stages": stages})
+
+
+def _now_stamp() -> str:
+    import datetime as _dt
+    d = _dt.datetime.now()
+    return f"{d.day:02d}/{d.month:02d}/{d.year} {d.hour:02d}:{d.minute:02d}"

@@ -97,6 +97,28 @@ ORDERS = [
     },
 ]
 
+# Something still to be made. Without it half the new screens have nothing
+# to show and would pass by being empty, which is not passing.
+ORDERS.append({
+    "id": "o3", "order_type": "filter", "customer_name": "Pelican Waters",
+    "order_number": "PO-9100", "date_ordered": "03/09/2026",
+    "date_due": "30/09/2026", "created_at": "2026-09-03T02:00:00Z",
+    "user_email": "smoke@taf.local", "full_name": "Smoke Test",
+    "created_by_role": "Employee", "archived": False, "n_items": 2,
+    "header": {"Customer Name": "Pelican Waters", "Order Number": "PO-9100",
+               "status": "Pending", "Location": "Sunshine Coast",
+               "stages": {"cut": True}},
+    "items": [
+        {"item_kind": "filter", "Filter Type": "V-form", "Media Type": "G4",
+         "Short": 295, "Long": 310, "Channel": 50, "Quantity": "12",
+         "Square Metres": 0.3, "Part Number": "PPFG450-030"},
+        {"item_kind": "filter", "Filter Type": "Flat Panel",
+         "Media Type": "F7", "Short": 495, "Long": 495, "Channel": 48,
+         "Quantity": "4", "Square Metres": 0.24,
+         "Part Number": "FPF48-0.24-F7"},
+    ],
+})
+
 CUSTOMERS = [
     {"id": "c1", "name": "Bells Creek", "legal_name": "Bells Creek Pty Ltd",
      "email": "orders@bellscreek.example", "phone": "07 5555 0000",
@@ -591,6 +613,26 @@ def _steps(app, gui, root):
             w.destroy()
         _feat._switches = {}
     add("dialog: frame preferences", _frame_prefs)
+
+    def _new_screens():
+        """Every feature with a screen of its own has to open, and none of
+        them may open when its switch is off."""
+        from taf_order_app import features as _feat
+        for key, _label, method in gui.ModernOrderApp.FEATURE_SCREENS:
+            _feat._switches = {key: True}
+            before = set(root.winfo_children())
+            getattr(app, method)()
+            root.update()
+            opened = set(root.winfo_children()) - before
+            if not opened:
+                raise AssertionError(f"{method} opened nothing")
+            for _ in range(6):
+                root.update()          # the table windows fill in a thread
+            for w in opened:
+                w.update_idletasks()
+                w.destroy()
+        _feat._switches = {}
+    add("dialogs: every feature screen", _new_screens)
 
     def _cut_list():
         from taf_order_app import features as _feat

@@ -61,7 +61,7 @@ CATALOGUE: List[Feature] = [
     Feature("media_nesting", "Media nesting",
             "The same maths for the media roll as for the channel: roll "
             "width against filter face.",
-            "Making it"),
+            "Making it", built=True),
     Feature("cutting_plan", "Cutting plan for the week",
             "The whole week's channel and media laid out together, rather "
             "than a day at a time.",
@@ -85,11 +85,11 @@ CATALOGUE: List[Feature] = [
     Feature("batch_by_material", "Batch by material",
             "A production view grouped by media and depth rather than by "
             "customer, in the order to work it.",
-            "Making it"),
+            "Making it", built=True),
     Feature("wip_board", "Work in progress board",
             "Cut, assembled, pleated, finished - so you can see where the "
             "jam is instead of hearing about it.",
-            "Making it"),
+            "Making it", built=True),
     Feature("kits", "Kits",
             "An AHU that takes four panels and two bags entered as one line "
             "rather than six.",
@@ -103,7 +103,7 @@ CATALOGUE: List[Feature] = [
     Feature("capacity", "What you can promise",
             "What is already promised this week against what you normally "
             "get through, before you agree to Friday.",
-            "Knowing where you stand"),
+            "Knowing where you stand", built=True),
     Feature("scrap_rate", "Scrap rate per job",
             "What percentage of the stick became filter. The only way to "
             "know the nesting is doing anything.",
@@ -115,11 +115,11 @@ CATALOGUE: List[Feature] = [
     Feature("month_end", "End of month, in one press",
             "Sales by customer, by month, by product type, against last "
             "year.",
-            "Knowing where you stand"),
+            "Knowing where you stand", built=True),
     Feature("search_all", "One search box",
             "Type anything - a customer, an order number, a part number, a "
             "site - and get what matches.",
-            "Knowing where you stand"),
+            "Knowing where you stand", built=True),
 
     # ── Money ────────────────────────────────────────────────────────────
     Feature("job_cost_actual", "What a job actually cost",

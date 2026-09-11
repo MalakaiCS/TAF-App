@@ -560,3 +560,79 @@ def near_standard(short: float, long: float, known: Sequence[Any],
     # to already be on a shelf.
     out.sort(key=lambda r: (r["off_by"], -r["seen"]))
     return out[:5]
+
+
+# ── The media, across the roll ───────────────────────────────────────────────
+
+def media_across_roll(cut_w: float, cut_l: float, qty: int,
+                      roll_width: float, rotatable: bool = False,
+                      settings: Dict[str, float] | None = None) -> Dict[str, Any]:
+    """How much roll a batch of media pieces takes, and how many fit across.
+
+    The media cut size is taken as given - it is already worked out and
+    printed on the worksheet (345 x 593 against a 295 x 310 filter), and it
+    depends on the pleat, which is not something to be reinvented here from
+    the filter's face. This only answers the part nobody works out: with a
+    roll this wide, how many go side by side, and what does the batch cost in
+    metres.
+
+    `rotatable` is off by default. Most media has a direction - the pleat
+    runs one way - and a nesting that quietly turns half the pieces ninety
+    degrees to save a metre would be a very expensive saving.
+    """
+    cut_w, cut_l = float(cut_w), float(cut_l)
+    roll_width = float(roll_width)
+    qty = max(1, int(qty))
+    if cut_w <= 0 or cut_l <= 0:
+        raise ValueError("A media piece needs both its sides.")
+    if roll_width <= 0:
+        raise ValueError("The roll has to have a width.")
+
+    def one_way(across_side: float, along_side: float) -> Dict[str, Any] | None:
+        across = int(roll_width // across_side)
+        if across < 1:
+            return None
+        rows = math.ceil(qty / across)
+        return {
+            "across":     across,
+            "rows":       rows,
+            "run_mm":     _tidy(rows * along_side),
+            "waste_mm":   _tidy(roll_width - across * across_side),
+            "turned":     False,
+        }
+
+    straight = one_way(cut_w, cut_l)
+    options = [o for o in (straight,) if o]
+    if rotatable:
+        turned = one_way(cut_l, cut_w)
+        if turned:
+            turned["turned"] = True
+            options.append(turned)
+
+    if not options:
+        return {"ok": False,
+                "why": f"a {_tidy(min(cut_w, cut_l))}mm piece will not fit "
+                       f"across a {_tidy(roll_width)}mm roll"}
+
+    options.sort(key=lambda o: (o["run_mm"], o["waste_mm"]))
+    won = options[0]
+    used = qty * cut_w * cut_l
+    laid = won["run_mm"] * roll_width
+    return {
+        "ok":        True,
+        "qty":       qty,
+        "cut":       f"{_tidy(cut_w)} x {_tidy(cut_l)}",
+        "across":    won["across"],
+        "rows":      won["rows"],
+        "run_mm":    won["run_mm"],
+        "run_m":     round(won["run_mm"] / 1000.0, 2),
+        "turned":    won["turned"],
+        "edge_mm":   won["waste_mm"],
+        "waste_pct": round(100.0 * (laid - used) / laid, 1) if laid else 0.0,
+        "others":    options[1:],
+        "why":       (f"{won['across']} across a {_tidy(roll_width)}mm roll, "
+                      f"{won['rows']} row{'' if won['rows'] == 1 else 's'}, "
+                      f"{round(won['run_mm'] / 1000.0, 2)}m of roll"
+                      + (f" - {_tidy(won['waste_mm'])}mm wasted down the edge"
+                         if won["waste_mm"] else " with nothing down the edge")),
+    }
