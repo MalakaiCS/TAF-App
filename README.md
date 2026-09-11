@@ -65,6 +65,16 @@ log, stock management and a customer database.
 - **Stock** — items with images, on-hand / minimum levels, adjustments &
   history, and optional automatic deduction as orders are generated.
 - **Customers** — full customer database with delivery/billing details.
+- **Filter calculator** — the three ways to bend a frame (U, sideways U, G),
+  which one gets the most filters out of a 2440 length of channel, and the
+  marks to strike off the tape. It counts the saw blade, uses what's on the
+  offcut rack first, and says what it turned down and by how much. A cut list
+  for a whole order comes off the Actions menu in View Order.
+- **Features, switched on when you're ready** — thirty things arriving one at
+  a time, each behind its own switch, all off to start with. A Director or an
+  Admin turns one on for the whole company under Settings → Features. Nothing
+  there grants access to anything: what a person may read or change is
+  row-level security in the database, which has no off switch.
 - **Audit Log** — every significant action recorded, from the desktop and
   from the web app in the same words.
 - **A morning summary** — what's overdue, what's due today, what's low on
@@ -211,6 +221,7 @@ just run it — nothing is lost and nothing is duplicated.
 | 26 | `migrate_margin.sql` | What a job costs, next to what it sells for | optional |
 | 27 | `migrate_order_files.sql` | Photos and a signature kept with an order | optional |
 | 28 | `migrate_notifications.sql` | A morning summary of what needs doing | optional |
+| 29 | `migrate_features.sql` | Switching new features on, and how the workshop cuts | recommended |
 
 **Step 16 is the one that matters most.** Every policy in the older scripts is
 `TO authenticated USING (true)` — meaning *anyone Supabase counts as signed
@@ -381,6 +392,30 @@ unaffected either way — an order that couldn't be confirmed by email is still
 an order. The switch is checked again inside the function before anything is
 sent, so a PC that has been left open since yesterday can't send on
 yesterday's answer.
+
+### Switching the new features on (recommended)
+
+Thirty things were asked for at once. They arrive one at a time, each behind
+its own switch and all off to start with, so the first one that gets in
+somebody's way doesn't take the other twenty-nine down with it.
+
+Run `migrate_features.sql`, then **Settings → Features**. A **Director or an
+Admin** flips a switch and it changes for the whole company — not a Manager,
+because this decides how everybody works rather than how today goes. Anything
+not built yet is listed and locked: a switch that does nothing is worse than
+no switch.
+
+The same screen holds **How the workshop cuts** — the length channel comes in
+(2440), what the saw blade takes, the shortest offcut worth keeping (400), the
+lip on a U (20) and what's taken off every side (2). A manager can change
+those; the filter calculator works to them, and they're shared so a cut list
+worked out on one PC matches the next. Re-running the migration never
+overwrites what you've set.
+
+**Measure your kerf.** It ships at 3mm as a guess. Seven pieces off a stick is
+six cuts, and at 3mm that's 18mm gone — routinely the difference between
+seven frames and six, and between an offcut that makes a cap and one that
+doesn't.
 
 ### A morning summary (optional)
 

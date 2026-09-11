@@ -343,10 +343,19 @@ def run(role: str = "manager") -> int:
 
 def _steps(app, gui, root):
     """Everything the smoke test does, in order, one event-loop tick apart."""
+    import tkinter as tk
+
     steps: list[tuple[str, object]] = []
 
     def add(label, fn):
         steps.append((label, fn))
+
+    def _walk(widget):
+        """Every widget under one, so a step can read what a dialog says
+        without knowing how it was laid out."""
+        yield widget
+        for kid in widget.winfo_children():
+            yield from _walk(kid)
 
     def _topmost_tab():
         """Which tab a person is actually looking at.
@@ -470,6 +479,92 @@ def _steps(app, gui, root):
         # A menu, so nothing new is packed — this checks it builds at all.
         app._account_menu()
     add("menu: account", _account)
+
+    def _feature_switches():
+        """Off means gone, on means there. A feature switch that leaves its
+        menu item behind is not a switch."""
+        from taf_order_app import features as _feat
+        _feat._switches = {}
+        app._show_tab("settings")
+        root.update()
+        if "channel_calculator" not in getattr(app, "_feature_vars", {}):
+            raise AssertionError("the features list was not built")
+        if app._feature_vars["channel_calculator"].get():
+            raise AssertionError("a feature is ticked before anyone turned "
+                                 "it on")
+        for key, var in app._feature_vars.items():
+            if var.get():
+                raise AssertionError(f"{key} is on by default")
+        # Something not built yet must not be flippable, whatever the screen
+        # shows — otherwise somebody turns it on and nothing happens.
+        unbuilt = [f for f in _feat.CATALOGUE if not f.built][0]
+        box = app._feature_boxes[unbuilt.key]
+        if str(box.cget("state")) != "disabled":
+            raise AssertionError(f"{unbuilt.key} is not built and not locked")
+    add("settings: features start off", _feature_switches)
+
+    def _calculator():
+        from taf_order_app import features as _feat
+        _feat._switches = {"channel_calculator": True}
+        before = set(root.winfo_children())
+        app._filter_calculator()
+        opened = set(root.winfo_children()) - before
+        if not opened:
+            raise AssertionError("the calculator opened nothing")
+        dlg = list(opened)[0]
+        entries = [w for w in _walk(dlg) if isinstance(w, tk.Entry)]
+        if len(entries) < 3:
+            raise AssertionError("the calculator has no boxes to type in")
+        entries[0].insert(0, "295")
+        entries[1].insert(0, "310")
+        # Press it the way a person does. The pills are Canvas-drawn, so
+        # there is no invoke() — the command is what the click runs.
+        pressed = [w for w in _walk(dlg)
+                   if isinstance(w, gui.PillButton)
+                   and "Work it out" in str(getattr(w, "_text", ""))]
+        if not pressed:
+            raise AssertionError("there is no button to work it out with")
+        pressed[0]._cmd()
+        dlg.update_idletasks()
+        said = " ".join(str(w.cget("text")) for w in _walk(dlg)
+                        if isinstance(w, tk.Label))
+        # The worksheet's own numbers, so a wrong answer is caught here
+        # rather than at the saw. A 295 x 310 is a G at one-off, and the G's
+        # marks are the ones printed on O/N 12576.
+        for mark in ("308", "601", "909", "1202", "1222"):
+            if mark not in said:
+                raise AssertionError(f"the marks are wrong: {said[-400:]}")
+        for w in opened:
+            w.destroy()
+        _feat._switches = {}
+    add("dialog: filter calculator", _calculator)
+
+    def _cut_list():
+        from taf_order_app import features as _feat
+        _feat._switches = {"channel_calculator": True}
+        before = set(root.winfo_children())
+        app._cut_list_window([{"short": 295, "long": 310, "qty": 4}], "12576")
+        opened = set(root.winfo_children()) - before
+        if not opened:
+            raise AssertionError("the cut list opened nothing")
+        dlg = list(opened)[0]
+        body = "".join(w.get("1.0", "end") for w in _walk(dlg)
+                       if isinstance(w, tk.Text))
+        # Whichever way it decided to make them, those are the marks that
+        # have to be on the sheet. Asserting one method's numbers would break
+        # the day the calculator correctly changed its mind.
+        from taf_order_app import cutting as _cut
+        won = _cut.best(295, 310, 4, _feat.workshop())["best"]
+        for mark in won["shape"]["marks"]:
+            if str(mark) not in body:
+                raise AssertionError(
+                    f"{mark} is missing from the cut list: {body[:300]}")
+        if "length" not in body:
+            raise AssertionError("the cut list never says how much channel")
+        for w in opened:
+            w.destroy()
+        _feat._switches = {}
+    add("dialog: cut list", _cut_list)
 
     def _ticking():
         """A tick has to survive the list being filtered and redrawn, or you

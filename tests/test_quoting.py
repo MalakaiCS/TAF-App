@@ -539,16 +539,32 @@ def test_there_is_one_card_style():
 
 
 def test_settings_is_grouped_and_nothing_shares_a_cell():
+    """Two things sharing a grid cell stack on top of each other, and the one
+    underneath is simply not there as far as anybody using it is concerned."""
     src = _gui_source()
     block = src.split("def _build_settings_tab")[1].split("\n    def _local_storage_info")[0]
-    headings = ("Filters and media", "Products and stock", "Printing",
-                "This computer", "Accounts", "Emails to customers", "About")
-    for heading in headings:
-        assert heading in block, f"Settings has no {heading!r} group"
-    # Every widget put straight into the settings frame gets its own row.
-    rows = [int(m) for m in re.findall(r"\.grid\(row=(\d+), column=0, sticky=\"w\",\n"
-                                       r"\s+pady=\(px\(18\)", block)]
-    assert len(rows) == len(set(rows)) == len(headings), rows
+
+    # The group headings, read off the grid itself rather than from a list
+    # kept by hand here - a list kept by hand goes stale the first time a
+    # section is renamed, and then passes for the wrong reason.
+    found = re.findall(
+        r'tk\.Label\(frm, text="([^"]+)", bg=CBG, fg=CMU, font=F_BOLD,\n'
+        r'\s+anchor="w"\)\.grid\(row=(\d+), column=0',
+        block)
+    names = [n for n, _r in found]
+    rows = [int(r) for _n, r in found]
+
+    for heading in ("Filters and media", "Products and stock", "Printing",
+                    "This computer", "Accounts", "Email", "Features",
+                    "About"):
+        assert heading in names, f"Settings has no {heading!r} group: {names}"
+    assert len(rows) == len(set(rows)), f"two groups share a row: {rows}"
+
+    # Whether a card lands on top of a heading is a question about geometry,
+    # not about source text - a row number here says nothing about which
+    # frame it was gridded into. The smoke test measures the built screen
+    # ("settings: nothing is hidden under anything else"), which is the only
+    # way to answer it honestly.
 
 
 

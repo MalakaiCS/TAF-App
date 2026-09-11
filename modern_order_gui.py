@@ -30,6 +30,8 @@ from taf_order_app import pricing as _pricing
 from taf_order_app import delivery as _delivery
 from taf_order_app import emails as _emails
 from taf_order_app import notify as _notify
+from taf_order_app import features as _features
+from taf_order_app import cutting as _cutting
 from taf_order_app import backup as _backup
 from taf_order_app import labels as _labels
 from taf_order_app.bag_filler import (
@@ -406,6 +408,10 @@ F_BOLD = (FAM, 10, "bold")
 F_SEC  = (FAM, 11, "bold")
 F_TTL  = (FAM, 17, "bold")
 F_SM   = (FAM, 9)
+# A cut list is columns of numbers that have to line up under each other.
+# Public Sans is proportional, so 1222 sits narrower than 8888 and the column
+# wanders. Not a brand decision — a legibility one, on a page read at a saw.
+F_NUM  = ("Consolas", 10)
 
 
 def _load_app_fonts():
@@ -414,7 +420,7 @@ def _load_app_fonts():
     Must run after a Tk root exists (Tk font enumeration needs it) but before
     any widgets are built. Falls back to Segoe UI if Public Sans can't load.
     """
-    global FAM, F_BODY, F_BOLD, F_SEC, F_TTL, F_SM
+    global FAM, F_BODY, F_BOLD, F_SEC, F_TTL, F_SM, F_NUM
     fam = "Public Sans"
     try:
         if os.name == "nt":
@@ -435,6 +441,15 @@ def _load_app_fonts():
     F_SEC  = (fam, 11, "bold")
     F_TTL  = (fam, 17, "bold")
     F_SM   = (fam, 9)
+    try:
+        import tkinter.font as _tkf2
+        have = set(_tkf2.families())
+    except Exception:
+        have = set()
+    for mono in ("Consolas", "DejaVu Sans Mono", "Courier New", "TkFixedFont"):
+        if mono in have or mono == "TkFixedFont":
+            F_NUM = (mono, 10)
+            break
 
 
 # ── Compressor filter pack presets ───────────────────────────────────────────
@@ -586,6 +601,15 @@ def _merge_corrections(data) -> None:
         if isinstance(got, dict):
             PO_CORRECTIONS[bucket].update(
                 {str(k): str(v) for k, v in got.items() if k and v})
+
+
+def _fmt_mm(value) -> str:
+    """A measurement as somebody would write it: 2440, not 2440.0."""
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return ""
+    return str(int(number)) if number == int(number) else f"{number:g}"
 
 
 def _apply_catalog(data: dict) -> None:
@@ -4929,6 +4953,10 @@ class ModernOrderApp(tk.Frame):
             ("Change my password…", self._do_change_password),
             None,
             ("Open on a phone…",    self._web_app_link),
+        ]
+        if _features.is_on("channel_calculator"):
+            items.append(("Filter calculator…", self._filter_calculator))
+        items += [
             ("Products and prices", lambda: self._show_tab("products")),
             ("Settings",            lambda: self._show_tab("settings")),
         ]
@@ -10096,9 +10124,15 @@ class ModernOrderApp(tk.Frame):
         tk.Label(frm, text="Email", bg=CBG, fg=CMU, font=F_BOLD,
                  anchor="w").grid(row=18, column=0, sticky="w",
                                   pady=(px(18), px(4)))
-        tk.Label(frm, text="About", bg=CBG, fg=CMU, font=F_BOLD,
+        tk.Label(frm, text="Features", bg=CBG, fg=CMU, font=F_BOLD,
                  anchor="w").grid(row=20, column=0, sticky="w",
                                   pady=(px(18), px(4)))
+        tk.Label(frm, text="About", bg=CBG, fg=CMU, font=F_BOLD,
+                 anchor="w").grid(row=22, column=0, sticky="w",
+                                  pady=(px(18), px(4)))
+
+        # ── Features (row 21) ─────────────────────────────────────────────
+        self._build_features_card(frm, row=21)
 
         # ── Emails to customers (row 19) ──────────────────────────────────
         em_card = tk.Frame(frm, bg=CCA, relief="flat", bd=0,
@@ -10184,7 +10218,7 @@ class ModernOrderApp(tk.Frame):
         self._load_my_summary()
         # row 2 – Software Update  (always visible to everyone)
         upd_card = tk.Frame(frm, bg=CCA, relief="flat", bd=0, highlightthickness=1, highlightbackground=CBR, padx=16, pady=12)
-        upd_card.grid(row=21, column=0, sticky="ew", pady=(12, 0))
+        upd_card.grid(row=23, column=0, sticky="ew", pady=(12, 0))
 
         upd_top = tk.Frame(upd_card, bg=CCA)
         upd_top.pack(fill="x")
@@ -11008,8 +11042,16 @@ class ModernOrderApp(tk.Frame):
                 data = _db.get_catalog_map()
             except Exception:
                 return   # offline or migration not run — keep cached values
+            # Which features are switched on comes down the same trip. Off on
+            # any failure, so a database that will not answer never starts
+            # showing people screens they have not seen before.
+            _features.load()
+            _features.load_workshop()
+
             def _apply():
                 _apply_catalog(data)
+                if hasattr(self, "_refresh_feature_switches"):
+                    self._refresh_feature_switches()
                 self._refresh_media_codes()
                 cft = data.get("custom_filter_types")
                 if isinstance(cft, list):
@@ -11314,6 +11356,384 @@ class ModernOrderApp(tk.Frame):
         self.status_var.set(
             "Customer emails are on — a receipt goes out with each order."
             if on else "Customer emails are off. Nothing is sent.")
+
+    # ── The filter calculator ─────────────────────────────────────────────
+    # Three ways to bend a frame, and which is cheapest is not the same
+    # question as which uses less material. See taf_order_app/cutting.py for
+    # the maths and the worksheet it was checked against.
+
+    def _cut_list_for_order(self, row):
+        """Work out how to cut every line on one order."""
+        header, items = self._order_header_items(row, "Cut list")
+        if not items:
+            messagebox.showinfo("Cut list",
+                                "There are no lines on this order to cut.")
+            return
+        lines = []
+        for it in items:
+            if str(it.get("item_kind", "filter")) != "filter":
+                continue          # a bag or a catalogue item has no channel
+            short = it.get("Short")
+            long = it.get("Long")
+            if not (short and long):
+                continue
+            lines.append({"short": short, "long": long,
+                          "qty": it.get("Quantity") or 1,
+                          "media": it.get("Media Type", ""),
+                          "depth": it.get("Channel", "")})
+        if not lines:
+            messagebox.showinfo(
+                "Cut list",
+                "Nothing on this order is a made-to-measure filter, so there "
+                "is no channel to work out.")
+            return
+        self._cut_list_window(lines, row.get("order_no", ""))
+
+    def _cut_list_window(self, lines, order_no: str = ""):
+        dlg = tk.Toplevel(self.master, bg=CBG)
+        dlg.title(f"Cut list — O/N {order_no}" if order_no else "Cut list")
+        dlg.transient(self.master)
+        _centre_on_parent(dlg, self.master, px(900), px(640))
+
+        head = tk.Frame(dlg, bg=CBG, padx=px(16), pady=px(12))
+        head.pack(fill="x")
+        tk.Label(head, text="Cut list", bg=CBG, fg=CA, font=F_TTL).pack(side="left")
+
+        w = _features.workshop()
+        tk.Label(head,
+                 text=f"{_fmt_mm(w['stick_length_mm'])}mm lengths · "
+                      f"{_fmt_mm(w['kerf_mm'])}mm blade · keeping offcuts over "
+                      f"{_fmt_mm(w['keep_offcut_mm'])}mm",
+                 bg=CBG, fg=CMU, font=F_SM).pack(side="right")
+
+        body = tk.Frame(dlg, bg=CCA, highlightbackground=CBR,
+                        highlightthickness=1)
+        body.pack(fill="both", expand=True, padx=px(16))
+        text = tk.Text(body, bg=CCA, fg=CTX, font=F_NUM, relief="flat",
+                       wrap="none", padx=px(12), pady=px(10))
+        bar = ttk.Scrollbar(body, orient="vertical", command=text.yview)
+        text.configure(yscrollcommand=bar.set)
+        bar.pack(side="right", fill="y")
+        text.pack(fill="both", expand=True)
+
+        plan = _cutting.plan(lines, w)
+        for out in plan["lines"]:
+            line = out["line"]
+            size = f"{_fmt_mm(line['short'])} x {_fmt_mm(line['long'])}"
+            qty = line.get("qty", 1)
+            if not out["ok"]:
+                text.insert("end", f"{qty} x {size}\n    {out['why']}\n\n")
+                continue
+            answer = out["answer"]
+            won = answer["best"]
+            shape = won["shape"]
+            text.insert("end", f"{qty} x {size}"
+                               f"{'  ' + str(line['media']) if line.get('media') else ''}\n")
+            text.insert("end", f"    {answer['why']}\n")
+            text.insert("end", "    Mark at  "
+                               + "   ".join(str(m) for m in shape["marks"])
+                               + "\n")
+            if shape["cap"]:
+                text.insert("end", f"    Cap      {shape['cap']}   "
+                                   f"(x{qty})\n")
+            for i, stick in enumerate(won["packed"]["lengths"], 1):
+                where = "from the rack" if stick["from_offcut"] else "new"
+                keep = (f"  keep {stick['offcut']}" if stick["keep"]
+                        else (f"  scrap {stick['offcut']}"
+                              if stick["offcut"] else ""))
+                text.insert("end", f"      {i}. {_fmt_mm(stick['length'])} "
+                                   f"{where}: "
+                                   + " + ".join(str(p) for p in stick["pieces"])
+                                   + keep + "\n")
+            text.insert("end", "\n")
+
+        text.insert("end", f"\n{plan['sticks']} length"
+                           f"{'' if plan['sticks'] == 1 else 's'} of channel, "
+                           f"{_fmt_mm(plan['channel'])}mm of it into filter "
+                           f"({plan['scrap_pct']}% off the end).\n")
+        text.config(state="disabled")
+
+        foot = tk.Frame(dlg, bg=CBG, padx=px(16), pady=px(12))
+        foot.pack(fill="x")
+        flat_btn(foot, "Close", dlg.destroy, bg=CNE,
+                 pady=px(6)).pack(side="right")
+        flat_btn(foot, "Copy", lambda: self._copy_text(
+            text.get("1.0", "end")), bg=CNE, pady=px(6),
+            variant="secondary").pack(side="right", padx=(0, px(8)))
+
+    def _copy_text(self, what: str):
+        try:
+            self.master.clipboard_clear()
+            self.master.clipboard_append(what)
+            self.status_var.set("Copied.")
+        except Exception:
+            pass
+
+    def _filter_calculator(self):
+        """The calculator on its own, for a size nobody has ordered yet."""
+        dlg = tk.Toplevel(self.master, bg=CBG)
+        dlg.title("Filter calculator")
+        dlg.transient(self.master)
+        _centre_on_parent(dlg, self.master, px(560), px(420))
+
+        pad = tk.Frame(dlg, bg=CBG, padx=px(18), pady=px(16))
+        pad.pack(fill="both", expand=True)
+        tk.Label(pad, text="Filter calculator", bg=CBG, fg=CA,
+                 font=F_TTL).pack(anchor="w")
+        tk.Label(pad, text="The three ways to make it, and which gets the "
+                           "most out of a length of channel.",
+                 bg=CBG, fg=CMU, font=F_SM,
+                 justify="left").pack(anchor="w", pady=(px(2), px(12)))
+
+        form = tk.Frame(pad, bg=CBG)
+        form.pack(anchor="w")
+        v = {}
+        for i, (key, label, default) in enumerate([
+                ("short", "Short side (mm)", ""),
+                ("long",  "Long side (mm)",  ""),
+                ("qty",   "How many",        "1")]):
+            tk.Label(form, text=label, bg=CBG, fg=CTX, font=F_BODY,
+                     anchor="w").grid(row=i, column=0, sticky="w",
+                                      padx=(0, px(10)), pady=px(3))
+            var = tk.StringVar(value=default)
+            v[key] = var
+            tk.Entry(form, textvariable=var, width=10, font=F_BODY, bg=CRE,
+                     fg=CTX, relief="flat", highlightthickness=1,
+                     highlightbackground=CBR).grid(row=i, column=1, sticky="w",
+                                                   pady=px(3))
+
+        out = tk.Label(pad, text="", bg=CBG, fg=CTX, font=F_BODY,
+                       justify="left", anchor="w", wraplength=px(500))
+        out.pack(anchor="w", pady=(px(14), 0))
+
+        def _work():
+            try:
+                short = float(str(v["short"].get()).strip())
+                long = float(str(v["long"].get()).strip())
+                qty = int(float(str(v["qty"].get()).strip() or 1))
+            except ValueError:
+                out.config(text="Give the two sides as numbers.")
+                return
+            if short > long:
+                short, long = long, short     # they are labelled, so swap
+            try:
+                answer = _cutting.best(short, long, qty, _features.workshop())
+            except ValueError as exc:
+                out.config(text=str(exc))
+                return
+            if not answer.get("ok"):
+                out.config(text=answer["why"])
+                return
+            shape = answer["best"]["shape"]
+            lines = [answer["why"], "",
+                     "Mark at  " + "   ".join(str(m) for m in shape["marks"])]
+            if shape["cap"]:
+                lines.append(f"Cap      {shape['cap']}")
+            lines.append("")
+            for other in answer["others"]:
+                lines.append(f"{other['name']}: {other['sticks']} length"
+                             f"{'' if other['sticks'] == 1 else 's'}, "
+                             f"marks "
+                             + "   ".join(str(m)
+                                          for m in other["shape"]["marks"])
+                             + (f", cap {other['shape']['cap']}"
+                                if other["shape"]["cap"] else ""))
+            out.config(text="\n".join(lines))
+
+        row = tk.Frame(pad, bg=CBG)
+        row.pack(anchor="w", pady=(px(14), 0))
+        flat_btn(row, "Work it out", _work, bg=CA, pady=px(6)).pack(side="left")
+        flat_btn(row, "Close", dlg.destroy, bg=CNE, pady=px(6),
+                 variant="secondary").pack(side="left", padx=(px(8), 0))
+        dlg.bind("<Return>", lambda _e: _work())
+
+    # ── Features ──────────────────────────────────────────────────────────
+    # Thirty things, arriving one at a time behind a switch each. A Director
+    # or an Admin decides; a Manager does not, because this is about how the
+    # whole company works rather than how today goes.
+    #
+    # Nothing here grants anything. Every switch decides whether a screen is
+    # offered — who may read or change what is row-level security in the
+    # database, and that has no off switch.
+
+    def _build_features_card(self, frm, row: int):
+        card = tk.Frame(frm, bg=CCA, relief="flat", bd=0, highlightthickness=1,
+                        highlightbackground=CBR, padx=16, pady=12)
+        card.grid(row=row, column=0, sticky="ew", pady=(12, 0))
+
+        tk.Label(card, text="Features", bg=CCA, fg=CA, font=F_SEC,
+                 anchor="w").pack(anchor="w")
+        allowed = _features.can_change()
+        tk.Label(card,
+                 text=("Turn a feature on for everyone, when the company is "
+                       "ready for it. Each one arrives off.\n"
+                       + ("Only a Director or an Admin can change these."
+                          if allowed else
+                          "You can see these; a Director or an Admin changes "
+                          "them.")),
+                 bg=CCA, fg=CMU, font=F_SM, justify="left",
+                 anchor="w").pack(anchor="w", pady=(2, 10))
+
+        self._feature_vars = {}
+        self._feature_boxes = {}
+        state = _features.state()
+
+        for group in _features.GROUPS:
+            tk.Label(card, text=group, bg=CCA, fg=CMU, font=F_BOLD,
+                     anchor="w").pack(anchor="w", pady=(px(10), px(2)))
+            for f in _features.CATALOGUE:
+                if f.group != group:
+                    continue
+                line = tk.Frame(card, bg=CCA)
+                line.pack(fill="x", anchor="w")
+                var = tk.BooleanVar(value=bool(state.get(f.key)))
+                self._feature_vars[f.key] = var
+                chk = tk.Checkbutton(
+                    line, text="  " + f.name, variable=var,
+                    command=lambda k=f.key: self._toggle_feature(k),
+                    bg=CCA, fg=CTX, font=F_BODY, activebackground=CCA,
+                    selectcolor=CCA, anchor="w", relief="flat", bd=0,
+                    highlightthickness=0, cursor="hand2")
+                chk.pack(anchor="w")
+                self._feature_boxes[f.key] = chk
+                # Not built yet: shown so people can see what is coming, and
+                # locked, because a switch that does nothing is worse than no
+                # switch — somebody turns it on, sees no change, and stops
+                # trusting the other twenty-nine.
+                if not f.built or not allowed:
+                    chk.config(state="disabled")
+                tk.Label(line,
+                         text=f.blurb + ("" if f.built else "   (not built yet)"),
+                         bg=CCA, fg=CMU, font=F_SM, justify="left", anchor="w",
+                         wraplength=px(620)).pack(anchor="w",
+                                                  padx=(px(26), 0),
+                                                  pady=(0, px(6)))
+
+        # ── The workshop's own numbers ────────────────────────────────────
+        tk.Frame(card, bg=CBR, height=1).pack(fill="x", pady=(px(14), px(12)))
+        tk.Label(card, text="How the workshop cuts", bg=CCA, fg=CA,
+                 font=F_SEC, anchor="w").pack(anchor="w")
+        tk.Label(card,
+                 text="What the filter calculator works to. Shared, so a cut "
+                      "list worked out on one PC matches the next.",
+                 bg=CCA, fg=CMU, font=F_SM, justify="left",
+                 anchor="w").pack(anchor="w", pady=(2, 8))
+
+        numbers = _features.workshop()
+        self._workshop_vars = {}
+        grid = tk.Frame(card, bg=CCA)
+        grid.pack(anchor="w")
+        for i, (key, label) in enumerate([
+                ("stick_length_mm",   "A length of channel (mm)"),
+                ("kerf_mm",           "What the blade takes (mm)"),
+                ("keep_offcut_mm",    "Shortest offcut worth keeping (mm)"),
+                ("lip_mm",            "The lip on a U (mm)"),
+                ("side_allowance_mm", "Taken off every side (mm)")]):
+            tk.Label(grid, text=label, bg=CCA, fg=CTX, font=F_BODY,
+                     anchor="w").grid(row=i, column=0, sticky="w",
+                                      pady=px(3), padx=(0, px(12)))
+            var = tk.StringVar(value=_fmt_mm(numbers.get(key, 0)))
+            self._workshop_vars[key] = var
+            entry = tk.Entry(grid, textvariable=var, width=8, font=F_BODY,
+                             bg=CRE, fg=CTX, relief="flat",
+                             highlightthickness=1, highlightbackground=CBR)
+            entry.grid(row=i, column=1, sticky="w", pady=px(3))
+            if not _db.can_manage_catalog():
+                entry.config(state="readonly")
+
+        self._workshop_note = tk.Label(card, text="", bg=CCA, fg=CMU,
+                                       font=F_SM, justify="left", anchor="w",
+                                       wraplength=px(620))
+        self._workshop_note.pack(anchor="w", pady=(px(8), 0))
+        if _db.can_manage_catalog():
+            flat_btn(card, "Save these numbers", self._save_workshop,
+                     bg=CNE, pady=5, padx=10,
+                     font=F_BODY).pack(anchor="w", pady=(px(6), 0))
+
+    def _refresh_feature_switches(self):
+        """Redraw the ticks after the switches come down from the database."""
+        if not getattr(self, "_feature_vars", None):
+            return
+        state = _features.state()
+        for key, var in self._feature_vars.items():
+            try:
+                var.set(bool(state.get(key)))
+            except tk.TclError:
+                return          # the tab has been rebuilt underneath us
+        for key, var in getattr(self, "_workshop_vars", {}).items():
+            try:
+                var.set(_fmt_mm(_features.workshop().get(key, 0)))
+            except tk.TclError:
+                return
+        self._rebuild_feature_screens()
+
+    def _toggle_feature(self, key: str):
+        """Turn one on or off for the whole company."""
+        var = self._feature_vars[key]
+        want = bool(var.get())
+        try:
+            now = _features.set_on(key, want)
+        except Exception as exc:
+            # Put the tick back where it was: a switch that looks flipped but
+            # saved nowhere is worse than one that refused.
+            var.set(not want)
+            messagebox.showerror(
+                "Features",
+                f"That could not be saved for everyone, so nothing has "
+                f"changed:\n\n{exc}")
+            return
+        var.set(now)
+        name = _features.BY_KEY[key].name
+        try:
+            _db.log_action("feature_" + ("on" if now else "off"), name)
+        except Exception:
+            pass          # the switch did move; the log is a bonus
+        self._rebuild_feature_screens()
+        self.status_var.set(
+            f"{name} is on for everyone." if now
+            else f"{name} is off. Nobody sees it.")
+
+    def _rebuild_feature_screens(self):
+        """Anything whose buttons depend on a switch gets redrawn.
+
+        A feature turned on while somebody is looking at Previous Orders has
+        to appear there, not on the next restart — half the point of a switch
+        is being able to try it and turn it straight back off.
+        """
+        try:
+            if getattr(self, "_active_tab", None) == "orders":
+                self._show_tab("orders")
+        except Exception:
+            pass
+
+    def _save_workshop(self):
+        """Write the workshop's numbers back, all or nothing."""
+        wanted = {}
+        for key, var in self._workshop_vars.items():
+            raw = str(var.get()).strip()
+            try:
+                wanted[key] = float(raw)
+            except ValueError:
+                self._workshop_note.config(
+                    text=f"{raw!r} is not a measurement. Nothing was saved.")
+                return
+            if wanted[key] < 0:
+                self._workshop_note.config(
+                    text="A measurement cannot be negative. Nothing saved.")
+                return
+        if wanted["stick_length_mm"] <= 0:
+            self._workshop_note.config(
+                text="A length of channel has to be longer than nothing.")
+            return
+        try:
+            for key, value in wanted.items():
+                _features.set_workshop(key, value)
+        except Exception as exc:
+            self._workshop_note.config(text=f"Could not save: {exc}")
+            return
+        self._workshop_note.config(
+            text="Saved for everyone. Cut lists from now on use these.")
+        self.status_var.set("Workshop measurements saved.")
 
     # ── The morning summary ───────────────────────────────────────────────
 
@@ -15669,12 +16089,21 @@ class ModernOrderApp(tk.Frame):
                  pady=px(6)).pack(side="right")
         flat_btn(foot, "Open in New Order", _act(self._load_prev_order, close=True),
                  bg=CA, pady=px(6)).pack(side="right", padx=(0, px(8)))
-        menu_btn(foot, "Actions  ▾", [
+        actions = [
             ("Add a note…",            _act(self._add_order_note)),
             ("Change status…",         _act(self._change_order_status)),
             ("Toggle high priority",   _act(self._toggle_order_priority)),
             ("Freight / delay…",       _act(self._edit_order_freight)),
             None,
+        ]
+        # Only when the company has switched it on. A menu item that appears
+        # the day the app updates, with nobody told what it is, is how a
+        # feature gets a bad name before anybody has used it properly.
+        if _features.is_on("channel_calculator"):
+            actions.append(("Cut list for this order…",
+                            lambda r=row: self._cut_list_for_order(r)))
+            actions.append(None)
+        menu_btn(foot, "Actions  ▾", actions + [
             ("Print",                  _act(self._print_prev_order)),
             ("Regenerate worksheets",  _act(self._regen_prev_order)),
             ("Duplicate this order",   _act(self._duplicate_prev_order, close=True)),

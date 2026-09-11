@@ -112,7 +112,10 @@ WITH checks(step, file, purpose, needed, present) AS (VALUES
       to_regclass('public.order_files') IS NOT NULL),
 
   (28, 'migrate_notifications.sql', 'A morning summary of what needs doing', 'optional',
-      to_regclass('public.notify_settings') IS NOT NULL)
+      to_regclass('public.notify_settings') IS NOT NULL),
+
+  (29, 'migrate_features.sql', 'Switching new features on, and how the workshop cuts', 'recommended',
+      to_regclass('public.feature_switches') IS NOT NULL)
 )
 SELECT step,
        CASE WHEN present THEN 'already done' ELSE 'RUN THIS' END AS status,

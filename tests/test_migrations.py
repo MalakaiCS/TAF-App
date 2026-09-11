@@ -48,6 +48,7 @@ ORDER = [
     "migrate_margin.sql",
     "migrate_order_files.sql",
     "migrate_notifications.sql",
+    "migrate_features.sql",
 ]
 
 
