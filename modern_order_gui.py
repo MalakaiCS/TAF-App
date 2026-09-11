@@ -34,6 +34,8 @@ from taf_order_app import features as _features
 from taf_order_app import cutting as _cutting
 from taf_order_app import insights as _insights
 from taf_order_app import records as _records
+from taf_order_app import xero as _xero
+from taf_order_app import stock_usage as _stock_usage
 from taf_order_app import backup as _backup
 from taf_order_app import labels as _labels
 from taf_order_app.bag_filler import (
@@ -603,6 +605,13 @@ def _merge_corrections(data) -> None:
         if isinstance(got, dict):
             PO_CORRECTIONS[bucket].update(
                 {str(k): str(v) for k, v in got.items() if k and v})
+
+
+def _now_text() -> str:
+    """dd/mm/yyyy hh:mm, the way every other stamp in this app is written."""
+    d = datetime.datetime.now()
+    return (f"{d.day:02d}/{d.month:02d}/{d.year} "
+            f"{d.hour:02d}:{d.minute:02d}")
 
 
 def _fmt_mm(value) -> str:
@@ -11409,6 +11418,9 @@ class ModernOrderApp(tk.Frame):
         ("purchasing",         "Buying…",                 "_purchasing"),
         ("customer_pricing",   "What each customer pays…", "_customer_pricing"),
         ("shutdown_calendar",  "Shutdown calendar…",      "_shutdown_calendar"),
+        ("job_cost_actual",    "What a job actually cost…", "_job_cost"),
+        ("xero_live",          "Xero…",                   "_xero"),
+        ("email_orders",       "Orders straight from email…", "_email_orders"),
     ]
 
     def _testable_features(self) -> list:
@@ -11462,9 +11474,37 @@ class ModernOrderApp(tk.Frame):
                 "Nothing on this order is a made-to-measure filter, so there "
                 "is no channel to work out.")
             return
-        self._cut_list_window(lines, row.get("order_no", ""), prefer)
+        self._cut_list_window(lines, row.get("order_no", ""), prefer,
+                              str(row.get("db_id") or ""))
 
-    def _cut_list_window(self, lines, order_no: str = "", prefer: str = ""):
+    def _record_actual(self, order_id: str, parent):
+        """What the job really took, typed in at the saw."""
+        answer = simpledialog.askstring(
+            "What it actually took",
+            "How many lengths of channel did it take?", parent=parent)
+        if answer is None:
+            return
+        try:
+            used = int(float(str(answer).strip()))
+        except ValueError:
+            messagebox.showinfo("What it actually took",
+                                "Give it as a number of lengths.",
+                                parent=parent)
+            return
+        try:
+            row = _db.get_order(order_id) or {}
+            plan = dict((row.get("header") or {}).get("cut_plan") or {})
+            plan["used"] = max(0, used)
+            plan["used_by"] = _db.current_full_name() or _db.current_username()
+            _db.merge_order_header(order_id, {"cut_plan": plan})
+        except Exception as exc:
+            messagebox.showerror("What it actually took", str(exc),
+                                 parent=parent)
+            return
+        self.status_var.set(f"{used} length(s) recorded against the plan.")
+
+    def _cut_list_window(self, lines, order_no: str = "", prefer: str = "",
+                         order_id: str = ""):
         dlg = tk.Toplevel(self.master, bg=CBG)
         dlg.title(f"Cut list — O/N {order_no}" if order_no else "Cut list")
         dlg.transient(self.master)
@@ -11587,10 +11627,44 @@ class ModernOrderApp(tk.Frame):
                                + "\n")
         text.config(state="disabled")
 
+        # Keep the plan against the order. It is what a phone at the saw
+        # reads - the maths stays in Python, and the web shows what was
+        # worked out here rather than working it out a second way - and it
+        # is what "planned against actual" measures against later.
+        if order_id and (_features.is_on("saw_screen")
+                         or _features.is_on("planned_vs_actual")):
+            marks = []
+            for entry in plan["lines"]:
+                if not entry["ok"]:
+                    continue
+                won = entry["answer"]["best"]
+                line = entry["line"]
+                for stick in won["frame_sticks"]:
+                    marks.append({
+                        "size": f"{_fmt_mm(line['short'])} x "
+                                f"{_fmt_mm(line['long'])}",
+                        "how": won["name"], "off": len(stick["pieces"]),
+                        "lip": stick["lip"], "marks": stick["marks"],
+                        "cap": won["full"]["cap"],
+                    })
+            try:
+                _db.merge_order_header(order_id, {"cut_plan": {
+                    "sticks": plan["sticks"], "at": _now_text(),
+                    "by": _db.current_full_name() or _db.current_username(),
+                    "lengths": marks[:60],
+                }})
+            except Exception:
+                pass          # the cut list is on screen either way
+
         foot = tk.Frame(dlg, bg=CBG, padx=px(16), pady=px(12))
         foot.pack(fill="x")
         flat_btn(foot, "Close", dlg.destroy, bg=CNE,
                  pady=px(6)).pack(side="right")
+        if order_id and _features.is_on("planned_vs_actual"):
+            flat_btn(foot, "What it actually took…",
+                     lambda: self._record_actual(order_id, dlg), bg=CNE,
+                     pady=px(6),
+                     variant="secondary").pack(side="right", padx=(0, px(8)))
         flat_btn(foot, "Copy", lambda: self._copy_text(
             text.get("1.0", "end")), bg=CNE, pady=px(6),
             variant="secondary").pack(side="right", padx=(0, px(8)))
@@ -13218,6 +13292,225 @@ class ModernOrderApp(tk.Frame):
         flat_btn(foot, "Take it off", _remove, bg=CNE, pady=px(6),
                  variant="secondary").pack(side="right", padx=(0, px(8)))
         _reload()
+
+    # ── Xero, connected ───────────────────────────────────────────────────
+
+    def _xero(self):
+        dlg = tk.Toplevel(self.master, bg=CBG)
+        dlg.title("Xero")
+        dlg.transient(self.master)
+        _centre_on_parent(dlg, self.master, px(840), px(600))
+        tk.Label(dlg, text="Xero", bg=CBG, fg=CA,
+                 font=F_TTL).pack(anchor="w", padx=px(16), pady=(px(12), 0))
+        state = tk.Label(dlg, text="Checking…", bg=CBG, fg=CMU, font=F_SM,
+                         wraplength=px(780), justify="left")
+        state.pack(anchor="w", padx=px(16), pady=(px(4), px(10)))
+
+        wrap = tk.Frame(dlg, bg=CCA, highlightbackground=CBR,
+                        highlightthickness=1)
+        wrap.pack(fill="both", expand=True, padx=px(16))
+        tree = ttk.Treeview(wrap, columns=("customer", "ref", "due", "owing",
+                                           "late"),
+                            show="headings", style="TAF.Treeview")
+        for key, label, wd, anc in [("customer", "Customer", 260, "w"),
+                                    ("ref", "Invoice", 140, "w"),
+                                    ("due", "Due", 110, "w"),
+                                    ("owing", "Owing", 110, "e"),
+                                    ("late", "Days late", 100, "e")]:
+            tree.heading(key, text=label)
+            tree.column(key, width=px(wd), anchor=anc)
+        tree.tag_configure("late", background="#FCE9E6")
+        tree.pack(fill="both", expand=True)
+
+        def _refresh():
+            def _work():
+                got = _xero.status()
+                owed = _xero.owing() if got.get("connected") else None
+                self.master.after(0, lambda: _show(got, owed))
+            threading.Thread(target=_work, daemon=True).start()
+
+        def _show(got, owed):
+            if got.get("error"):
+                state.config(text=str(got["error"]))
+                return
+            if not got.get("connected"):
+                state.config(text="Not connected yet. Press Connect, sign in "
+                                  "to Xero in the browser, then come back "
+                                  "and press Refresh.\nThe CSV export is not "
+                                  "going anywhere either way.")
+                return
+            org = got.get("organisation") or "your Xero"
+            for iid in tree.get_children():
+                tree.delete(iid)
+            rows = (owed or {}).get("rows") or []
+            for i, r in enumerate(rows):
+                tree.insert("", "end", iid=str(i),
+                            tags=("late",) if r.get("days_late") else (),
+                            values=(r.get("customer"), r.get("number"),
+                                    r.get("due"),
+                                    f"${float(r.get('owing') or 0):,.2f}",
+                                    r.get("days_late") or ""))
+            behind = sum(1 for r in rows if r.get("days_late"))
+            state.config(
+                text=f"Connected to {org}. "
+                     f"${float((owed or {}).get('owed') or 0):,.2f} "
+                     f"outstanding across {len(rows)} invoice"
+                     f"{'' if len(rows) == 1 else 's'}"
+                     + (f", {behind} of them late." if behind else ".")
+                     + ((" " + str(owed.get("error")))
+                        if owed and owed.get("error") else ""))
+
+        def _connect():
+            def _work():
+                url = _xero.connect_url()
+                self.master.after(0, lambda: _open(url))
+            threading.Thread(target=_work, daemon=True).start()
+
+        def _open(url):
+            if not url:
+                state.config(text="Could not start the connection. The Xero "
+                                  "app may not be set up on this Supabase "
+                                  "project yet.")
+                return
+            try:
+                import webbrowser
+                webbrowser.open(url)
+                state.config(text="Sign in to Xero in the browser, then press "
+                                  "Refresh.")
+            except Exception as exc:
+                state.config(text=str(exc))
+
+        foot = tk.Frame(dlg, bg=CBG, padx=px(16), pady=px(12))
+        foot.pack(fill="x")
+        flat_btn(foot, "Close", dlg.destroy, bg=CNE,
+                 pady=px(6)).pack(side="right")
+        flat_btn(foot, "Refresh", _refresh, bg=CNE, pady=px(6),
+                 variant="secondary").pack(side="right", padx=(0, px(8)))
+        if _db.can_manage_prices():
+            flat_btn(foot, "Connect", _connect, bg=CA,
+                     pady=px(6)).pack(side="left")
+        else:
+            tk.Label(foot, text="Only a manager can connect Xero.", bg=CBG,
+                     fg=CMU, font=F_SM).pack(side="left")
+        _refresh()
+
+    # ── What a job actually cost ──────────────────────────────────────────
+
+    def _job_cost(self):
+        def build():
+            costs = {}
+            try:
+                costs = _db.get_cost_list()
+            except Exception:
+                costs = {}
+            items = {str(i.get("id")): i for i in _db.get_stock_items()}
+            out, seen = [], 0
+            for order in _db.get_all_orders():
+                oid = str(order.get("id") or "")
+                moves = []
+                for item_id, item in items.items():
+                    try:
+                        rows = _db.get_stock_transactions(item_id, limit=200)
+                    except Exception:
+                        rows = []
+                    for m in rows:
+                        ref = str(m.get("notes") or "")
+                        if not oid or str(order.get("order_number") or "") \
+                                not in ref:
+                            continue
+                        moves.append(dict(m, sku=item.get("sku"),
+                                          item_name=item.get("name")))
+                if not moves:
+                    continue
+                lines = _pricing.price_order(order, _db.get_price_list()) \
+                    if hasattr(_pricing, "price_order") else []
+                got = _stock_usage.actual_cost(lines, moves, costs)
+                seen += 1
+                out.append(((order.get("customer_name") or "",
+                             order.get("order_number") or "",
+                             f"${got['materials']:.2f}",
+                             f"${got['charged']:.2f}" if got["charged"] else "—",
+                             ("—" if got["percent"] is None
+                              else f"{got['percent']:.0f}%"),
+                             f"{got['unknown']} unknown" if got["unknown"]
+                             else ""),
+                            "late" if (got["percent"] is not None
+                                       and got["percent"] < 0) else None,
+                            order.get("id")))
+            footer = (f"{seen} job{'' if seen == 1 else 's'} with media "
+                      f"actually deducted against them. Anything with no "
+                      f"cost recorded is counted as unknown, never as free."
+                      if seen else
+                      "No job has had media deducted against it yet. Switch "
+                      "automatic stock deduction on under Settings, and this "
+                      "fills in as orders are generated.")
+            return out, footer
+
+        self._table_window(
+            "What a job actually cost",
+            "Quoted margin is what somebody expected. This is what happened, "
+            "and the two only match when the allowances are right.",
+            [("customer", "Customer", 200, "w"), ("ref", "O/N", 130, "w"),
+             ("cost", "Materials", 110, "e"), ("sell", "Charged", 110, "e"),
+             ("pc", "Margin", 90, "e"), ("note", "", 140, "w")],
+            build, width=880, height=540)
+
+    # ── Orders straight from email ────────────────────────────────────────
+
+    def _email_orders(self):
+        dlg = tk.Toplevel(self.master, bg=CBG)
+        dlg.title("Orders straight from email")
+        dlg.transient(self.master)
+        _centre_on_parent(dlg, self.master, px(640), px(520))
+        pad = tk.Frame(dlg, bg=CBG, padx=px(18), pady=px(16))
+        pad.pack(fill="both", expand=True)
+        tk.Label(pad, text="Orders straight from email", bg=CBG, fg=CA,
+                 font=F_TTL).pack(anchor="w")
+
+        base = _db.SUPABASE_URL.rstrip("/")
+        where = f"{base}/functions/v1/inbound-order?token=YOUR-TOKEN"
+        tk.Label(pad, wraplength=px(560), justify="left", bg=CBG, fg=CTX,
+                 font=F_BODY,
+                 text="A purchase order that arrives as a PDF does not need "
+                      "photographing. Point an inbound email address at the "
+                      "address below and its attachments land in the same "
+                      "place a phone photo does — the reader, the review "
+                      "screen and everything it has learned are already "
+                      "there.").pack(anchor="w", pady=(px(6), px(12)))
+
+        box = tk.Text(pad, height=3, bg=CCA, fg=CTX, font=F_NUM, wrap="word",
+                      relief="flat", highlightthickness=1,
+                      highlightbackground=CBR, padx=px(10), pady=px(8))
+        box.insert("1.0", where)
+        box.config(state="disabled")
+        box.pack(fill="x")
+
+        tk.Label(pad, wraplength=px(560), justify="left", bg=CBG, fg=CMU,
+                 font=F_SM,
+                 text="Set up once, by somebody with Supabase access:\n"
+                      "  1. supabase secrets set INBOUND_TOKEN=<a long "
+                      "random string>\n"
+                      "  2. supabase functions deploy inbound-order "
+                      "--no-verify-jwt\n"
+                      "  3. Point your inbound email provider at the address "
+                      "above, with the token in place of YOUR-TOKEN.\n\n"
+                      "It takes PDFs and photographs and nothing else, and "
+                      "it never answers an error to a provider that would "
+                      "retry — a retry means the same order in the review "
+                      "screen twice.").pack(anchor="w", pady=(px(12), 0))
+
+        row = tk.Frame(pad, bg=CBG)
+        row.pack(anchor="w", pady=(px(14), 0))
+        flat_btn(row, "Copy the address",
+                 lambda: self._copy_text(where), bg=CA,
+                 pady=px(6)).pack(side="left")
+        flat_btn(row, "Open the Phone Inbox",
+                 lambda: (dlg.destroy(), self._show_po_inbox())
+                 if hasattr(self, "_show_po_inbox") else dlg.destroy(),
+                 bg=CNE, pady=px(6),
+                 variant="secondary").pack(side="left", padx=(px(8), 0))
+        flat_btn(row, "Close", dlg.destroy, bg=CNE, pady=px(6),
+                 variant="secondary").pack(side="left", padx=(px(8), 0))
 
     def _copy_text(self, what: str):
         try:

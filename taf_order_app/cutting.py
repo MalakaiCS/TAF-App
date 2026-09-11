@@ -713,3 +713,31 @@ def with_labour(answer: Dict[str, Any],
                 f" - {cheapest_time['name']} is {saved} minutes less, for "
                 f"{extra} more length{'' if extra == 1 else 's'} of channel")
     return answer
+
+
+def worksheet_note(short: float, long: float, qty: int,
+                   settings: Dict[str, float] | None = None,
+                   prefer: str = "") -> str:
+    """One line for the printed worksheet: which way, and the lip.
+
+    The sheet already prints all three sets of marks - Forward, Flipped and
+    Reversed - and has done for years. What it has never said is which of
+    them to use for this quantity, or that the lip wants trimming to fit two
+    on a length. That is the whole of what this adds.
+    """
+    try:
+        answer = best(short, long, qty, settings, None, prefer)
+    except ValueError:
+        return ""
+    if not answer.get("ok"):
+        return ""
+    won = answer["best"]
+    note = f"CUT AS {won['name'].upper()}"
+    # The rate only means something when more than one is being made. "2 a
+    # length" on a sheet for a single filter is noise on a page that is
+    # already busy.
+    if qty > 1 and won["frames_per_stick"] > 1:
+        note += f", {won['frames_per_stick']} a length"
+    if won["shortened"]:
+        note += f", LIP {_tidy(won['lip'])}mm"
+    return note

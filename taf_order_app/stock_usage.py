@@ -173,3 +173,65 @@ def find_unit_problem(stock_items: Iterable[Dict[str, Any]]) -> Optional[str]:
     listed = ", ".join(bad[:4]) + (f" and {len(bad) - 4} more" if len(bad) > 4 else "")
     return (f"Media kept in units other than m2 can't be deducted by area: "
             f"{listed}. Set those items' unit to m2 in Stock to include them.")
+
+
+# ── What a job actually cost ─────────────────────────────────────────────────
+
+def actual_cost(items: Iterable[Dict[str, Any]],
+                movements: Iterable[Dict[str, Any]],
+                costs: Optional[Dict[str, float]] = None) -> Dict[str, Any]:
+    """Media that really came off the shelf for a job, against what the job
+    was quoted at.
+
+    Quoted margin is what somebody expected. This is what happened, and the
+    two only match when the allowances are right - which is the thing worth
+    knowing and the thing nobody currently finds out.
+
+    Anything with no cost against it is counted as unknown rather than as
+    free. A job costed over the half of it that had figures, presented as the
+    cost, reads as fact and is not.
+    """
+    costs = {str(k).strip().upper(): float(v)
+             for k, v in (costs or {}).items()}
+    used, unknown = 0.0, 0
+    per_item: Dict[str, Dict[str, Any]] = {}
+    for move in movements or []:
+        if not isinstance(move, dict):
+            continue
+        try:
+            change = float(move.get("quantity_change") or 0)
+        except (TypeError, ValueError):
+            continue
+        if change >= 0:
+            continue              # a receipt is not a cost of this job
+        amount = -change
+        key = str(move.get("sku") or move.get("item_name") or "").strip()
+        rate = costs.get(key.upper())
+        row = per_item.setdefault(key or "—", {
+            "what": key or "—", "amount": 0.0, "cost": None})
+        row["amount"] += amount
+        if rate is None:
+            unknown += 1
+            continue
+        row["cost"] = round((row["cost"] or 0.0) + amount * rate, 2)
+        used += amount * rate
+
+    charged = 0.0
+    for item in items or []:
+        if not isinstance(item, dict):
+            continue
+        try:
+            charged += float(item.get("line_total") or 0)
+        except (TypeError, ValueError):
+            continue
+
+    return {
+        "materials":  round(used, 2),
+        "charged":    round(charged, 2),
+        "margin":     round(charged - used, 2) if charged else None,
+        "percent":    (round((charged - used) / charged * 100, 1)
+                       if charged else None),
+        "unknown":    unknown,
+        "lines":      sorted(per_item.values(),
+                             key=lambda r: -(r["cost"] or 0)),
+    }

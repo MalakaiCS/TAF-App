@@ -191,6 +191,11 @@ OVERRIDES = {
     "set_line_sent":       lambda *a, **k: "o3",
     "get_order_items":     lambda oid="", *a, **k: next(
         (list(o["items"]) for o in ORDERS if o["id"] == oid), []),
+    "get_cost_list":       lambda *a, **k: {"TAF-G4-ROLL": 8.0},
+    "get_stock_transactions": lambda *a, **k: [
+        {"quantity_change": -4.0, "notes": "Order PO-8842"}],
+    "merge_order_header":  lambda *a, **k: "o3",
+    "SUPABASE_URL":        "https://example.supabase.co",
 }
 
 # Rights are a real fork in what gets built: a manager sees the stock-alert
@@ -531,12 +536,13 @@ def _steps(app, gui, root):
         for key, var in app._feature_vars.items():
             if var.get():
                 raise AssertionError(f"{key} is on by default")
-        # Something not built yet must not be flippable, whatever the screen
-        # shows — otherwise somebody turns it on and nothing happens.
-        unbuilt = [f for f in _feat.CATALOGUE if not f.built][0]
-        box = app._feature_boxes[unbuilt.key]
-        if str(box.cget("state")) != "disabled":
-            raise AssertionError(f"{unbuilt.key} is not built and not locked")
+        # Everything in the catalogue is built now, so every switch is one
+        # somebody can actually flip. A locked one would mean a screen that
+        # is listed and does not exist.
+        for f in _feat.CATALOGUE:
+            box = app._feature_boxes[f.key]
+            if not f.built and str(box.cget("state")) != "disabled":
+                raise AssertionError(f"{f.key} is not built and not locked")
     add("settings: features start off", _feature_switches)
 
     def _calculator():

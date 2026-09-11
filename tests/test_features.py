@@ -60,23 +60,34 @@ def test_nothing_is_on_by_default():
 
 
 def test_a_switch_with_nothing_behind_it_cannot_be_flipped():
-    unbuilt = [f for f in _feat.CATALOGUE if not f.built]
-    assert unbuilt, "every feature is built - update this test"
+    """All thirty are built today, so this stands one of them down for the
+    length of the test. The rule has to survive the next thing anybody adds
+    to the catalogue, not only the state the catalogue happens to be in."""
+    victim = _feat.CATALOGUE[0]
+    was = victim.built
+    victim.built = False
     try:
-        _feat.set_on(unbuilt[0].key, True)
+        _feat.set_on(victim.key, True)
     except ValueError as exc:
         assert "not built" in str(exc)
     else:
         raise AssertionError("it switched on something that does not exist")
+    finally:
+        victim.built = was
 
 
 def test_an_unbuilt_feature_reads_as_off_even_with_a_row_saying_yes():
     """A stray row in the table must not light up a screen that is not
     there. The app decides what exists, never the database."""
-    unbuilt = [f for f in _feat.CATALOGUE if not f.built][0]
-    _feat._switches = {unbuilt.key: True}
-    assert _feat.is_on(unbuilt.key) is False
-    _feat._switches = {}
+    victim = _feat.CATALOGUE[0]
+    was = victim.built
+    victim.built = False
+    _feat._switches = {victim.key: True}
+    try:
+        assert _feat.is_on(victim.key) is False
+    finally:
+        victim.built = was
+        _feat._switches = {}
 
 
 def test_a_key_nobody_has_heard_of_is_off():
@@ -264,3 +275,30 @@ def test_every_screen_in_the_menu_belongs_to_a_real_feature():
         assert key in _feat.BY_KEY, f"the menu offers {key}, which is not a feature"
         assert _feat.BY_KEY[key].built, f"{key} is in the menu but not built"
         assert f"def {method}(self" in src, f"{method} is in the menu and missing"
+
+
+
+def test_all_thirty_are_actually_built():
+    """The thing that was asked for: thirty features, every one of them with
+    something behind its switch."""
+    missing = [f.key for f in _feat.CATALOGUE if not f.built]
+    assert not missing, f"still to build: {missing}"
+
+
+def test_every_built_feature_is_reachable():
+    """A feature switched on that appears nowhere is a switch that does
+    nothing, which is the thing the catalogue exists to prevent. Either it
+    has a screen in the menu, or the app reads its switch somewhere."""
+    src = (ROOT / "modern_order_gui.py").read_text(encoding="utf-8")
+    others = "\n".join(
+        (ROOT / name).read_text(encoding="utf-8")
+        for name in ("taf_order_app/order_service.py",
+                     "taf_order_app/features.py", "docs/app/screens.js"))
+    menu = src.split("FEATURE_SCREENS = [")[1].split("\n    ]")[0]
+    for f in _feat.CATALOGUE:
+        if not f.built:
+            continue
+        assert (f'"{f.key}"' in menu
+                or f'is_on("{f.key}")' in src
+                or f'is_on("{f.key}")' in others), \
+            f"{f.key} is built but nothing ever looks at its switch"

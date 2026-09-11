@@ -322,3 +322,146 @@ def test_a_site_not_yet_round_again_is_left_alone():
     rows = [{"id": "a", "name": "AHU 3", "every_months": 6,
              "last_done": "2026-08-01"}]
     assert _rec.sites_due(rows, _dt.date(2026, 9, 11)) == []
+
+
+# ── Xero, connected ──────────────────────────────────────────────────────────
+
+def test_a_line_with_no_price_does_not_go_on_an_invoice():
+    """A line Xero would take at zero is a line that quietly invoices a
+    customer nothing for something they are getting."""
+    from taf_order_app import xero as _xero
+    out = _xero.invoice_from(
+        {"customer_name": "Bells", "order_number": "PO-1"},
+        [{"description": "V-form", "quantity": 4, "unit_price": 88.5,
+          "part_number": "PPFG445-030"},
+         {"description": "Stepped", "quantity": 2, "unit_price": 0}])
+    assert len(out["invoice"]["LineItems"]) == 1
+    assert len(out["skipped"]) == 1
+
+
+def test_an_invoice_carries_the_order_number_as_its_reference():
+    from taf_order_app import xero as _xero
+    out = _xero.invoice_from({"customer_name": "Bells",
+                              "order_number": "PO-8842"},
+                             [{"description": "x", "quantity": 1,
+                               "unit_price": 10}])
+    assert out["invoice"]["Reference"] == "PO-8842"
+    assert out["invoice"]["Type"] == "ACCREC"
+
+
+def test_an_invoice_goes_over_as_a_draft():
+    """Nothing this program does should send a customer an invoice without
+    somebody in the office having looked at it."""
+    from taf_order_app import xero as _xero
+    out = _xero.invoice_from({"customer_name": "B"},
+                             [{"description": "x", "quantity": 1,
+                               "unit_price": 10}])
+    assert out["invoice"]["Status"] == "DRAFT"
+
+
+def test_no_xero_secret_is_anywhere_near_the_installer():
+    """The client secret and the refresh token move money. They live as
+    function secrets and never come down to a PC."""
+    import re as _re
+    for path in list(ROOT.glob("*.py")) + list((ROOT / "taf_order_app").glob("*.py")) \
+            + list((ROOT / "docs").rglob("*.js")):
+        text = path.read_text(encoding="utf-8", errors="ignore")
+        for secret in ("XERO_CLIENT_SECRET", "refresh_token ="):
+            assert secret not in text or "function secret" in text.lower() \
+                or "never" in text.lower(), f"{path.name}: {secret}"
+        assert not _re.search(r"[0-9A-F]{32}", text), \
+            f"something that looks like a client secret in {path.name}"
+
+
+def test_the_function_will_not_renew_from_a_token_it_already_used():
+    """Xero's refresh tokens are single use. Writing the new one down before
+    anything else is the difference between a connection that lasts and one
+    that dies the first time two requests overlap."""
+    ts = (ROOT / "supabase" / "functions" / "xero" /
+          "index.ts").read_text(encoding="utf-8")
+    body = ts.split("async function token()")[1]
+    assert "await remember(" in body
+    assert body.index("await remember(") < body.index("return String(got.access_token)")
+
+
+def test_connecting_checks_the_link_was_one_we_started():
+    """Otherwise a link somebody was emailed could connect a different Xero
+    to us."""
+    ts = (ROOT / "supabase" / "functions" / "xero" /
+          "index.ts").read_text(encoding="utf-8")
+    assert "state !== have.state" in ts
+
+
+# ── Orders straight from email ───────────────────────────────────────────────
+
+INBOUND = (ROOT / "supabase" / "functions" / "inbound-order" /
+           "index.ts").read_text(encoding="utf-8")
+
+
+def test_it_will_not_write_any_file_anybody_emails_it():
+    """A function that takes anything is a place to host anything."""
+    assert "const ALLOWED" in INBOUND
+    assert "application/pdf" in INBOUND
+    assert "MAX_BYTES" in INBOUND
+
+
+def test_a_filename_cannot_write_outside_its_folder():
+    """The name comes from whoever sent the email."""
+    assert 'split(/[\\\\/]/).pop()' in INBOUND
+    assert "replace(/[^A-Za-z0-9._-]/g" in INBOUND
+
+
+def test_an_email_with_nothing_attached_is_not_an_error():
+    """Answering 400 to those makes a provider retry them forever."""
+    assert 'reason: "Nothing attached."' in INBOUND
+    block = INBOUND.split('reason: "Nothing attached."')[1][:40]
+    assert "200" in block
+
+
+def test_it_never_answers_something_a_provider_would_retry():
+    """A retry means the same purchase order in the review screen twice."""
+    # The status it answers with, not the comment explaining why it does.
+    tail = INBOUND.split("for (const file of files)")[1]
+    code = " ".join(l.strip() for l in tail.splitlines()
+                    if not l.strip().startswith("//"))
+    assert "subject }, 200)" in code, \
+        "the last word is not a 200"
+    assert "500" not in code, "it answers something a provider would retry"
+
+
+def test_without_a_token_the_address_is_simply_off():
+    assert 'INBOUND_TOKEN' in INBOUND
+    assert "not switched on" in INBOUND
+
+
+def test_the_token_is_compared_over_its_whole_length():
+    assert "given.length !== want.length" in INBOUND
+    assert "every((c, i) => c === want[i])" in INBOUND
+
+
+# ── What a job actually cost ─────────────────────────────────────────────────
+
+def test_only_what_left_the_shelf_counts_as_a_cost():
+    from taf_order_app import stock_usage as _su
+    out = _su.actual_cost(
+        [{"line_total": 400}],
+        [{"sku": "MED-G4", "quantity_change": -12.5},
+         {"sku": "MED-G4", "quantity_change": 5}],     # a receipt
+        {"MED-G4": 8.0})
+    assert out["materials"] == 100.0
+
+
+def test_media_with_no_cost_recorded_is_unknown_not_free():
+    """A job costed over the half of it that had figures, presented as the
+    cost, reads as fact and is not."""
+    from taf_order_app import stock_usage as _su
+    out = _su.actual_cost([{"line_total": 400}],
+                          [{"sku": "MYSTERY", "quantity_change": -3}], {})
+    assert out["materials"] == 0.0 and out["unknown"] == 1
+
+
+def test_nothing_charged_gives_no_margin_rather_than_a_hundred_percent():
+    from taf_order_app import stock_usage as _su
+    out = _su.actual_cost([], [{"sku": "MED-G4", "quantity_change": -1}],
+                          {"MED-G4": 8.0})
+    assert out["margin"] is None and out["percent"] is None

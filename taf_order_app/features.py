@@ -77,11 +77,11 @@ CATALOGUE: List[Feature] = [
     Feature("cutlist_on_worksheet", "Cut list on the worksheet",
             "The marks printed on the worksheet that already goes out with "
             "the job.",
-            "Making it"),
+            "Making it", built=True),
     Feature("saw_screen", "A screen at the saw",
             "Next cut, tick, next - feeding the line-by-line progress the "
             "app already keeps.",
-            "Making it"),
+            "Making it", built=True),
     Feature("batch_by_material", "Batch by material",
             "A production view grouped by media and depth rather than by "
             "customer, in the order to work it.",
@@ -125,7 +125,7 @@ CATALOGUE: List[Feature] = [
     Feature("job_cost_actual", "What a job actually cost",
             "Media actually used against what was charged, not what was "
             "quoted.",
-            "Money"),
+            "Money", built=True),
     Feature("labour_margin", "Labour in the margin",
             "A U with a separate cap is more handling than a G. Puts that "
             "into the figure.",
@@ -137,7 +137,7 @@ CATALOGUE: List[Feature] = [
     Feature("xero_live", "Xero, connected",
             "Push the invoice and get back whether it has been paid, instead "
             "of exporting a file.",
-            "Money"),
+            "Money", built=True),
     Feature("purchasing", "Buying, not just knowing",
             "Turn a low-stock list into a purchase order to the supplier, "
             "emailed, with the quantity marked as on order.",
@@ -169,7 +169,7 @@ CATALOGUE: List[Feature] = [
     Feature("email_orders", "Orders straight from email",
             "A forwarding address that reads an emailed purchase order the "
             "way the app already reads a photographed one.",
-            "Admin"),
+            "Admin", built=True),
     Feature("shutdown_calendar", "Shutdown calendar",
             "Christmas, public holidays and supplier lead times, so a due "
             "date never lands on a Monday that does not exist.",

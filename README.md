@@ -82,8 +82,18 @@ log, stock management and a customer database.
 - **How each customer wants them** — some always want a G. Stored against the
   customer and honoured, with what the preference costs reported rather than
   hidden.
-- **Features, switched on when you're ready** — thirty things arriving one at
-  a time, each behind its own switch, all off to start with. A Director or an
+- **The rest of the thirty**, each behind its own switch under **Testable
+  Features**: today's cut list and the week's cutting · media across the roll ·
+  near a size we already make · what it turned down · scrap rate · batch by
+  material · where everything has got to (the worksheet's own five tick boxes)
+  · what you can promise · end of month · one search box · what is still owed ·
+  planned against actual · channel counted in lengths · labour in the margin ·
+  kits · what is installed where · what came back · stocktake · buying ·
+  what each customer pays · the shutdown calendar · the cut list on the printed
+  worksheet · the cut list on a phone at the saw · what a job actually cost ·
+  Xero connected properly · orders straight from email.
+- **Thirty features, each behind its own switch** — all built, all off to
+  start with, so the factory changes when you decide it does. A Director or an
   Admin turns one on for the whole company under Settings → Features, and
   everything new lives under **Testable Features** in the account menu — off
   ones greyed rather than hidden, so somebody who's been told about one can
@@ -237,6 +247,7 @@ just run it — nothing is lost and nothing is duplicated.
 | 27 | `migrate_order_files.sql` | Photos and a signature kept with an order | optional |
 | 28 | `migrate_notifications.sql` | A morning summary of what needs doing | optional |
 | 29 | `migrate_features.sql` | Switching new features on, and how the workshop cuts | recommended |
+| 30 | `migrate_more_features.sql` | Kits, sites, returns, stocktakes, buying, agreed prices, shutdowns | optional |
 
 **Step 16 is the one that matters most.** Every policy in the older scripts is
 `TO authenticated USING (true)` — meaning *anyone Supabase counts as signed
@@ -410,11 +421,12 @@ yesterday's answer.
 
 ### Switching the new features on (recommended)
 
-Thirty things were asked for at once. They arrive one at a time, each behind
-its own switch and all off to start with, so the first one that gets in
+Thirty things were asked for at once. All thirty are built, each behind its
+own switch and all off to start with, so the first one that gets in
 somebody's way doesn't take the other twenty-nine down with it.
 
-Run `migrate_features.sql`, then **Settings → Features**. A **Director or an
+Run `migrate_features.sql` and `migrate_more_features.sql`, then
+**Settings → Features**. A **Director or an
 Admin** flips a switch and it changes for the whole company — not a Manager,
 because this decides how everybody works rather than how today goes. Anything
 not built yet is listed and locked: a switch that does nothing is worse than

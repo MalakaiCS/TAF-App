@@ -713,6 +713,7 @@ var TAFAPP = (function () {
         .then(function (rows) {
           var order = (rows && rows[0]) || {};
           drawLines(lines, row, order.items || [], body);
+          drawCutPlan(body, order.header || {});
           drawNotes(body, row, order.header || {});
           drawFiles(files, row, body);
           body.appendChild(actions);
@@ -1036,6 +1037,39 @@ var TAFAPP = (function () {
         U.button("Cancel", closeInner, "quiet")
       ] }));
     });
+  }
+
+  /* ── The screen at the saw ───────────────────────────────────────────
+     The marks the desktop worked out, shown on the phone that is already in
+     somebody's hand at the machine. Deliberately only a display: the maths
+     lives in Python, and a second copy of it here would eventually give a
+     different answer on a Tuesday. If no plan has been worked out, this
+     says nothing at all rather than guessing at one. */
+
+  function drawCutPlan(body, header) {
+    var plan = header.cut_plan;
+    if (!plan || !plan.lengths || !plan.lengths.length) { return; }
+    var rows = plan.lengths.map(function (b) {
+      return U.el("tr", { kids: [
+        U.cell(b.size || ""),
+        U.cell(b.how || ""),
+        U.cell(b.off || 1, { num: true }),
+        U.cell((b.marks || []).join("   "), { }),
+        U.cell(b.lip && b.lip !== 20 ? b.lip + "mm" : "")
+      ] });
+    });
+    var note = plan.sticks
+      ? plan.sticks + " length" + (plan.sticks === 1 ? "" : "s")
+        + " of channel" + (plan.at ? ", worked out " + plan.at : "")
+      : "";
+    var kids = [U.table(["Size", "As", { text: "Off", num: true },
+                         "Mark at", "Lip"], rows)];
+    if (note) { kids.push(U.el("div", { cls: "muted", text: note })); }
+    if (plan.used) {
+      kids.push(U.el("div", { cls: "muted",
+        text: "It actually took " + plan.used + "." }));
+    }
+    body.appendChild(U.card("How to cut it", kids));
   }
 
   function drawNotes(body, row, header) {

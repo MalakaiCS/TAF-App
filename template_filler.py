@@ -390,6 +390,13 @@ def _fill_vorf(ws, item, pleat=False, header_only=False, use_stock_v=False):
         _sqm = 0.0
     if _sqm > 0:
         _stamp.append(f"{_sqm:.2f} m2")
+    # How to cut it, when the company has the calculator switched on. The
+    # app works it out and stamps it on the line; nothing here knows about
+    # feature switches or the database, and a line without one prints
+    # exactly as it always did.
+    cut_note = str(item.get("Cut Note") or "").strip()
+    if cut_note:
+        _stamp.append(cut_note)
     _line = "  ".join(_stamp + ([item_notes] if item_notes else []))
     if _line:
         existing = ws["G18"].value or "NOTES:"
@@ -522,6 +529,13 @@ def _fill_flyscreen(ws, item, stepped=False, use_stock_fs=False):
         _sqm = 0.0
     if _sqm > 0:
         _stamp.append(f"{_sqm:.2f} m2")
+    # How to cut it, when the company has the calculator switched on. The
+    # app works it out and stamps it on the line; nothing here knows about
+    # feature switches or the database, and a line without one prints
+    # exactly as it always did.
+    cut_note = str(item.get("Cut Note") or "").strip()
+    if cut_note:
+        _stamp.append(cut_note)
     _line = "  ".join(_stamp + ([item_notes] if item_notes else []))
     if _line:
         existing = ws["G18"].value or "NOTES:"
