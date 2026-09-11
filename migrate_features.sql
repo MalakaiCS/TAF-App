@@ -222,5 +222,8 @@ INSERT INTO public.workshop_settings (key, value) VALUES
     ('keep_offcut_mm',   400),   -- shorter than this goes in the bin
     ('lip_mm',            20),   -- the fold that closes the filter
     ('min_lip_mm',        10),   -- the shortest lip that still closes it
-    ('side_allowance_mm',  2)    -- every side is cut at the size less this
+    ('side_allowance_mm',  2),   -- every side is cut at the size less this
+    ('minutes_u_frame',    9),   -- bench time for a U and its cap
+    ('minutes_g_frame',    7),   -- bench time for a G: one piece, one fold
+    ('labour_per_hour',   55)    -- what an hour at the bench costs
 ON CONFLICT (key) DO NOTHING;    -- never overwrite what the workshop has set

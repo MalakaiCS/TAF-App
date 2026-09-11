@@ -417,3 +417,196 @@ def wip_board(rows: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
                     - len(busiest["orders"])) / max(1, len(ordered) - 1)
                 else ""),
     }
+
+
+# ── What is still owed ───────────────────────────────────────────────────────
+
+def backorders(rows: Sequence[Dict[str, Any]],
+               sent_of=None) -> List[Dict[str, Any]]:
+    """Orders with something still to go, and how much.
+
+    Only orders where something has actually gone: a job nobody has started
+    is not a backorder, it is a job. The distinction matters because a list
+    that includes everything outstanding is the order book again, and nobody
+    reads the order book looking for backorders.
+    """
+    out = []
+    for row in rows or []:
+        if not _outstanding(row):
+            continue
+        header = row.get("header") or {}
+        sent = (sent_of or _sent_from_header)(header)
+        if not sent:
+            continue
+        ordered = left = gone = 0
+        for item, qty, _area in _filters(row):
+            key = str(item.get("line_id") or "")
+            been = min(int(sent.get(key, 0)), qty)
+            ordered += qty
+            gone += been
+            left += qty - been
+        if left <= 0 or gone <= 0:
+            continue
+        out.append({
+            "customer": str(row.get("customer_name")
+                            or row.get("customer") or ""),
+            "order_no": str(row.get("order_number")
+                            or row.get("order_no") or ""),
+            "id":       row.get("id"),
+            "due":      parse_date(row.get("date_due")),
+            "ordered":  ordered,
+            "sent":     gone,
+            "left":     left,
+            "when":     str(sent.get("at") or ""),
+        })
+    out.sort(key=lambda r: (r["due"] or _dt.date.max, r["customer"]))
+    return out
+
+
+def _sent_from_header(header: Dict[str, Any]) -> Dict[str, Any]:
+    got = (header or {}).get("sent") or {}
+    return got if isinstance(got, dict) else {}
+
+
+# ── What was planned against what was used ───────────────────────────────────
+
+def planned_vs_actual(rows: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
+    """Channel the cut list said a job would take, against what it took.
+
+    The plan is written onto the order when a cut list is produced, and the
+    actual is typed in at the saw. Neither is worth much alone; together they
+    say whether the allowances are right, and they say it within a week
+    instead of within a quarter.
+    """
+    lines, planned, actual = [], 0, 0
+    for row in rows or []:
+        header = row.get("header") or {}
+        plan = header.get("cut_plan")
+        if not isinstance(plan, dict):
+            continue
+        try:
+            said = int(float(plan.get("sticks") or 0))
+        except (TypeError, ValueError):
+            continue
+        used_raw = plan.get("used")
+        used = None
+        if used_raw not in (None, ""):
+            try:
+                used = int(float(used_raw))
+            except (TypeError, ValueError):
+                used = None
+        lines.append({
+            "customer": str(row.get("customer_name")
+                            or row.get("customer") or ""),
+            "order_no": str(row.get("order_number")
+                            or row.get("order_no") or ""),
+            "id":       row.get("id"),
+            "planned":  said,
+            "used":     used,
+            "out_by":   None if used is None else used - said,
+            "method":   str(plan.get("method") or ""),
+            "when":     str(plan.get("at") or ""),
+        })
+        if used is not None:
+            planned += said
+            actual += used
+    lines.sort(key=lambda r: (r["used"] is None,
+                              -(abs(r["out_by"]) if r["out_by"] else 0)))
+    return {
+        "lines":    lines,
+        "planned":  planned,
+        "actual":   actual,
+        "out_by":   actual - planned,
+        "answered": sum(1 for r in lines if r["used"] is not None),
+        "waiting":  sum(1 for r in lines if r["used"] is None),
+        "percent":  (round((actual - planned) / planned * 100, 1)
+                     if planned else None),
+    }
+
+
+# ── Channel, counted the way it is stored ────────────────────────────────────
+
+def as_sticks(item: Dict[str, Any], offcuts: Sequence[float] = (),
+              stick_length: float = 2440.0) -> Dict[str, Any]:
+    """Channel as whole lengths and offcuts, rather than as a number.
+
+    A figure of "63" against channel means nothing until you know whether it
+    is 63 lengths or 63 metres, and the low-stock alert means nothing either
+    way. The unit on the stock item decides, and where it does not say, this
+    says so rather than guessing - a guess here is a purchase order for the
+    wrong amount.
+    """
+    unit = str(item.get("unit") or "").strip().lower()
+    try:
+        held = float(item.get("stock_on_hand") or 0)
+    except (TypeError, ValueError):
+        held = 0.0
+    rack = sorted((float(x) for x in offcuts if float(x) > 0), reverse=True)
+    rack_mm = sum(rack)
+
+    if unit in ("each", "", "ea", "stick", "sticks", "length", "lengths"):
+        sticks, guessed = held, unit == ""
+        full_mm = sticks * stick_length
+    elif unit in ("m", "metre", "metres", "meter", "meters", "lm"):
+        full_mm, guessed = held * 1000.0, False
+        sticks = full_mm / stick_length if stick_length else 0
+    elif unit in ("mm", "millimetre", "millimetres"):
+        full_mm, guessed = held, False
+        sticks = full_mm / stick_length if stick_length else 0
+    else:
+        return {"ok": False, "unit": unit,
+                "why": f"this is counted in {unit!r}, which is not a length "
+                       f"or a count of lengths, so it cannot be shown as "
+                       f"sticks"}
+
+    return {
+        "ok":        True,
+        "unit":      unit or "each",
+        "guessed":   guessed,
+        "sticks":    round(sticks, 2),
+        "whole":     int(sticks),
+        "full_mm":   round(full_mm, 1),
+        "rack":      rack,
+        "rack_mm":   round(rack_mm, 1),
+        "rack_sticks": round(rack_mm / stick_length, 2) if stick_length else 0,
+        "total_mm":  round(full_mm + rack_mm, 1),
+        "total_sticks": (round((full_mm + rack_mm) / stick_length, 2)
+                         if stick_length else 0),
+    }
+
+
+# ── The week's work, channel and media together ──────────────────────────────
+
+def due_between(rows: Sequence[Dict[str, Any]], start: _dt.date,
+                end: _dt.date) -> List[Dict[str, Any]]:
+    """Outstanding orders promised inside a window, plus everything late and
+    everything with no date - both of which are work that has to happen in
+    that window whether or not anybody wrote a date on them."""
+    out = []
+    for row in rows or []:
+        if not _outstanding(row):
+            continue
+        due = parse_date(row.get("date_due"))
+        if due is None or due <= end:
+            out.append(row)
+    return out
+
+
+def media_needed(rows: Sequence[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """How much of each media a batch of orders wants, in square metres.
+
+    The area is the filter's face, not the media cut - what the pleat adds
+    is worked out on the worksheet and is not something to double-count
+    here. So this is what to have on the shelf, not what to cut.
+    """
+    per: Dict[str, Dict[str, Any]] = {}
+    for row in rows or []:
+        for item, qty, area in _filters(row):
+            media = str(item.get("Media Type") or "—")
+            b = per.setdefault(media, {"media": media, "filters": 0,
+                                       "sqm": 0.0})
+            b["filters"] += qty
+            b["sqm"] += area * qty
+    for b in per.values():
+        b["sqm"] = round(b["sqm"], 2)
+    return sorted(per.values(), key=lambda b: -b["sqm"])

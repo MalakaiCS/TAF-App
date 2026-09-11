@@ -59,6 +59,9 @@ DEFAULTS: Dict[str, float] = {
     "lip_mm":              20.0,
     "min_lip_mm":          10.0,
     "side_allowance_mm":    2.0,
+    "minutes_u_frame":      9.0,
+    "minutes_g_frame":      7.0,
+    "labour_per_hour":     55.0,
 }
 
 METHODS = ("u", "sideways_u", "g")
@@ -636,3 +639,77 @@ def media_across_roll(cut_w: float, cut_l: float, qty: int,
                       + (f" - {_tidy(won['waste_mm'])}mm wasted down the edge"
                          if won["waste_mm"] else " with nothing down the edge")),
     }
+
+
+# ── What the making of it costs ──────────────────────────────────────────────
+
+# Minutes at the bench, per frame, by the way it is made. A U is a strip and
+# a cap: two pieces to cut, handle, and not lose, and one more fold. A G is
+# one piece. These start as the workshop's best guess and are meant to be
+# corrected - the point is that the difference exists and is currently
+# nowhere in the figure a quote is priced off.
+LABOUR_DEFAULTS: Dict[str, float] = {
+    "minutes_u_frame":   9.0,
+    "minutes_g_frame":   7.0,
+    "labour_per_hour":  55.0,
+}
+
+
+def labour(method: str, qty: int,
+           settings: Dict[str, Any] | None = None) -> Dict[str, Any]:
+    """Minutes and money for making `qty` frames a given way.
+
+    Reported separately from the material rather than folded into it. A job
+    where the cheap channel costs ten more minutes a filter is a job somebody
+    should be able to see both halves of before deciding.
+    """
+    s = dict(LABOUR_DEFAULTS)
+    for key, value in (settings or {}).items():
+        if key in LABOUR_DEFAULTS and value is not None:
+            s[key] = float(value)
+    qty = max(0, int(qty))
+    each = s["minutes_g_frame"] if method == "g" else s["minutes_u_frame"]
+    minutes = each * qty
+    return {
+        "minutes_each": _tidy(each),
+        "minutes":      _tidy(minutes),
+        "hours":        round(minutes / 60.0, 2),
+        "cost":         round(minutes / 60.0 * s["labour_per_hour"], 2),
+        "per_hour":     _tidy(s["labour_per_hour"]),
+    }
+
+
+def with_labour(answer: Dict[str, Any],
+                settings: Dict[str, Any] | None = None) -> Dict[str, Any]:
+    """Add the bench time to an answer from best(), and say what the way it
+    chose is costing in minutes against the way it turned down."""
+    if not answer.get("ok"):
+        return answer
+    qty = answer["qty"]
+    won = answer["best"]
+    won["labour"] = labour(won["method"], qty, settings)
+    for other in answer["others"]:
+        other["labour"] = labour(other["method"], qty, settings)
+    cheapest_time = min([won] + answer["others"],
+                        key=lambda o: o["labour"]["minutes"])
+    answer["quickest"] = cheapest_time["method"]
+    answer["labour_note"] = (
+        f"{won['labour']['hours']}h at the bench "
+        f"(${won['labour']['cost']:.2f})")
+    if cheapest_time["method"] != won["method"]:
+        saved = _tidy(won["labour"]["minutes"]
+                      - cheapest_time["labour"]["minutes"])
+        extra = cheapest_time["sticks"] - won["sticks"]
+        if extra <= 0:
+            # Quicker and no dearer. Material picked the winner and material
+            # has nothing to say here, so say so plainly rather than dressing
+            # a free saving up as a trade-off.
+            answer["labour_note"] += (
+                f" - {cheapest_time['name']} is {saved} minutes less and "
+                f"takes no more channel. Make them that way.")
+            answer["labour_beats_material"] = True
+        else:
+            answer["labour_note"] += (
+                f" - {cheapest_time['name']} is {saved} minutes less, for "
+                f"{extra} more length{'' if extra == 1 else 's'} of channel")
+    return answer

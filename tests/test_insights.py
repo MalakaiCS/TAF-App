@@ -234,3 +234,108 @@ def test_a_pile_up_is_named():
                   lines=[(1, 0.3, "G4", 50)]) for i in range(6)]
     rows.append(order("B", "CAS", "01/10/2026", lines=[(1, 0.3, "G4", 50)]))
     assert _ins.wip_board(rows)["jam"] == "Cut"
+
+
+# ── What is still owed ───────────────────────────────────────────────────────
+
+def _part_sent(ref, want, gone, due="01/10/2026"):
+    row = order(ref, "Bells", due, lines=[(want, 0.3, "G4", 50)])
+    row["items"][0]["line_id"] = "L1"
+    row["header"]["sent"] = {"L1": gone, "at": "10/09/2026 09:00"}
+    return row
+
+
+def test_a_job_nobody_has_started_is_not_a_backorder():
+    """A list that includes everything outstanding is the order book again,
+    and nobody reads the order book looking for backorders."""
+    assert _ins.backorders(ROWS) == []
+
+
+def test_something_part_sent_is():
+    out = _ins.backorders([_part_sent("PO-9", 20, 12)])
+    assert len(out) == 1
+    assert out[0]["ordered"] == 20 and out[0]["sent"] == 12
+    assert out[0]["left"] == 8
+
+
+def test_a_job_that_has_all_gone_is_not_still_owed():
+    assert _ins.backorders([_part_sent("PO-9", 20, 20)]) == []
+
+
+def test_more_sent_than_ordered_does_not_go_negative():
+    out = _ins.backorders([_part_sent("PO-9", 20, 25)])
+    assert out == [], "it counted a negative backorder"
+
+
+# ── Planned against actual ───────────────────────────────────────────────────
+
+def _planned(ref, said, used=None):
+    row = order(ref, "Bells", "01/10/2026", lines=[(4, 0.3, "G4", 50)])
+    plan = {"sticks": said, "method": "g"}
+    if used is not None:
+        plan["used"] = used
+    row["header"]["cut_plan"] = plan
+    return row
+
+
+def test_a_job_with_no_figure_back_is_waiting_not_perfect():
+    """Counting an unanswered job as bang on target is how a report says
+    everything is fine while nobody is filling it in."""
+    out = _ins.planned_vs_actual([_planned("A", 4)])
+    assert out["waiting"] == 1 and out["answered"] == 0
+    assert out["planned"] == 0, "an unanswered job was counted in the total"
+
+
+def test_the_totals_only_count_what_came_back():
+    out = _ins.planned_vs_actual([_planned("A", 4, 5), _planned("B", 3)])
+    assert out["planned"] == 4 and out["actual"] == 5
+    assert out["out_by"] == 1 and out["percent"] == 25.0
+
+
+def test_the_worst_drift_is_at_the_top():
+    out = _ins.planned_vs_actual([_planned("A", 10, 10), _planned("B", 4, 8)])
+    assert out["lines"][0]["order_no"] == "B"
+
+
+# ── Channel, counted the way it is stored ────────────────────────────────────
+
+def test_lengths_are_lengths_and_metres_are_metres():
+    each = _ins.as_sticks({"unit": "each", "stock_on_hand": 63})
+    assert each["whole"] == 63
+    metres = _ins.as_sticks({"unit": "m", "stock_on_hand": 100})
+    assert metres["whole"] == 40          # 100m / 2.44m
+    assert metres["sticks"] == 40.98
+
+
+def test_a_unit_that_is_not_a_length_is_refused_rather_than_guessed():
+    """A guess here is a purchase order for the wrong amount."""
+    out = _ins.as_sticks({"unit": "kg", "stock_on_hand": 100})
+    assert out["ok"] is False and "kg" in out["why"]
+
+
+def test_no_unit_at_all_is_counted_as_lengths_and_says_so():
+    out = _ins.as_sticks({"unit": "", "stock_on_hand": 5})
+    assert out["whole"] == 5 and out["guessed"] is True
+
+
+def test_the_rack_counts_towards_the_total_but_not_the_whole_lengths():
+    out = _ins.as_sticks({"unit": "each", "stock_on_hand": 10},
+                         [2440, 1220])
+    assert out["whole"] == 10
+    assert out["total_sticks"] == 11.5
+
+
+# ── The week's work ──────────────────────────────────────────────────────────
+
+def test_late_work_is_in_this_week_whatever_its_date_says():
+    due = _ins.due_between(ROWS, _dt.date(2026, 9, 11), _dt.date(2026, 9, 18))
+    refs = {r["order_number"] for r in due}
+    assert "PO-1" in refs, "an overdue job is not in the week's work"
+    assert "PO-4" in refs, "an ASAP job is not in the week's work"
+    assert "PO-5" not in refs, "a finished job is in the week's work"
+
+
+def test_media_is_totalled_by_type():
+    got = {m["media"]: m for m in _ins.media_needed(ROWS)}
+    assert got["G4"]["filters"] == 21     # includes the finished one: this is
+    assert got["F5"]["filters"] == 2      # asked of a list somebody chose

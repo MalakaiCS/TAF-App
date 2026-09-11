@@ -11397,6 +11397,10 @@ class ModernOrderApp(tk.Frame):
         ("capacity",           "What you can promise…",   "_capacity"),
         ("month_end",          "End of month…",           "_month_end"),
         ("search_all",         "Search everything…",      "_search_all"),
+        ("backorders",         "What is still owed…",     "_backorders"),
+        ("planned_vs_actual",  "Planned against actual…", "_planned_vs_actual"),
+        ("channel_in_sticks",  "Channel, in lengths…",    "_channel_in_sticks"),
+        ("cutting_plan",       "The week's cutting…",     "_cutting_plan"),
     ]
 
     def _testable_features(self) -> list:
@@ -11497,12 +11501,20 @@ class ModernOrderApp(tk.Frame):
                 text.insert("end", f"{qty} x {size}\n    {out['why']}\n\n")
                 continue
             answer = out["answer"]
+            # The bench time, when the company wants to see it. Reported
+            # beside the channel rather than folded into it: a job where the
+            # cheap channel costs ten more minutes a filter is one somebody
+            # should see both halves of.
+            if _features.is_on("labour_margin"):
+                answer = _cutting.with_labour(answer, w)
             won = answer["best"]
             if answer.get("forced"):
                 text.insert("end", "")     # the reason is already in `why`
             text.insert("end", f"{qty} x {size}"
                                f"{'  ' + str(line['media']) if line.get('media') else ''}\n")
             text.insert("end", f"    {answer['why']}\n")
+            if answer.get("labour_note"):
+                text.insert("end", f"    {answer['labour_note']}\n")
             if won["full"]["cap"]:
                 text.insert("end", f"    Cap      {won['full']['cap']}   "
                                    f"(x{qty})\n")
@@ -11546,6 +11558,17 @@ class ModernOrderApp(tk.Frame):
         text.insert("end", f"\n{plan['sticks']} length"
                            f"{'' if plan['sticks'] == 1 else 's'} of channel, "
                            f"{_fmt_mm(plan['channel'])}mm of it into filter.\n")
+        if _features.is_on("labour_margin"):
+            minutes = sum(
+                line["answer"]["best"]["labour"]["minutes"]
+                for line in plan["lines"]
+                if line["ok"] and line["answer"]["best"].get("labour"))
+            money = sum(
+                line["answer"]["best"]["labour"]["cost"]
+                for line in plan["lines"]
+                if line["ok"] and line["answer"]["best"].get("labour"))
+            text.insert("end", f"{round(minutes / 60.0, 1)} hours at the "
+                               f"bench, ${money:.2f}.\n")
         if _features.is_on("scrap_rate"):
             text.insert("end", f"{plan['scrap_pct']}% of what was opened did "
                                f"not become filter.\n")
@@ -12252,6 +12275,270 @@ class ModernOrderApp(tk.Frame):
         flat_btn(row, "Close", dlg.destroy, bg=CNE, pady=px(6),
                  variant="secondary").pack(side="left", padx=(px(8), 0))
         dlg.bind("<Return>", lambda _e: _work())
+
+    # ── What is still owed ────────────────────────────────────────────────
+
+    def _backorders(self):
+        def build():
+            rows = _insights.backorders(_db.get_all_orders())
+            out = []
+            for r in rows:
+                out.append(((r["customer"], r["order_no"],
+                             r["ordered"], r["sent"], r["left"],
+                             r["due"].strftime("%d/%m/%Y") if r["due"]
+                             else "—"),
+                            "late" if r["due"] and
+                            r["due"] < datetime.date.today() else None, r["id"]))
+            total = sum(r["left"] for r in rows)
+            footer = (f"{len(rows)} order"
+                      f"{'' if len(rows) == 1 else 's'} part-dispatched, "
+                      f"{total} filter{'' if total == 1 else 's'} still "
+                      f"owed. Double-click one to record more going out."
+                      if rows else
+                      "Nothing is part-dispatched. An order nobody has sent "
+                      "anything from is a job, not a backorder.")
+            return out, footer
+
+        def _open(iid, parent):
+            if iid:
+                self._record_dispatch(iid, parent)
+
+        self._table_window(
+            "What is still owed",
+            "Twenty ordered, twelve made — send the twelve, keep the rest "
+            "live, and know what is left.",
+            [("customer", "Customer", 220, "w"), ("ref", "O/N", 140, "w"),
+             ("ordered", "Ordered", 90, "e"), ("sent", "Gone", 80, "e"),
+             ("left", "Still owed", 100, "e"), ("due", "Due", 110, "w")],
+            build, width=820, height=520, on_row=_open)
+
+    def _record_dispatch(self, order_id: str, parent):
+        try:
+            row = _db.get_order(order_id) or {}
+        except Exception as exc:
+            messagebox.showerror("What is still owed", str(exc), parent=parent)
+            return
+        items = row.get("items") or []
+        header = row.get("header") or {}
+        lines = _db.outstanding_lines(items, header)
+        if not lines:
+            messagebox.showinfo("What is still owed",
+                                "There are no lines on that order.",
+                                parent=parent)
+            return
+
+        dlg = tk.Toplevel(parent, bg=CBG)
+        dlg.title("Record what has gone")
+        dlg.transient(parent)
+        _centre_on_parent(dlg, parent, px(560), px(460))
+        tk.Label(dlg, text="Record what has gone", bg=CBG, fg=CA,
+                 font=F_TTL).pack(anchor="w", padx=px(16), pady=(px(12), px(8)))
+        note = tk.Label(dlg, text="", bg=CBG, fg=CMU, font=F_SM,
+                        wraplength=px(500), justify="left")
+        grid = tk.Frame(dlg, bg=CBG, padx=px(16))
+        grid.pack(fill="x")
+        boxes = {}
+        for i, line in enumerate(lines):
+            item = line["item"]
+            label = (f"{item.get('Filter Type', '')} "
+                     f"{item.get('Short', '')} x {item.get('Long', '')}"
+                     f"   ({line['ordered']} ordered, {line['sent']} gone)")
+            tk.Label(grid, text=label, bg=CBG, fg=CTX, font=F_BODY,
+                     anchor="w").grid(row=i, column=0, sticky="w",
+                                      pady=px(3), padx=(0, px(10)))
+            var = tk.StringVar(value=str(line["sent"]))
+            boxes[line["line_id"]] = (var, line)
+            tk.Entry(grid, textvariable=var, width=6, font=F_BODY, bg=CRE,
+                     fg=CTX, relief="flat", highlightthickness=1,
+                     highlightbackground=CBR).grid(row=i, column=1,
+                                                   sticky="w", pady=px(3))
+
+        def _save():
+            problems = []
+            for line_id, (var, line) in boxes.items():
+                try:
+                    want = int(float(str(var.get()).strip() or 0))
+                except ValueError:
+                    problems.append(f"{line_id}: not a number")
+                    continue
+                if want == line["sent"]:
+                    continue
+                if want > line["ordered"]:
+                    problems.append(
+                        f"{want} is more than the {line['ordered']} ordered")
+                    continue
+                try:
+                    _db.set_line_sent(order_id, line_id, want)
+                except Exception as exc:
+                    problems.append(str(exc))
+            note.config(text="; ".join(problems) if problems
+                        else "Saved. Close and reopen the list to see it.")
+            if not problems:
+                self.status_var.set("Part-dispatch recorded.")
+
+        note.pack(anchor="w", padx=px(16), pady=(px(10), 0))
+        row2 = tk.Frame(dlg, bg=CBG, padx=px(16), pady=px(12))
+        row2.pack(fill="x")
+        flat_btn(row2, "Close", dlg.destroy, bg=CNE,
+                 pady=px(6)).pack(side="right")
+        flat_btn(row2, "Save", _save, bg=CA,
+                 pady=px(6)).pack(side="right", padx=(0, px(8)))
+
+    # ── Planned against actual ────────────────────────────────────────────
+
+    def _planned_vs_actual(self):
+        def build():
+            data = _insights.planned_vs_actual(_db.get_all_orders())
+            out = []
+            for r in data["lines"]:
+                out.append(((r["customer"], r["order_no"],
+                             _cutting.NAMES.get(r["method"], r["method"] or "—"),
+                             r["planned"],
+                             "—" if r["used"] is None else r["used"],
+                             "" if r["out_by"] is None else
+                             (f"+{r['out_by']}" if r["out_by"] > 0
+                              else str(r["out_by"]))),
+                            "late" if (r["out_by"] or 0) > 0 else None,
+                            r["id"]))
+            if not data["answered"]:
+                footer = ("Nothing has been checked back yet. Print a cut "
+                          "list, then type in what it actually took.")
+            else:
+                footer = (f"{data['answered']} job"
+                          f"{'' if data['answered'] == 1 else 's'} checked "
+                          f"back: {data['planned']} lengths planned, "
+                          f"{data['actual']} used")
+                if data["percent"]:
+                    footer += f" ({data['percent']:+.1f}%)"
+                footer += "."
+                if data["waiting"]:
+                    footer += (f" {data['waiting']} still waiting on a "
+                               f"figure.")
+            return out, footer
+
+        self._table_window(
+            "Planned against actual",
+            "What the cut list said a job would take, against what it took. "
+            "Says whether the allowances are right inside a week rather "
+            "than inside a quarter.",
+            [("customer", "Customer", 200, "w"), ("ref", "O/N", 130, "w"),
+             ("how", "Made as", 110, "w"), ("planned", "Planned", 90, "e"),
+             ("used", "Used", 80, "e"), ("out", "Out by", 80, "e")],
+            build, width=800, height=520)
+
+    # ── Channel, counted the way it is stored ─────────────────────────────
+
+    def _channel_in_sticks(self):
+        def build():
+            items = _db.get_stock_items()
+            try:
+                rack = _db.list_offcuts()
+            except Exception:
+                rack = []
+            stick = _features.workshop()["stick_length_mm"]
+            out, shown = [], 0
+            for item in items:
+                name = str(item.get("name") or "")
+                blob = (name + " " + str(item.get("product_type") or "")
+                        + " " + str(item.get("sku") or "")).lower()
+                if "channel" not in blob and "frame" not in blob:
+                    continue
+                mine = [float(r.get("length_mm") or 0) for r in rack
+                        if not r.get("profile")
+                        or str(r["profile"]).lower() in blob]
+                seen = _insights.as_sticks(item, mine, stick)
+                shown += 1
+                if not seen.get("ok"):
+                    out.append(((name, "—", "—", "—", seen["why"]),
+                                "late", None))
+                    continue
+                out.append(((name,
+                             f"{seen['whole']}",
+                             f"{len(seen['rack'])}",
+                             f"{seen['total_sticks']}",
+                             ("counted in " + seen["unit"]
+                              + (" (assumed)" if seen["guessed"] else ""))),
+                            None, None))
+            footer = (f"{shown} channel item"
+                      f"{'' if shown == 1 else 's'}, at "
+                      f"{_fmt_mm(stick)}mm a length. Offcuts on the rack "
+                      f"count towards the total but are not whole lengths."
+                      if shown else
+                      "No stock item looks like channel. Anything with "
+                      "\"channel\" or \"frame\" in its name or type shows "
+                      "up here.")
+            return out, footer
+
+        self._table_window(
+            "Channel, in lengths",
+            "A figure of 63 against channel means nothing until you know "
+            "whether it is 63 lengths or 63 metres.",
+            [("name", "Item", 260, "w"), ("whole", "Whole lengths", 120, "e"),
+             ("rack", "On the rack", 110, "e"),
+             ("total", "Lengths' worth", 120, "e"),
+             ("note", "", 260, "w")],
+            build, width=840, height=480)
+
+    # ── The week's cutting ────────────────────────────────────────────────
+
+    def _cutting_plan(self):
+        rows_cache = {}
+
+        def build():
+            rows = _db.get_all_orders()
+            end = datetime.date.today() + datetime.timedelta(days=7)
+            due = _insights.due_between(rows, datetime.date.today(), end)
+            rows_cache["due"] = due
+            sizes: dict = {}
+            for row in due:
+                for item, qty, _area in _insights._filters(row):
+                    try:
+                        short = float(item.get("Short") or 0)
+                        long = float(item.get("Long") or 0)
+                    except (TypeError, ValueError):
+                        continue
+                    if short <= 0 or long <= 0:
+                        continue
+                    if short > long:
+                        short, long = long, short
+                    key = (short, long)
+                    sizes[key] = sizes.get(key, 0) + qty
+            lines = [{"short": s, "long": l, "qty": n}
+                     for (s, l), n in sorted(sizes.items(),
+                                             key=lambda kv: -kv[1])]
+            plan = _cutting.plan(lines, _features.workshop())
+            out = [(("Channel", "", "", ""), "head", None)]
+            for entry in plan["lines"]:
+                line = entry["line"]
+                size = f"{_fmt_mm(line['short'])} x {_fmt_mm(line['long'])}"
+                if not entry["ok"]:
+                    out.append(((size, line["qty"], "—", entry["why"]),
+                                "late", None))
+                    continue
+                won = entry["answer"]["best"]
+                out.append(((size, line["qty"], won["sticks"],
+                             won["name"]
+                             + (f", lip {_fmt_mm(won['lip'])}"
+                                if won["shortened"] else "")), None, None))
+            out.append((("Media to have ready", "", "", ""), "head", None))
+            for m in _insights.media_needed(due):
+                out.append(((m["media"], m["filters"], "",
+                             f"{m['sqm']:.1f} m² of face"), None, None))
+            footer = (f"{len(due)} order"
+                      f"{'' if len(due) == 1 else 's'} due in the next seven "
+                      f"days or already late, {plan['sticks']} length"
+                      f"{'' if plan['sticks'] == 1 else 's'} of channel "
+                      f"between them.")
+            return out, footer
+
+        self._table_window(
+            "The week's cutting",
+            "Everything due in the next seven days or already late, as one "
+            "plan — the channel and the media that has to be on the shelf "
+            "for it.",
+            [("what", "Size / media", 220, "w"), ("qty", "Filters", 90, "e"),
+             ("sticks", "Lengths", 90, "e"), ("how", "", 300, "w")],
+            build, width=800)
 
     def _copy_text(self, what: str):
         try:

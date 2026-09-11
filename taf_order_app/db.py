@@ -2327,3 +2327,77 @@ def _now_stamp() -> str:
     import datetime as _dt
     d = _dt.datetime.now()
     return f"{d.day:02d}/{d.month:02d}/{d.year} {d.hour:02d}:{d.minute:02d}"
+
+
+# ── Part-dispatched orders (backorders) ──────────────────────────────────────
+# Twenty on the order, twelve made, and the customer wants those twelve now.
+# At the moment that is an order nothing can honestly be marked on: Complete
+# is a lie and Pending stops it going out.
+#
+# What has gone lives on the header rather than on each line, and is written
+# through merge_order_header for the same reason line ticks are: two people
+# packing two lines of the same order is normal, and a read-change-write from
+# here would have whoever saved second wipe the other's work.
+
+def sent_quantities(header: dict) -> dict:
+    """{line_id: how many have gone}."""
+    got = (header or {}).get("sent") or {}
+    if not isinstance(got, dict):
+        return {}
+    out = {}
+    for key, value in got.items():
+        if key in ("at", "by"):
+            continue
+        try:
+            out[str(key)] = max(0, int(float(value)))
+        except (TypeError, ValueError):
+            continue
+    return out
+
+
+def set_line_sent(order_id: str, line_id: str, qty: int) -> str:
+    """Record how many of one line have actually gone out."""
+    if not str(line_id or "").strip():
+        raise ValueError("That line has no id, so nothing can be recorded "
+                         "against it. Open the order once on a PC with "
+                         "line ticking switched on first.")
+    header = {}
+    try:
+        resp = (get_client().table("orders").select("header")
+                .eq("id", str(order_id)).limit(1).execute())
+        rows = resp.data or []
+        header = (rows[0].get("header") or {}) if rows else {}
+    except Exception:
+        header = {}
+    sent = sent_quantities(header)
+    sent[str(line_id)] = max(0, int(qty))
+    sent["at"] = _now_stamp()
+    sent["by"] = current_full_name() or current_username()
+    return merge_order_header(str(order_id), {"sent": sent})
+
+
+def outstanding_lines(items: list, header: dict) -> list:
+    """Every line with what is still owed on it.
+
+    Nothing here decides a status. A part-dispatched order is still open, and
+    whether it gets closed is a decision for a person who can see how much is
+    left - which is the number this exists to produce.
+    """
+    sent = sent_quantities(header)
+    out = []
+    for item in items or []:
+        if not isinstance(item, dict):
+            continue
+        try:
+            want = int(float(item.get("Quantity") or item.get("quantity") or 0))
+        except (TypeError, ValueError):
+            want = 0
+        gone = sent.get(str(item.get(LINE_ID) or ""), 0)
+        out.append({
+            "item": item,
+            "line_id": str(item.get(LINE_ID) or ""),
+            "ordered": want,
+            "sent": min(gone, want),
+            "left": max(0, want - gone),
+        })
+    return out

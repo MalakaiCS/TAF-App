@@ -366,3 +366,64 @@ def test_a_rubbish_row_does_not_stop_the_rest():
     known = [{"short": "", "long": None, "seen": "x"},
              {"short": 595, "long": 495, "seen": 40}]
     assert len(_cut.near_standard(597, 497, known)) == 1
+
+
+# ── What the making of it costs ──────────────────────────────────────────────
+
+def test_a_u_takes_longer_than_a_g():
+    """Two pieces to cut, handle and not lose, and one more fold."""
+    assert (_cut.labour("u", 10)["minutes"]
+            > _cut.labour("g", 10)["minutes"])
+
+
+def test_the_bench_rate_is_the_workshop_s_own():
+    out = _cut.labour("g", 60, {"minutes_g_frame": 10, "labour_per_hour": 60})
+    assert out["hours"] == 10.0 and out["cost"] == 600.0
+
+
+def test_a_free_saving_is_not_dressed_up_as_a_trade_off():
+    """When the quicker way takes no more channel, material has nothing to
+    say and the answer is simply "make them that way"."""
+    out = _cut.with_labour(_cut.best(100, 100, 50))
+    assert out.get("labour_beats_material") is True
+    assert "takes no more channel" in out["labour_note"]
+
+
+def test_a_real_trade_off_is_shown_as_one():
+    out = _cut.with_labour(_cut.best(300, 300, 10))
+    assert out["best"]["method"] == "g"
+    assert "at the bench" in out["labour_note"]
+    assert not out.get("labour_beats_material")
+
+
+def test_labour_never_changes_which_way_it_picked():
+    """It is reported beside the material, not folded into it. Somebody
+    deciding to spend a stick to save an hour should be doing that on
+    purpose."""
+    plain = _cut.best(300, 300, 10)["best"]["method"]
+    with_time = _cut.with_labour(_cut.best(300, 300, 10))["best"]["method"]
+    assert plain == with_time
+
+
+# ── The media, across the roll ───────────────────────────────────────────────
+
+def test_a_wider_roll_takes_less_of_it():
+    narrow = _cut.media_across_roll(345, 593, 12, 1000)
+    wide = _cut.media_across_roll(345, 593, 12, 1050)
+    assert wide["across"] == 3 and narrow["across"] == 2
+    assert wide["run_m"] < narrow["run_m"]
+
+
+def test_media_is_not_turned_sideways_unless_it_is_allowed():
+    """Most media has a direction. A nesting that quietly rotated half the
+    pieces to save a metre would be an expensive saving."""
+    fixed = _cut.media_across_roll(200, 900, 6, 1000)
+    turned = _cut.media_across_roll(200, 900, 6, 1000, rotatable=True)
+    assert fixed["turned"] is False
+    assert turned["turned"] is True
+    assert turned["run_m"] < fixed["run_m"]
+
+
+def test_a_piece_too_wide_for_the_roll_is_reported():
+    out = _cut.media_across_roll(1200, 500, 4, 1000)
+    assert out["ok"] is False and "will not fit across" in out["why"]

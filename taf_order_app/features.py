@@ -65,7 +65,7 @@ CATALOGUE: List[Feature] = [
     Feature("cutting_plan", "Cutting plan for the week",
             "The whole week's channel and media laid out together, rather "
             "than a day at a time.",
-            "Making it"),
+            "Making it", built=True),
     Feature("show_alternative", "Show what it rejected",
             "\"U, 7 per stick - G would be 5\", so the person at the saw can "
             "overrule it knowing what they are overruling.",
@@ -111,7 +111,7 @@ CATALOGUE: List[Feature] = [
     Feature("planned_vs_actual", "Planned against actual",
             "What the calculator said it would use, against what stock "
             "actually moved.",
-            "Knowing where you stand"),
+            "Knowing where you stand", built=True),
     Feature("month_end", "End of month, in one press",
             "Sales by customer, by month, by product type, against last "
             "year.",
@@ -129,7 +129,7 @@ CATALOGUE: List[Feature] = [
     Feature("labour_margin", "Labour in the margin",
             "A U with a separate cap is more handling than a G. Puts that "
             "into the figure.",
-            "Money"),
+            "Money", built=True),
     Feature("customer_pricing", "Per-customer pricing",
             "An agreed rate or discount against a customer, applied without "
             "anybody remembering to.",
@@ -147,7 +147,7 @@ CATALOGUE: List[Feature] = [
     Feature("backorders", "Backorders and part-dispatch",
             "Twenty ordered, twelve made - send the twelve, keep the rest "
             "live, invoice what went.",
-            "The floor"),
+            "The floor", built=True),
     Feature("stocktake", "Stocktake mode",
             "A counting session: what has been counted, what has not, and "
             "the variance at the end.",
@@ -155,7 +155,7 @@ CATALOGUE: List[Feature] = [
     Feature("channel_in_sticks", "Channel counted in sticks",
             "Channel is n full lengths plus these offcuts, not a number of "
             "metres.",
-            "The floor"),
+            "The floor", built=True),
     Feature("returns", "Returns and rework",
             "A filter that comes back, recorded against the order it came "
             "from.",
@@ -285,6 +285,9 @@ WORKSHOP_DEFAULTS: Dict[str, float] = {
     "lip_mm":              20.0,
     "min_lip_mm":          10.0,
     "side_allowance_mm":    2.0,
+    "minutes_u_frame":      9.0,
+    "minutes_g_frame":      7.0,
+    "labour_per_hour":     55.0,
 }
 
 _workshop: Dict[str, float] = dict(WORKSHOP_DEFAULTS)
