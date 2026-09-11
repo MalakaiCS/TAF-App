@@ -2,7 +2,7 @@
 import sys
 import datetime as _dt_module
 import tkinter as tk
-from tkinter import ttk, messagebox, filedialog
+from tkinter import ttk, messagebox, filedialog, simpledialog
 
 try:
     from tkcalendar import DateEntry as _DateEntry
@@ -33,6 +33,7 @@ from taf_order_app import notify as _notify
 from taf_order_app import features as _features
 from taf_order_app import cutting as _cutting
 from taf_order_app import insights as _insights
+from taf_order_app import records as _records
 from taf_order_app import backup as _backup
 from taf_order_app import labels as _labels
 from taf_order_app.bag_filler import (
@@ -11401,6 +11402,13 @@ class ModernOrderApp(tk.Frame):
         ("planned_vs_actual",  "Planned against actual…", "_planned_vs_actual"),
         ("channel_in_sticks",  "Channel, in lengths…",    "_channel_in_sticks"),
         ("cutting_plan",       "The week's cutting…",     "_cutting_plan"),
+        ("kits",               "Kits…",                   "_kits"),
+        ("site_schedules",     "What is installed where…", "_sites"),
+        ("returns",            "What came back…",         "_returns"),
+        ("stocktake",          "Stocktake…",              "_stocktake"),
+        ("purchasing",         "Buying…",                 "_purchasing"),
+        ("customer_pricing",   "What each customer pays…", "_customer_pricing"),
+        ("shutdown_calendar",  "Shutdown calendar…",      "_shutdown_calendar"),
     ]
 
     def _testable_features(self) -> list:
@@ -12539,6 +12547,677 @@ class ModernOrderApp(tk.Frame):
             [("what", "Size / media", 220, "w"), ("qty", "Filters", 90, "e"),
              ("sticks", "Lengths", 90, "e"), ("how", "", 300, "w")],
             build, width=800)
+
+    # ── Kits ──────────────────────────────────────────────────────────────
+
+    def _kits(self):
+        def build():
+            rows = _records.list_kits()
+            out = []
+            for k in rows:
+                lines = k.get("lines") or []
+                total = sum(int(float(l.get("Quantity") or 1))
+                            for l in lines if isinstance(l, dict))
+                out.append(((k.get("name") or "", len(lines), total,
+                             k.get("note") or ""), None, k.get("id")))
+            return out, (f"{len(rows)} kit{'' if len(rows) == 1 else 's'}. "
+                         f"Double-click one to put it on the order you are "
+                         f"building." if rows else
+                         "No kits yet. Build an order the way you want it, "
+                         "then save it as a kit from New Order.")
+
+        def _use(iid, parent):
+            self._use_kit(iid, parent)
+
+        self._table_window(
+            "Kits",
+            "An AHU that takes four panels and two bags, entered as one "
+            "line instead of six.",
+            [("name", "Kit", 260, "w"), ("lines", "Lines", 80, "e"),
+             ("filters", "Filters", 90, "e"), ("note", "Note", 300, "w")],
+            build, width=800, height=500, on_row=_use)
+
+    def _use_kit(self, kit_id: str, parent):
+        kit = next((k for k in _records.list_kits()
+                    if str(k.get("id")) == str(kit_id)), None)
+        if not kit:
+            return
+        lines = [dict(l) for l in (kit.get("lines") or [])
+                 if isinstance(l, dict)]
+        if not lines:
+            messagebox.showinfo("Kits", "That kit has no lines on it.",
+                                parent=parent)
+            return
+        if not messagebox.askyesno(
+                "Kits",
+                f"Put {len(lines)} line(s) from “{kit.get('name')}” "
+                f"onto the order you are building?", parent=parent):
+            return
+        for line in lines:
+            # Stamped again on the way in: a kit saved before a part-number
+            # rule changed must not carry the old number onto a new order.
+            try:
+                _pn.apply_derived_fields(line, _db.get_media_codes())
+            except Exception:
+                pass
+            self.items.append(line)
+        self._refresh_items_tree()
+        parent.destroy()
+        self._show_tab("new_order")
+        self.status_var.set(f"{len(lines)} line(s) added from "
+                            f"{kit.get('name')}.")
+
+    def _save_as_kit(self):
+        """Whatever is on New Order now, kept to be used again."""
+        if not getattr(self, "items", None):
+            messagebox.showinfo("Kits", "There is nothing on the order to "
+                                        "save as a kit.")
+            return
+        name = simpledialog.askstring("Save as a kit",
+                                      "What is this kit called?",
+                                      parent=self.master)
+        if not name:
+            return
+        try:
+            _records.save_kit(name, [dict(i) for i in self.items])
+        except Exception as exc:
+            messagebox.showerror("Kits", str(exc))
+            return
+        self.status_var.set(f"Saved {len(self.items)} line(s) as "
+                            f"“{name}”.")
+
+    # ── What is installed where ───────────────────────────────────────────
+
+    def _sites(self):
+        def build():
+            rows = _records.list_sites()
+            due = {str(s.get("id")) for s in _records.sites_due(rows)}
+            out = []
+            for s in rows:
+                filters = s.get("filters") or []
+                cycle = int(s.get("every_months") or 0)
+                out.append(((s.get("customer_name") or "—",
+                             s.get("name") or "",
+                             len(filters),
+                             f"every {cycle} months" if cycle else "—",
+                             str(s.get("last_done") or "never")),
+                            "late" if str(s.get("id")) in due else None,
+                            s.get("id")))
+            footer = (f"{len(rows)} site{'' if len(rows) == 1 else 's'}, "
+                      f"{len(due)} due. Double-click one to raise its order."
+                      if rows else
+                      "Nothing recorded yet. Open an order for a site and "
+                      "save what was on it as that site's schedule.")
+            return out, footer
+
+        def _raise(iid, parent):
+            self._order_from_site(iid, parent)
+
+        self._table_window(
+            "What is installed where",
+            "Most of the work is replacing the same units on a cycle, and "
+            "what is in each plant room lives in old orders and in people's "
+            "heads.",
+            [("customer", "Customer", 200, "w"), ("site", "Site", 200, "w"),
+             ("filters", "Filters", 80, "e"), ("cycle", "Cycle", 130, "w"),
+             ("last", "Last done", 120, "w")],
+            build, width=860, height=540, on_row=_raise)
+
+    def _order_from_site(self, site_id: str, parent):
+        site = next((s for s in _records.list_sites()
+                     if str(s.get("id")) == str(site_id)), None)
+        if not site:
+            return
+        lines = [dict(l) for l in (site.get("filters") or [])
+                 if isinstance(l, dict)]
+        if not lines:
+            messagebox.showinfo("Sites", "Nothing is recorded for that site "
+                                         "yet.", parent=parent)
+            return
+        if not messagebox.askyesno(
+                "Sites",
+                f"Start an order for {site.get('name')} with its "
+                f"{len(lines)} line(s)?", parent=parent):
+            return
+        for line in lines:
+            try:
+                _pn.apply_derived_fields(line, _db.get_media_codes())
+            except Exception:
+                pass
+            self.items.append(line)
+        self._refresh_items_tree()
+        parent.destroy()
+        self._show_tab("new_order")
+        # The lines are on; the customer is not. Filling that in from here
+        # would mean reaching into New Order's fields from three screens
+        # away, and getting it wrong once is an order raised against the
+        # wrong company.
+        self.status_var.set(
+            f"{len(lines)} line(s) from {site.get('name')}"
+            + (f" — for {site.get('customer_name')}"
+               if site.get("customer_name") else "")
+            + ". Fill in the customer and the dates.")
+
+    def _save_as_site(self):
+        """What is on New Order now, recorded as what that plant room has."""
+        if not getattr(self, "items", None):
+            messagebox.showinfo("Sites", "There is nothing on the order to "
+                                         "record against a site.")
+            return
+        name = simpledialog.askstring("Record as a site",
+                                      "What is the site called?",
+                                      parent=self.master)
+        if not name:
+            return
+        who = simpledialog.askstring(
+            "Record as a site", "Which customer is it at?",
+            parent=self.master) or ""
+        try:
+            _records.save_site(name, who, filters=[dict(i) for i in self.items])
+        except Exception as exc:
+            messagebox.showerror("Sites", str(exc))
+            return
+        self.status_var.set(f"{len(self.items)} line(s) recorded for {name}.")
+
+    # ── A filter that came back ───────────────────────────────────────────
+
+    def _returns(self):
+        def build():
+            rows = _records.list_returns()
+            out = []
+            for r in rows:
+                out.append(((r.get("customer_name") or "—",
+                             r.get("order_number") or "—",
+                             _fmt_mm(r.get("quantity")),
+                             r.get("reason") or "",
+                             r.get("outcome") or "open",
+                             str(r.get("created_at") or "")[:10]),
+                            "late" if str(r.get("outcome")) == "open" else None,
+                            r.get("id")))
+            pattern = _records.returns_pattern(rows)
+            worst = pattern[0] if pattern else None
+            footer = (f"{len(rows)} recorded, "
+                      f"{sum(1 for r in rows if r.get('outcome') == 'open')} "
+                      f"still open.")
+            if worst and worst["times"] > 1:
+                footer += (f"  Most often: {worst['customer']} — "
+                           f"{worst['reason']}, {worst['times']} times.")
+            footer += "  Double-click one to close it off."
+            return out, footer
+
+        def _close(iid, parent):
+            self._close_return(iid, parent)
+
+        self._table_window(
+            "What came back",
+            "One return is bad luck. The same reason from the same customer "
+            "four times is something to go and look at.",
+            [("customer", "Customer", 190, "w"), ("ref", "O/N", 120, "w"),
+             ("qty", "How many", 90, "e"), ("reason", "Why", 200, "w"),
+             ("outcome", "Ended as", 110, "w"), ("when", "When", 100, "w")],
+            build, width=900, height=540, on_row=_close)
+
+    def _log_return(self):
+        dlg = tk.Toplevel(self.master, bg=CBG)
+        dlg.title("Something came back")
+        dlg.transient(self.master)
+        _centre_on_parent(dlg, self.master, px(480), px(440))
+        tk.Label(dlg, text="Something came back", bg=CBG, fg=CA,
+                 font=F_TTL).pack(anchor="w", padx=px(16), pady=(px(12), px(8)))
+        form = tk.Frame(dlg, bg=CBG, padx=px(16))
+        form.pack(fill="x")
+        v = {}
+        for i, (key, label) in enumerate([("order_number", "Order number"),
+                                          ("customer_name", "Customer"),
+                                          ("quantity", "How many"),
+                                          ("detail", "What happened")]):
+            tk.Label(form, text=label, bg=CBG, fg=CTX, font=F_BODY,
+                     anchor="w").grid(row=i, column=0, sticky="w",
+                                      pady=px(4), padx=(0, px(10)))
+            var = tk.StringVar(value="1" if key == "quantity" else "")
+            v[key] = var
+            tk.Entry(form, textvariable=var, width=26, font=F_BODY, bg=CRE,
+                     fg=CTX, relief="flat", highlightthickness=1,
+                     highlightbackground=CBR).grid(row=i, column=1,
+                                                   sticky="w", pady=px(4))
+        tk.Label(form, text="Why", bg=CBG, fg=CTX, font=F_BODY,
+                 anchor="w").grid(row=9, column=0, sticky="w", pady=px(4))
+        reason = ttk.Combobox(form, values=_records.REASONS, width=24,
+                              state="readonly")
+        reason.set(_records.REASONS[0])
+        reason.grid(row=9, column=1, sticky="w", pady=px(4))
+        note = tk.Label(dlg, text="", bg=CBG, fg=CMU, font=F_SM,
+                        wraplength=px(420), justify="left")
+        note.pack(anchor="w", padx=px(16), pady=(px(10), 0))
+
+        def _save():
+            try:
+                _records.log_return(v["order_number"].get(),
+                                    v["customer_name"].get(),
+                                    float(str(v["quantity"].get()).strip() or 0),
+                                    reason.get(), v["detail"].get())
+            except ValueError as exc:
+                note.config(text=str(exc))
+                return
+            except Exception as exc:
+                note.config(text=f"Could not record that: {exc}")
+                return
+            self.status_var.set("Return recorded.")
+            dlg.destroy()
+
+        row = tk.Frame(dlg, bg=CBG, padx=px(16), pady=px(12))
+        row.pack(fill="x")
+        flat_btn(row, "Close", dlg.destroy, bg=CNE,
+                 pady=px(6)).pack(side="right")
+        flat_btn(row, "Record it", _save, bg=CA,
+                 pady=px(6)).pack(side="right", padx=(0, px(8)))
+
+    def _close_return(self, return_id: str, parent):
+        dlg = tk.Toplevel(parent, bg=CBG)
+        dlg.title("How did it end?")
+        dlg.transient(parent)
+        _centre_on_parent(dlg, parent, px(320), px(280))
+        tk.Label(dlg, text="How did it end?", bg=CBG, fg=CA,
+                 font=F_SEC).pack(anchor="w", padx=px(16), pady=(px(14), px(8)))
+        note = tk.Label(dlg, text="", bg=CBG, fg=CMU, font=F_SM,
+                        wraplength=px(280), justify="left")
+
+        def _set(outcome):
+            try:
+                _records.close_return(return_id, outcome)
+            except Exception as exc:
+                note.config(text=str(exc))
+                return
+            note.config(text="Closed. Reopen the list to see it.")
+            self.status_var.set("Return closed as " + outcome + ".")
+
+        for outcome in ("remade", "credited", "no fault", "scrapped"):
+            flat_btn(dlg, outcome.title(), lambda o=outcome: _set(o), bg=CNE,
+                     pady=px(6), variant="secondary").pack(
+                         anchor="w", padx=px(16), pady=px(3))
+        note.pack(anchor="w", padx=px(16), pady=(px(8), 0))
+        flat_btn(dlg, "Close", dlg.destroy, bg=CNE,
+                 pady=px(6)).pack(anchor="e", padx=px(16), pady=px(10))
+
+    # ── Counting a rack ───────────────────────────────────────────────────
+
+    def _stocktake(self):
+        dlg = tk.Toplevel(self.master, bg=CBG)
+        dlg.title("Stocktake")
+        dlg.transient(self.master)
+        _centre_on_parent(dlg, self.master, px(900), px(640))
+
+        head = tk.Frame(dlg, bg=CBG, padx=px(16), pady=px(12))
+        head.pack(fill="x")
+        tk.Label(head, text="Stocktake", bg=CBG, fg=CA,
+                 font=F_TTL).pack(side="left")
+        which = tk.Label(head, text="", bg=CBG, fg=CMU, font=F_SM)
+        which.pack(side="right")
+
+        bar = tk.Frame(dlg, bg=CBG, padx=px(16))
+        bar.pack(fill="x")
+        tk.Label(bar, text="Scan or type a code", bg=CBG, fg=CTX,
+                 font=F_BODY).pack(side="left")
+        code = tk.StringVar()
+        e_code = tk.Entry(bar, textvariable=code, width=18, font=F_BODY,
+                          bg=CRE, fg=CTX, relief="flat", highlightthickness=1,
+                          highlightbackground=CBR)
+        e_code.pack(side="left", padx=(px(6), px(12)))
+        tk.Label(bar, text="Counted", bg=CBG, fg=CTX,
+                 font=F_BODY).pack(side="left")
+        amount = tk.StringVar()
+        e_amt = tk.Entry(bar, textvariable=amount, width=8, font=F_BODY,
+                         bg=CRE, fg=CTX, relief="flat", highlightthickness=1,
+                         highlightbackground=CBR)
+        e_amt.pack(side="left", padx=(px(6), px(12)))
+
+        wrap = tk.Frame(dlg, bg=CCA, highlightbackground=CBR,
+                        highlightthickness=1)
+        wrap.pack(fill="both", expand=True, padx=px(16), pady=px(12))
+        tree = ttk.Treeview(wrap, columns=("item", "was", "counted", "out",
+                                           "who"),
+                            show="headings", style="TAF.Treeview")
+        for key, label, wd, anc in [("item", "Item", 280, "w"),
+                                    ("was", "System said", 110, "e"),
+                                    ("counted", "Counted", 100, "e"),
+                                    ("out", "Out by", 90, "e"),
+                                    ("who", "By", 150, "w")]:
+            tree.heading(key, text=label)
+            tree.column(key, width=px(wd), anchor=anc)
+        tree.tag_configure("late", background="#FCE9E6")
+        tree.tag_configure("todo", background=CSP)
+        tree.pack(fill="both", expand=True)
+
+        note = tk.Label(dlg, text="", bg=CBG, fg=CMU, font=F_SM,
+                        wraplength=px(840), justify="left")
+        note.pack(anchor="w", padx=px(16))
+
+        state = {"session": None, "items": []}
+
+        def _reload():
+            try:
+                state["items"] = _db.get_stock_items()
+                state["session"] = _records.open_stocktake()
+            except Exception as exc:
+                note.config(text=str(exc))
+                return
+            session = state["session"]
+            which.config(text=(f"Counting: {session.get('name')}"
+                               if session else "Nothing being counted"))
+            for iid in tree.get_children():
+                tree.delete(iid)
+            if not session:
+                note.config(text="Start a count, then scan a rack label and "
+                                 "type what is on the shelf. It can be put "
+                                 "down and picked up again.")
+                return
+            got = _records.stocktake_progress(session["id"], state["items"])
+            for row in got["counted"]:
+                tree.insert("", "end", iid=str(row.get("id")),
+                            tags=("late",) if abs(row["out_by"]) > 1e-9 else (),
+                            values=(row.get("name"), _fmt_mm(row["was"]),
+                                    _fmt_mm(row["counted"]),
+                                    _fmt_mm(row["out_by"]),
+                                    row.get("counted_by") or ""))
+            for row in got["not_counted"]:
+                tree.insert("", "end", iid=str(row.get("id")), tags=("todo",),
+                            values=(row.get("name"), _fmt_mm(
+                                row.get("stock_on_hand")), "—", "", ""))
+            note.config(
+                text=f"{len(got['counted'])} of {got['total']} counted, "
+                     f"{len(got['out_by'])} out. Nothing moves until you "
+                     f"finish and apply it.")
+
+        def _start():
+            try:
+                _records.start_stocktake()
+            except ValueError as exc:
+                note.config(text=str(exc))
+                return
+            except Exception as exc:
+                note.config(text=f"Could not start: {exc}")
+                return
+            _reload()
+            e_code.focus_set()
+
+        def _count(_e=None):
+            session = state["session"]
+            if not session:
+                note.config(text="Start a count first.")
+                return
+            wanted = str(code.get()).strip().lower()
+            if not wanted:
+                return
+            item = next((i for i in state["items"]
+                         if wanted in (str(i.get("sku") or "").lower(),
+                                       str(i.get("name") or "").lower())), None)
+            if item is None:
+                note.config(text=f"Nothing here answers to {code.get()!r}.")
+                return
+            try:
+                counted = float(str(amount.get()).strip())
+            except ValueError:
+                note.config(text="How many are on the shelf?")
+                e_amt.focus_set()
+                return
+            try:
+                _records.count_item(session["id"], item["id"], counted,
+                                    float(item.get("stock_on_hand") or 0))
+            except Exception as exc:
+                note.config(text=str(exc))
+                return
+            code.set("")
+            amount.set("")
+            e_code.focus_set()
+            _reload()
+
+        def _finish(apply: bool):
+            session = state["session"]
+            if not session:
+                return
+            if apply and not messagebox.askyesno(
+                    "Stocktake",
+                    "Apply every count as a real stock movement? This is "
+                    "what makes the figures match the shelf.", parent=dlg):
+                return
+            try:
+                out = _records.finish_stocktake(session["id"], apply)
+            except Exception as exc:
+                note.config(text=str(exc))
+                return
+            _reload()
+            note.config(text=(f"Finished. {out['applied']} item(s) moved."
+                              if apply else
+                              "Finished without changing any figures."))
+            self.status_var.set("Stocktake finished.")
+
+        flat_btn(bar, "Count it", _count, bg=CA, pady=px(5)).pack(side="left")
+        e_code.bind("<Return>", lambda _e: e_amt.focus_set())
+        e_amt.bind("<Return>", _count)
+
+        foot = tk.Frame(dlg, bg=CBG, padx=px(16), pady=px(12))
+        foot.pack(fill="x")
+        flat_btn(foot, "Close", dlg.destroy, bg=CNE,
+                 pady=px(6)).pack(side="right")
+        flat_btn(foot, "Start a count", _start, bg=CNE, pady=px(6),
+                 variant="secondary").pack(side="left")
+        flat_btn(foot, "Finish and apply", lambda: _finish(True), bg=CGR,
+                 pady=px(6)).pack(side="left", padx=(px(8), 0))
+        flat_btn(foot, "Finish without applying", lambda: _finish(False),
+                 bg=CNE, pady=px(6),
+                 variant="secondary").pack(side="left", padx=(px(8), 0))
+        _reload()
+
+    # ── Buying ────────────────────────────────────────────────────────────
+
+    def _purchasing(self):
+        def build():
+            items = _db.get_stock_items()
+            open_pos = _records.list_purchases(open_only=True)
+            coming = _records.quantities_on_order(open_pos)
+            drafts = _records.purchase_from_low_stock(items, coming)
+            out = []
+            if open_pos:
+                out.append((("On order", "", "", "", ""), "head", None))
+                for po in open_pos:
+                    out.append(((f"    {po.get('supplier')}",
+                                 len(po.get("lines") or []),
+                                 po.get("status") or "draft",
+                                 str(po.get("created_at") or "")[:10], ""),
+                                None, po.get("id")))
+            out.append((("Short, and not on order", "", "", "", ""),
+                        "head", None))
+            for draft in drafts:
+                out.append(((draft["supplier"], len(draft["lines"]),
+                             "to raise", "", draft["supplier_email"] or "—"),
+                            "late", None))
+                for line in draft["lines"]:
+                    out.append(((f"        {line['name']}", "", "",
+                                 f"{line['quantity']:g} {line['unit']}",
+                                 f"{line['on_hand']:g} of "
+                                 f"{line['minimum']:g}"
+                                 + (f", {line['on_order']:g} coming"
+                                    if line["on_order"] else "")),
+                                None, None))
+            footer = (f"{len(drafts)} supplier"
+                      f"{'' if len(drafts) == 1 else 's'} to raise an order "
+                      f"with. What is already on order is taken off the "
+                      f"shortfall, so the same roll is not bought twice."
+                      if drafts else
+                      "Nothing is short once what is already on order is "
+                      "counted.")
+            return out, footer
+
+        dlg, tree, foot = self._table_window(
+            "Buying",
+            "Low stock is a red row and a phone call. This is the other "
+            "half: what to order, from whom, and what is already coming.",
+            [("supplier", "Supplier / item", 280, "w"),
+             ("lines", "Lines", 70, "e"), ("status", "State", 100, "w"),
+             ("qty", "To order", 120, "e"), ("note", "", 220, "w")],
+            build, width=900, height=560)
+
+        def _raise_all():
+            items = _db.get_stock_items()
+            coming = _records.quantities_on_order()
+            drafts = _records.purchase_from_low_stock(items, coming)
+            if not drafts:
+                foot.config(text="Nothing to raise.")
+                return
+            made = 0
+            for draft in drafts:
+                try:
+                    _records.draft_purchase(draft["supplier"], draft["lines"],
+                                            draft["supplier_email"])
+                    made += 1
+                except Exception as exc:
+                    foot.config(text=str(exc))
+                    return
+            foot.config(text=f"{made} purchase order(s) drafted. Close and "
+                             f"reopen to see them.")
+            self.status_var.set(f"{made} purchase order(s) drafted.")
+
+        bottom = tk.Frame(dlg, bg=CBG, padx=px(16), pady=px(6))
+        bottom.pack(fill="x")
+        if _db.can_manage_prices():
+            flat_btn(bottom, "Draft them all", _raise_all, bg=CA,
+                     pady=px(6)).pack(side="left")
+        else:
+            tk.Label(bottom, text="Only a manager can raise a purchase "
+                                  "order.", bg=CBG, fg=CMU,
+                     font=F_SM).pack(side="left")
+
+    # ── What a particular customer pays ───────────────────────────────────
+
+    def _customer_pricing(self):
+        def build():
+            customers = {str(c.get("id")): c for c in _db.get_customers()}
+            rows = _records.list_customer_prices()
+            out = []
+            for r in rows:
+                who = customers.get(str(r.get("customer_id")), {})
+                out.append(((who.get("name") or "—",
+                             r.get("part_number") or "(everything)",
+                             ("" if r.get("unit_price") is None
+                              else f"${float(r['unit_price']):.2f}"),
+                             ("" if r.get("discount") is None
+                              else f"{float(r['discount']):g}%"),
+                             r.get("note") or ""), None, r.get("id")))
+            return out, (f"{len(rows)} agreement"
+                         f"{'' if len(rows) == 1 else 's'}. A price against a "
+                         f"part number beats an across-the-board discount: "
+                         f"the specific thing somebody agreed beats the "
+                         f"general thing they agreed earlier."
+                         if rows else
+                         "Nothing agreed with anybody yet — everyone pays "
+                         "the list price.")
+
+        self._table_window(
+            "What each customer pays",
+            "An agreed rate that has to be remembered is an agreed rate "
+            "that gets forgotten on a Friday.",
+            [("customer", "Customer", 240, "w"),
+             ("part", "Part number", 180, "w"),
+             ("price", "Their price", 110, "e"),
+             ("off", "Or off list", 100, "e"), ("note", "Note", 200, "w")],
+            build, width=880, height=520)
+
+    # ── Days that do not exist ────────────────────────────────────────────
+
+    def _shutdown_calendar(self):
+        dlg = tk.Toplevel(self.master, bg=CBG)
+        dlg.title("Shutdown calendar")
+        dlg.transient(self.master)
+        _centre_on_parent(dlg, self.master, px(560), px(540))
+        tk.Label(dlg, text="Shutdown calendar", bg=CBG, fg=CA,
+                 font=F_TTL).pack(anchor="w", padx=px(16), pady=(px(12), 0))
+        tk.Label(dlg, text="Christmas, the public holidays, and the fortnight "
+                           "the place is shut. A due date that lands on one "
+                           "of them was never going to be met.",
+                 bg=CBG, fg=CMU, font=F_SM, wraplength=px(500),
+                 justify="left").pack(anchor="w", padx=px(16),
+                                      pady=(px(4), px(10)))
+
+        bar = tk.Frame(dlg, bg=CBG, padx=px(16))
+        bar.pack(fill="x")
+        day = tk.StringVar()
+        name = tk.StringVar()
+        tk.Label(bar, text="Day (dd/mm/yyyy)", bg=CBG, fg=CTX,
+                 font=F_BODY).pack(side="left")
+        tk.Entry(bar, textvariable=day, width=12, font=F_BODY, bg=CRE, fg=CTX,
+                 relief="flat", highlightthickness=1,
+                 highlightbackground=CBR).pack(side="left", padx=(px(6), px(10)))
+        tk.Label(bar, text="What for", bg=CBG, fg=CTX,
+                 font=F_BODY).pack(side="left")
+        tk.Entry(bar, textvariable=name, width=18, font=F_BODY, bg=CRE,
+                 fg=CTX, relief="flat", highlightthickness=1,
+                 highlightbackground=CBR).pack(side="left", padx=(px(6), px(10)))
+
+        wrap = tk.Frame(dlg, bg=CCA, highlightbackground=CBR,
+                        highlightthickness=1)
+        wrap.pack(fill="both", expand=True, padx=px(16), pady=px(12))
+        tree = ttk.Treeview(wrap, columns=("day", "name"), show="headings",
+                            style="TAF.Treeview")
+        tree.heading("day", text="Day")
+        tree.heading("name", text="What for")
+        tree.column("day", width=px(140), anchor="w")
+        tree.column("name", width=px(300), anchor="w")
+        tree.pack(fill="both", expand=True)
+        note = tk.Label(dlg, text="", bg=CBG, fg=CMU, font=F_SM,
+                        wraplength=px(500), justify="left")
+        note.pack(anchor="w", padx=px(16))
+
+        def _reload():
+            for iid in tree.get_children():
+                tree.delete(iid)
+            try:
+                rows = _records.shutdown_days()
+            except Exception as exc:
+                note.config(text=str(exc))
+                return
+            for r in rows:
+                stamp = str(r.get("day") or "")
+                tree.insert("", "end", iid=stamp, values=(
+                    stamp, r.get("name") or ""))
+            nxt = _records.next_working_day(datetime.date.today(), rows)
+            note.config(text=f"{len(rows)} day(s) recorded. The next day the "
+                             f"place is open is {nxt.strftime('%A %d/%m/%Y')}.")
+
+        def _add():
+            when = _insights.parse_date(day.get())
+            if when is None:
+                note.config(text="Give the day as dd/mm/yyyy.")
+                return
+            try:
+                _records.add_shutdown(when, name.get())
+            except Exception as exc:
+                note.config(text=f"Could not save that: {exc}")
+                return
+            day.set("")
+            name.set("")
+            _reload()
+
+        def _remove():
+            picked = tree.selection()
+            if not picked:
+                note.config(text="Pick a day to take off.")
+                return
+            try:
+                _records.remove_shutdown(
+                    datetime.date.fromisoformat(picked[0]))
+            except Exception as exc:
+                note.config(text=str(exc))
+                return
+            _reload()
+
+        flat_btn(bar, "Add", _add, bg=CA, pady=px(5)).pack(side="left")
+        foot = tk.Frame(dlg, bg=CBG, padx=px(16), pady=px(12))
+        foot.pack(fill="x")
+        flat_btn(foot, "Close", dlg.destroy, bg=CNE,
+                 pady=px(6)).pack(side="right")
+        flat_btn(foot, "Take it off", _remove, bg=CNE, pady=px(6),
+                 variant="secondary").pack(side="right", padx=(0, px(8)))
+        _reload()
 
     def _copy_text(self, what: str):
         try:

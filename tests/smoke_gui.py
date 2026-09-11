@@ -177,6 +177,20 @@ OVERRIDES = {
         {"kind": "stock", "ref": "s1", "label": "G4 media roll",
          "detail": "Rack A1", "extra": {"sku": "TAF-G4-ROLL"}}],
     "adjust_stock":        lambda *a, **k: 12.0,
+    "list_offcuts":        lambda *a, **k: [
+        {"id": "of1", "length_mm": 1300, "profile": "50mm",
+         "created_by": "Smoke Test", "created_at": "2026-09-01T00:00:00Z"}],
+    "offcut_lengths":      lambda *a, **k: [1300.0],
+    "add_offcut":          lambda *a, **k: {"id": "of2"},
+    "use_offcut":          lambda *a, **k: None,
+    "frame_preference":    lambda *a, **k: "",
+    "set_frame_preference": lambda *a, **k: None,
+    "made_sizes":          lambda *a, **k: [
+        {"short": 295, "long": 310, "seen": 7}],
+    "set_order_stage":     lambda *a, **k: "o3",
+    "set_line_sent":       lambda *a, **k: "o3",
+    "get_order_items":     lambda oid="", *a, **k: next(
+        (list(o["items"]) for o in ORDERS if o["id"] == oid), []),
 }
 
 # Rights are a real fork in what gets built: a manager sees the stock-alert

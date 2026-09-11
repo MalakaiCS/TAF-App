@@ -93,13 +93,13 @@ CATALOGUE: List[Feature] = [
     Feature("kits", "Kits",
             "An AHU that takes four panels and two bags entered as one line "
             "rather than six.",
-            "Making it"),
+            "Making it", built=True),
 
     # ── Knowing where you stand ──────────────────────────────────────────
     Feature("site_schedules", "Site filter schedules",
             "What is actually installed at each site, so a service visit "
             "writes its own order.",
-            "Knowing where you stand"),
+            "Knowing where you stand", built=True),
     Feature("capacity", "What you can promise",
             "What is already promised this week against what you normally "
             "get through, before you agree to Friday.",
@@ -133,7 +133,7 @@ CATALOGUE: List[Feature] = [
     Feature("customer_pricing", "Per-customer pricing",
             "An agreed rate or discount against a customer, applied without "
             "anybody remembering to.",
-            "Money"),
+            "Money", built=True),
     Feature("xero_live", "Xero, connected",
             "Push the invoice and get back whether it has been paid, instead "
             "of exporting a file.",
@@ -141,7 +141,7 @@ CATALOGUE: List[Feature] = [
     Feature("purchasing", "Buying, not just knowing",
             "Turn a low-stock list into a purchase order to the supplier, "
             "emailed, with the quantity marked as on order.",
-            "Money"),
+            "Money", built=True),
 
     # ── The floor ────────────────────────────────────────────────────────
     Feature("backorders", "Backorders and part-dispatch",
@@ -151,7 +151,7 @@ CATALOGUE: List[Feature] = [
     Feature("stocktake", "Stocktake mode",
             "A counting session: what has been counted, what has not, and "
             "the variance at the end.",
-            "The floor"),
+            "The floor", built=True),
     Feature("channel_in_sticks", "Channel counted in sticks",
             "Channel is n full lengths plus these offcuts, not a number of "
             "metres.",
@@ -159,7 +159,7 @@ CATALOGUE: List[Feature] = [
     Feature("returns", "Returns and rework",
             "A filter that comes back, recorded against the order it came "
             "from.",
-            "The floor"),
+            "The floor", built=True),
     Feature("frame_preference", "Per-customer frame preference",
             "Some customers always want a G. Store it and stop it being a "
             "question.",
@@ -173,7 +173,7 @@ CATALOGUE: List[Feature] = [
     Feature("shutdown_calendar", "Shutdown calendar",
             "Christmas, public holidays and supplier lead times, so a due "
             "date never lands on a Monday that does not exist.",
-            "Admin"),
+            "Admin", built=True),
 ]
 
 BY_KEY: Dict[str, Feature] = {f.key: f for f in CATALOGUE}
