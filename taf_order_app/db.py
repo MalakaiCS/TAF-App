@@ -2002,6 +2002,7 @@ def save_quote(data: dict) -> "dict | None":
         # The priced lines exactly as quoted, kept apart from `items` so what
         # the customer was shown is never re-rendered at today's prices.
         "lines":          data.get("lines") or [],
+        "shipping":       round(float(data.get("shipping") or 0), 2),
         "subtotal":       round(float(data.get("subtotal") or 0), 2),
         "gst":            round(float(data.get("gst") or 0), 2),
         "total":          round(float(data.get("total") or 0), 2),

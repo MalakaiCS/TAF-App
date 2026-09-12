@@ -610,12 +610,26 @@ def describe_item(item: Dict[str, Any]) -> str:
 
 
 def quote_totals(lines: Iterable[Dict[str, Any]],
-                 gst_rate: float = 0.10) -> Dict[str, float]:
-    """Subtotal, GST and total for a set of quote lines."""
-    subtotal = round(sum(l.get("line_total", 0) for l in lines), 2)
+                 gst_rate: float = 0.10,
+                 shipping: float = 0.0) -> Dict[str, float]:
+    """Goods, shipping, GST and total for a set of quote lines.
+
+    Shipping is charged on top of the goods and is taxed with them: freight
+    on a taxable supply is itself taxable, so a quote that put GST on the
+    filters and not on the delivery would be understating the total by a
+    tenth of the freight. It is kept as its own figure rather than folded
+    into the goods, because a customer asked what delivery costs is asking
+    about one number and is entitled to see it.
+    """
+    goods = round(sum(l.get("line_total", 0) for l in lines), 2)
+    try:
+        ship = round(max(0.0, float(shipping or 0)), 2)
+    except (TypeError, ValueError):
+        ship = 0.0
+    subtotal = round(goods + ship, 2)
     gst = round(subtotal * gst_rate, 2)
-    return {"subtotal": subtotal, "gst": gst,
-            "total": round(subtotal + gst, 2)}
+    return {"goods": goods, "shipping": ship, "subtotal": subtotal,
+            "gst": gst, "total": round(subtotal + gst, 2)}
 
 
 def unpriced(lines: Iterable[Dict[str, Any]]) -> List[Dict[str, Any]]:

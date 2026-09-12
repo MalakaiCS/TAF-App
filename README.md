@@ -37,6 +37,8 @@ log, stock management and a customer database.
   it up, and turn an accepted one into an order with the lines already there.
   Print a quote PDF and export a Xero sales-invoice CSV. A line nothing can
   price is shown as "to be confirmed", with the reason, rather than guessed at.
+  **Delivery** is part of the quote, charged on top and taxed with the goods,
+  so the number at the counter is the number on the invoice.
 - **The customer can answer online** — send a link and they read the quote in
   a browser and press Accept or Decline, giving their name and their own order
   number. You see who answered and when, and Follow Up lists everything sent
@@ -114,6 +116,18 @@ log, stock management and a customer database.
 - **Job number highlighter** — show the app one of a customer's purchase
   orders, drag a box around their job number, and it learns the wording to
   look for on every future order from them.
+- **Saying which customer it is** — an imported order that matches nobody
+  offers **Pick Customer** (the likely branches first, each with the reason
+  it's suggested) and **Highlight on Order** (drag a box round their name and
+  address on the page). Choosing one remembers how that order reads, so the
+  next one from them matches on its own. Creating a new profile is the last
+  option rather than the only one — which is how one customer used to end up
+  with four.
+- **A screen facing the customer** — a second monitor at the counter showing
+  the quote as it's built: every line, its price, the line total, the delivery
+  and the total. It never shows a cost or a margin: what goes on it is worked
+  out from prices alone, in its own module, so there's no path from the
+  margin figures to that screen.
 - **Learns from corrections** — when someone fixes a line in the import review
   screen ("V Filter" was read as unknown and they picked V-form; "MERV 8" was
   swapped for G4), the wording and what it meant are remembered and shared
@@ -256,6 +270,7 @@ just run it — nothing is lost and nothing is duplicated.
 | 28 | `migrate_notifications.sql` | A morning summary of what needs doing | optional |
 | 29 | `migrate_features.sql` | Switching new features on, and how the workshop cuts | recommended |
 | 30 | `migrate_more_features.sql` | Kits, sites, returns, stocktakes, buying, agreed prices, shutdowns | optional |
+| 31 | `migrate_quote_shipping.sql` | Delivery charged on a quote, so the counter and the invoice agree | recommended |
 
 **Step 16 is the one that matters most.** Every policy in the older scripts is
 `TO authenticated USING (true)` — meaning *anyone Supabase counts as signed
@@ -431,7 +446,8 @@ yesterday's answer.
 
 Thirty things were asked for at once. All thirty are built, each behind its
 own switch and all off to start with, so the first one that gets in
-somebody's way doesn't take the other twenty-nine down with it.
+somebody's way doesn't take the other twenty-nine down with it. Anything
+asked for since is in the same list and works the same way.
 
 Run `migrate_features.sql` and `migrate_more_features.sql`, then
 **Settings → Features**. A **Director or an

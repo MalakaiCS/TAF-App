@@ -29,9 +29,34 @@ SQL = (ROOT / "migrate_features.sql").read_text(encoding="utf-8")
 
 # ── The catalogue ────────────────────────────────────────────────────────────
 
-def test_all_thirty_are_there():
-    assert len(_feat.CATALOGUE) == 30, \
-        f"{len(_feat.CATALOGUE)} features, not the thirty that were asked for"
+# The thirty that were asked for together, by key. Named rather than counted
+# because the list is not closed - things asked for since are in the
+# catalogue too - and a count would let one of these disappear the moment
+# anything new was added.
+THE_THIRTY = [
+    "channel_calculator", "cut_list_day", "offcut_register", "media_nesting",
+    "cutting_plan", "show_alternative", "near_standard",
+    "cutlist_on_worksheet", "saw_screen", "batch_by_material", "wip_board",
+    "kits", "site_schedules", "capacity", "scrap_rate", "planned_vs_actual",
+    "month_end", "search_all", "job_cost_actual", "labour_margin",
+    "customer_pricing", "xero_live", "purchasing", "backorders", "stocktake",
+    "channel_in_sticks", "returns", "frame_preference", "email_orders",
+    "shutdown_calendar",
+]
+
+
+def test_the_thirty_that_were_asked_for_are_still_there():
+    gone = [k for k in THE_THIRTY if k not in _feat.BY_KEY]
+    assert not gone, f"missing from the catalogue: {gone}"
+    assert len(THE_THIRTY) == 30, "the list of thirty has been edited"
+
+
+def test_anything_added_since_is_built_as_well():
+    """A feature added after the thirty goes through the same door: it is
+    only offered because there is something behind it."""
+    for f in _feat.CATALOGUE:
+        if f.key not in THE_THIRTY:
+            assert f.built, f"{f.key} was added to the catalogue unbuilt"
 
 
 def test_no_two_share_a_key():
@@ -278,9 +303,9 @@ def test_every_screen_in_the_menu_belongs_to_a_real_feature():
 
 
 
-def test_all_thirty_are_actually_built():
-    """The thing that was asked for: thirty features, every one of them with
-    something behind its switch."""
+def test_every_feature_in_the_catalogue_is_actually_built():
+    """The thing that was asked for: every one of them with something behind
+    its switch, not a list of intentions."""
     missing = [f.key for f in _feat.CATALOGUE if not f.built]
     assert not missing, f"still to build: {missing}"
 

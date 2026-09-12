@@ -118,7 +118,12 @@ WITH checks(step, file, purpose, needed, present) AS (VALUES
       to_regclass('public.feature_switches') IS NOT NULL),
 
   (30, 'migrate_more_features.sql', 'Kits, sites, returns, stocktakes, buying, agreed prices, shutdowns', 'optional',
-      to_regclass('public.kits') IS NOT NULL)
+      to_regclass('public.kits') IS NOT NULL),
+
+  (31, 'migrate_quote_shipping.sql', 'Delivery charged on a quote, so the counter and the invoice agree', 'recommended',
+      EXISTS (SELECT 1 FROM information_schema.columns
+               WHERE table_schema='public' AND table_name='quotes'
+                 AND column_name='shipping'))
 )
 SELECT step,
        CASE WHEN present THEN 'already done' ELSE 'RUN THIS' END AS status,

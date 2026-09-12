@@ -34,7 +34,8 @@ def build_quote_pdf(out_path,
                     quote_number: str = "",
                     prepared_by: str = "",
                     gst_rate: float = GST_RATE,
-                    valid_days: int = VALID_DAYS) -> str:
+                    valid_days: int = VALID_DAYS,
+                    shipping: float = 0.0) -> str:
     """Write a quote PDF and return its path."""
     from reportlab.lib.pagesizes import A4
     from reportlab.lib import colors as _c
@@ -188,15 +189,21 @@ def build_quote_pdf(out_path,
     story.append(Spacer(1, 8))
 
     # ── Totals ───────────────────────────────────────────────────────────
-    totals = _pricing.quote_totals(lines, gst_rate)
-    trows = [["Subtotal (ex GST)", f'{totals["subtotal"]:,.2f}'],
-             [f"GST ({gst_rate * 100:.0f}%)", f'{totals["gst"]:,.2f}'],
-             ["Total (inc GST)", f'{totals["total"]:,.2f}']]
+    totals = _pricing.quote_totals(lines, gst_rate, shipping)
+    # Delivery only appears when there is one. A line reading "Delivery 0.00"
+    # invites the question of what it would have been.
+    trows = []
+    if totals["shipping"]:
+        trows.append(["Goods (ex GST)", f'{totals["goods"]:,.2f}'])
+        trows.append(["Delivery", f'{totals["shipping"]:,.2f}'])
+    trows += [["Subtotal (ex GST)", f'{totals["subtotal"]:,.2f}'],
+              [f"GST ({gst_rate * 100:.0f}%)", f'{totals["gst"]:,.2f}'],
+              ["Total (inc GST)", f'{totals["total"]:,.2f}']]
     ttable = Table([[Paragraph(a, s_body), Paragraph(b, s_body)] for a, b in trows],
                    colWidths=[38 * mm, 24 * mm], hAlign="RIGHT")
     ttable.setStyle(TableStyle([
         ("ALIGN", (1, 0), (1, -1), "RIGHT"),
-        ("LINEABOVE", (0, 2), (-1, 2), 0.8, navy),
+        ("LINEABOVE", (0, len(trows) - 1), (-1, len(trows) - 1), 0.8, navy),
         ("TOPPADDING", (0, 0), (-1, -1), 3),
         ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
     ]))

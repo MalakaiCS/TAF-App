@@ -174,6 +174,15 @@ CATALOGUE: List[Feature] = [
             "Christmas, public holidays and supplier lead times, so a due "
             "date never lands on a Monday that does not exist.",
             "Admin", built=True),
+
+    # ── Asked for after the thirty ───────────────────────────────────────
+    # Everything above is one of the thirty that were asked for together.
+    # Anything below arrived afterwards and works the same way; the list is
+    # not closed, it just started at thirty.
+    Feature("customer_display", "Screen facing the customer",
+            "A second monitor at the counter showing the quote as it is "
+            "built - every line, its price, the delivery and the total.",
+            "Money", built=True),
 ]
 
 BY_KEY: Dict[str, Feature] = {f.key: f for f in CATALOGUE}

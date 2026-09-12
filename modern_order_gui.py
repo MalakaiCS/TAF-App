@@ -40,6 +40,7 @@ from taf_order_app import stock_usage as _stock_usage
 from taf_order_app import backup as _backup
 from taf_order_app import labels as _labels
 from taf_order_app import paths as _paths
+from taf_order_app import counter_display as _counter
 from taf_order_app.bag_filler import (
     BAG_PRODUCT_TYPES, BAG_MEDIA_TYPES, ROLL_MEDIA_TYPES,
     ROLL_WIDTHS, ROLL_LENGTHS, STANDARD_SIZES,
@@ -4717,6 +4718,185 @@ class POReviewDialog(tk.Toplevel):
 # Quote
 # ═══════════════════════════════════════════════════════════════════════════
 
+class CounterDisplay(tk.Toplevel):
+    """The quote, on a screen turned to face the customer.
+
+    Somebody comes in and asks what a few filters will cost. Until now they
+    watched the back of a monitor while it was worked out, and heard one
+    number at the end. This puts the same quote in front of them as it is
+    built: every line, what each one costs, what the line comes to, the
+    delivery, and the total.
+
+    Three things it deliberately does not do.
+
+    It never shows a cost or a margin. What comes onto this screen is built
+    by counter_display.py out of prices alone - see the note at the top of
+    that file - so there is no route from the margin figures on the quote
+    tab to this window.
+
+    It does not steal focus. Whoever is typing is typing on the other screen,
+    and a window that grabs the keyboard every time a line is added would
+    make the quote take twice as long.
+
+    And it is not a dialog. No grab, no transient - it sits on the second
+    monitor and stays there while everything else carries on.
+    """
+
+    # Big enough to read across a counter, from a screen that is usually a
+    # cheap one at an angle. The quote screen's own type is sized for
+    # somebody a foot away and is far too small here.
+    F_HEAD = 30
+    F_ROW  = 17
+    F_TOT  = 24
+
+    # Its own colours. The app follows whatever the person at the desk set,
+    # and dark mode on a customer-facing screen across a counter is harder
+    # to read - so this one is always the light, high-contrast pair.
+    BG   = "#FFFFFF"
+    INK  = "#16334A"
+    MUTE = "#6B7C8C"
+    LINE = "#D8E1E8"
+    ACC  = "#1B6CA8"
+
+    def __init__(self, master, title="Total Air Filtration"):
+        super().__init__(master)
+        self.title("Customer Display")
+        self.configure(bg=self.BG)
+        self._closed = False
+        self.protocol("WM_DELETE_WINDOW", self.close)
+        # Escape leaves full screen; it does not close, because the person
+        # who would press it is the one standing on the wrong side of it.
+        self.bind("<Escape>", lambda _e: self.fullscreen(False))
+        self.bind("<F11>",    lambda _e: self.fullscreen())
+
+        head = tk.Frame(self, bg=self.BG, padx=28, pady=18)
+        head.pack(fill="x")
+        self._title = tk.Label(head, text=title, bg=self.BG, fg=self.ACC,
+                               font=(FAM, self.F_HEAD, "bold"), anchor="w")
+        self._title.pack(side="left")
+        self._who = tk.Label(head, text="", bg=self.BG, fg=self.MUTE,
+                             font=(FAM, self.F_ROW), anchor="e")
+        self._who.pack(side="right")
+        tk.Frame(self, bg=self.ACC, height=px(3)).pack(fill="x")
+
+        cols = tk.Frame(self, bg=self.BG, padx=28)
+        cols.pack(fill="x", pady=(px(14), px(4)))
+        for text, side, width in (("ITEM", "left", 0),
+                                  ("TOTAL", "right", 12),
+                                  ("PRICE", "right", 12),
+                                  ("QTY", "right", 6)):
+            tk.Label(cols, text=text, bg=self.BG, fg=self.MUTE,
+                     font=(FAM, 11, "bold"),
+                     width=width or None,
+                     anchor="e" if side == "right" else "w").pack(
+                side=side, fill="x" if not width else None,
+                expand=not width)
+        tk.Frame(self, bg=self.LINE, height=1).pack(fill="x", padx=28)
+
+        self._rows = tk.Frame(self, bg=self.BG, padx=28, pady=4)
+        self._rows.pack(fill="both", expand=True)
+
+        self._empty = tk.Label(
+            self._rows, text="Nothing on this quote yet",
+            bg=self.BG, fg=self.MUTE, font=(FAM, self.F_ROW))
+
+        foot = tk.Frame(self, bg=self.BG, padx=28)
+        foot.pack(fill="x", side="bottom", pady=(px(6), px(22)))
+        tk.Frame(foot, bg=self.LINE, height=1).pack(fill="x", pady=(0, 10))
+        self._totals = tk.Frame(foot, bg=self.BG)
+        self._totals.pack(side="right")
+        self._note = tk.Label(foot, text="", bg=self.BG, fg="#B03A2E",
+                              font=(FAM, 12), anchor="w", justify="left",
+                              wraplength=px(420))
+        self._note.pack(side="left", anchor="s")
+
+        self.geometry("980x680")
+        self.show([], 0.0, "")
+
+    # ── Where it sits ─────────────────────────────────────────────────────
+
+    def to_second_screen(self) -> bool:
+        """Move to the monitor the app is not on, if there is one.
+
+        Tk has no idea how many monitors there are - it reports one desktop
+        the width of all of them side by side. So: a desktop appreciably
+        wider than the window the app is in means a second screen to the
+        right, and that is where this goes. It is a guess, and a wrong guess
+        just puts the window somewhere the person can drag it from.
+        """
+        try:
+            full = self.winfo_screenwidth()
+            here = self.master.winfo_screenwidth()
+            if full > here * 1.4:          # a desktop spanning two monitors
+                self.geometry(f"+{here + 40}+60")
+                return True
+        except Exception:
+            pass
+        return False
+
+    def fullscreen(self, on=None) -> None:
+        try:
+            now = bool(self.attributes("-fullscreen"))
+        except Exception:
+            return
+        self.attributes("-fullscreen", (not now) if on is None else bool(on))
+
+    def close(self) -> None:
+        self._closed = True
+        try:
+            self.destroy()
+        except Exception:
+            pass
+
+    def alive(self) -> bool:
+        return bool(self.winfo_exists()) if not self._closed else False
+
+    # ── What it shows ─────────────────────────────────────────────────────
+
+    def show(self, lines, shipping=0.0, customer="") -> None:
+        """Redraw from a set of quote lines. Called on every change."""
+        self._who.config(text=customer or "")
+        for child in self._rows.winfo_children():
+            child.pack_forget()
+
+        rows = _counter.display_lines(lines)
+        if not rows:
+            self._empty.pack(pady=40)
+        for row in rows:
+            line = tk.Frame(self._rows, bg=self.BG)
+            line.pack(fill="x", pady=px(5))
+            unpriced = row["priced"] == "no"
+            ink = self.MUTE if unpriced else self.INK
+            desc = row["description"]
+            if row["part"]:
+                desc = f'{desc}    ({row["part"]})'
+            tk.Label(line, text=desc, bg=self.BG, fg=ink,
+                     font=(FAM, self.F_ROW), anchor="w",
+                     justify="left").pack(side="left", fill="x", expand=True)
+            for key, width in (("line_total", 12), ("unit_price", 12),
+                               ("quantity", 6)):
+                tk.Label(line, text=row[key], bg=self.BG, fg=ink,
+                         font=(F_NUM[0], self.F_ROW), width=width,
+                         anchor="e").pack(side="right")
+
+        for child in self._totals.winfo_children():
+            child.destroy()
+        for label, amount, big in _counter.display_totals(lines, shipping):
+            r = tk.Frame(self._totals, bg=self.BG)
+            r.pack(fill="x", pady=px(2))
+            tk.Label(r, text=label, bg=self.BG,
+                     fg=self.INK if big else self.MUTE,
+                     font=(FAM, self.F_TOT if big else self.F_ROW,
+                           "bold" if big else "normal"),
+                     width=14, anchor="e").pack(side="left")
+            tk.Label(r, text=amount, bg=self.BG,
+                     fg=self.ACC if big else self.INK,
+                     font=(F_NUM[0], self.F_TOT if big else self.F_ROW,
+                           "bold" if big else "normal"),
+                     width=12, anchor="e").pack(side="left")
+        self._note.config(text=_counter.caveat(lines))
+
+
 class QuoteDialog(tk.Toplevel):
     """What an order comes to, line by line, before anything is sent out.
 
@@ -6753,7 +6933,18 @@ class ModernOrderApp(tk.Frame):
                  font=F_BOLD).grid(row=0, column=3, sticky="w")
         ttk.Combobox(det, textvariable=self.quote_location_var,
                      values=list(_pn.REGION_NAMES), state="readonly", width=16
-                     ).grid(row=1, column=3, sticky="ew")
+                     ).grid(row=1, column=3, sticky="ew", padx=(0, 14))
+
+        # Freight, charged on top and taxed with the goods. It was quoted in
+        # somebody's head and added at invoicing before this, which is how a
+        # customer gets told one number and billed another.
+        tk.Label(det, text="DELIVERY $", bg=CCA, fg=CMU,
+                 font=F_BOLD).grid(row=0, column=4, sticky="w")
+        self.quote_shipping_var = tk.StringVar(value="")
+        field_entry(det, textvariable=self.quote_shipping_var, width=10
+                    ).grid(row=1, column=4, sticky="ew")
+        self.quote_shipping_var.trace_add(
+            "write", lambda *_: self._refresh_quote_lines())
 
         # ── The lines ────────────────────────────────────────────────────
         wrap = tk.Frame(frm, bg=CCA, highlightbackground=CSP,
@@ -6806,6 +6997,16 @@ class ModernOrderApp(tk.Frame):
         # deletion. Red is saved for the things that don't come back.
         flat_btn(bot, "Remove", self._remove_quote_item, variant="secondary",
                  pady=7).pack(side="left", padx=(0, 8))
+
+        # The screen that faces the customer. Only offered where somebody has
+        # turned it on — most PCs in the building have one monitor and no
+        # counter in front of them.
+        self._counter_win = None
+        self._counter_btn = flat_btn(bot, "🖥  Customer Screen",
+                                     self._toggle_counter_display,
+                                     variant="secondary", pady=7)
+        if _features.is_on("customer_display"):
+            self._counter_btn.pack(side="left", padx=(0, 8))
 
         # Saving is the thing you do here; everything you can then do WITH the
         # quote is one click away. Built when the menu opens, so sending and
@@ -6909,13 +7110,18 @@ class ModernOrderApp(tk.Frame):
                             f'{line.get("line_total", 0):,.2f}' if priced else "—",
                             _pricing.source_label(line),
                         ))
+        ship = self._quote_shipping()
+        self._push_to_counter(lines, ship)
         if not lines:
             self._quote_totals_var.set("")
             self._quote_warn_var.set("")
             return
-        t = _pricing.quote_totals(lines)
+        t = _pricing.quote_totals(lines, shipping=ship)
         totals = (f"Subtotal  ${t['subtotal']:,.2f}      "
                   f"GST  ${t['gst']:,.2f}      Total  ${t['total']:,.2f}")
+        if t["shipping"]:
+            totals = (f"Goods  ${t['goods']:,.2f}      "
+                      f"Delivery  ${t['shipping']:,.2f}      ") + totals
         # What the job makes, next to what it sells for. Only for the people
         # who set prices — it is the one number on this screen that must
         # never end up in front of a customer.
@@ -6933,6 +7139,76 @@ class ModernOrderApp(tk.Frame):
             f"{'are' if len(missing) != 1 else 'is'} excluded from the totals. "
             "Price them on the Products tab before sending this out."
             if missing else "")
+
+    def _quote_shipping(self) -> float:
+        """What is in the delivery box, as a number.
+
+        Somebody types "$45", "45.00 " or nothing at all, and none of those
+        should stop the totals redrawing — it is a box being typed into, so
+        it spends most of its life half-finished.
+        """
+        raw = getattr(self, "quote_shipping_var", None)
+        if raw is None:
+            return 0.0
+        text = str(raw.get() or "").replace("$", "").replace(",", "").strip()
+        if not text:
+            return 0.0
+        try:
+            return max(0.0, float(text))
+        except ValueError:
+            return 0.0
+
+    # ── The screen the customer sees ──────────────────────────────────────
+
+    def _counter_window(self):
+        win = getattr(self, "_counter_win", None)
+        if win is not None and not win.alive():
+            self._counter_win = None
+            return None
+        return self._counter_win if win is not None else None
+
+    def _push_to_counter(self, lines=None, shipping=None) -> None:
+        """Keep the customer's screen in step, if one is open.
+
+        Called from the same place the quote table is redrawn, so there is
+        no second list of the places a quote can change — one of which would
+        eventually be missed, and the customer would be looking at a screen
+        that is a line behind.
+        """
+        win = self._counter_window()
+        if win is None:
+            return
+        if lines is None:
+            lines = self._quote_current_lines()
+        if shipping is None:
+            shipping = self._quote_shipping()
+        who = ((self._quote_customer or {}).get("short_name")
+               or self.quote_customer_var.get().strip() or "")
+        try:
+            win.show(lines, shipping, who)
+        except Exception:
+            # A display that has gone (screen unplugged, window killed) must
+            # never take the quote down with it.
+            self._counter_win = None
+
+    def _toggle_counter_display(self):
+        """Open or close the second screen."""
+        win = self._counter_window()
+        if win is not None:
+            win.close()
+            self._counter_win = None
+            self._counter_btn.config(text="🖥  Customer Screen")
+            self.status_var.set("Customer screen closed.")
+            return
+        self._counter_win = CounterDisplay(self.master)
+        moved = self._counter_win.to_second_screen()
+        self._push_to_counter()
+        self._counter_btn.config(text="🖥  Close Customer Screen")
+        self.status_var.set(
+            "Customer screen opened on the second monitor — F11 for full "
+            "screen." if moved else
+            "Customer screen opened — drag it to the other monitor, then F11 "
+            "for full screen.")
 
     def _quote_add_menu(self):
         """Everything a quote can carry, in one list.
@@ -7229,6 +7505,7 @@ class ModernOrderApp(tk.Frame):
         self.quote_ref_var.set("")
         self.quote_location_var.set("")
         self.quote_number_var.set("")
+        self.quote_shipping_var.set("")
         self._refresh_quote_lines()
         self._update_convert_button()
 
@@ -7618,7 +7895,8 @@ class ModernOrderApp(tk.Frame):
         if not self._quote_tab_ready():
             return
         lines = self._quote_current_lines()
-        totals = _pricing.quote_totals(lines)
+        ship = self._quote_shipping()
+        totals = _pricing.quote_totals(lines, shipping=ship)
         if not self.quote_number_var.get().strip():
             try:
                 self.quote_number_var.set(_db.next_quote_number())
@@ -7638,6 +7916,7 @@ class ModernOrderApp(tk.Frame):
             # What the customer is shown, frozen at today's prices.
             "lines":          [{k: v for k, v in line.items() if k != "item"}
                                for line in lines],
+            "shipping":       totals["shipping"],
             "subtotal":       totals["subtotal"],
             "gst":            totals["gst"],
             "total":          totals["total"],
@@ -7852,6 +8131,8 @@ class ModernOrderApp(tk.Frame):
         self.quote_customer_var.set(row.get("customer_name", ""))
         self.quote_ref_var.set(row.get("reference", ""))
         self.quote_location_var.set(row.get("location", ""))
+        ship = row.get("shipping") or 0
+        self.quote_shipping_var.set(f"{float(ship):.2f}" if ship else "")
         self.quote_items = [self._stamp_item(dict(i))
                             for i in (row.get("items") or [])]
         self._refresh_quote_lines()

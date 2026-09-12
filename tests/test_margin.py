@@ -136,8 +136,13 @@ def test_the_products_list_shows_a_dash_not_a_hundred_per_cent():
 def test_margin_is_only_shown_to_the_people_who_set_prices():
     """It is the one number on the quote screen that must never end up in
     front of a customer."""
+    # Anchored on the function rather than a fixed number of characters
+    # after a line. It used to slice 700 characters, and adding the delivery
+    # row to the totals pushed the margin past the end of the slice — a test
+    # that stops reading the thing it is about is a test that passes.
     src = (ROOT / "modern_order_gui.py").read_text(encoding="utf-8")
-    block = src.split("totals = (f\"Subtotal")[1][:700]
+    block = src.split("def _refresh_quote_lines(self)")[1].split("\n    def ")[0]
+    assert "margin_label" in block, "the margin has left the quote screen"
     assert "can_manage_prices()" in block
     assert block.index("can_manage_prices()") < block.index("margin_label")
 

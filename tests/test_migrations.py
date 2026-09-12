@@ -50,6 +50,7 @@ ORDER = [
     "migrate_notifications.sql",
     "migrate_features.sql",
     "migrate_more_features.sql",
+    "migrate_quote_shipping.sql",
 ]
 
 

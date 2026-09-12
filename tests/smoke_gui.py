@@ -934,10 +934,25 @@ def _dialogs(gui, root):
                     "items": [dict(i) for i in ORDERS[0]["items"]],
                     "source": "phone", "sent_by": "smoke@taf.local"}],
             ["G4", "F7"], ["V-form", "Flat Panel"])),
+        # Drawn with a real quote on it, delivery included, so the totals
+        # block and an unpriced row are both actually laid out.
+        ("CounterDisplay", lambda: _counter_with_a_quote(gui, root)),
         ("QuoteDialog",      lambda: gui.QuoteDialog(
             root, dict(ORDERS[0]["header"]), _quote_lines(), CUSTOMERS[0],
             "Smoke Test")),
     ]
+
+
+def _counter_with_a_quote(gui, root):
+    win = gui.CounterDisplay(root)
+    lines = _quote_lines()
+    # One line nothing could price, because that row is drawn differently
+    # and is the one a customer is most likely to ask about.
+    lines.append({"part_number": "", "description": "Special frame - to spec",
+                  "quantity": 1, "unit_price": 0, "line_total": 0,
+                  "source": ""})
+    win.show(lines, 45.0, "Bells Creek")
+    return win
 
 
 def _suggestions(po_name, po_address):
