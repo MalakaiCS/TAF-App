@@ -125,51 +125,159 @@ def _export_pdf_powershell(xlsx_path: str, pdf_path: str) -> bool:
         return False
 
 
+# ── Turning the filled workbook into a printable sheet ───────────────────────
+#
+# The .xlsx is written by openpyxl and needs nothing installed. Turning it into
+# a PDF needs something that can lay out a spreadsheet, and which something is
+# there depends on the machine:
+#
+#   Windows   Excel through COM, cached between orders because starting it
+#             costs several seconds; then the same thing through PowerShell
+#             for a PC without pywin32.
+#   macOS     Excel for Mac through AppleScript first, because it is the same
+#             Excel and lays the template out identically. Then LibreOffice.
+#   Linux     LibreOffice.
+#
+# Excel first on a Mac is not a preference, it is fidelity. The template is a
+# fixed grid that somebody reads at a saw, and LibreOffice shifts a column
+# here and there. Right numbers in a slightly different place is fine;
+# guessing which is which is not, so the closest match goes first.
+
+def _soffice() -> str:
+    """Where LibreOffice is, or empty. It is the one converter that is the
+    same on every platform, which is why it is everybody's fallback."""
+    import shutil
+    for name in ("soffice", "libreoffice"):
+        found = shutil.which(name)
+        if found:
+            return found
+    for guess in (
+            "/Applications/LibreOffice.app/Contents/MacOS/soffice",
+            "/usr/lib/libreoffice/program/soffice",
+            r"C:\\Program Files\\LibreOffice\\program\\soffice.exe"):
+        if os.path.exists(guess):
+            return guess
+    return ""
+
+
+def _export_pdf_libreoffice(xlsx_path: str, pdf_path: str) -> bool:
+    """Convert through LibreOffice, with nothing on screen.
+
+    It writes the PDF beside the source using its own name, so the result is
+    moved into place afterwards rather than trusting a --outdir to land it
+    where we asked.
+    """
+    soffice = _soffice()
+    if not soffice:
+        return False
+    out_dir = os.path.dirname(os.path.abspath(xlsx_path)) or "."
+    try:
+        result = subprocess.run(
+            [soffice, "--headless", "--norestore", "--convert-to", "pdf",
+             "--outdir", out_dir, xlsx_path],
+            capture_output=True, timeout=180)
+    except Exception:
+        return False
+    if result.returncode != 0:
+        return False
+    made = os.path.join(
+        out_dir, os.path.splitext(os.path.basename(xlsx_path))[0] + ".pdf")
+    if not os.path.exists(made):
+        return False
+    if os.path.abspath(made) != os.path.abspath(pdf_path):
+        try:
+            os.replace(made, pdf_path)
+        except Exception:
+            return os.path.exists(made)
+    return os.path.exists(pdf_path)
+
+
+def _export_pdf_excel_mac(xlsx_path: str, pdf_path: str) -> bool:
+    """Export through Excel for Mac, if it is installed.
+
+    AppleScript rather than COM, which does not exist here. The same page
+    setup the Windows path applies - landscape, one page wide and tall - so a
+    worksheet printed on a Mac is the sheet somebody is used to rather than a
+    near miss.
+    """
+    if platform.system() != "Darwin":
+        return False
+    xlsx = os.path.abspath(xlsx_path).replace("\\", "\\\\").replace('"', '\\"')
+    pdf = os.path.abspath(pdf_path).replace("\\", "\\\\").replace('"', '\\"')
+    script = f'''
+      set src to POSIX file "{xlsx}"
+      set dst to POSIX file "{pdf}"
+      tell application "Microsoft Excel"
+        set wasRunning to running
+        open src
+        set wb to active workbook
+        repeat with ws in worksheets of wb
+          tell page setup object of ws
+            set orientation to landscape
+            set zoom to false
+            set fit to pages wide to 1
+            set fit to pages tall to 1
+          end tell
+        end repeat
+        save as active sheet filename dst file format PDF file format
+        close wb saving no
+        if not wasRunning then quit
+      end tell
+    '''
+    try:
+        result = subprocess.run(["osascript", "-e", script],
+                                capture_output=True, timeout=180)
+    except Exception:
+        return False
+    return result.returncode == 0 and os.path.exists(pdf_path)
+
+
+def _open_file(path: str) -> None:
+    """Show a finished file to whoever asked for it, on any of the three."""
+    try:
+        system = platform.system()
+        if system == "Windows":
+            os.startfile(path)
+        elif system == "Darwin":
+            subprocess.call(["open", path])
+        else:
+            subprocess.call(["xdg-open", path])
+    except Exception:
+        # No application associated with it. The caller shows the path, and a
+        # worksheet that saved but did not open is still a worksheet.
+        pass
+
+
 def save_and_export_pdf(out_wb, out_path, auto_open=True):
-    # Always save the .xlsx first — this never requires Excel
+    # Always save the .xlsx first — this never requires anything installed.
     out_wb.save(out_path)
+    pdf_path = out_path.replace(".xlsx", ".pdf")
 
-    if platform.system() == "Windows":
-        pdf_path = out_path.replace(".xlsx", ".pdf")
-
-        # Method 1: persistent cached Excel COM (fast after first use)
-        exported = _export_pdf_via_cached_excel(out_path, pdf_path)
-
-        # Method 2: PowerShell COM fallback (works without pywin32)
-        if not exported:
-            exported = _export_pdf_powershell(out_path, pdf_path)
-
-        if exported and os.path.exists(pdf_path):
-            if auto_open:
-                try:
-                    os.startfile(pdf_path)
-                except Exception:
-                    pass
-            return pdf_path
-
-        # Excel not installed — xlsx already saved, just return it
-        if auto_open:
-            try:
-                os.startfile(out_path)
-            except Exception:
-                # No app associated with .xlsx — silently continue;
-                # the caller will show the file path to the user
-                pass
-        return out_path
-
-    elif platform.system() == "Darwin":
-        if auto_open:
-            try:
-                subprocess.call(["open", out_path])
-            except Exception:
-                pass
+    system = platform.system()
+    if system == "Windows":
+        ways = (lambda: _export_pdf_via_cached_excel(out_path, pdf_path),
+                lambda: _export_pdf_powershell(out_path, pdf_path),
+                lambda: _export_pdf_libreoffice(out_path, pdf_path))
+    elif system == "Darwin":
+        ways = (lambda: _export_pdf_excel_mac(out_path, pdf_path),
+                lambda: _export_pdf_libreoffice(out_path, pdf_path))
     else:
-        if auto_open:
-            try:
-                subprocess.call(["xdg-open", out_path])
-            except Exception:
-                pass
+        ways = (lambda: _export_pdf_libreoffice(out_path, pdf_path),)
 
+    for way in ways:
+        try:
+            if way() and os.path.exists(pdf_path):
+                if auto_open:
+                    _open_file(pdf_path)
+                return pdf_path
+        except Exception:
+            continue          # try the next one rather than losing the order
+
+    # Nothing here can lay out a spreadsheet. The .xlsx is saved either way,
+    # and an order that has to be opened and printed by hand is a great deal
+    # better than an order that did not get made.
+    if auto_open:
+        _open_file(out_path)
     return out_path
 
 TEMPLATE_FILE = "Templates.xlsx"
