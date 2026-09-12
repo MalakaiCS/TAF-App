@@ -28,6 +28,9 @@ permissions:
 jobs:
   release:
     runs-on: windows-latest
+    outputs:
+      version: ${{ steps.ver.outputs.version }}
+      tag:     ${{ steps.ver.outputs.tag }}
 
     steps:
       - name: Checkout
@@ -192,3 +195,149 @@ jobs:
             }
             echo "Release notes published ($(wc -c < release_notes.md) bytes)."
           fi
+
+  # ── The Mac build ──────────────────────────────────────────────────────────
+  # Separate job, after the Windows one, for two reasons. PyInstaller cannot
+  # cross-compile, so a Mac app has to be built on a Mac; and the release is
+  # already published by then, so if anything here goes wrong the factory's
+  # own PCs still get their update.
+  #
+  # Two of them, because Intel and Apple Silicon are different builds and
+  # neither runs the other's without Rosetta being involved. macos-13 is the
+  # last Intel runner GitHub offers; macos-14 is Apple Silicon.
+  mac:
+    needs: release
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-13
+            label:  Intel
+          - runner: macos-14
+            label:  AppleSilicon
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          # The Windows job may have just bumped the version and pushed it.
+          # Checking out the tag is how this build gets the same number in
+          # the app rather than the one from before the bump.
+          ref: ${{ needs.release.outputs.tag }}
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      # The Windows job already ran the full suite and the smoke test on the
+      # same commit. This is the part that is genuinely different here: the
+      # modules have to import on a machine with no pywin32 at all, which is
+      # exactly what breaks when a Windows-only import creeps back in.
+      - name: Everything imports without pywin32
+        run: |
+          python -m compileall -q modern_order_gui.py pdf_generator.py template_filler.py taf_order_app
+          python -c "import template_filler, pdf_generator; from taf_order_app import db, updater, paths, order_service, bag_filler; print('imports clean')"
+
+      - name: Tests
+        run: python tests/run.py
+
+      - name: Write settings.json from secret
+        env:
+          SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
+        run: |
+          if [ -z "$SUPABASE_ANON_KEY" ]; then
+            echo "::error::SUPABASE_ANON_KEY secret is not set."
+            exit 1
+          fi
+          cat > settings.json <<EOF
+          {
+            "custom_media_types": [],
+            "supabase_anon_key": "${SUPABASE_ANON_KEY}"
+          }
+          EOF
+
+      # One logo, not two. Built here from the artwork the app already
+      # ships, so nobody has to remember to update a second icon file.
+      - name: Make the app icon
+        run: |
+          python make_mac_icon.py --icns
+          ls -l TAF_logo.icns
+
+      - name: Build app (PyInstaller)
+        env:
+          TAF_VERSION: ${{ needs.release.outputs.version }}
+        run: pyinstaller --noconfirm --clean TAFOrderEntry.spec
+
+      # An unsigned app on Apple Silicon is killed on launch, not warned
+      # about. Ad-hoc signing is what makes it run at all; it does not make
+      # Gatekeeper trust it, which is what the note in the disk image is for.
+      - name: Sign it ad-hoc
+        run: |
+          codesign --force --deep --sign - "dist/TAF Order Entry.app"
+          codesign --verify --verbose=2 "dist/TAF Order Entry.app"
+
+      # Not a screenshot test - nothing here can tell whether the window
+      # looks right. What it does tell you is that every module the app needs
+      # actually made it into the bundle, which is the failure PyInstaller is
+      # most likely to hand you and the one that is invisible in a diff.
+      - name: It at least starts
+        timeout-minutes: 5
+        run: |
+          set +e
+          out=$("dist/TAF Order Entry.app/Contents/MacOS/TAFOrderEntry" --version 2>&1)
+          code=$?
+          echo "$out"
+          if [ $code -ne 0 ] || ! echo "$out" | grep -q "TAF Order Entry"; then
+            echo "::error::The packaged app could not start: $out"
+            exit 1
+          fi
+
+      - name: Make the disk image
+        id: dmg
+        env:
+          V: ${{ needs.release.outputs.version }}
+        run: |
+          set -e
+          NAME="TAFOrderEntry-${V}-${{ matrix.label }}.dmg"
+          mkdir -p stage
+          cp -R "dist/TAF Order Entry.app" stage/
+          ln -s /Applications "stage/Applications"
+          cat > "stage/READ ME FIRST.txt" <<'EOF'
+          TAF Order Entry — installing on a Mac
+          =====================================
+
+          1. Drag "TAF Order Entry" onto the Applications folder beside it.
+          2. Open Applications, then right-click TAF Order Entry and choose
+             Open. Click Open again when it asks.
+
+          Step 2 matters the first time only. The app is not signed with an
+          Apple Developer certificate — that is a paid yearly thing, and this
+          is an internal tool — so macOS does not recognise who made it and
+          will not open it on a plain double-click.
+
+          If it says the app "is damaged and can't be opened", it is not.
+          That is the same block wearing a different hat. Open Terminal
+          (Applications → Utilities) and paste this line, then press Return:
+
+              xattr -cr "/Applications/TAF Order Entry.app"
+
+          Then open it normally. You only ever do this once.
+
+          Updates from inside the app handle this themselves.
+          EOF
+          hdiutil create -volname "TAF Order Entry" -srcfolder stage \
+                         -ov -format UDZO "$NAME"
+          echo "name=$NAME" >> "$GITHUB_OUTPUT"
+          ls -lh "$NAME"
+
+      - name: Attach it to the release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release upload "${{ needs.release.outputs.tag }}" "${{ steps.dmg.outputs.name }}" --clobber

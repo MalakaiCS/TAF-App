@@ -51,3 +51,8 @@ Desktop.ini
 .DS_Store
 .idea/
 .vscode/
+
+# ── Built by the Mac job, never committed ───────────────────────────────
+icon_master.png
+TAF_logo.icns
+*.dmg

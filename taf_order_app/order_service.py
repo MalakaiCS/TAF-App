@@ -20,12 +20,13 @@ class OrderService:
         # when the app is relaunched by the updater (or any service), cwd can
         # be C:\Windows\System32 — mkdir there is Access Denied and crashed
         # startup. Anchor to the app data dir instead (same as the GUI's
-        # APP_DIR): %APPDATA%\TAF Order Entry when frozen, repo dir otherwise.
+        # APP_DIR): the app data folder when frozen, repo dir otherwise.
         import os, sys
+        from .paths import user_data_dir
         if base_dir is not None:
             self.base_dir = Path(base_dir)
         elif getattr(sys, "frozen", False):
-            self.base_dir = Path(os.environ.get("APPDATA", Path.home())) / "TAF Order Entry"
+            self.base_dir = user_data_dir()
         else:
             self.base_dir = Path(__file__).resolve().parents[1]
         self.orders_dir = self.base_dir / "orders"

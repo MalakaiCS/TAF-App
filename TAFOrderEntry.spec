@@ -7,7 +7,11 @@
 # no cleanup, no warning.
 #
 import os
+import sys
 from PyInstaller.utils.hooks import collect_data_files
+
+WINDOWS = sys.platform == 'win32'
+MACOS   = sys.platform == 'darwin'
 
 # Collect all babel locale data files properly (1000+ .dat files + global.dat)
 babel_datas = collect_data_files('babel', include_py_files=False)
@@ -15,8 +19,25 @@ babel_datas = collect_data_files('babel', include_py_files=False)
 # SumatraPDF.exe lets us print PDFs without a PDF viewer. CI fetches it (from
 # the pinned pdf-to-printer npm package) before the build; if it's absent
 # (e.g. a local source build) we simply don't bundle it and the app falls back
-# to the Windows shell 'print' verb.
-pdf_helper_datas = [('SumatraPDF.exe', '.')] if os.path.exists('SumatraPDF.exe') else []
+# to the Windows shell 'print' verb. It is a Windows program: on a Mac the
+# printing path is lpr, which is already there, so there is nothing to bundle.
+pdf_helper_datas = ([('SumatraPDF.exe', '.')]
+                    if WINDOWS and os.path.exists('SumatraPDF.exe') else [])
+
+# pywin32 is not installed off Windows and never will be. Listing it as a
+# hidden import there is not a warning, it is a build that stops.
+windows_imports = ['win32com', 'win32com.client', 'win32print', 'win32api',
+                   'pywintypes'] if WINDOWS else []
+
+# The icon: Windows wants .ico, macOS wants .icns, and PyInstaller refuses a
+# format the platform does not take. CI makes the .icns from the same PNG the
+# rest of the app uses, so it is one logo rather than two that can drift.
+if WINDOWS:
+    app_icon = ['TAF_logo.ico']
+elif MACOS and os.path.exists('TAF_logo.icns'):
+    app_icon = ['TAF_logo.icns']
+else:
+    app_icon = None
 
 a = Analysis(
     ['modern_order_gui.py'],
@@ -100,11 +121,6 @@ a = Analysis(
         'pypdf',
         'docx',
         'docx.oxml',
-        'win32com',
-        'win32com.client',
-        'win32print',   # get/set default printer for the Print feature
-        'win32api',
-        'pywintypes',
         # stdlib extras sometimes missed
         'tkinter',
         'tkinter.ttk',
@@ -113,7 +129,7 @@ a = Analysis(
         'queue',
         'threading',
         'calendar',
-    ],
+    ] + windows_imports,
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
@@ -132,7 +148,10 @@ exe = EXE(
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
-    upx=True,
+    # UPX is a Windows habit here and it is actively harmful on a Mac: it
+    # rewrites the binaries, which breaks the ad-hoc signature every
+    # arm64 executable must carry, and the app is then killed on launch.
+    upx=WINDOWS,
     upx_exclude=[],
     console=False,
     disable_windowed_traceback=False,
@@ -140,7 +159,7 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
-    icon=['TAF_logo.ico'],
+    icon=app_icon,
 )
 
 coll = COLLECT(
@@ -148,7 +167,30 @@ coll = COLLECT(
     a.binaries,
     a.datas,
     strip=False,
-    upx=True,
+    upx=WINDOWS,
     upx_exclude=[],
     name='TAFOrderEntry',   # output folder: dist/TAFOrderEntry/
 )
+
+# A folder full of files is how Windows ships. A Mac ships one thing you drag
+# to Applications, and a plain executable there has no Dock icon, no name in
+# the menu bar, and no way to be the default for anything. BUNDLE wraps the
+# same COLLECT output in TAF Order Entry.app, which is that one thing.
+if MACOS:
+    app = BUNDLE(
+        coll,
+        name='TAF Order Entry.app',
+        icon='TAF_logo.icns' if os.path.exists('TAF_logo.icns') else None,
+        bundle_identifier='au.com.totalairfiltration.orderentry',
+        info_plist={
+            'CFBundleName':             'TAF Order Entry',
+            'CFBundleDisplayName':      'TAF Order Entry',
+            'CFBundleShortVersionString': os.environ.get('TAF_VERSION', '0.0.0'),
+            'CFBundleVersion':            os.environ.get('TAF_VERSION', '0.0.0'),
+            # Retina. Without it the whole window is drawn at half resolution
+            # and then scaled up, which looks like a screenshot of itself.
+            'NSHighResolutionCapable':  True,
+            'NSRequiresAquaSystemAppearance': False,
+            'LSMinimumSystemVersion':   '11.0',
+        },
+    )

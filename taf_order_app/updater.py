@@ -19,7 +19,7 @@ because the request failed leaves someone on an old build certain they are
 on the newest one.
 """
 from __future__ import annotations
-import os, sys, json, subprocess, tempfile
+import os, platform, sys, json, subprocess, tempfile
 from pathlib import Path
 import urllib.request
 import urllib.error
@@ -95,12 +95,41 @@ def _reset_hint(headers) -> str:
         return ""
 
 
+def _wanted_asset(names: list[str]) -> str:
+    """Which file on a release this machine can actually install.
+
+    A release now carries a Windows installer and two Mac disk images - Intel
+    and Apple Silicon are different builds and neither runs the other's
+    without asking Rosetta about it. Handing a Mac the .exe, or handing an
+    M-series Mac the Intel image, is a download that ends in a shrug.
+    """
+    low = [(n or "").lower() for n in names]
+    if sys.platform == "darwin":
+        arm = platform.machine().lower() in ("arm64", "aarch64")
+        want = "applesilicon" if arm else "intel"
+        for n in low:
+            if n.endswith(".dmg") and want in n:
+                return names[low.index(n)]
+        for n in low:                      # an older release with one image
+            if n.endswith(".dmg"):
+                return names[low.index(n)]
+        return ""
+    if sys.platform == "win32":
+        for n in low:
+            if n.endswith(".exe"):
+                return names[low.index(n)]
+        return ""
+    return ""                              # nothing is built for Linux
+
+
 def _release_info(data: dict) -> dict:
     """The bits of a release the app needs, from already-fetched JSON."""
     version = (data.get("tag_name") or "").strip().lstrip("vV")
+    assets = data.get("assets", []) or []
+    wanted = _wanted_asset([a.get("name") or "" for a in assets])
     download_url = ""
-    for asset in data.get("assets", []):
-        if (asset.get("name") or "").lower().endswith(".exe"):
+    for asset in assets:
+        if (asset.get("name") or "") == wanted and wanted:
             download_url = asset.get("browser_download_url", "")
             break
     return {
@@ -168,6 +197,51 @@ def cleanup_old_exe() -> None:
     return
 
 
+def _install_mac(info: dict, progress_cb=None) -> None:
+    """Download the disk image, mount it, and show it.
+
+    A Mac app cannot replace itself the way the Windows installer does. The
+    app being updated is the thing sitting in /Applications, it is running,
+    and anything that swaps it underneath itself is a good way to end up with
+    half an app. So this does the part a person should not have to: fetches
+    the right image for the machine and opens it, with the new copy and the
+    Applications folder side by side. Dragging one onto the other is the last
+    step, and it is the step every Mac app asks for.
+    """
+    url = info["download_url"]
+    dmg = Path(tempfile.gettempdir()) / f"TAFOrderEntry-{info.get('version','new')}.dmg"
+
+    def _report(block_num, block_size, total_size):
+        if total_size > 0 and progress_cb:
+            pct = min(90, int(block_num * block_size / total_size * 100))
+            mb = total_size / 1_048_576
+            progress_cb(pct, f"Downloading… ({pct}% of {mb:.1f} MB)")
+
+    urllib.request.urlretrieve(url, str(dmg), reporthook=_report)
+
+    # Straight off the internet, so it is quarantined and Gatekeeper will
+    # refuse it. This is the app itself handing over its own next version,
+    # not something arriving from nowhere, so the flag comes off here rather
+    # than being left for somebody to work out at the Terminal.
+    try:
+        subprocess.run(["xattr", "-dr", "com.apple.quarantine", str(dmg)],
+                       capture_output=True, timeout=30)
+    except Exception:
+        pass
+
+    if progress_cb:
+        progress_cb(95, "Opening the installer…")
+    try:
+        subprocess.run(["open", str(dmg)], check=True, timeout=60)
+    except Exception as exc:
+        raise RuntimeError(
+            f"The update downloaded but would not open.\n\nIt is at:\n{dmg}"
+        ) from exc
+
+    if progress_cb:
+        progress_cb(100, "Drag TAF Order Entry onto Applications, then reopen it.")
+
+
 def download_and_install(info: dict, progress_cb=None) -> None:
     """
     Download the release installer and run it silently, then relaunch the app.
@@ -182,8 +256,11 @@ def download_and_install(info: dict, progress_cb=None) -> None:
     """
     url = info.get("download_url", "")
     if not url:
+        which = {"darwin": "a Mac disk image",
+                 "win32":  "a Windows installer"}.get(sys.platform,
+                                                      "a build for this system")
         raise RuntimeError(
-            "This release has no installer attached yet.\n"
+            f"This release has no {which} attached.\n"
             "Download the latest version manually from the GitHub Releases page."
         )
     if not getattr(sys, "frozen", False):
@@ -194,6 +271,9 @@ def download_and_install(info: dict, progress_cb=None) -> None:
 
     if progress_cb:
         progress_cb(0, "Connecting…")
+
+    if sys.platform == "darwin":
+        return _install_mac(info, progress_cb)
 
     setup = Path(tempfile.gettempdir()) / "TAFOrderEntry_Setup.exe"
 
@@ -213,7 +293,8 @@ def download_and_install(info: dict, progress_cb=None) -> None:
     app_pid  = os.getpid()
 
     # Logs so a failed update can actually be diagnosed instead of guessed at.
-    data_dir = Path(os.environ.get("APPDATA", tempfile.gettempdir())) / "TAF Order Entry"
+    from .paths import user_data_dir
+    data_dir = user_data_dir()
     try:
         data_dir.mkdir(parents=True, exist_ok=True)
     except Exception:

@@ -7,6 +7,7 @@ list read back as its first thousand rows, and an update check that reported
 "you're up to date" when it had never reached GitHub.
 """
 import json
+import sys
 import urllib.error
 
 from taf_order_app import db
@@ -184,12 +185,18 @@ RELEASE = {"tag_name": "v9.9.9", "body": "notes",
 
 
 def test_a_newer_release_is_found():
+    # Which file comes back now depends on the machine asking - a release
+    # carries a Windows installer and two Mac disk images. This is the
+    # Windows answer; tests/test_macos.py covers the rest.
     original = _patch_urlopen(_fake_urlopen(RELEASE))
+    was = sys.platform
     try:
+        sys.platform = "win32"
         info = updater.latest_release()
         assert info["version"] == "9.9.9" and info["is_newer"]
         assert info["download_url"].endswith("setup.exe")
     finally:
+        sys.platform = was
         updater.urllib.request.urlopen = original
 
 

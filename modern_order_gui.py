@@ -13,6 +13,7 @@ from pathlib import Path
 import json
 import platform
 import os
+import subprocess
 import calendar as _cal
 import datetime
 import re
@@ -38,6 +39,7 @@ from taf_order_app import xero as _xero
 from taf_order_app import stock_usage as _stock_usage
 from taf_order_app import backup as _backup
 from taf_order_app import labels as _labels
+from taf_order_app import paths as _paths
 from taf_order_app.bag_filler import (
     BAG_PRODUCT_TYPES, BAG_MEDIA_TYPES, ROLL_MEDIA_TYPES,
     ROLL_WIDTHS, ROLL_LENGTHS, STANDARD_SIZES,
@@ -49,12 +51,12 @@ from taf_order_app.bag_filler import (
 APP_TITLE   = "Total Air Filtration  ·  Filter Order Entry"
 from taf_order_app.updater import APP_VERSION
 
-# When frozen by PyInstaller the exe lives in its own folder;
-# Writable user data goes in %APPDATA%\TAF Order Entry when installed,
-# or next to the script during development.
+# When frozen by PyInstaller the exe lives in its own folder; writable user
+# data goes in the one folder this app owns on this machine (see
+# taf_order_app/paths.py), or next to the script during development.
 if getattr(sys, "frozen", False):
     RESOURCE_DIR = Path(sys._MEIPASS)
-    APP_DIR      = Path(os.environ.get("APPDATA", Path.home())) / "TAF Order Entry"
+    APP_DIR      = _paths.user_data_dir()
 else:
     APP_DIR      = Path(__file__).resolve().parent
     RESOURCE_DIR = APP_DIR
@@ -402,6 +404,30 @@ def _restyle_widget_tree(widget, color_map: dict):
     except Exception:
         pass
 
+# ── Showing somebody a file ───────────────────────────────────────────────
+# os.startfile only exists on Windows. Everywhere else the attribute is not
+# there at all, so calling it is an AttributeError in the middle of finishing
+# an order - and about half the places that do it are wrapped in a try that
+# would have quietly turned "here is your PDF" into nothing happening.
+
+
+def _open_path(path) -> None:
+    """Open a file or a folder in whatever this machine uses for it.
+
+    Deliberately lets a failure out. Several callers catch it and show the
+    path in a message box instead, which is the right thing when nothing is
+    associated with a .xlsx - and swallowing it here would take that away.
+    """
+    target = str(path)
+    system = platform.system()
+    if system == "Windows":
+        os.startfile(target)                                   # noqa: attr
+    elif system == "Darwin":
+        subprocess.run(["open", target], check=True)
+    else:
+        subprocess.run(["xdg-open", target], check=True)
+
+
 # ── Fonts ─────────────────────────────────────────────────────────────────
 # Public Sans is the TAF brand font (bundled in fonts/). _load_app_fonts()
 # registers the .ttf files at startup and falls back to Segoe UI if the
@@ -425,6 +451,12 @@ def _load_app_fonts():
     any widgets are built. Falls back to Segoe UI if Public Sans can't load.
     """
     global FAM, F_BODY, F_BOLD, F_SEC, F_TTL, F_SM, F_NUM
+    # Segoe UI is a Windows font. Naming it on a Mac does not fail, it gets
+    # silently substituted with something that is not it and is not the
+    # system font either, so every platform has its own sensible second
+    # choice rather than one that only suits one of them.
+    usual = ("Segoe UI" if sys.platform == "win32" else
+             "Helvetica Neue" if sys.platform == "darwin" else "DejaVu Sans")
     fam = "Public Sans"
     try:
         if os.name == "nt":
@@ -434,11 +466,15 @@ def _load_app_fonts():
             if font_dir.exists():
                 for ttf in sorted(font_dir.glob("PublicSans-*.ttf")):
                     ctypes.windll.gdi32.AddFontResourceExW(str(ttf), FR_PRIVATE, 0)
+        # A Mac has no equivalent of AddFontResourceEx that Tk can see, so
+        # the bundled Public Sans is only used there if somebody installed it.
         import tkinter.font as _tkf
-        if "Public Sans" not in _tkf.families():
-            fam = "Segoe UI"
+        have = set(_tkf.families())
+        if "Public Sans" not in have:
+            fam = next((f for f in (usual, "Segoe UI", "Helvetica Neue",
+                                    "DejaVu Sans", "Arial") if f in have), usual)
     except Exception:
-        fam = "Segoe UI"
+        fam = usual
     FAM    = fam
     F_BODY = (fam, 10)
     F_BOLD = (fam, 10, "bold")
@@ -450,7 +486,8 @@ def _load_app_fonts():
         have = set(_tkf2.families())
     except Exception:
         have = set()
-    for mono in ("Consolas", "DejaVu Sans Mono", "Courier New", "TkFixedFont"):
+    for mono in ("Consolas", "Menlo", "DejaVu Sans Mono", "Courier New",
+                 "TkFixedFont"):
         if mono in have or mono == "TkFixedFont":
             F_NUM = (mono, 10)
             break
@@ -6096,7 +6133,7 @@ class ModernOrderApp(tk.Frame):
                 if err:
                     self.status_var.set("Run sheet saved — printing failed.")
                     try:
-                        os.startfile(str(path))
+                        _open_path(str(path))
                     except Exception:
                         messagebox.showinfo("Run Sheet", f"Saved to:\n{path}")
                 else:
@@ -8299,7 +8336,7 @@ class ModernOrderApp(tk.Frame):
             return
 
         self.status_var.set(f"Monthly summary saved: {out_path.name}")
-        os.startfile(str(out_path))
+        _open_path(str(out_path))
 
     def _refresh_due_panel(self, data=None):
         """Counts of what is late, due today and due this week.
@@ -9499,7 +9536,7 @@ class ModernOrderApp(tk.Frame):
                     "Print at 100% — 'fit to page' shrinks the barcodes and a "
                     "scanner stops reading them.")
             try:
-                os.startfile(str(Path(path).parent))
+                _open_path(str(Path(path).parent))
             except Exception:
                 pass
 
@@ -10567,14 +10604,25 @@ class ModernOrderApp(tk.Frame):
         self._printer_cb.pack(side="left", padx=(0, 8))
 
         def _refresh_printers():
+            # Windows keeps its printers in WMI; a Mac and a Linux box keep
+            # theirs in CUPS, which is also what the printing path uses there
+            # (lpr). Asking PowerShell on a Mac gets an empty list and a
+            # dropdown with nothing in it.
             try:
                 import subprocess as _sp
-                out = _sp.run(
-                    ["powershell", "-NoProfile", "-Command",
-                     "Get-Printer | Select-Object -ExpandProperty Name"],
-                    capture_output=True, text=True, timeout=8
-                )
-                names = [p.strip() for p in out.stdout.splitlines() if p.strip()]
+                if platform.system() == "Windows":
+                    out = _sp.run(
+                        ["powershell", "-NoProfile", "-Command",
+                         "Get-Printer | Select-Object -ExpandProperty Name"],
+                        capture_output=True, text=True, timeout=8
+                    )
+                    names = [p.strip() for p in out.stdout.splitlines() if p.strip()]
+                else:
+                    # "name accepting requests since ..." — the name is first.
+                    out = _sp.run(["lpstat", "-a"],
+                                  capture_output=True, text=True, timeout=8)
+                    names = [ln.split()[0] for ln in out.stdout.splitlines()
+                             if ln.strip()]
             except Exception:
                 names = []
             values = ["(System Default)"] + names
@@ -15727,7 +15775,7 @@ class ModernOrderApp(tk.Frame):
         except Exception:
             pass
         try:
-            os.startfile(str(path))
+            _open_path(str(path))
         except Exception:
             messagebox.showinfo("Quote Saved", f"Saved to:\n{path}")
 
@@ -15740,7 +15788,7 @@ class ModernOrderApp(tk.Frame):
 
     def _open_backup_folder(self):
         try:
-            os.startfile(str(self._backup_dir()))
+            _open_path(str(self._backup_dir()))
         except Exception as exc:
             messagebox.showinfo("Backups", f"The folder is at:\n"
                                            f"{self._backup_dir()}\n\n({exc})")
@@ -15809,7 +15857,7 @@ class ModernOrderApp(tk.Frame):
                     "Copy it somewhere off this PC — a cloud drive or a USB "
                     "stick. Everything inside is a plain spreadsheet.")
             try:
-                os.startfile(str(Path(path).parent))
+                _open_path(str(Path(path).parent))
             except Exception:
                 pass
 
@@ -15925,7 +15973,7 @@ class ModernOrderApp(tk.Frame):
             "check the account code and tax rate on the preview before "
             "confirming. Nothing is created in Xero until you confirm there.")
         try:
-            os.startfile(str(Path(path).parent))
+            _open_path(str(Path(path).parent))
         except Exception:
             pass
 
@@ -15994,7 +16042,7 @@ class ModernOrderApp(tk.Frame):
             "match the account code and tax rate on the preview before "
             "confirming.")
         try:
-            os.startfile(str(Path(path).parent))
+            _open_path(str(Path(path).parent))
         except Exception:
             pass
 
@@ -17263,19 +17311,19 @@ class ModernOrderApp(tk.Frame):
             if len(real_pdfs) > 1:
                 merged = str(ORDERS_DIR / f"{base}_order.pdf")
                 if os.path.exists(merged):
-                    os.startfile(merged)
+                    _open_path(merged)
                     opened = merged
                 else:
                     for p in real_pdfs:
-                        os.startfile(p)
+                        _open_path(p)
                     opened = " + ".join(real_pdfs)
             elif real_pdfs:
-                os.startfile(real_pdfs[0])
+                _open_path(real_pdfs[0])
                 opened = real_pdfs[0]
             elif pdf_paths:
                 for p in pdf_paths:
                     if os.path.exists(p):
-                        os.startfile(p)
+                        _open_path(p)
                 opened = " + ".join(pdf_paths)
             else:
                 opened = ""
@@ -18566,15 +18614,10 @@ class ModernOrderApp(tk.Frame):
                                 "No orders have been saved yet.\n"
                                 "Generate an order first.")
             return
-        sys_name = platform.system()
-        if sys_name == "Windows":
-            os.startfile(str(ORDERS_DIR))
-        elif sys_name == "Darwin":
-            import subprocess
-            subprocess.Popen(["open", str(ORDERS_DIR)])
-        else:
-            import subprocess
-            subprocess.Popen(["xdg-open", str(ORDERS_DIR)])
+        try:
+            _open_path(ORDERS_DIR)
+        except Exception:
+            messagebox.showinfo("Orders", f"The folder is at:\n{ORDERS_DIR}")
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -18729,6 +18772,14 @@ def _start_app():
 
 
 def main():
+    # A packaged app that cannot find one of its own modules fails the moment
+    # it is asked to do anything, and on a build machine with no screen that
+    # looks identical to "there is no screen". This gives the build something
+    # it can ask that exercises the whole bundle and then stops, instead of
+    # opening a window nobody is there to close.
+    if "--version" in sys.argv:
+        print(f"TAF Order Entry {APP_VERSION}")
+        return
     _start_app()
 
 

@@ -33,14 +33,28 @@ DARK = {
 
 
 def _font_family() -> str:
-    """Public Sans if it registered (main app loads it before login), else Segoe UI."""
+    """Public Sans if it registered (main app loads it before login).
+
+    Otherwise whatever this machine actually has. Segoe UI is a Windows font
+    and naming it on a Mac gets a silent substitution that is nothing like
+    it - so the fallbacks are asked for in order and the first one present
+    wins.
+    """
+    usual = ("Segoe UI" if sys.platform == "win32" else
+             "Helvetica Neue" if sys.platform == "darwin" else "DejaVu Sans")
     try:
+        # This runs at import, which is before the root window exists, and
+        # asking Tk for the families then raises. That is why `usual` has to
+        # be right on its own rather than only as a last resort.
         import tkinter.font as _tkf
-        if "Public Sans" in _tkf.families():
-            return "Public Sans"
+        have = set(_tkf.families())
+        for fam in ("Public Sans", usual, "Segoe UI", "Helvetica Neue",
+                    "DejaVu Sans", "Arial"):
+            if fam in have:
+                return fam
     except Exception:
         pass
-    return "Segoe UI"
+    return usual
 
 
 FAM = _font_family()
@@ -79,7 +93,8 @@ def _resource(name: str) -> Path:
 
 def _settings_path() -> Path:
     if getattr(sys, "frozen", False):
-        base = Path(os.environ.get("APPDATA", Path.home())) / "TAF Order Entry"
+        from .paths import user_data_dir
+        base = user_data_dir()
     else:
         base = Path(__file__).resolve().parent.parent
     return base / "settings.json"

@@ -164,15 +164,23 @@ log, stock management and a customer database.
 ## Tech stack
 
 Python 3.11+ · Tkinter · Supabase (Postgres + Auth) · ReportLab · openpyxl /
-python-docx (+ Excel/Word COM via pywin32) · Pillow · tkcalendar · PyInstaller.
+python-docx (Excel/Word via COM on Windows, AppleScript or LibreOffice on a
+Mac) · Pillow · tkcalendar · PyInstaller.
 
 ---
 
 ## Prerequisites
 
-- **Windows** (Excel & Word are used via COM for some worksheet templates).
-- **Python 3.11+**.
+- **Windows or macOS.** Both are built and published on every release.
+- **Python 3.11+** (to run from source or build it yourself).
 - A **Supabase project** (free tier is fine).
+
+Everything works on both, with one difference worth knowing. The filter
+worksheet is an Excel template, and turning it into a PDF needs something
+that can lay out a spreadsheet. Windows uses Excel; a Mac uses Excel too if
+it is installed, and [LibreOffice](https://www.libreoffice.org/) if it is
+not. With neither, the app still saves the `.xlsx` and opens it, and you
+print it from there.
 
 ## Setup
 
@@ -657,6 +665,40 @@ ISCC installer.iss
 
 Produces `TAFOrderEntry_Setup.exe`.
 
+## Build the Mac app
+
+Has to be done on a Mac — PyInstaller cannot cross-compile, and an Intel Mac
+and an Apple Silicon Mac need separate builds. CI does both on every release
+(`macos-13` and `macos-14`) and attaches two disk images.
+
+```bash
+pip install -r requirements.txt
+python make_mac_icon.py --icns
+pyinstaller --noconfirm --clean TAFOrderEntry.spec
+codesign --force --deep --sign - "dist/TAF Order Entry.app"
+```
+
+### Installing it
+
+Download the disk image that matches the Mac — **AppleSilicon** for an M1 and
+later, **Intel** for anything older (☰ → About This Mac says which). Then
+drag the app onto Applications, **right-click it and choose Open**, and click
+Open again.
+
+That last bit is only needed the first time, and only because the app is not
+signed with an Apple Developer certificate — a paid yearly subscription, for
+an app that never leaves the company. macOS therefore does not know who made
+it. If it says the app *"is damaged and can't be opened"* it is not damaged;
+that is the same block wearing a different hat, and this clears it:
+
+```bash
+xattr -cr "/Applications/TAF Order Entry.app"
+```
+
+Updates from inside the app handle that themselves. The app downloads the
+right image for the machine, clears the flag and opens it — the only manual
+step left is dragging the new copy across.
+
 ---
 
 ## Project structure
@@ -669,6 +711,7 @@ taf_order_app/
   db.py                    Supabase wrapper (auth, orders, stock, customers)
   login_window.py          Split-panel login / register / reset
   order_service.py         Order build/save orchestration
+  paths.py                 The one folder this app writes to, per platform
   bag_filler.py            Word worksheet filling (COM)
   updater.py               In-app auto-update (APP_VERSION lives here)
   po_import.py             Purchase-order import + phone inbox
@@ -694,8 +737,9 @@ docs/portal/index.html     The customer portal (orders, quotes, account)
 docs/company.js            Phone, email, address, hours — fill this in
 supabase/functions/        Edge Functions (order reading, email, the
                            morning summary)
-TAFOrderEntry.spec         PyInstaller build spec
+TAFOrderEntry.spec         PyInstaller build spec (Windows and macOS)
 installer.iss              Inno Setup installer script
+make_mac_icon.py           Builds the Mac app icon from the logo
 ```
 
 ## Working from anywhere (incl. your phone)
