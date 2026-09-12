@@ -261,8 +261,20 @@ def test_the_icon_is_cropped_before_it_is_squared():
 def test_both_kinds_of_mac_are_built():
     """Intel and Apple Silicon are different builds and neither runs the
     other's without Rosetta being involved."""
-    assert "macos-13" in CI and "macos-14" in CI
+    runners = re.findall(r"- runner: (\S+)", CI)
+    assert len(runners) == 2, runners
+    assert any("intel" in r for r in runners), f"no Intel runner: {runners}"
     assert "Intel" in CI and "AppleSilicon" in CI
+
+
+def test_the_build_does_not_ask_for_a_runner_that_no_longer_exists():
+    """A retired label does not fail the job - it queues it forever. macos-13
+    sat there while the Apple Silicon build finished in a minute, and the
+    only sign was a job that never started."""
+    runners = re.findall(r"- runner: (\S+)", CI)
+    gone = [r for r in runners if r in ("macos-11", "macos-12", "macos-13",
+                                        "macos-10.15")]
+    assert not gone, f"retired runner labels: {gone}"
 
 
 def test_the_mac_build_cannot_stop_the_windows_release():

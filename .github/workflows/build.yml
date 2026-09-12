@@ -203,8 +203,10 @@ jobs:
   # own PCs still get their update.
   #
   # Two of them, because Intel and Apple Silicon are different builds and
-  # neither runs the other's without Rosetta being involved. macos-13 is the
-  # last Intel runner GitHub offers; macos-14 is Apple Silicon.
+  # neither runs the other's without Rosetta being involved. macos-14 is
+  # Apple Silicon; macos-15-intel is the Intel one. It used to be macos-13,
+  # which GitHub has since retired - a retired label does not fail, it queues
+  # forever, so the Intel job sat there while the other finished in a minute.
   mac:
     needs: release
     runs-on: ${{ matrix.runner }}
@@ -212,7 +214,7 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - runner: macos-13
+          - runner: macos-15-intel
             label:  Intel
           - runner: macos-14
             label:  AppleSilicon
