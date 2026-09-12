@@ -158,7 +158,10 @@ Deno.serve(async (req: Request) => {
     // "label" reads a highlighted corner of a purchase order and reports the
     // wording that precedes the job number, so it can be saved against the
     // customer and used on every future order from them.
-    mode?: "orders" | "label";
+    // "customer" reads a highlighted corner and reports who the order is
+    // from, for when the whole-page read missed it or got it wrong and the
+    // app was about to make yet another new customer profile.
+    mode?: "orders" | "label" | "customer";
   };
   try {
     body = await req.json();
@@ -221,6 +224,9 @@ Deno.serve(async (req: Request) => {
 
   if (body.mode === "label") {
     return await readJobLabel(client, content);
+  }
+  if (body.mode === "customer") {
+    return await readCustomerName(client, content);
   }
 
   try {
@@ -307,6 +313,67 @@ async function readJobLabel(client: Anthropic, content: unknown[]): Promise<Resp
       max_tokens: 2000,
       system: LABEL_SYSTEM,
       output_config: { format: { type: "json_schema", schema: LABEL_SCHEMA } },
+      messages: [{ role: "user", content: content as never }],
+    });
+    if (response.stop_reason === "refusal") {
+      return json({ error: "That image could not be processed." }, 422);
+    }
+    const text = response.content
+      .filter((b) => b.type === "text")
+      .map((b) => (b as { text: string }).text)
+      .join("");
+    return json(JSON.parse(text), 200);
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    return json({ error: `Could not read the highlighted area: ${msg}` }, 500);
+  }
+}
+
+// ── Reading who an order is from ────────────────────────────────────────────
+// A purchase order carries two addresses and often three company names - the
+// letterhead, the delivery address, and TAF's own name as the supplier. A
+// whole-page read picks the wrong one often enough that somebody ends up
+// creating a new customer profile for a company we have invoiced for years.
+// This is what they point at the right one with.
+
+const CUSTOMER_SCHEMA = {
+  type: "object",
+  additionalProperties: false,
+  required: ["name", "address", "confidence"],
+  properties: {
+    name: {
+      type: "string",
+      description:
+        "The company or branch name exactly as printed in the highlighted " +
+        "piece. Empty if no company name is visible in it.",
+    },
+    address: {
+      type: "string",
+      description:
+        "The address printed with that name, on one line, exactly as " +
+        "printed. Empty if none is visible.",
+    },
+    confidence: { type: "string", enum: ["high", "medium", "low"] },
+  },
+} as const;
+
+const CUSTOMER_SYSTEM = `You are shown a small piece cut out of a purchase order. Somebody has highlighted it because it is the customer this order is from.
+
+Report the NAME exactly as printed - the company or branch, including any branch or depot wording such as "- Bells Creek" or "(Northside)". Do not expand abbreviations, tidy the capitalisation, or drop "Pty Ltd". Copy what is there.
+
+Report the ADDRESS printed with it, on one line, exactly as printed.
+
+Branches of one company share a name and are told apart only by their address, so report them as two separate fields and never merge them. If only one of the two is visible in the piece, return that one and leave the other empty rather than guessing at it from elsewhere.
+
+Total Air Filtration is the supplier reading this order, never the customer. If the highlighted piece contains only Total Air Filtration's own details, return empty strings and low confidence.`;
+
+async function readCustomerName(client: Anthropic, content: unknown[]): Promise<Response> {
+  try {
+    const response = await client.messages.create({
+      model: MODEL,
+      max_tokens: 2000,
+      system: CUSTOMER_SYSTEM,
+      output_config: { format: { type: "json_schema", schema: CUSTOMER_SCHEMA } },
       messages: [{ role: "user", content: content as never }],
     });
     if (response.stop_reason === "refusal") {

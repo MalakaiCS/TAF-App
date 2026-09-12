@@ -1290,6 +1290,107 @@ def match_customer(po_name: str, po_address: str = "",
     return matches[0] if len(matches) == 1 else None
 
 
+def _words(text: str) -> set:
+    """The words in a piece of text, minus the ones every company prints."""
+    noise = {"pty", "ltd", "limited", "the", "and", "co", "company", "inc",
+             "australia", "au", "unit", "street", "st", "road", "rd", "drive",
+             "dr", "avenue", "ave", "court", "ct", "qld", "nsw", "vic", "sa",
+             "wa", "nt", "act", "po", "box"}
+    return {w for w in _norm(text).split() if len(w) > 2 and w not in noise}
+
+
+def suggest_customers(po_name: str, po_address: str = "",
+                      customers: list | None = None,
+                      limit: int = 8) -> list:
+    """Branches this purchase order might belong to, likeliest first.
+
+    match_customer answers "can I be certain"; this answers "who should a
+    person be shown". They are different questions and must stay different
+    functions - the moment a suggestion is allowed to pick, the Bells Creek
+    order goes to Tweed again. Nothing here decides anything. It puts the
+    likely ones at the top of a list somebody still has to choose from.
+
+    Returns [{"customer", "score", "why"}], never a bare list of profiles,
+    because a name offered with no reason attached is a name somebody clicks
+    without reading.
+    """
+    people = customers if customers is not None else get_customers(active_only=True)
+    name_w = _words(po_name)
+    addr_w = _words(po_address)
+    if not name_w and not addr_w:
+        return []
+
+    out = []
+    for c in people:
+        score = 0
+        why = []
+
+        for alias in (c.get("po_aliases") or []):
+            shared = _words(str(alias)) & (name_w | addr_w)
+            if shared:
+                score += 4 * len(shared)
+                why.append(f'seen before as "{alias}"')
+                break
+
+        for field, points, label in (("short_name", 5, "short name"),
+                                     ("name", 4, "name"),
+                                     ("legal_name", 2, "company name")):
+            shared = _words(c.get(field) or "") & name_w
+            if shared:
+                score += points * len(shared)
+                why.append(f"{label} matches {' '.join(sorted(shared))}")
+
+        # An address is the only thing that tells two branches of one company
+        # apart - the name is identical on both and cannot order them - so it
+        # is weighted above every name field.
+        for field in ("delivery_city", "delivery_postcode", "delivery_address1"):
+            shared = _words(c.get(field) or "") & addr_w
+            if shared:
+                score += 6 * len(shared)
+                why.append(f"delivers to {' '.join(sorted(shared))}")
+                break
+
+        if score:
+            out.append({"customer": c, "score": score,
+                        "why": "; ".join(why[:3])})
+
+    out.sort(key=lambda r: (-r["score"],
+                            (r["customer"].get("short_name") or "").lower()))
+    return out[:limit]
+
+
+def link_po_to_customer(customer_id: str, po_name: str,
+                        po_address: str = "") -> list:
+    """Remember that a purchase order reading like this is that branch.
+
+    The whole point of saying "this is an existing customer" once is never
+    being asked again, and that only happens if the wording is written down.
+
+    What is deliberately NOT written down is the company's legal name. Every
+    branch of the company prints it, so recording it against one profile is
+    exactly what sent a Bells Creek order to the Tweed branch - and doing it
+    from here, where somebody is correcting that very mistake, would be worse
+    than not learning at all.
+
+    Returns the wordings actually remembered, so a screen can say so.
+    """
+    if not customer_id:
+        return []
+    kept = []
+    for wording in (po_name, po_address):
+        wording = (wording or "").strip()
+        if not wording:
+            continue
+        try:
+            if is_company_name(wording):
+                continue
+            add_customer_alias(customer_id, wording)
+            kept.append(wording)
+        except Exception:
+            pass
+    return kept
+
+
 def add_customer_alias(customer_id: str, alias: str) -> None:
     """Remember a name or address as belonging to this branch.
 

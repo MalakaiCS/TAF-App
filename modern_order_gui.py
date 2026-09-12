@@ -3545,24 +3545,39 @@ def _safe_int(s) -> int:
 # Imported Purchase Order Review
 # ═══════════════════════════════════════════════════════════════════════════
 
-class JobNumberHighlighter(tk.Toplevel):
-    """Teach the app where a customer puts their job number.
+class _PageHighlighter(tk.Toplevel):
+    """Show a purchase order, drag a box round part of it, read that part.
 
-    Show one of their purchase orders, drag a box around the job number, and
-    the app reads that piece and keeps the WORDING in front of the number
-    ("Our Reference:") rather than the position on the page — wording survives
-    a layout change, a remembered position does not.
+    Two things get pointed at this way: where a customer puts their job
+    number, and who the order is actually from. Both are the same job -
+    somebody knows where it is on the page and the app does not - so the
+    dragging, the scaling and the cropping live here once, and what gets
+    read out of the crop is the only thing the subclasses decide.
 
-    result = None if cancelled, else the label to save.
+    Why a crop at all, when the whole page was already read: a purchase
+    order carries three or four names and two addresses, and a reader that
+    has to pick between them will sometimes pick wrong. Pointing at one is
+    the cheapest way to be certain, and it takes a second.
     """
 
     MAX_W, MAX_H = 900, 620
 
+    TITLE  = "Highlight part of the order"
+    INTRO  = ""
+    PROMPT = "Now drag a box around it."
+    OPEN_PROMPT = "Open a photo or scan of one of their purchase orders."
+    FOOT_HINT = ""
+
     def __init__(self, master, image_path=None):
         super().__init__(master)
-        self.title("Where is the Job Number?")
+        self.title(self.TITLE)
         self.transient(master)
         self.grab_set()
+        # Escape closes it, like every other dialog. It was exempt from that
+        # rule for being "a canvas tool, not a form" - but there is nothing
+        # here for Escape to mean instead, and a window that ignores it is
+        # one somebody has to go and find the mouse for.
+        self.bind("<Escape>", lambda _e: self.destroy())
         self.configure(bg=CBG)
         self.result = None
         self._img = None
@@ -3573,18 +3588,16 @@ class JobNumberHighlighter(tk.Toplevel):
 
         hdr = tk.Frame(self, bg=CA, padx=16, pady=10)
         hdr.pack(fill="x")
-        tk.Label(hdr, text="Where is the Job Number?", bg=CA, fg="white",
+        tk.Label(hdr, text=self.TITLE, bg=CA, fg="white",
                  font=(FAM, 12, "bold")).pack(anchor="w")
-        tk.Label(hdr, text="Open one of this customer's purchase orders and drag a "
-                           "box around their job number — include the words in front of it.",
-                 bg=CA, fg="#A9CCE3", font=F_SM).pack(anchor="w")
+        tk.Label(hdr, text=self.INTRO, bg=CA, fg="#A9CCE3",
+                 font=F_SM, justify="left").pack(anchor="w")
 
         bar = tk.Frame(self, bg=CBG, padx=16, pady=8)
         bar.pack(fill="x")
         flat_btn(bar, "📁  Open a Purchase Order", self._pick_image,
                  bg=CA, pady=6, padx=14, font=F_BODY).pack(side="left")
-        self._status = tk.StringVar(
-            value="Open a photo or scan of one of their purchase orders.")
+        self._status = tk.StringVar(value=self.OPEN_PROMPT)
         tk.Label(bar, textvariable=self._status, bg=CBG, fg=CMU,
                  font=F_SM, anchor="w").pack(side="left", padx=(12, 0))
 
@@ -3599,25 +3612,35 @@ class JobNumberHighlighter(tk.Toplevel):
 
         res = tk.Frame(self, bg=CBG, padx=16, pady=10)
         res.pack(fill="x")
-        tk.Label(res, text="Job number appears after:", bg=CBG, fg=CTX,
-                 font=F_BOLD).pack(side="left", padx=(0, 8))
-        self._label_var = tk.StringVar()
-        field_entry(res, textvariable=self._label_var, width=30).pack(side="left")
-        self._found = tk.Label(res, text="", bg=CBG, fg=CMU, font=F_SM)
-        self._found.pack(side="left", padx=(10, 0))
+        self._build_result_row(res)
 
         foot = tk.Frame(self, bg=CBG, padx=16, pady=12)
         foot.pack(fill="x")
         flat_btn(foot, "Cancel", self.destroy, variant="secondary", pady=7).pack(side="right", padx=(8, 0))
         flat_btn(foot, "Save",   self._save,   bg=CGR, pady=7).pack(side="right")
-        tk.Label(foot, text="You can also just type the wording yourself.",
-                 bg=CBG, fg=CMU, font=F_SM).pack(side="left")
+        if self.FOOT_HINT:
+            tk.Label(foot, text=self.FOOT_HINT,
+                     bg=CBG, fg=CMU, font=F_SM).pack(side="left")
 
         self.update_idletasks()
         self.geometry(f"+{max(0, master.winfo_rootx() + 20)}"
                       f"+{max(0, master.winfo_rooty() + 10)}")
         if image_path:
             self._load_image(image_path)
+
+    # ── What each one asks for ────────────────────────────────────────────
+
+    def _build_result_row(self, parent):
+        raise NotImplementedError
+
+    def _read(self, data: bytes) -> dict:
+        raise NotImplementedError
+
+    def _show(self, got: dict) -> None:
+        raise NotImplementedError
+
+    def _save(self):
+        raise NotImplementedError
 
     # ── Loading the page ──────────────────────────────────────────────────
 
@@ -3642,7 +3665,7 @@ class JobNumberHighlighter(tk.Toplevel):
                 "Use an Image",
                 "Highlighting works on a photo or scan.\n\n"
                 "For a PDF, take a screenshot of the page (or photograph it) "
-                "and open that instead — or just type the wording in below.",
+                "and open that instead — or just type it in below.",
                 parent=self)
             return
         try:
@@ -3665,7 +3688,7 @@ class JobNumberHighlighter(tk.Toplevel):
         self._canvas.config(width=disp.width, height=disp.height)
         self._canvas.create_image(0, 0, anchor="nw", image=self._photo)
         self._rect = None
-        self._status.set("Now drag a box around the job number.")
+        self._status.set(self.PROMPT)
 
     # ── Dragging the box ──────────────────────────────────────────────────
 
@@ -3689,12 +3712,12 @@ class JobNumberHighlighter(tk.Toplevel):
         x1, y1 = e.x, e.y
         self._start = None
         if abs(x1 - x0) < 8 or abs(y1 - y0) < 8:
-            self._status.set("That box was too small — drag across the job number.")
+            self._status.set("That box was too small — drag right across it.")
             return
         self._read_region(min(x0, x1), min(y0, y1), max(x0, x1), max(y0, y1))
 
     def _read_region(self, x0, y0, x1, y1):
-        """Crop what was highlighted and ask what wording introduces it."""
+        """Crop what was highlighted and send it to be read."""
         from PIL import Image
         s = self._scale or 1.0
         # A little margin, so the wording just outside the box still counts.
@@ -3719,7 +3742,7 @@ class JobNumberHighlighter(tk.Toplevel):
 
         def _work():
             try:
-                got = _po_import.read_job_label(data)
+                got = self._read(data)
                 err = ""
             except _po_import.POImportError as exc:
                 got, err = None, str(exc)
@@ -3731,21 +3754,53 @@ class JobNumberHighlighter(tk.Toplevel):
                     self._status.set("Couldn't read that area.")
                     messagebox.showerror("Couldn't Read", err, parent=self)
                     return
-                label = got.get("label", "")
-                value = got.get("value", "")
-                if label:
-                    self._label_var.set(label)
-                    self._status.set("Check it looks right, then Save.")
-                else:
-                    self._status.set(
-                        "No wording found in front of that number — type it below.")
-                self._found.config(
-                    text=(f'found "{value}"' if value else "") +
-                         ("   (unsure — please check)"
-                          if got.get("confidence") == "low" else ""))
+                self._show(got)
             self.after(0, _done)
 
         threading.Thread(target=_work, daemon=True).start()
+
+
+class JobNumberHighlighter(_PageHighlighter):
+    """Teach the app where a customer puts their job number.
+
+    Show one of their purchase orders, drag a box around the job number, and
+    the app reads that piece and keeps the WORDING in front of the number
+    ("Our Reference:") rather than the position on the page — wording survives
+    a layout change, a remembered position does not.
+
+    result = None if cancelled, else the label to save.
+    """
+
+    TITLE = "Where is the Job Number?"
+    INTRO = ("Open one of this customer's purchase orders and drag a box "
+             "around their job number — include the words in front of it.")
+    PROMPT = "Now drag a box around the job number."
+    FOOT_HINT = "You can also just type the wording yourself."
+
+    def _build_result_row(self, parent):
+        tk.Label(parent, text="Job number appears after:", bg=CBG, fg=CTX,
+                 font=F_BOLD).pack(side="left", padx=(0, 8))
+        self._label_var = tk.StringVar()
+        field_entry(parent, textvariable=self._label_var, width=30).pack(side="left")
+        self._found = tk.Label(parent, text="", bg=CBG, fg=CMU, font=F_SM)
+        self._found.pack(side="left", padx=(10, 0))
+
+    def _read(self, data):
+        return _po_import.read_job_label(data)
+
+    def _show(self, got):
+        label = got.get("label", "")
+        value = got.get("value", "")
+        if label:
+            self._label_var.set(label)
+            self._status.set("Check it looks right, then Save.")
+        else:
+            self._status.set(
+                "No wording found in front of that number — type it below.")
+        self._found.config(
+            text=(f'found "{value}"' if value else "") +
+                 ("   (unsure — please check)"
+                  if got.get("confidence") == "low" else ""))
 
     def _save(self):
         label = self._label_var.get().strip()
@@ -3756,6 +3811,225 @@ class JobNumberHighlighter(tk.Toplevel):
                 "before it.", parent=self)
             return
         self.result = label
+        self.destroy()
+
+
+class CustomerNameHighlighter(_PageHighlighter):
+    """Point at who the order is from, when the whole-page read got it wrong.
+
+    A purchase order prints several names: the letterhead, the delivery
+    address, whoever raised it, and Total Air Filtration as the supplier. The
+    reader picks one, and when it picks a different one each time, every
+    order looks like a company we have never dealt with — which is how a
+    customer we have invoiced for years ends up with four profiles.
+
+    The name and the address come back separately and stay separate. Branches
+    of one company share a name and are told apart only by the address, so
+    merging them would throw away the one field that can resolve a branch.
+
+    result = None if cancelled, else {"name", "address"}.
+    """
+
+    TITLE = "Who is this order from?"
+    INTRO = ("Drag a box around the customer's name and address on the order "
+             "— the company it came from, not the delivery address if they "
+             "are different.")
+    PROMPT = "Now drag a box around the customer's name and address."
+    OPEN_PROMPT = "Open the photo or scan of this purchase order."
+    FOOT_HINT = "You can also just type it in."
+
+    def _build_result_row(self, parent):
+        row = tk.Frame(parent, bg=CBG)
+        row.pack(fill="x")
+        tk.Label(row, text="Customer:", bg=CBG, fg=CTX,
+                 font=F_BOLD, width=10, anchor="w").pack(side="left")
+        self._name_var = tk.StringVar()
+        field_entry(row, textvariable=self._name_var, width=40).pack(side="left")
+        self._found = tk.Label(row, text="", bg=CBG, fg=CMU, font=F_SM)
+        self._found.pack(side="left", padx=(10, 0))
+
+        row2 = tk.Frame(parent, bg=CBG)
+        row2.pack(fill="x", pady=(6, 0))
+        tk.Label(row2, text="Address:", bg=CBG, fg=CTX,
+                 font=F_BOLD, width=10, anchor="w").pack(side="left")
+        self._addr_var = tk.StringVar()
+        field_entry(row2, textvariable=self._addr_var, width=52).pack(side="left")
+
+    def _read(self, data):
+        return _po_import.read_customer_name(data)
+
+    def _show(self, got):
+        name = got.get("name", "")
+        addr = got.get("address", "")
+        if name:
+            self._name_var.set(name)
+        if addr:
+            self._addr_var.set(addr)
+        if name or addr:
+            self._status.set("Check it looks right, then Save.")
+        else:
+            self._status.set(
+                "No customer found in that area — try a box around their "
+                "letterhead, or type it below.")
+        self._found.config(
+            text="(unsure — please check)"
+                 if got.get("confidence") == "low" else "")
+
+    def _save(self):
+        name = self._name_var.get().strip()
+        addr = self._addr_var.get().strip()
+        if not name and not addr:
+            messagebox.showwarning(
+                "Nothing to Save",
+                "Highlight the customer's name on the order, or type it in.",
+                parent=self)
+            return
+        self.result = {"name": name, "address": addr}
+        self.destroy()
+
+
+class CustomerPicker(tk.Toplevel):
+    """Say which branch a purchase order is from, out of the ones on file.
+
+    Until this existed the only button on an unmatched order said "Create
+    Profile", so that is what everybody pressed — and a customer we have
+    invoiced for years collected a new profile every time their layout
+    changed enough to stop the automatic match. There was no way to say "no,
+    it's this one".
+
+    The list is ordered by how well each branch fits what the order says, and
+    every suggestion carries the reason it is being suggested. A name with no
+    reason next to it is a name somebody clicks without reading, and picking
+    the wrong branch sends the work to the wrong depot.
+
+    result = None if cancelled, else the customer dict chosen.
+    """
+
+    def __init__(self, master, customers, po_name="", po_address="",
+                 suggest=None):
+        super().__init__(master)
+        self.title("Which customer is this?")
+        self.transient(master)
+        self.grab_set()
+        self.bind("<Escape>", lambda _e: self.destroy())
+        self.configure(bg=CBG)
+        self.result = None
+        self._all = list(customers or [])
+        self._shown = []
+
+        hdr = tk.Frame(self, bg=CA, padx=16, pady=10)
+        hdr.pack(fill="x")
+        tk.Label(hdr, text="Which customer is this?", bg=CA, fg="white",
+                 font=(FAM, 12, "bold")).pack(anchor="w")
+        read = po_name or "(no name read)"
+        tk.Label(hdr, text=f"The order reads: {read}"
+                          + (f"  —  {po_address}" if po_address else ""),
+                 bg=CA, fg="#A9CCE3", font=F_SM, justify="left",
+                 wraplength=px(560)).pack(anchor="w")
+
+        body = tk.Frame(self, bg=CBG, padx=16, pady=12)
+        body.pack(fill="both", expand=True)
+
+        srch = tk.Frame(body, bg=CBG)
+        srch.pack(fill="x", pady=(0, 8))
+        tk.Label(srch, text="Search", bg=CBG, fg=CMU, font=F_SM).pack(side="left",
+                                                                     padx=(0, 8))
+        self._q = tk.StringVar()
+        field_entry(srch, textvariable=self._q, width=34).pack(side="left")
+        self._q.trace_add("write", lambda *_: self._refill())
+
+        self._lb = tk.Listbox(body, height=12, width=72, font=F_BODY,
+                              bg=CCA, fg=CTX, selectbackground=CA,
+                              selectforeground="white", activestyle="none",
+                              highlightthickness=1, highlightbackground=CSP,
+                              bd=0)
+        self._lb.pack(fill="both", expand=True)
+        self._lb.bind("<Double-1>", lambda _e: self._choose())
+        self._lb.bind("<Return>",   lambda _e: self._choose())
+
+        tk.Label(body,
+                 text="Choosing one remembers how this order reads, so the "
+                      "next one from them matches on its own.",
+                 bg=CBG, fg=CMU, font=F_SM, justify="left",
+                 wraplength=px(560)).pack(anchor="w", pady=(8, 0))
+
+        foot = tk.Frame(self, bg=CBG, padx=16, pady=12)
+        foot.pack(fill="x")
+        flat_btn(foot, "Cancel", self.destroy, variant="secondary",
+                 pady=7).pack(side="right", padx=(8, 0))
+        flat_btn(foot, "Use this customer", self._choose, bg=CGR,
+                 pady=7).pack(side="right")
+
+        # The likely ones first, then everybody else. Both are in the list:
+        # a suggestion that scored nothing is still sometimes the right
+        # answer, and hiding it would force a new profile all over again.
+        self._suggested = []
+        try:
+            for row in (suggest or []):
+                cust = row.get("customer") or {}
+                if cust.get("id"):
+                    self._suggested.append((cust, row.get("why") or ""))
+        except Exception:
+            self._suggested = []
+        self._refill()
+
+        self.update_idletasks()
+        _centre_on_parent(self, master,
+                          self.winfo_reqwidth(), self.winfo_reqheight())
+
+    def _label(self, cust, why=""):
+        name = ((cust.get("short_name") or "").strip()
+                or (cust.get("name") or "").strip() or "(unnamed)")
+        where = (cust.get("region") or "").strip()
+        text = name + (f"   ·   {where}" if where else "")
+        return text + (f"      ← {why}" if why else "")
+
+    def _refill(self):
+        q = _db._norm(self._q.get())
+        self._lb.delete(0, "end")
+        self._shown = []
+
+        picked = {c.get("id") for c, _ in self._suggested}
+
+        def _matches(c):
+            if not q:
+                return True
+            hay = " ".join(str(c.get(f) or "") for f in
+                           ("short_name", "name", "legal_name", "region",
+                            "delivery_city"))
+            return q in _db._norm(hay)
+
+        first = [(c, why) for c, why in self._suggested if _matches(c)]
+        rest = sorted((c for c in self._all
+                       if c.get("id") not in picked and _matches(c)),
+                      key=lambda c: ((c.get("short_name") or c.get("name")
+                                      or "").lower()))
+        for cust, why in first:
+            self._lb.insert("end", "  " + self._label(cust, why))
+            self._shown.append(cust)
+        if first and rest:
+            self._lb.insert("end", "  " + "─" * 40)
+            self._shown.append(None)
+        for cust in rest:
+            self._lb.insert("end", "  " + self._label(cust))
+            self._shown.append(cust)
+        for i, c in enumerate(self._shown):
+            if c is None:
+                self._lb.itemconfig(i, fg=CMU)
+        if first:
+            self._lb.selection_set(0)
+
+    def _choose(self):
+        sel = self._lb.curselection()
+        if not sel:
+            messagebox.showinfo("Pick One",
+                                "Choose the customer this order is from.",
+                                parent=self)
+            return
+        cust = self._shown[sel[0]]
+        if cust is None:          # the divider
+            return
+        self.result = cust
         self.destroy()
 
 
@@ -3854,7 +4128,8 @@ class POReviewDialog(tk.Toplevel):
     }
 
     def __init__(self, master, orders, media_types=None, filter_types=None,
-                 on_create_customer=None):
+                 on_create_customer=None, customers=None,
+                 on_link_customer=None, source_image=None):
         super().__init__(master)
         self.title("Review Imported Purchase Orders")
         self.transient(master)
@@ -3870,6 +4145,12 @@ class POReviewDialog(tk.Toplevel):
         self._filter_types = filter_types or list(VALID_FILTER_TYPES)
         self._current = None
         self._on_create_customer = on_create_customer
+        self._on_link_customer = on_link_customer
+        self._customers = list(customers or [])
+        # The page these orders were read from, so "highlight it on the
+        # order" opens the right one instead of asking somebody to go and
+        # find the file again.
+        self._source_image = source_image
         for o in self._orders:
             o.setdefault("include", True)
 
@@ -3926,10 +4207,21 @@ class POReviewDialog(tk.Toplevel):
         self._cust_lbl = tk.Label(cust_bar, text="", bg=CCA, fg=CTX, font=F_BODY,
                                   justify="left", anchor="w", wraplength=520)
         self._cust_lbl.pack(side="left", fill="x", expand=True)
+        # Creating a profile used to be the only thing offered here, so it is
+        # what everybody pressed — which is how one customer ends up with
+        # four profiles. It is last now, after the two ways of saying "we
+        # already have them".
         self._cust_btn = flat_btn(cust_bar, "Create Profile",
-                                  self._make_customer, bg=CA, pady=5, padx=12,
-                                  font=F_BODY)
+                                  self._make_customer, variant="secondary",
+                                  pady=5, padx=12, font=F_BODY)
         self._cust_btn.pack(side="right")
+        self._cust_hl_btn = flat_btn(cust_bar, "Highlight on Order…",
+                                     self._highlight_customer,
+                                     variant="secondary", pady=5, padx=12,
+                                     font=F_BODY)
+        self._cust_pick_btn = flat_btn(cust_bar, "Pick Customer…",
+                                       self._pick_customer, bg=CA, pady=5,
+                                       padx=12, font=F_BODY)
 
         self._warn_lbl = tk.Label(right, text="", bg="#FDECEC", fg="#C0392B",
                                   font=F_SM, justify="left", anchor="w",
@@ -4098,25 +4390,82 @@ class POReviewDialog(tk.Toplevel):
                      + (f" — {po_addr}" if po_addr else ""),
                 fg=CTX)
             self._cust_btn.config(text="Change", command=self._make_customer)
+            self._cust_pick_btn.pack_forget()
+            self._cust_hl_btn.pack_forget()
         else:
             self._cust_lbl.config(
                 text=f"No customer profile for: {po_name}"
                      + (f"\n{po_addr}" if po_addr else "")
-                     + "\nCreate one to set the short name and region that go on the order.",
+                     + "\nIf we already deal with them, pick them — don't make "
+                       "a second profile.",
                 fg=CRD)
             self._cust_btn.config(text="Create Profile", command=self._make_customer)
+            self._cust_hl_btn.pack(side="right", padx=(0, 8))
+            self._cust_pick_btn.pack(side="right", padx=(0, 8))
 
     def _make_customer(self):
         if self._current is None or not self._on_create_customer:
             return
         order = self._orders[self._current]
+        self._on_create_customer(order, self._customer_changed)
 
-        def _after():
-            self._refresh_customer_bar()
-            self._refresh_order_list()
-            self._on_select()
+    def _customer_changed(self):
+        self._refresh_customer_bar()
+        self._refresh_order_list()
+        self._on_select()
 
-        self._on_create_customer(order, _after)
+    def _pick_customer(self):
+        """Say which existing branch this is, rather than making a new one."""
+        if self._current is None or not self._on_link_customer:
+            return
+        order = self._orders[self._current]
+        po_name = (order.get("po_customer_name") or "").strip()
+        po_addr = (order.get("po_customer_address") or "").strip()
+        try:
+            suggest = _db.suggest_customers(po_name, po_addr, self._customers)
+        except Exception:
+            suggest = []
+        dlg = CustomerPicker(self, self._customers, po_name, po_addr, suggest)
+        self.wait_window(dlg)
+        if dlg.result:
+            self._on_link_customer(order, dlg.result)
+            self._customer_changed()
+
+    def _highlight_customer(self):
+        """Point at the customer on the page, then pick from what that read.
+
+        The whole-page read already had its go and got this one wrong. This
+        is somebody telling it where to look, and what comes back is still
+        only ever a starting point for the picker — nothing is linked on the
+        strength of a second reading either.
+        """
+        if self._current is None:
+            return
+        order = self._orders[self._current]
+        dlg = CustomerNameHighlighter(self, image_path=self._source_image)
+        self.wait_window(dlg)
+        if not dlg.result:
+            return
+        name = (dlg.result.get("name") or "").strip()
+        addr = (dlg.result.get("address") or "").strip()
+        if name:
+            order["po_customer_name"] = name
+        if addr:
+            order["po_customer_address"] = addr
+        # Try the match again with what was pointed at. It often lands now,
+        # and when it does nobody has to choose anything.
+        try:
+            match = _db.match_customer(order.get("po_customer_name", ""),
+                                       order.get("po_customer_address", ""),
+                                       self._customers)
+        except Exception:
+            match = None
+        if match and self._on_link_customer:
+            self._on_link_customer(order, match)
+            self._customer_changed()
+            return
+        self._refresh_customer_bar()
+        self._pick_customer()
 
     def _refresh_order_list(self):
         sel = self._order_lb.curselection()
@@ -14978,7 +15327,8 @@ class ModernOrderApp(tk.Frame):
         self._review_imported_orders(
             orders,
             on_finish=lambda: (_po_import.clear_batch(APP_DIR, batch),
-                               self._refresh_inbox_badge()))
+                               self._refresh_inbox_badge()),
+            paths=_po_import.batch_images(payload))
 
     # ── Purchase-order import ─────────────────────────────────────────────
 
@@ -15356,7 +15706,7 @@ class ModernOrderApp(tk.Frame):
                         "If it's a photo, check the whole page is in frame and "
                         "the text is legible.")
                     return
-                self._review_imported_orders(orders)
+                self._review_imported_orders(orders, paths=list(paths))
             self.master.after(0, _done)
 
         threading.Thread(target=_work, daemon=True).start()
@@ -15440,13 +15790,44 @@ class ModernOrderApp(tk.Frame):
         order["customer"] = match
         if not match:
             return False
+        self._apply_customer_to_order(order, match)
+        return True
+
+    def _apply_customer_to_order(self, order, cust) -> None:
+        """Put the branch's own short name and region onto the order."""
+        order["customer"] = cust
         order["header"]["Customer Name"] = (
-            (match.get("short_name") or "").strip() or (match.get("name") or "").strip())
+            (cust.get("short_name") or "").strip() or (cust.get("name") or "").strip())
         # A stated pick-up beats the branch's usual region.
-        region = "Pick Up" if order.get("pickup") else (match.get("region") or "").strip()
+        region = "Pick Up" if order.get("pickup") else (cust.get("region") or "").strip()
         if region:
             order["header"]["Location"] = region
-        return True
+
+    def _link_order_to_customer(self, order, cust) -> None:
+        """Somebody said this order is that branch. Take them at their word,
+        and write down how the order read so nobody is asked twice.
+
+        The wording is what makes this stick. Without it the next order from
+        the same branch fails to match again, somebody presses Create Profile
+        because it is the obvious button, and the duplicate this whole thing
+        exists to prevent gets made anyway.
+        """
+        self._apply_customer_to_order(order, cust)
+        try:
+            kept = _db.link_po_to_customer(
+                cust.get("id", ""),
+                (order.get("po_customer_name") or "").strip(),
+                (order.get("po_customer_address") or "").strip())
+        except Exception:
+            kept = []
+        name = order["header"].get("Customer Name", "")
+        self.status_var.set(
+            f"Order set to {name}."
+            + (f" Remembered {len(kept)} wording{'s' if len(kept) != 1 else ''} "
+               "— the next one from them will match on its own."
+               if kept else
+               " Nothing new to remember: what the order says is the company "
+               "name every branch prints."))
 
     def _apply_order_rules(self, order) -> list:
         """Settle filter type and media, then derive part numbers.
@@ -15495,14 +15876,24 @@ class ModernOrderApp(tk.Frame):
                 self._media_swaps[name] = value
         return True
 
-    def _review_imported_orders(self, orders, on_finish=None):
+    def _review_imported_orders(self, orders, on_finish=None, paths=None):
         """Show the review screen, then generate whatever was approved.
 
         `on_finish` runs once the batch is dealt with either way — it's what
         clears a phone batch from the inbox, including when the review is
         cancelled (the photos have been read; leaving it queued would just
         re-prompt forever).
+
+        `paths` are the files this batch was read from, so "highlight the
+        customer on the order" can open the page rather than asking somebody
+        to go and find it again.
         """
+        source_image = ""
+        for p in (paths or []):
+            if str(p).lower().endswith((".png", ".jpg", ".jpeg", ".gif",
+                                        ".webp", ".bmp")):
+                source_image = str(p)
+                break
         n = len(orders)
         self.status_var.set(
             f"Read {n} purchase order{'s' if n != 1 else ''} — check them before generating.")
@@ -15543,7 +15934,10 @@ class ModernOrderApp(tk.Frame):
         dlg = POReviewDialog(self.master, orders,
                              media_types=self.all_media_types,
                              filter_types=self.all_filter_types,
-                             on_create_customer=self._create_customer_for_order)
+                             on_create_customer=self._create_customer_for_order,
+                             customers=people,
+                             on_link_customer=self._link_order_to_customer,
+                             source_image=source_image)
         self.master.wait_window(dlg)
         if not dlg.result:
             self.status_var.set("Purchase order import cancelled.")

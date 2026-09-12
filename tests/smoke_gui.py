@@ -918,6 +918,15 @@ def _dialogs(gui, root):
                            "name": "Bag filter 592x592 6 pocket",
                            "unit_price": 47.25}])),
         ("JobNumberHighlighter", lambda: gui.JobNumberHighlighter(root)),
+        ("CustomerNameHighlighter",
+         lambda: gui.CustomerNameHighlighter(root)),
+        # An order that matched nobody, which is the state the picker exists
+        # for. The suggestions are built the way the app builds them, so the
+        # divider between "likely" and "everybody else" gets drawn for real.
+        ("CustomerPicker", lambda: gui.CustomerPicker(
+            root, CUSTOMERS, "Bells Creek Pty Ltd",
+            "1 Filter Rd, Caloundra QLD 4551",
+            _suggestions("Bells Creek Pty Ltd", "1 Filter Rd, Caloundra"))),
         ("_UnknownMediaDialog", lambda: gui._UnknownMediaDialog(
             root, "Mystery Media", ["G4", "F7"])),
         ("POReviewDialog",   lambda: gui.POReviewDialog(
@@ -929,6 +938,12 @@ def _dialogs(gui, root):
             root, dict(ORDERS[0]["header"]), _quote_lines(), CUSTOMERS[0],
             "Smoke Test")),
     ]
+
+
+def _suggestions(po_name, po_address):
+    from taf_order_app import db
+    return db.suggest_customers(po_name, po_address,
+                                [dict(c) for c in CUSTOMERS])
 
 
 def _quote_lines():

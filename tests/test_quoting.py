@@ -287,8 +287,8 @@ def test_escape_closes_every_dialog():
     missing = []
     for m in re.finditer(r"^class (\w+)\(tk\.Toplevel\)", src, re.M):
         name = m.group(1)
-        if name in ("_ProgressDialog", "JobNumberHighlighter", "CalendarPicker"):
-            continue          # a progress bar and a canvas tool, not forms
+        if name in ("_ProgressDialog", "CalendarPicker"):
+            continue          # a progress bar and a picker, not forms
         body = src[m.start():]
         nxt = re.search(r"\nclass ", body[10:])
         body = body[:nxt.start() + 10] if nxt else body

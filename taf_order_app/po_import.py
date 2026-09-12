@@ -180,17 +180,17 @@ def extract_orders(paths: List[str], timeout: int = 300,
     return [_normalise_order(o) for o in raw_orders if isinstance(o, dict)]
 
 
-def read_job_label(image_bytes: bytes, media_type: str = "image/png",
-                   timeout: int = 120) -> Dict[str, Any]:
-    """Read the wording that introduces a job number out of a highlighted crop.
+def _read_highlight(mode: str, image_bytes: bytes,
+                    media_type: str = "image/png",
+                    timeout: int = 120) -> Dict[str, Any]:
+    """Send one highlighted crop of a purchase order to be read.
 
-    Returns {"label", "value", "confidence"}. The label is what gets saved
-    against the customer — matching on wording survives a layout change,
-    which matching on a position on the page would not.
+    Shared by every "point at this bit of the page" feature. The only thing
+    that differs between them is the mode, and the answer it gives back.
     """
     token = _access_token()
     body = json.dumps({
-        "mode": "label",
+        "mode": mode,
         "files": [{
             "name": "highlight.png",
             "media_type": media_type,
@@ -223,9 +223,41 @@ def read_job_label(image_bytes: bytes, media_type: str = "image/png",
 
     if isinstance(data, dict) and data.get("error"):
         raise POImportError(str(data["error"]))
+    return data if isinstance(data, dict) else {}
+
+
+def read_job_label(image_bytes: bytes, media_type: str = "image/png",
+                   timeout: int = 120) -> Dict[str, Any]:
+    """Read the wording that introduces a job number out of a highlighted crop.
+
+    Returns {"label", "value", "confidence"}. The label is what gets saved
+    against the customer — matching on wording survives a layout change,
+    which matching on a position on the page would not.
+    """
+    data = _read_highlight("label", image_bytes, media_type, timeout)
     return {
         "label":      (data.get("label") or "").strip(),
         "value":      (data.get("value") or "").strip(),
+        "confidence": (data.get("confidence") or "medium").lower(),
+    }
+
+
+def read_customer_name(image_bytes: bytes, media_type: str = "image/png",
+                       timeout: int = 120) -> Dict[str, Any]:
+    """Read who a purchase order is from, out of a highlighted crop.
+
+    Returns {"name", "address", "confidence"}. Both come back separately and
+    both matter: branches of one company share a name and are told apart by
+    the address, so a reader that merged them would be handing back the one
+    piece of information that cannot resolve a branch.
+
+    Whatever comes back is a starting point for a person, never a decision.
+    Nothing in the app acts on it without somebody choosing the branch.
+    """
+    data = _read_highlight("customer", image_bytes, media_type, timeout)
+    return {
+        "name":       (data.get("name") or "").strip(),
+        "address":    (data.get("address") or "").strip(),
         "confidence": (data.get("confidence") or "medium").lower(),
     }
 
@@ -444,6 +476,27 @@ def pending_batches(app_dir: Path) -> List[Dict[str, Any]]:
             payload["dir"] = str(d)
             out.append(payload)
     return out
+
+
+IMAGE_SUFFIXES = (".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp")
+
+
+def batch_images(payload: Dict[str, Any]) -> List[str]:
+    """The photos a phone batch was read from, as they sit on this PC.
+
+    The names in the payload are the ones the cloud copy had, and that copy
+    is deleted as soon as the photos are down — so the only answer that is
+    any use is what is actually in the batch's folder. Sorted, because the
+    first one is what a review screen opens.
+    """
+    folder = (payload or {}).get("dir") or ""
+    if not folder:
+        return []
+    try:
+        return sorted(str(p) for p in Path(folder).iterdir()
+                      if p.suffix.lower() in IMAGE_SUFFIXES)
+    except Exception:
+        return []
 
 
 def clear_batch(app_dir: Path, batch: str) -> None:
