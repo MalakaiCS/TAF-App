@@ -634,6 +634,45 @@ def _steps(app, gui, root):
         _feat._switches = {}
     add("dialog: frame preferences", _frame_prefs)
 
+    def _answer_waiting_dialogs(before):
+        """Say yes to a dialog that has stopped and asked something.
+
+        Most feature screens open a window and return. One asks first —
+        which monitor the customer display goes on — and wait_window does
+        not come back until that is answered, so without this the whole run
+        stops there with no output and no failure.
+
+        It presses the dialog's own confirm button rather than closing it,
+        because cancelling would mean the screen behind it never opens and
+        the check would report that as the feature being broken.
+
+        It only ever presses a confirm button, and never closes anything.
+        Plenty of feature screens are modal in their own right, and a sweep
+        that destroyed every modal window it found would destroy those —
+        which showed up as "_media_nesting opened nothing", a screen that
+        was working perfectly.
+        """
+        state = {"stop": False}
+
+        def tick(n=0):
+            if state["stop"]:
+                return
+            for w in list(root.winfo_children()):
+                if w in before or not isinstance(w, tk.Toplevel):
+                    continue
+                go = getattr(w, "_go", None)
+                if not callable(go):
+                    continue          # not a dialog that is asking anything
+                try:
+                    go()
+                except Exception:
+                    pass
+            if n < 60:
+                root.after(25, lambda: tick(n + 1))
+
+        root.after(25, tick)
+        return lambda: state.update(stop=True)
+
     def _new_screens():
         """Every feature with a screen of its own has to open, and none of
         them may open when its switch is off."""
@@ -641,7 +680,11 @@ def _steps(app, gui, root):
         for key, _label, method in gui.ModernOrderApp.FEATURE_SCREENS:
             _feat._switches = {key: True}
             before = set(root.winfo_children())
-            getattr(app, method)()
+            stop = _answer_waiting_dialogs(before)
+            try:
+                getattr(app, method)()
+            finally:
+                stop()
             root.update()
             opened = set(root.winfo_children()) - before
             if not opened:
@@ -937,10 +980,24 @@ def _dialogs(gui, root):
         # Drawn with a real quote on it, delivery included, so the totals
         # block and an unpriced row are both actually laid out.
         ("CounterDisplay", lambda: _counter_with_a_quote(gui, root)),
+        # Two screens found, so the radio list, the fill box and the
+        # drag-it-yourself option are all laid out for real.
+        ("ScreenChooser", lambda: gui.ScreenChooser(root, _two_screens())),
+        # And the case that actually happens on most PCs: one screen, which
+        # is the branch that has to still offer a way through.
+        ("ScreenChooser (one screen)",
+         lambda: gui.ScreenChooser(root, _two_screens()[:1], guessed=True)),
         ("QuoteDialog",      lambda: gui.QuoteDialog(
             root, dict(ORDERS[0]["header"]), _quote_lines(), CUSTOMERS[0],
             "Smoke Test")),
     ]
+
+
+def _two_screens():
+    from taf_order_app import monitors
+    return monitors.parse_xrandr(
+        "eDP-1 connected primary 1920x1080+0+0 (normal) 1mm x 1mm\n"
+        "HDMI-1 connected 1920x1080+1920+0 (normal) 1mm x 1mm\n")
 
 
 def _counter_with_a_quote(gui, root):

@@ -41,6 +41,7 @@ from taf_order_app import backup as _backup
 from taf_order_app import labels as _labels
 from taf_order_app import paths as _paths
 from taf_order_app import counter_display as _counter
+from taf_order_app import monitors as _monitors
 from taf_order_app.bag_filler import (
     BAG_PRODUCT_TYPES, BAG_MEDIA_TYPES, ROLL_MEDIA_TYPES,
     ROLL_WIDTHS, ROLL_LENGTHS, STANDARD_SIZES,
@@ -4718,6 +4719,121 @@ class POReviewDialog(tk.Toplevel):
 # Quote
 # ═══════════════════════════════════════════════════════════════════════════
 
+class ScreenChooser(tk.Toplevel):
+    """Which monitor the customer display goes on.
+
+    It used to guess, from how wide Tk said the desktop was. That is a fine
+    guess on a PC with two identical screens side by side and wrong on most
+    other arrangements — and the moment it is wrong, the window with the
+    customer's quote on it opens on the screen the customer cannot see, or
+    half across both, while somebody is standing at the counter waiting.
+
+    So it asks. The last option on the list always works whatever the
+    detection did: open a window and drag it wherever it needs to go.
+
+    result = None if cancelled, else (monitor | None, fill). A monitor of
+    None means "just open a window".
+    """
+
+    def __init__(self, master, monitors, guessed=False, remembered=None):
+        super().__init__(master)
+        self.title("Which screen?")
+        self.transient(master)
+        self.grab_set()
+        self.bind("<Escape>", lambda _e: self.destroy())
+        self.resizable(False, False)
+        self.configure(bg=CBG)
+        self.result = None
+        self._monitors = list(monitors or [])
+
+        hdr = tk.Frame(self, bg=CA, padx=16, pady=10)
+        hdr.pack(fill="x")
+        tk.Label(hdr, text="Which screen faces the customer?", bg=CA,
+                 fg="white", font=(FAM, 12, "bold")).pack(anchor="w")
+        tk.Label(hdr, text="The quote opens there. Everything you type stays "
+                           "on this screen.",
+                 bg=CA, fg="#A9CCE3", font=F_SM).pack(anchor="w")
+
+        body = tk.Frame(self, bg=CBG, padx=18, pady=16)
+        body.pack(fill="both", expand=True)
+
+        # Default to the one used last time, then the obvious second screen,
+        # then nothing — so on the counter PC this dialog is one Enter press
+        # after the first time.
+        pick = ""
+        for i, mon in enumerate(self._monitors):
+            if remembered and mon["name"] == remembered:
+                pick = str(i)
+        if not pick:
+            obvious = _monitors.second_screen(self._monitors)
+            if obvious:
+                pick = str(self._monitors.index(obvious))
+        self._choice = tk.StringVar(value=pick or "window")
+
+        for i, mon in enumerate(self._monitors):
+            tk.Radiobutton(
+                body, text=_monitors.describe(mon, self._monitors),
+                variable=self._choice,
+                value=str(i), bg=CBG, fg=CTX, font=F_BODY,
+                activebackground=CBG, selectcolor=CCA, anchor="w",
+                cursor="hand2").pack(anchor="w", fill="x")
+        if guessed and len(self._monitors) > 1:
+            tk.Label(body,
+                     text="   This PC wouldn't say what screens it has, so "
+                          "the list above is worked out from the size of the "
+                          "desktop and may be wrong.",
+                     bg=CBG, fg=CMU, font=F_SM, justify="left",
+                     wraplength=px(420)).pack(anchor="w", pady=(0, 6))
+        if len(self._monitors) < 2:
+            tk.Label(body,
+                     text="   Only one screen found. Plug the second monitor "
+                          "in and press Refresh, or open a window and move it "
+                          "across yourself.",
+                     bg=CBG, fg=CMU, font=F_SM, justify="left",
+                     wraplength=px(420)).pack(anchor="w", pady=(0, 6))
+
+        tk.Radiobutton(
+            body, text="Just open a window — I'll drag it where it goes",
+            variable=self._choice, value="window", bg=CBG, fg=CTX,
+            font=F_BODY, activebackground=CBG, selectcolor=CCA, anchor="w",
+            cursor="hand2").pack(anchor="w", fill="x", pady=(6, 0))
+
+        self._fill = tk.BooleanVar(value=True)
+        tk.Checkbutton(body, text="Fill that screen (F11 toggles it later)",
+                       variable=self._fill, bg=CBG, fg=CTX, font=F_SM,
+                       activebackground=CBG, selectcolor=CCA,
+                       cursor="hand2").pack(anchor="w", pady=(10, 0))
+
+        foot = tk.Frame(self, bg=CBG, padx=18, pady=12)
+        foot.pack(fill="x")
+        flat_btn(foot, "Cancel", self.destroy, variant="secondary",
+                 pady=7).pack(side="right", padx=(8, 0))
+        flat_btn(foot, "Open it", self._go, bg=CGR, pady=7).pack(side="right")
+        flat_btn(foot, "↻ Refresh", self._refresh, variant="secondary",
+                 pady=7).pack(side="left")
+        self.bind("<Return>", lambda _e: self._go())
+
+        self.update_idletasks()
+        _centre_on_parent(self, master, self.winfo_reqwidth(),
+                          self.winfo_reqheight())
+
+    def _refresh(self):
+        """Look again — somebody has just plugged the monitor in."""
+        self.result = ("refresh", None)
+        self.destroy()
+
+    def _go(self):
+        pick = self._choice.get()
+        if pick == "window":
+            self.result = (None, False)
+        else:
+            try:
+                self.result = (self._monitors[int(pick)], bool(self._fill.get()))
+            except (ValueError, IndexError):
+                self.result = (None, False)
+        self.destroy()
+
+
 class CounterDisplay(tk.Toplevel):
     """The quote, on a screen turned to face the customer.
 
@@ -4815,24 +4931,24 @@ class CounterDisplay(tk.Toplevel):
 
     # ── Where it sits ─────────────────────────────────────────────────────
 
-    def to_second_screen(self) -> bool:
-        """Move to the monitor the app is not on, if there is one.
+    def put_on(self, monitor, fill=True) -> None:
+        """Place the window on a chosen screen.
 
-        Tk has no idea how many monitors there are - it reports one desktop
-        the width of all of them side by side. So: a desktop appreciably
-        wider than the window the app is in means a second screen to the
-        right, and that is where this goes. It is a guess, and a wrong guess
-        just puts the window somewhere the person can drag it from.
+        Filling it is done by moving there first and only then asking for
+        full screen. Asking the other way round fills whichever screen the
+        window happens to be on, which is the one the customer cannot see.
         """
+        if monitor is None:
+            return
         try:
-            full = self.winfo_screenwidth()
-            here = self.master.winfo_screenwidth()
-            if full > here * 1.4:          # a desktop spanning two monitors
-                self.geometry(f"+{here + 40}+60")
-                return True
+            self.geometry(_monitors.geometry(monitor, fill=False))
+            if fill:
+                self.update_idletasks()
+                self.geometry(_monitors.geometry(monitor, fill=True))
+                self.update_idletasks()
+                self.fullscreen(True)
         except Exception:
-            pass
-        return False
+            pass                # a window somebody drags is still a window
 
     def fullscreen(self, on=None) -> None:
         try:
@@ -7002,7 +7118,11 @@ class ModernOrderApp(tk.Frame):
         # turned it on — most PCs in the building have one monitor and no
         # counter in front of them.
         self._counter_win = None
-        self._counter_btn = flat_btn(bot, "🖥  Customer Screen",
+        # Not a loud button: Add Line and Save Quote are the two things done
+        # on this screen all day, and a third shouting alongside them makes
+        # all three read as equally urgent. It is found by its wording and by
+        # its entry under Testable Features, not by its colour.
+        self._counter_btn = flat_btn(bot, "🖥  Enable Second Screen Display",
                                      self._toggle_counter_display,
                                      variant="secondary", pady=7)
         if _features.is_on("customer_display"):
@@ -7191,24 +7311,79 @@ class ModernOrderApp(tk.Frame):
             # never take the quote down with it.
             self._counter_win = None
 
+    def _screens_now(self):
+        """Every monitor on this PC, and whether that had to be guessed."""
+        try:
+            found = _monitors.list_monitors()
+            if found:
+                return found, False
+            return _monitors.list_monitors(
+                self.master.winfo_screenwidth(),
+                self.master.winfo_screenheight(),
+                self.master.winfo_screenwidth(),
+                self.master.winfo_screenheight()), True
+        except Exception:
+            return [], True
+
     def _toggle_counter_display(self):
-        """Open or close the second screen."""
+        """Turn the customer's screen on, or off again.
+
+        Asks which monitor rather than guessing. The guess was fine on a PC
+        with two identical screens side by side and wrong on most other
+        arrangements — and a wrong guess opens the customer's quote on the
+        screen the customer cannot see, while they stand there waiting.
+        """
         win = self._counter_window()
         if win is not None:
             win.close()
             self._counter_win = None
-            self._counter_btn.config(text="🖥  Customer Screen")
-            self.status_var.set("Customer screen closed.")
+            self._set_counter_button(False)
+            self.status_var.set("Second screen display turned off.")
             return
+
+        remembered = self._settings.get("counter_screen", "")
+        while True:
+            found, guessed = self._screens_now()
+            dlg = ScreenChooser(self.master, found, guessed, remembered)
+            self.master.wait_window(dlg)
+            if not dlg.result:
+                return                      # cancelled
+            if dlg.result[0] == "refresh":
+                continue                    # they have just plugged it in
+            break
+        monitor, fill = dlg.result
+
         self._counter_win = CounterDisplay(self.master)
-        moved = self._counter_win.to_second_screen()
+        self._counter_win.put_on(monitor, fill)
         self._push_to_counter()
-        self._counter_btn.config(text="🖥  Close Customer Screen")
-        self.status_var.set(
-            "Customer screen opened on the second monitor — F11 for full "
-            "screen." if moved else
-            "Customer screen opened — drag it to the other monitor, then F11 "
-            "for full screen.")
+        self._set_counter_button(True)
+
+        if monitor is not None:
+            # Remembered so the next customer through the door is one press
+            # away rather than a dialog away.
+            self._settings["counter_screen"] = monitor["name"]
+            _save_settings(self._settings)
+            self.status_var.set(
+                f'Second screen display on — {monitor["name"]}. '
+                "F11 toggles full screen, Escape leaves it.")
+        else:
+            self.status_var.set(
+                "Second screen display opened as a window — drag it across to "
+                "the other monitor, then press F11.")
+
+    def _set_counter_button(self, on: bool) -> None:
+        self._counter_btn.config(
+            text="🖥  Turn Off Second Screen" if on
+            else "🖥  Enable Second Screen Display")
+
+    def _customer_screen_from_menu(self):
+        """The same thing, reached from Testable Features.
+
+        Somebody who has been told about this looks for it in the menu with
+        everything else new, not on a tab they may not have open.
+        """
+        self._show_tab("quotes")
+        self._toggle_counter_display()
 
     def _quote_add_menu(self):
         """Everything a quote can carry, in one list.
@@ -12099,6 +12274,8 @@ class ModernOrderApp(tk.Frame):
         ("job_cost_actual",    "What a job actually cost…", "_job_cost"),
         ("xero_live",          "Xero…",                   "_xero"),
         ("email_orders",       "Orders straight from email…", "_email_orders"),
+        ("customer_display",   "Enable second screen display…",
+                                                         "_customer_screen_from_menu"),
     ]
 
     def _testable_features(self) -> list:

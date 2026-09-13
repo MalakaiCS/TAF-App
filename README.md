@@ -123,11 +123,17 @@ log, stock management and a customer database.
   next one from them matches on its own. Creating a new profile is the last
   option rather than the only one — which is how one customer used to end up
   with four.
-- **A screen facing the customer** — a second monitor at the counter showing
-  the quote as it's built: every line, its price, the line total, the delivery
-  and the total. It never shows a cost or a margin: what goes on it is worked
-  out from prices alone, in its own module, so there's no path from the
-  margin figures to that screen.
+- **A screen facing the customer** — press **Enable Second Screen Display** on
+  the Quotes tab (or find it under Testable Features) and pick which monitor
+  faces the customer. It shows the quote as it's built: every line, its price,
+  the line total, the delivery and the total. F11 fills the screen, Escape
+  leaves full screen, and the monitor you pick is remembered.
+  It never shows a cost or a margin: what goes on it is worked out from prices
+  alone, in its own module, so there's no path from the margin figures to that
+  screen. Which screens exist is read from the machine — EnumDisplayMonitors on
+  Windows, xrandr on Linux, system_profiler on a Mac — rather than guessed at
+  from how wide Tk says the desktop is, and there's always a "just open a
+  window I'll drag" option for when none of that works.
 - **Learns from corrections** — when someone fixes a line in the import review
   screen ("V Filter" was read as unknown and they picked V-form; "MERV 8" was
   swapped for G4), the wording and what it meant are remembered and shared
