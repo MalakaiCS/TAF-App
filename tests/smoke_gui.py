@@ -1053,6 +1053,23 @@ def _exports(app, gui):
         assert any("no SKU" in p for p in problems), \
             "an item with no SKU should be reported, not silently blank"
 
+    def _delivery_dockets():
+        from taf_order_app import dockets
+        # One customer collecting two orders, which is the case the docket
+        # exists for — and it has to come out as one docket, not two.
+        rows = [dict(ORDERS[0], customer="Bells Creek", order_no="PO-8842",
+                     location="Pick Up"),
+                dict(ORDERS[2], customer="Bells Creek", order_no="PO-9100",
+                     location="Pick Up")]
+        built = dockets.build_dockets(
+            dockets.group_by_customer(rows),
+            lambda o: next((list(x["items"]) for x in ORDERS
+                            if x.get("order_no") == o["order_no"]), []))
+        assert len(built) == 1, f"{len(built)} dockets for one customer"
+        assert built[0]["order_count"] == 2
+        path = dockets.build_dockets_pdf(out / "dockets.pdf", built)
+        assert Path(path).exists(), "the dockets were not written"
+
     def _worksheet_barcode():
         import pdf_generator
         from reportlab.pdfgen import canvas as rc
@@ -1075,7 +1092,8 @@ def _exports(app, gui):
             ("pricing.invoice_for_order", _invoice),
             ("labels.build_label_sheet", _labels),
             ("pdf_generator.draw_order_barcode", _worksheet_barcode),
-            ("delivery.build_run_sheet_pdf", _run_sheet)]
+            ("delivery.build_run_sheet_pdf", _run_sheet),
+            ("dockets.build_dockets_pdf", _delivery_dockets)]
 
 
 def print_failures():

@@ -46,6 +46,15 @@ log, stock management and a customer database.
 - **Delivery** — what's finished and where it goes, grouped by region in run
   order. Print a run sheet for the driver (tick box, due date, signature
   column) and mark a whole run dispatched in one go.
+- **Delivery dockets** — a docket per customer rather than per order, so
+  somebody collecting five orders at once signs once for the lot. Each order
+  number is listed with its own filters underneath, so a query about one order
+  doesn't put the other four in doubt. Two copies: the **customer copy** they
+  keep, and the **office copy** they sign and we keep — the only thing that
+  settles "we never received those" weeks later. A pick-up prints as a
+  COLLECTION docket asking who collected it, a drop as a DELIVERY docket
+  asking who received it. Prints the selected orders, or the whole run when
+  nothing is selected.
 - **Products** — the priced catalogue: search it, correct a price, add a
   product, import price spreadsheets. The part numbers here are the item codes
   in Xero.
@@ -742,6 +751,7 @@ taf_order_app/
   quote_pdf.py             The quote PDF
   stock_usage.py           What an order takes out of stock
   delivery.py              Run sheets and what's ready to go out
+  dockets.py               The docket a customer signs for what they got
   backup.py                The dated zip of spreadsheets
   labels.py                Barcode labels for stock, on Avery sheets
 tests/                     Rule tests — `python tests/run.py`, run by CI

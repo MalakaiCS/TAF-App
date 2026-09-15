@@ -42,6 +42,7 @@ from taf_order_app import labels as _labels
 from taf_order_app import paths as _paths
 from taf_order_app import counter_display as _counter
 from taf_order_app import monitors as _monitors
+from taf_order_app import dockets as _dockets
 from taf_order_app.bag_filler import (
     BAG_PRODUCT_TYPES, BAG_MEDIA_TYPES, ROLL_MEDIA_TYPES,
     ROLL_WIDTHS, ROLL_LENGTHS, STANDARD_SIZES,
@@ -6681,6 +6682,8 @@ class ModernOrderApp(tk.Frame):
         bot.grid(row=3, column=0, sticky="ew")
         flat_btn(bot, "🖨  Print Run Sheet", self._print_run_sheet,
                  variant="secondary", pady=7).pack(side="left", padx=(0, 8))
+        flat_btn(bot, "🖨  Print Delivery Dockets", self._print_dockets,
+                 variant="secondary", pady=7).pack(side="left", padx=(0, 8))
         flat_btn(bot, "✓  Mark Dispatched", self._mark_dispatched,
                  bg=CA, pady=7).pack(side="left", padx=(0, 8))
         menu_btn(bot, "Run  ▾", [
@@ -6783,6 +6786,90 @@ class ModernOrderApp(tk.Frame):
                         messagebox.showinfo("Run Sheet", f"Saved to:\n{path}")
                 else:
                     self.status_var.set("Run sheet sent to the printer.")
+            self.master.after(0, _done)
+
+        threading.Thread(target=_print_worker, daemon=True).start()
+
+    def _print_dockets(self):
+        """A docket per customer: what they are being handed, and a copy to sign.
+
+        Selected orders if any are selected, otherwise the whole run — which
+        is the difference between one customer at the counter and loading the
+        van for the morning.
+
+        The lines are read from the database one order at a time, so this
+        runs on a worker: a counter with somebody standing at it is the worst
+        place for the window to stop responding.
+        """
+        picked = self._selected_delivery_orders()
+        if not picked:
+            grouped = getattr(self, "_run_grouped", None) or []
+            picked = [o for _region, rows in grouped for o in rows]
+        if not picked:
+            messagebox.showinfo(
+                "Delivery Dockets",
+                "Nothing is ready to go out, so there is nothing to make a "
+                "docket for.\n\nMark orders Complete in Previous Orders, or "
+                "select the ones you want dockets for.")
+            return
+
+        by_customer = _dockets.group_by_customer(picked)
+        self.status_var.set(
+            f"Building {len(by_customer)} docket"
+            f"{'s' if len(by_customer) != 1 else ''}…")
+
+        def _items_for(order):
+            _header, items = self._order_header_items(order, "Delivery Docket")
+            return items
+
+        def _work():
+            try:
+                built = _dockets.build_dockets(by_customer, _items_for)
+                ORDERS_DIR.mkdir(parents=True, exist_ok=True)
+                today = datetime.date.today()
+                out = ORDERS_DIR / f"Delivery_Dockets_{today:%Y-%m-%d}.pdf"
+                path = _dockets.build_dockets_pdf(
+                    out, built, today,
+                    prepared_by=(_db.current_full_name()
+                                 or _db.current_username() or ""))
+                err = ""
+            except Exception as exc:
+                built, path, err = [], "", f"{exc}"
+
+            def _done():
+                if err:
+                    self.status_var.set("Delivery dockets failed.")
+                    messagebox.showerror(
+                        "Delivery Dockets",
+                        f"The dockets could not be created:\n{err}")
+                    return
+                try:
+                    _db.log_action("dockets_printed", _dockets.summary(built))
+                except Exception:
+                    pass
+                self.status_var.set(
+                    f"{_dockets.summary(built)} — printing…")
+                self._send_dockets_to_printer(path)
+            self.master.after(0, _done)
+
+        threading.Thread(target=_work, daemon=True).start()
+
+    def _send_dockets_to_printer(self, path):
+        def _print_worker():
+            err = self._print_file(str(path))
+
+            def _done():
+                if err:
+                    self.status_var.set("Dockets saved — printing failed.")
+                    try:
+                        _open_path(str(path))
+                    except Exception:
+                        messagebox.showinfo("Delivery Dockets",
+                                            f"Saved to:\n{path}")
+                else:
+                    self.status_var.set(
+                        "Dockets sent to the printer — the customer signs "
+                        "the office copy.")
             self.master.after(0, _done)
 
         threading.Thread(target=_print_worker, daemon=True).start()
