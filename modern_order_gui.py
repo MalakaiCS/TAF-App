@@ -15035,8 +15035,7 @@ class ModernOrderApp(tk.Frame):
                  lambda: self._copy_text(where), bg=CA,
                  pady=px(6)).pack(side="left")
         flat_btn(row, "Open the Phone Inbox",
-                 lambda: (dlg.destroy(), self._show_po_inbox())
-                 if hasattr(self, "_show_po_inbox") else dlg.destroy(),
+                 lambda: (dlg.destroy(), self._open_phone_inbox()),
                  bg=CNE, pady=px(6),
                  variant="secondary").pack(side="left", padx=(px(8), 0))
         flat_btn(row, "Close", dlg.destroy, bg=CNE, pady=px(6),
@@ -17212,7 +17211,7 @@ class ModernOrderApp(tk.Frame):
 
     def _cost_data(self, force: bool = False):
         """What things cost, alongside what they sell for."""
-        self._price_data(force=force)          # fills both caches together
+        self._load_prices(force=force)         # fills both caches together
         return getattr(self, "_cost_cache", ({}, {}))
 
     def _open_quote(self, header, items, customer=None):

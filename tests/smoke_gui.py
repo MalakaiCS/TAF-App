@@ -497,6 +497,22 @@ def _steps(app, gui, root):
         if not takes_args:
             add(f"{name}()", fn)
 
+    def _quote_with_lines():
+        """The refresh above runs on an empty quote, which returns before the
+        totals and the margin. v2.27.0 went out calling a method that did not
+        exist in exactly that part, and it only ran for a manager with lines
+        on the quote - so put some on."""
+        was = list(getattr(app, "quote_items", []) or [])
+        app.quote_items = [dict(i) for i in ORDERS[0]["items"]]
+        try:
+            app._refresh_quote_lines()
+            if not app._quote_totals_var.get():
+                raise AssertionError("a quote with lines shows no totals")
+        finally:
+            app.quote_items = was
+            app._refresh_quote_lines()
+    add("quote with lines on it", _quote_with_lines)
+
     add("banner: dialogs", lambda: print("Opening every dialog…"))
     for label, make in _dialogs(gui, root):
         add(f"dialog: {label}", _open_and_close(make))
