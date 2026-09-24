@@ -113,8 +113,14 @@ def test_the_worker_is_not_registered_from_a_file_url():
 #   adjust_stock_atomic  is NOT, on its own - it moves a figure. It is safe
 #                        only because of the client reference, which is why
 #                        the test below insists on one.
+#   request_supply       is NOT, on its own either - it files a request, and
+#                        filing twice tells every manager twice. Safe only
+#                        because of its client reference: a retry is handed
+#                        back the request it already filed. tests/db_rules.py
+#                        checks that against a real Postgres, including that
+#                        a retry is answered as a success rather than refused.
 REPEATABLE = {"set_order_line_made", "merge_order_header",
-              "adjust_stock_atomic"}
+              "adjust_stock_atomic", "request_supply"}
 
 
 def _queued_calls() -> list:
@@ -159,6 +165,20 @@ def test_a_queued_stock_movement_always_carries_a_reference():
                 "a stock movement is queued without a client reference"
             return
     raise AssertionError("stock adjustments no longer go through the queue")
+
+
+def test_a_queued_supply_request_always_carries_a_reference():
+    """The same reason as a stock movement. Without it a send that lost its
+    answer to a dropout and went again is two requests for the same tape,
+    and every manager's bell counts it twice."""
+    for call in _queued_calls():
+        if "request_supply" in call:
+            assert "p_client_ref" in call, \
+                "a supply request is queued without a client reference"
+            assert "S.newRef()" in call, \
+                "the reference is not a fresh one each time"
+            return
+    raise AssertionError("supply requests no longer go through the queue")
 
 
 def test_a_write_whose_row_vanished_is_reported_rather_than_counted():

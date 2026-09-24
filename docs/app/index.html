@@ -55,6 +55,41 @@
                   font:600 13px/1 inherit; padding:9px 12px; border-radius:8px;
                   cursor:pointer; }
 
+  /* The bell. Quiet with nothing unread; red, with the count on it, when
+     there is. The badge grows from a circle into a pill for "12" or "99+"
+     rather than squeezing the number - min-width and padding do that, not
+     a guessed width. */
+  header .bell { position:relative; background:none; padding:6px 8px; }
+  header .bell svg { width:26px; height:26px; display:block; fill:none;
+                     stroke:#A9CCE3; stroke-width:2; stroke-linecap:round;
+                     stroke-linejoin:round; }
+  header .bell.has svg { stroke:#FF6B6E; }
+  header .bell .badge { position:absolute; top:0; right:0; min-width:19px;
+                        height:19px; padding:0 5px; border-radius:10px;
+                        background:#E5484D; color:#fff;
+                        font:700 11px/19px inherit; text-align:center;
+                        white-space:nowrap; box-shadow:0 0 0 2px var(--navy); }
+
+  /* A notification in the list under the bell. */
+  .note-row { display:block; width:100%; text-align:left; font:inherit;
+              background:#fff; border:1px solid var(--line); border-radius:10px;
+              padding:11px 12px; margin-bottom:8px; cursor:pointer; }
+  .note-row.new { border-color:#F2B8B5; background:#FFF6F5; }
+  .note-row strong { display:block; font-size:15px; }
+  .note-row .when { float:right; font-size:12px; color:var(--muted); }
+
+  /* Supply requests. Urgent and still waiting is the one somebody is
+     standing at a bench without, so it looks like it. */
+  tr.urgent td { background:#FCE9E6; color:#8A2A1E; }
+  tr.done td { color:var(--muted); }
+  .s-Waiting   { background:#FEF6E0; color:var(--amber); }
+  .s-Ordered   { background:#E4EEF8; color:var(--blue); }
+  .s-Received  { background:#E4F4EA; color:var(--green); }
+  .s-Declined  { background:#EAEEF2; color:#48576A; }
+  .s-Cancelled { background:#EAEEF2; color:#48576A; }
+  .acts { display:flex; gap:6px; flex-wrap:wrap; }
+  .acts button.btn { padding:8px 10px; font-size:12px; }
+
   nav { background:var(--navy); display:flex; gap:2px; padding:0 8px;
         overflow-x:auto; }
   nav button { flex:0 0 auto; background:transparent; border:0; color:#A9CCE3;
@@ -212,6 +247,13 @@
 <div id="app" class="hidden">
   <header>
     <h1 id="app-title">Total Air Filtration</h1>
+    <button class="bell" id="bell" type="button" aria-label="Notifications">
+      <svg viewBox="0 0 24 24" aria-hidden="true">
+        <path d="M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9"/>
+        <path d="M10.3 21a1.94 1.94 0 0 0 3.4 0"/>
+      </svg>
+      <span class="badge hidden" id="bell-badge"></span>
+    </button>
     <button class="who" id="who" type="button" aria-label="You and your settings">
       <strong id="who-name">—</strong><span id="who-role"></span></button>
     <button id="signout" type="button">Sign out</button>

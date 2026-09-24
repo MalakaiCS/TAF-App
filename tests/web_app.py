@@ -136,6 +136,37 @@ QUOTES = [
 ]
 
 
+# Supply requests and the bell. Seeded as if the floor had already asked for
+# three things, so Kai - a manager - signs in to a red bell.
+SUPPLY: list = [
+    {"id": "sr1", "item": "Tape", "detail": "50mm foil", "quantity": "3 rolls",
+     "urgent": False, "status": "open", "requested_by": "u9",
+     "requested_by_name": "Dave Floor", "handled_by_name": "",
+     "created_at": "2026-09-24T00:10:00Z"},
+    {"id": "sr2", "item": "Rivets", "detail": "4mm pop", "quantity": "1 box",
+     "urgent": True, "status": "open", "requested_by": "u9",
+     "requested_by_name": "Dave Floor", "handled_by_name": "",
+     "created_at": "2026-09-24T00:40:00Z"},
+    {"id": "sr3", "item": "Channel", "detail": "45mm", "quantity": "20",
+     "urgent": False, "status": "ordered", "requested_by": "u9",
+     "requested_by_name": "Dave Floor", "handled_by_name": "Sarah Boss",
+     "created_at": "2026-09-23T03:00:00Z"},
+]
+NOTES: list = [
+    {"id": "n1", "kind": "supply_request", "ref_id": "sr2",
+     "title": "URGENT: Rivets - 4mm pop", "body": "Dave Floor asked for 1 box",
+     "read_at": None, "created_at": "2026-09-24T00:40:00Z"},
+    {"id": "n2", "kind": "supply_request", "ref_id": "sr1",
+     "title": "Tape - 50mm foil", "body": "Dave Floor asked for 3 rolls",
+     "read_at": None, "created_at": "2026-09-24T00:10:00Z"},
+    {"id": "n3", "kind": "supply_request", "ref_id": "sr0",
+     "title": "Mesh Wire", "body": "Dave Floor asked for 1 roll",
+     "read_at": None, "created_at": "2026-09-23T23:00:00Z"},
+]
+BELL = {"override": None}    # a count to report instead, e.g. 150
+REFUSE_MOVE = {"on": False}  # row-level security matching nothing
+
+
 class Stub:
     """Answers what the page asks for, and remembers what it was asked."""
 
@@ -199,6 +230,28 @@ class Stub:
                 return send({"message": "permission denied for table"
                                         " audit_log"}, 401)
             return send(AUDIT + LOGGED)
+        if "/rest/v1/notifications" in url:
+            return send(NOTES)
+        if "/rest/v1/supply_requests" in url and req.method == "PATCH":
+            # Like the real policy: a change that is not allowed is not an
+            # error, it matches nothing and hands back no rows.
+            if REFUSE_MOVE["on"]:
+                return send([])
+            rid = url.split("id=eq.", 1)[1].split("&")[0]
+            row = next((r for r in SUPPLY if r["id"] == rid), None)
+            if row is None:
+                return send([])
+            row["status"] = body.get("status", row["status"])
+            row["handled_by_name"] = "Kai Brown"
+            for n in NOTES:          # the settle trigger
+                if n["ref_id"] == rid and not n["read_at"]:
+                    n["read_at"] = "2026-09-24T01:00:00Z"
+            return send([row])
+        if "/rest/v1/supply_requests" in url:
+            rows = list(SUPPLY)
+            if "status=in." in url:
+                rows = [r for r in rows if r["status"] in ("open", "ordered")]
+            return send(rows)
         if "/rest/v1/orders_list" in url:
             return send(ORDERS)
         if "/rest/v1/customers" in url:
@@ -267,6 +320,38 @@ class Stub:
             if name == "set_my_daily_summary":
                 NOTIFY["on"] = bool(body.get("p_on"))
                 return send(NOTIFY["on"])
+            if name == "my_unread_count":
+                if BELL["override"] is not None:
+                    return send(BELL["override"])
+                return send(sum(1 for n in NOTES if not n["read_at"]))
+            if name == "mark_notifications_read":
+                ids = body.get("p_ids")
+                n = 0
+                for note in NOTES:
+                    if not note["read_at"] and (ids is None or note["id"] in ids):
+                        note["read_at"] = "2026-09-24T01:00:00Z"
+                        n += 1
+                return send(n)
+            if name == "request_supply":
+                # As the database does it: the same reference twice is the
+                # same request, handed back rather than filed again.
+                ref = body.get("p_client_ref")
+                old = next((r for r in SUPPLY
+                            if ref and r.get("client_ref") == ref), None)
+                if old:
+                    return send(old)
+                row = {"id": "sr" + str(len(SUPPLY) + 10),
+                       "item": body.get("p_item"),
+                       "detail": body.get("p_detail", ""),
+                       "quantity": body.get("p_quantity", ""),
+                       "urgent": bool(body.get("p_urgent")),
+                       "note": body.get("p_note", ""), "status": "open",
+                       "client_ref": ref, "requested_by": "u1",
+                       "requested_by_name": "Kai Brown",
+                       "handled_by_name": "",
+                       "created_at": "2026-09-24T01:30:00Z"}
+                SUPPLY.append(row)
+                return send(row)
             if name == "resolve_scan":
                 code = str(body.get("p_code") or "").strip().upper()
                 hits = []
@@ -291,6 +376,24 @@ class Stub:
                 return send(None)
             return send(None)
         return send([])
+
+
+def wait_for_text(page, where: str, text: str, ms: int = 5000) -> None:
+    """Wait until `text` is showing in `where`, and no longer.
+
+    Not wait_for_selector(".ok"): a message from the step before is still on
+    screen, so that returns at once with the old one and the check reads the
+    wrong message - a test that passes or fails depending on how fast the
+    machine is. Judged by check() afterwards either way; a timeout here is
+    not the failure, the missing words are.
+    """
+    try:
+        page.wait_for_function(
+            "([w, t]) => (document.querySelector(w) || {}).innerText"
+            " && document.querySelector(w).innerText.includes(t)",
+            arg=[where, text], timeout=ms)
+    except Exception:
+        pass
 
 
 def run() -> int:
@@ -960,6 +1063,161 @@ def run() -> int:
         page.locator("#sheet-body button", has_text="Close").first.click()
         page.wait_for_selector("#sheet.hidden", state="attached")
 
+        print("\n── the bell ──")
+        badge = page.locator("#bell-badge")
+        page.wait_for_function(
+            "() => document.getElementById('bell-badge').textContent !== ''")
+        check("signing in as a manager with three unread shows a red 3",
+              badge.inner_text() == "3" and badge.is_visible()
+              and "has" in (page.get_attribute("#bell", "class") or ""),
+              badge.inner_text())
+        check("and says so to a screen reader",
+              page.get_attribute("#bell", "aria-label")
+              == "3 new notifications")
+
+        rules = page.evaluate("""() => [0, 1, 9, 99, 100, 150, -2, 'x']
+                                   .map(n => TAFAPP._badgeText(n))""")
+        check("the badge reads nothing, then the number, then 99+",
+              rules == ["", "1", "9", "99", "99+", "99+", "", ""], str(rules))
+
+        BELL["override"] = 150
+        page.evaluate("document.dispatchEvent(new Event('visibilitychange'))")
+        page.wait_for_function(
+            "() => document.getElementById('bell-badge').textContent"
+            " === '99+'")
+        fits = page.evaluate("""() => {
+          const b = document.getElementById('bell-badge');
+          return b.scrollWidth <= b.clientWidth + 1; }""")
+        check("150 unread reads 99+, and it fits in the badge",
+              badge.inner_text() == "99+" and fits)
+        BELL["override"] = None
+        page.evaluate("document.dispatchEvent(new Event('visibilitychange'))")
+        page.wait_for_function(
+            "() => document.getElementById('bell-badge').textContent === '3'")
+        check("picking the phone back up asks again straight away",
+              badge.inner_text() == "3")
+
+        page.click("#bell")
+        page.wait_for_selector("#sheet-body .note-row")
+        rows = page.locator("#sheet-body .note-row")
+        check("tapping the bell lists what is new",
+              rows.count() == 3 and "Rivets" in rows.first.inner_text())
+        check("unread ones look unread",
+              page.locator("#sheet-body .note-row.new").count() == 3)
+        rows.first.click()
+        page.wait_for_selector('#tabs button[data-tab="supplies"]'
+                               '[aria-selected="true"]')
+        page.wait_for_function(
+            "() => document.getElementById('bell-badge').textContent === '2'")
+        check("tapping one opens Supplies and counts it read",
+              badge.inner_text() == "2")
+
+        print("\n── asking for supplies ──")
+        page.wait_for_selector("#screen table")
+        first = page.locator("#screen tbody tr").first.inner_text()
+        check("the urgent one waiting is at the top",
+              first.startswith("URGENT") and "Rivets" in first, first)
+        check("what is already on order says who ordered it",
+              "Sarah Boss" in page.locator("#screen").inner_text())
+        check("a manager is offered Ordered, Received and Decline",
+              page.locator("#screen button", has_text="Ordered").count() >= 1
+              and page.locator("#screen button", has_text="Decline").count() >= 1)
+
+        page.select_option("#supply-item", "Other")
+        page.fill("#supply-detail", "")
+        page.click("#supply-send")
+        page.wait_for_timeout(200)
+        check("\"Other\" with nothing said is stopped before it is sent",
+              "does not tell anybody" in page.locator("#screen").inner_text()
+              and not any("request_supply" in u for u, _b in stub.calls))
+
+        before = len(SUPPLY)
+        page.select_option("#supply-item", "Tape")
+        check("the hint follows what is being asked for",
+              "Which tape" in page.locator("#screen").inner_text())
+        page.fill("#supply-detail", "duct 48mm")
+        page.fill("#supply-qty", "2 rolls")
+        page.check("#supply-urgent")
+        page.click("#supply-send")
+        wait_for_text(page, "#screen", "managers have been told")
+        sent = [b for u, b in stub.calls if "rpc/request_supply" in u]
+        check("asking sends it, with a reference of its own",
+              len(SUPPLY) == before + 1 and sent
+              and sent[-1].get("p_client_ref")
+              and sent[-1].get("p_urgent") is True, str(sent[-1:]))
+        check("never who is asking - the database writes that",
+              "requested_by" not in json.dumps(sent[-1])
+              and "requested_by_name" not in json.dumps(sent[-1]))
+        check("the form empties so it is not sent twice by accident",
+              page.input_value("#supply-detail") == ""
+              and not page.is_checked("#supply-urgent"))
+        check("and says the managers have been told",
+              "managers have been told" in page.locator("#screen").inner_text())
+        check("and it is logged, without asking to read the log back",
+              any(e.get("action") == "supply_requested" for e in LOGGED))
+
+        # Out of signal at the back of the factory.
+        page.route("**/rest/v1/rpc/request_supply*",
+                   lambda r: r.abort("internetdisconnected"))
+        before = len(SUPPLY)
+        page.select_option("#supply-item", "Channel")
+        page.fill("#supply-detail", "50mm")
+        page.fill("#supply-qty", "10")
+        page.click("#supply-send")
+        wait_for_text(page, "#screen", "Kept on this phone")
+        check("with no signal it is kept on the phone, and says so",
+              "Kept on this phone" in page.locator("#screen").inner_text()
+              and len(SUPPLY) == before)
+        page.unroute("**/rest/v1/rpc/request_supply*")
+        page.evaluate("TAFSYNC.flush()")
+        page.wait_for_timeout(500)
+        # And once more, as if the phone sent it, lost the answer, and sent
+        # it again.
+        queued_ref = [b for u, b in stub.calls
+                      if "rpc/request_supply" in u][-1]["p_client_ref"]
+        page.evaluate(f"""TAFDATA.rpc('request_supply', {{
+            p_item: 'Channel', p_detail: '50mm', p_quantity: '10',
+            p_urgent: false, p_note: '', p_client_ref: '{queued_ref}' }})""")
+        page.wait_for_timeout(300)
+        check("when the signal is back it goes - once, even if sent again",
+              sum(1 for r in SUPPLY if r.get("detail") == "50mm") == 1)
+
+        page.click('#tabs button[data-tab="supplies"]')
+        page.wait_for_selector("#screen table")
+        page.locator('#screen tr[data-request="sr1"] button',
+                     has_text="Ordered").click()
+        page.wait_for_timeout(400)
+        check("marking one ordered moves it along",
+              next(r for r in SUPPLY if r["id"] == "sr1")["status"] == "ordered")
+        check("and that clears it from the bell",
+              page.locator("#bell-badge").inner_text() == "1",
+              page.locator("#bell-badge").inner_text())
+
+        REFUSE_MOVE["on"] = True
+        page.locator('#screen tr[data-request="sr2"] button',
+                     has_text="Ordered").click()
+        # Waited for briefly and then judged, rather than waited for forever:
+        # if the page wrongly treats the refusal as done, there is no message
+        # to wait for, and that should be a FAIL here, not a timeout that
+        # takes every check after it down too.
+        try:
+            page.wait_for_selector("#screen .err", timeout=4000)
+        except Exception:
+            pass
+        check("a change the database quietly refused is not shown as done",
+              "didn't change anything" in page.locator("#screen").inner_text())
+        REFUSE_MOVE["on"] = False
+
+        page.click("#bell")
+        page.wait_for_selector("#sheet-body button", state="attached")
+        page.locator("#sheet-body button", has_text="Mark all read").click()
+        page.wait_for_selector("#sheet.hidden", state="attached")
+        page.wait_for_function(
+            "() => document.getElementById('bell-badge').textContent === ''")
+        check("mark all read and the bell goes quiet",
+              page.locator("#bell-badge").is_hidden()
+              and "has" not in (page.get_attribute("#bell", "class") or ""))
+
         print("\n── a phone left on the bench ──")
         page.evaluate("TAFAPP._stillThere()")
         page.wait_for_selector("#sheet:not(.hidden)")
@@ -1018,6 +1276,28 @@ def run() -> int:
         check("but everything they do use is still there",
               page.locator('#tabs button[data-tab="orders"]').count() == 1
               and page.locator('#tabs button[data-tab="scan"]').count() == 1)
+
+        # Somebody on the floor is who Supplies is for. They ask; they do not
+        # mark things ordered - and the one thing they can change is taking
+        # back their own request while nothing has been done about it.
+        check("the floor can reach Supplies",
+              page.locator('#tabs button[data-tab="supplies"]').count() == 1)
+        SUPPLY.append({"id": "mine", "item": "Tape", "detail": "foil",
+                       "quantity": "1", "urgent": False, "status": "open",
+                       "requested_by": "u1", "requested_by_name": "Kai Brown",
+                       "handled_by_name": "",
+                       "created_at": "2026-09-24T02:00:00Z"})
+        page.click('#tabs button[data-tab="supplies"]')
+        page.wait_for_selector("#screen table")
+        check("an employee is not offered Ordered, Received or Decline",
+              page.locator("#screen button", has_text="Received").count() == 0
+              and page.locator("#screen button", has_text="Decline").count() == 0)
+        check("but can cancel a request of their own that is still waiting",
+              page.locator('#screen tr[data-request="mine"] button',
+                           has_text="Cancel").count() == 1)
+        check("and nobody else's",
+              page.locator('#screen tr[data-request="sr2"] button',
+                           has_text="Cancel").count() == 0)
         PROFILE["role"] = "Manager"
 
         print("\n── kept on the phone ──")

@@ -123,7 +123,11 @@ WITH checks(step, file, purpose, needed, present) AS (VALUES
   (31, 'migrate_quote_shipping.sql', 'Delivery charged on a quote, so the counter and the invoice agree', 'recommended',
       EXISTS (SELECT 1 FROM information_schema.columns
                WHERE table_schema='public' AND table_name='quotes'
-                 AND column_name='shipping'))
+                 AND column_name='shipping')),
+
+  (32, 'migrate_supply_requests.sql', 'Asking for supplies, and the bell that tells managers', 'recommended',
+      to_regclass('public.supply_requests') IS NOT NULL
+      AND to_regclass('public.notifications') IS NOT NULL)
 )
 SELECT step,
        CASE WHEN present THEN 'already done' ELSE 'RUN THIS' END AS status,

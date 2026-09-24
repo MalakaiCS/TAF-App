@@ -43,6 +43,7 @@ from taf_order_app import paths as _paths
 from taf_order_app import counter_display as _counter
 from taf_order_app import monitors as _monitors
 from taf_order_app import dockets as _dockets
+from taf_order_app import supplies as _supplies
 from taf_order_app.bag_filler import (
     BAG_PRODUCT_TYPES, BAG_MEDIA_TYPES, ROLL_MEDIA_TYPES,
     ROLL_WIDTHS, ROLL_LENGTHS, STANDARD_SIZES,
@@ -4720,6 +4721,197 @@ class POReviewDialog(tk.Toplevel):
 # Quote
 # ═══════════════════════════════════════════════════════════════════════════
 
+class NotificationBell(tk.Canvas):
+    """The bell next to the profile picture, with the count on it.
+
+    Drawn rather than an emoji: a bell character comes out as a colour
+    picture on one PC, a black outline on the next and an empty box on a
+    third, and a red number has to sit on it in the same place every time.
+
+    Grey and quiet with nothing unread. Red, with the count in a red circle,
+    when there is - 1, 2, up to 99, then "99+".
+    """
+
+    RED = "#E5484D"
+
+    def __init__(self, master, command=None, bg=None):
+        self._size = px(34)
+        # Wider than it is tall: the bell takes the left of it, and the badge
+        # needs room to its right to grow into "99+" without being clipped
+        # by the edge of the canvas.
+        self._width = px(44)
+        super().__init__(master, width=self._width, height=self._size,
+                         bg=bg or CCA, highlightthickness=0, bd=0,
+                         cursor="hand2")
+        self._count = 0
+        self._command = command
+        self.bind("<Button-1>", lambda _e: self._command and self._command())
+        self._tip = _Tooltip(self, "Notifications")
+        self.redraw()
+
+    @property
+    def count(self) -> int:
+        return self._count
+
+    @property
+    def badge(self) -> str:
+        return _supplies.badge_text(self._count)
+
+    def set_count(self, n) -> None:
+        try:
+            n = max(0, int(n))
+        except (TypeError, ValueError):
+            n = 0
+        if n == self._count:
+            return
+        self._count = n
+        self.redraw()
+
+    def redraw(self) -> None:
+        """Draw it again - on a new count, and when the theme changes, since
+        the colour walk reaches the canvas behind it but not what is on it."""
+        self.delete("all")
+        s = self._size / 34.0
+        colour = self.RED if self._count else CMU
+
+        def p(*xy):
+            return [v * s for v in xy]
+
+        # The bell: knob, dome flaring to a lip, and the clapper under it.
+        self.create_oval(*p(15.2, 5.2, 18.8, 8.8), outline=colour, width=2 * s)
+        self.create_polygon(*p(17, 8, 22, 10, 23, 16, 24, 21, 27, 24,
+                               7, 24, 10, 21, 11, 16, 12, 10),
+                            smooth=True, fill="", outline=colour, width=2 * s)
+        self.create_line(*p(7, 24, 27, 24), fill=colour, width=2 * s,
+                         capstyle="round")
+        self.create_arc(*p(14, 23, 20, 29), start=180, extent=180,
+                        style="arc", outline=colour, width=2 * s)
+
+        text = self.badge
+        if text:
+            # A circle for one digit, stretched into a pill for "12" or
+            # "99+". Sized from the text as the font actually draws it -
+            # guessed widths let "99+" spill out of both ends, because a
+            # digit is wider in bold at this size than anybody guesses.
+            import tkinter.font as _tkfont
+            font = _tkfont.Font(family=FAM, size=max(7, int(8 * s)),
+                                weight="bold")
+            pad = 4 * s
+            h = max(13 * s, font.metrics("linespace") + 1)
+            w = max(h, font.measure(text) + 2 * pad)
+            right, top = self._width - 1, 0.5 * s
+            left = right - w
+            self.create_oval(left, top, left + h, top + h,
+                             fill=self.RED, outline=self.RED)
+            self.create_oval(right - h, top, right, top + h,
+                             fill=self.RED, outline=self.RED)
+            self.create_rectangle(left + h / 2, top, right - h / 2, top + h,
+                                  fill=self.RED, outline=self.RED)
+            self.create_text((left + right) / 2, top + h / 2, text=text,
+                             fill="white", font=font)
+            self._badge_box = (left, top, right, top + h)
+            self._badge_text_width = font.measure(text)
+        else:
+            self._badge_box = None
+            self._badge_text_width = 0
+        self._tip._text = ("No new notifications" if not self._count else
+                           f"{self._count} new notification"
+                           f"{'s' if self._count != 1 else ''}")
+
+
+class NotificationsPanel(tk.Toplevel):
+    """What the bell opens: my notifications, newest first.
+
+    A plain window rather than a borderless dropdown. A window with no title
+    bar has to work out for itself when focus has left it, and that differs
+    on each of the three platforms this runs on - a dropdown that will not
+    close, or closes the moment you reach for a button inside it, is worse
+    than one that looks slightly less like a dropdown.
+    """
+
+    def __init__(self, master, rows, on_open=None, on_mark_all=None,
+                 anchor=None):
+        super().__init__(master)
+        self.title("Notifications")
+        self.transient(master)
+        self.resizable(False, False)
+        self.configure(bg=CBG)
+        self.bind("<Escape>", lambda _e: self.destroy())
+        self._on_open = on_open
+        self._on_mark_all = on_mark_all
+
+        head = tk.Frame(self, bg=CA, padx=14, pady=9)
+        head.pack(fill="x")
+        unread = sum(1 for r in rows if not r.get("read_at"))
+        tk.Label(head, text="Notifications", bg=CA, fg="white",
+                 font=(FAM, 11, "bold")).pack(side="left")
+        tk.Label(head, text=(f"{unread} new" if unread else "all read"),
+                 bg=CA, fg="#A9CCE3", font=F_SM).pack(side="left", padx=(8, 0))
+
+        body = tk.Frame(self, bg=CBG, padx=10, pady=8)
+        body.pack(fill="both", expand=True)
+
+        if not rows:
+            tk.Label(body, text="Nothing here yet.\n\nWhen somebody asks for "
+                                "supplies, managers are told here.",
+                     bg=CBG, fg=CMU, font=F_BODY, justify="center",
+                     wraplength=px(320)).pack(padx=20, pady=24)
+        for row in rows[:25]:
+            self._row(body, row)
+
+        foot = tk.Frame(self, bg=CBG, padx=10, pady=8)
+        foot.pack(fill="x")
+        if unread:
+            flat_btn(foot, "Mark all read", self._mark_all,
+                     variant="secondary", pady=5, padx=10,
+                     font=F_SM).pack(side="left")
+        flat_btn(foot, "Open Supplies", lambda: self._open(None),
+                 variant="secondary", pady=5, padx=10,
+                 font=F_SM).pack(side="right")
+
+        self.update_idletasks()
+        if anchor is not None:
+            try:
+                x = anchor.winfo_rootx() + anchor.winfo_width() - self.winfo_reqwidth()
+                y = anchor.winfo_rooty() + anchor.winfo_height() + px(6)
+                self.geometry(f"+{max(0, x)}+{max(0, y)}")
+            except Exception:
+                pass
+
+    def _row(self, parent, row):
+        new = not row.get("read_at")
+        card = tk.Frame(parent, bg=CCA if new else CBG, cursor="hand2",
+                        highlightbackground=CSP, highlightthickness=1,
+                        padx=10, pady=7)
+        card.pack(fill="x", pady=(0, 6))
+        top = tk.Frame(card, bg=card["bg"])
+        top.pack(fill="x")
+        if new:
+            tk.Label(top, text="●", bg=card["bg"], fg=NotificationBell.RED,
+                     font=F_SM).pack(side="left", padx=(0, 6))
+        tk.Label(top, text=row.get("title") or "", bg=card["bg"], fg=CTX,
+                 font=F_BOLD if new else F_BODY, anchor="w",
+                 wraplength=px(300), justify="left").pack(side="left", fill="x")
+        tk.Label(top, text=_supplies.ago(row.get("created_at")),
+                 bg=card["bg"], fg=CMU, font=F_SM).pack(side="right")
+        if row.get("body"):
+            tk.Label(card, text=row["body"], bg=card["bg"], fg=CMU,
+                     font=F_SM, anchor="w", justify="left",
+                     wraplength=px(340)).pack(fill="x", pady=(2, 0))
+        for w in (card, top, *top.winfo_children(), *card.winfo_children()):
+            w.bind("<Button-1>", lambda _e, r=row: self._open(r))
+
+    def _open(self, row):
+        self.destroy()
+        if self._on_open:
+            self._on_open(row)
+
+    def _mark_all(self):
+        self.destroy()
+        if self._on_mark_all:
+            self._on_mark_all()
+
+
 class ScreenChooser(tk.Toplevel):
     """Which monitor the customer display goes on.
 
@@ -5535,6 +5727,7 @@ class ModernOrderApp(tk.Frame):
             "products":    self._build_products_tab,
             "customers":   self._build_customers_tab,
             "stock":       self._build_stock_tab,
+            "supplies":    self._build_supplies_tab,
             "audit_log":   self._build_audit_log_tab,
             "settings":    self._build_settings_tab,
         }
@@ -5825,6 +6018,13 @@ class ModernOrderApp(tk.Frame):
                 for child in w.winfo_children():
                     child.bind("<Button-1>", lambda _e: self._account_menu())
 
+            # The bell, immediately left of the profile. Packed after it and
+            # to the right, which is what puts it next to the picture rather
+            # than out beyond the shortcuts link.
+            self._bell = NotificationBell(inner, command=self._open_notifications)
+            self._bell.pack(side="right", padx=(px(4), px(8)))
+            self.master.after(1500, self._poll_notifications)
+
         # A shortcut nobody knows about saves nobody any time, so there is a
         # way in that doesn't require already knowing the shortcut.
         kb = tk.Label(inner, text="⌨  Shortcuts", bg=CCA, fg=CMU,
@@ -5877,6 +6077,7 @@ class ModernOrderApp(tk.Frame):
         "quotes":      "💲  Quotes",
         "customers":   "👥  Customers",
         "stock":        "📦  Stock",
+        "supplies":    "🧰  Order Supplies",
         "audit_log":   "☰  Audit Log",
     }
     # On the bar, left to right, and numbered Ctrl+1..n off the same list.
@@ -6114,6 +6315,8 @@ class ModernOrderApp(tk.Frame):
             self._refresh_customers_list()
         elif key == "stock":
             self._refresh_stock_list()
+        elif key == "supplies":
+            self._refresh_supplies()
         elif key == "products":
             self._refresh_products_list()
         elif key == "delivery":
@@ -10951,6 +11154,391 @@ class ModernOrderApp(tk.Frame):
             messagebox.showerror("Error", f"Could not delete:\n{exc}")
 
     # ── Audit Log tab ─────────────────────────────────────────────────────
+
+    # ── The bell ──────────────────────────────────────────────────────────
+    # Asked every thirty seconds: how many unread are mine. One small number
+    # from an indexed count, off the main thread, so a slow connection never
+    # makes the window stutter.
+
+    _BELL_EVERY_MS = 30 * 1000
+
+    def _poll_notifications(self):
+        if not getattr(self, "_bell", None):
+            return
+
+        def _work():
+            n = _supplies.unread_count()
+            self.master.after(0, lambda: self._set_bell(n))
+
+        threading.Thread(target=_work, daemon=True).start()
+        self.master.after(self._BELL_EVERY_MS, self._poll_notifications)
+
+    def _set_bell(self, n):
+        bell = getattr(self, "_bell", None)
+        if bell is not None and bell.winfo_exists():
+            bell.set_count(n)
+
+    def _refresh_bell_now(self):
+        """After doing something that changes the count - not in thirty
+        seconds, which is long enough to tap the bell again and wonder why
+        it still says 1."""
+        def _work():
+            n = _supplies.unread_count()
+            self.master.after(0, lambda: self._set_bell(n))
+        threading.Thread(target=_work, daemon=True).start()
+
+    def _open_notifications(self):
+        """Toggle the list under the bell."""
+        panel = getattr(self, "_notif_panel", None)
+        if panel is not None and panel.winfo_exists():
+            panel.destroy()
+            self._notif_panel = None
+            return
+
+        def _work():
+            try:
+                rows, err = _supplies.my_notifications(), ""
+            except Exception as exc:
+                rows = []
+                err = ("Run migrate_supply_requests.sql in Supabase to turn "
+                       "notifications on." if _supplies.is_missing_table(exc)
+                       else f"Couldn't load notifications:\n{exc}")
+            self.master.after(0, lambda: _show(rows, err))
+
+        def _show(rows, err):
+            if err:
+                messagebox.showinfo("Notifications", err)
+                return
+            self._notif_panel = NotificationsPanel(
+                self.master, rows, on_open=self._open_notification,
+                on_mark_all=self._mark_all_notifications, anchor=self._bell)
+
+        threading.Thread(target=_work, daemon=True).start()
+
+    def _open_notification(self, row):
+        """Tapped one: it has been seen, and the place it is about opens."""
+        if row and not row.get("read_at"):
+            def _work():
+                try:
+                    _supplies.mark_read([row["id"]])
+                except Exception:
+                    pass
+                self.master.after(0, self._refresh_bell_now)
+            threading.Thread(target=_work, daemon=True).start()
+        self._show_tab("supplies")
+        self._refresh_supplies()
+
+    def _mark_all_notifications(self):
+        def _work():
+            try:
+                _supplies.mark_read(None)
+            except Exception:
+                pass
+            self.master.after(0, self._refresh_bell_now)
+        threading.Thread(target=_work, daemon=True).start()
+
+    # ── Order Supplies tab ────────────────────────────────────────────────
+    # Somebody runs out of rivets and says so here, from the desktop or from
+    # a phone. Every manager's bell goes red. The list underneath is the same
+    # for everybody, so the second person out of tape sees it is already on
+    # its way instead of asking again.
+
+    def _build_supplies_tab(self):
+        frm = tk.Frame(self.content, bg=CBG, padx=14, pady=12)
+        frm.grid(row=0, column=0, sticky="nsew")
+        frm.rowconfigure(2, weight=1)
+        frm.columnconfigure(0, weight=1)
+        self._tab_frames["supplies"] = frm
+        self._supply_rows = {}
+
+        hdr = tk.Frame(frm, bg=CBG)
+        hdr.grid(row=0, column=0, sticky="ew", pady=(0, 8))
+        tk.Label(hdr, text="Order Supplies", bg=CBG, fg=CA,
+                 font=F_TTL).pack(side="left")
+        tk.Label(hdr, text="Ask here and every manager is told.",
+                 bg=CBG, fg=CMU, font=F_SM).pack(side="left", padx=(12, 0))
+        flat_btn(hdr, "Refresh", self._refresh_supplies,
+                 bg=CNE, pady=5, padx=10, font=F_BODY).pack(side="right")
+        self._supply_show_done = tk.BooleanVar(value=False)
+        tk.Checkbutton(hdr, text="Show finished", bg=CBG, fg=CTX,
+                       variable=self._supply_show_done,
+                       activebackground=CBG, selectcolor=CCA, font=F_SM,
+                       command=self._refresh_supplies,
+                       cursor="hand2").pack(side="right", padx=(0, 10))
+
+        # ── Asking ────────────────────────────────────────────────────────
+        ask = tk.Frame(frm, bg=CCA, highlightbackground=CSP,
+                       highlightthickness=1, padx=14, pady=10)
+        ask.grid(row=1, column=0, sticky="ew", pady=(0, 10))
+        for c in (1, 2):
+            ask.columnconfigure(c, weight=1)
+
+        tk.Label(ask, text="WHAT", bg=CCA, fg=CMU,
+                 font=F_BOLD).grid(row=0, column=0, sticky="w")
+        self._supply_item = tk.StringVar(value=_supplies.ITEMS[0])
+        item_cb = ttk.Combobox(ask, textvariable=self._supply_item,
+                               values=_supplies.ITEMS, state="readonly",
+                               width=14)
+        item_cb.grid(row=1, column=0, sticky="w", padx=(0, 12))
+
+        self._supply_hint = tk.StringVar(
+            value=_supplies.DETAIL_HINTS[_supplies.ITEMS[0]].upper())
+        tk.Label(ask, textvariable=self._supply_hint, bg=CCA, fg=CMU,
+                 font=F_BOLD).grid(row=0, column=1, sticky="w")
+        self._supply_detail = tk.StringVar()
+        field_entry(ask, textvariable=self._supply_detail, width=28
+                    ).grid(row=1, column=1, sticky="ew", padx=(0, 12))
+
+        tk.Label(ask, text="HOW MANY", bg=CCA, fg=CMU,
+                 font=F_BOLD).grid(row=0, column=2, sticky="w")
+        self._supply_qty = tk.StringVar()
+        field_entry(ask, textvariable=self._supply_qty, width=14
+                    ).grid(row=1, column=2, sticky="ew", padx=(0, 12))
+
+        self._supply_urgent = tk.BooleanVar(value=False)
+        tk.Checkbutton(ask, text="Urgent - work has stopped",
+                       variable=self._supply_urgent, bg=CCA, fg=CRD,
+                       activebackground=CCA, selectcolor=CCA, font=F_BODY,
+                       cursor="hand2").grid(row=1, column=3, sticky="w")
+
+        tk.Label(ask, text="NOTE (OPTIONAL)", bg=CCA, fg=CMU,
+                 font=F_BOLD).grid(row=2, column=0, columnspan=3,
+                                   sticky="w", pady=(8, 0))
+        self._supply_note = tk.StringVar()
+        field_entry(ask, textvariable=self._supply_note, width=60
+                    ).grid(row=3, column=0, columnspan=3, sticky="ew",
+                           padx=(0, 12))
+        flat_btn(ask, "Send to managers", self._send_supply_request,
+                 bg=CA, pady=7).grid(row=3, column=3, sticky="e")
+
+        def _hint(*_):
+            self._supply_hint.set(
+                _supplies.DETAIL_HINTS.get(self._supply_item.get(), "").upper())
+        self._supply_item.trace_add("write", _hint)
+
+        # ── What has been asked for ───────────────────────────────────────
+        wrap = tk.Frame(frm, bg=CCA, highlightbackground=CSP,
+                        highlightthickness=1)
+        wrap.grid(row=2, column=0, sticky="nsew")
+        wrap.rowconfigure(0, weight=1)
+        wrap.columnconfigure(0, weight=1)
+        cols = ("item", "qty", "who", "when", "status")
+        self.supply_tree = ttk.Treeview(wrap, columns=cols, show="headings",
+                                        style="TAF.Treeview")
+        for col, hd, wd, anc in (
+                ("item",   "What",     330, "w"),
+                ("qty",    "How many", 110, "w"),
+                ("who",    "Asked by", 140, "w"),
+                ("when",   "When",     100, "w"),
+                ("status", "Status",   190, "w")):
+            self.supply_tree.heading(col, text=hd)
+            self.supply_tree.column(col, width=px(wd), anchor=anc,
+                                    stretch=(col == "item"))
+        self.supply_tree.tag_configure("even", background=CRE)
+        self.supply_tree.tag_configure("odd", background=CCA)
+        self.supply_tree.tag_configure("urgent", background="#FADBD8",
+                                       foreground="#922B21")
+        self.supply_tree.tag_configure("done", foreground=CMU)
+        self.supply_tree.grid(row=0, column=0, sticky="nsew")
+        attach_empty_state(self.supply_tree, "Nothing waiting",
+                           "Anything asked for shows here until it has "
+                           "arrived.")
+        sb = ttk.Scrollbar(wrap, orient="vertical",
+                           command=self.supply_tree.yview)
+        sb.grid(row=0, column=1, sticky="ns")
+        self.supply_tree.configure(yscrollcommand=sb.set)
+
+        bot = tk.Frame(frm, bg=CBG, pady=8)
+        bot.grid(row=3, column=0, sticky="ew")
+        # Moving a request along is a manager's call, and the database holds
+        # that line whatever this screen shows. Not offering the buttons
+        # just saves somebody pressing one to be told no.
+        if _db.is_ready() and _db.can_handle_supplies():
+            flat_btn(bot, "Mark Ordered",
+                     lambda: self._move_supply("ordered"),
+                     variant="secondary", pady=7).pack(side="left", padx=(0, 8))
+            flat_btn(bot, "Mark Received",
+                     lambda: self._move_supply("received"),
+                     variant="secondary", pady=7).pack(side="left", padx=(0, 8))
+            flat_btn(bot, "Decline", lambda: self._move_supply("declined"),
+                     variant="secondary", pady=7).pack(side="left", padx=(0, 8))
+        flat_btn(bot, "Cancel my request", self._cancel_supply,
+                 variant="secondary", pady=7).pack(side="right")
+        self._supply_state = tk.StringVar(value="")
+        tk.Label(frm, textvariable=self._supply_state, bg=CBG, fg=CMU,
+                 font=F_SM, anchor="w").grid(row=4, column=0, sticky="w")
+
+    def _refresh_supplies(self):
+        tree = getattr(self, "supply_tree", None)
+        if tree is None:
+            return
+        show_done = bool(self._supply_show_done.get())
+
+        def _work():
+            try:
+                rows, err = _supplies.list_requests(include_done=show_done), ""
+            except Exception as exc:
+                rows = []
+                # Said to somebody at a bench, so it says what to do. The
+                # Python underneath ("'NoneType' object has no attribute
+                # 'table'") tells them nothing they can act on.
+                err = ("Run migrate_supply_requests.sql in the Supabase SQL "
+                       "Editor to turn supply requests on."
+                       if _supplies.is_missing_table(exc)
+                       else "Couldn't load supply requests - check the "
+                            "connection, then press Refresh.")
+            self.master.after(0, lambda: _show(rows, err))
+
+        def _show(rows, err):
+            if not tree.winfo_exists():
+                return
+            for iid in tree.get_children():
+                tree.delete(iid)
+            self._supply_rows = {}
+            self._supply_state.set(err)
+            for i, row in enumerate(rows):
+                status = row.get("status") or "open"
+                label = _supplies.STATUS_LABELS.get(status, status)
+                if status != "open" and row.get("handled_by_name"):
+                    label += f" - {row['handled_by_name']}"
+                urgent = bool(row.get("urgent")) and status == "open"
+                what = (_supplies.describe({**row, "quantity": ""}))
+                if urgent:
+                    what = "URGENT  " + what
+                iid = f"s{i}"
+                self._supply_rows[iid] = row
+                tree.insert("", "end", iid=iid, tags=(
+                    "urgent" if urgent else
+                    ("done" if status not in ("open", "ordered")
+                     else ("even" if i % 2 == 0 else "odd")),),
+                    values=(what, row.get("quantity") or "",
+                            row.get("requested_by_name") or "",
+                            _supplies.ago(row.get("created_at")), label))
+            if not err:
+                waiting = sum(1 for r in rows if r.get("status") == "open")
+                self._supply_state.set(
+                    f"{waiting} waiting" if waiting else "Nothing waiting.")
+
+        threading.Thread(target=_work, daemon=True).start()
+
+    def _send_supply_request(self):
+        try:
+            row = _supplies.clean_request(
+                self._supply_item.get(), self._supply_detail.get(),
+                self._supply_qty.get(), self._supply_urgent.get(),
+                self._supply_note.get())
+        except _supplies.SupplyError as exc:
+            messagebox.showwarning("Order Supplies", str(exc))
+            return
+
+        def _work():
+            try:
+                _supplies.request_supply(**row)
+                err = ""
+            except Exception as exc:
+                err = ("Run migrate_supply_requests.sql in the Supabase SQL "
+                       "Editor first." if _supplies.is_missing_table(exc)
+                       else f"It wasn't sent:\n{exc}")
+            self.master.after(0, lambda: _done(err))
+
+        def _done(err):
+            if err:
+                messagebox.showerror("Order Supplies", err)
+                return
+            try:
+                _db.log_action("supply_requested", _supplies.describe(row))
+            except Exception:
+                pass
+            # Emptied, so the same thing is not sent twice by somebody
+            # pressing the button again to see if it worked.
+            self._supply_detail.set("")
+            self._supply_qty.set("")
+            self._supply_note.set("")
+            self._supply_urgent.set(False)
+            self.status_var.set(
+                f"Asked for {_supplies.describe(row)} - the managers have "
+                "been told.")
+            self._refresh_supplies()
+
+        threading.Thread(target=_work, daemon=True).start()
+
+    def _selected_supply(self):
+        sel = self.supply_tree.selection()
+        return self._supply_rows.get(sel[0]) if sel else None
+
+    def _move_supply(self, status):
+        row = self._selected_supply()
+        if not row:
+            messagebox.showinfo("Order Supplies", "Select a request first.")
+            return
+        now = row.get("status") or "open"
+        if status not in _supplies.NEXT.get(now, []):
+            messagebox.showinfo(
+                "Order Supplies",
+                f"That request is already "
+                f"{_supplies.STATUS_LABELS.get(now, now).lower()}.")
+            return
+
+        def _work():
+            try:
+                _supplies.set_status(row["id"], status)
+                err = ""
+            except Exception as exc:
+                err = f"It wasn't changed:\n{exc}"
+            self.master.after(0, lambda: _done(err))
+
+        def _done(err):
+            if err:
+                messagebox.showerror("Order Supplies", err)
+                return
+            try:
+                _db.log_action(f"supply_{status}", _supplies.describe(row))
+            except Exception:
+                pass
+            self._refresh_supplies()
+            # Every manager's notification for it has just been cleared by
+            # the database, this one's included.
+            self._refresh_bell_now()
+
+        threading.Thread(target=_work, daemon=True).start()
+
+    def _cancel_supply(self):
+        row = self._selected_supply()
+        if not row:
+            messagebox.showinfo("Order Supplies",
+                                "Select the request you want to cancel.")
+            return
+        if (row.get("status") or "open") != "open":
+            messagebox.showinfo(
+                "Order Supplies",
+                "Something has already been done about that one, so it "
+                "can't be cancelled here - ask a manager.")
+            return
+        if not messagebox.askyesno(
+                "Cancel Request", f"Cancel the request for "
+                                  f"{_supplies.describe(row)}?"):
+            return
+
+        def _work():
+            try:
+                _supplies.cancel(row["id"])
+                err = ""
+            except _supplies.SupplyError:
+                # The database only lets you cancel your own, and says so by
+                # changing nothing. Saying who can is more use than that.
+                err = ("Only the person who asked can cancel it - and only "
+                       "while nothing has been done about it yet.")
+            except Exception as exc:
+                err = f"It wasn't cancelled:\n{exc}"
+            self.master.after(0, lambda: _done(err))
+
+        def _done(err):
+            if err:
+                messagebox.showerror("Order Supplies", err)
+                return
+            self._refresh_supplies()
+
+        threading.Thread(target=_work, daemon=True).start()
 
     def _build_audit_log_tab(self):
         frm = tk.Frame(self.content, bg=CBG, padx=14, pady=12)
@@ -18438,8 +19026,13 @@ class ModernOrderApp(tk.Frame):
         _restyle_widget_tree(self.master, color_map)
         self.master.configure(bg=CBG)
 
+        # The walk reaches the bell's canvas but not what is drawn on it.
+        bell = getattr(self, "_bell", None)
+        if bell is not None and bell.winfo_exists():
+            bell.redraw()
+
         # Re-configure treeview row tags (not caught by widget walk)
-        for tree_attr in ("tree", "orders_tree", "audit_tree"):
+        for tree_attr in ("tree", "orders_tree", "audit_tree", "supply_tree"):
             tv = getattr(self, tree_attr, None)
             if tv:
                 tv.tag_configure("even",  background=CRE)

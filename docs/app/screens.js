@@ -24,8 +24,32 @@ var TAFAPP = (function () {
     { key: "quotes",      label: "Quotes" },
     { key: "customers",   label: "Customers" },
     { key: "stock",       label: "Stock" },
+    { key: "supplies",    label: "Supplies" },
     { key: "log",         label: "Log", from: 3 }
   ];
+
+  /* The things that run out. The same list as SUPPLY ITEMS in
+     taf_order_app/supplies.py - a test holds the two together, so a phone
+     and a PC never offer different things to ask for. */
+  var SUPPLY_ITEMS = ["Rivets", "Tape", "Media", "Mesh Wire", "Channel",
+                      "Other"];
+  var SUPPLY_HINTS = {
+    "Rivets":    "Which rivets? Size or type",
+    "Tape":      "Which tape? Foil, duct, width",
+    "Media":     "Which grade? G4, F7, carbon…",
+    "Mesh Wire": "Which mesh? Gauge, galv or stainless",
+    "Channel":   "Which depth? 25, 45, 50…",
+    "Other":     "What do you need?"
+  };
+  var SUPPLY_STATUS = {
+    open: "Waiting", ordered: "Ordered", received: "Received",
+    declined: "Declined", cancelled: "Cancelled"
+  };
+  // What a manager can move a request to, from where it is.
+  var SUPPLY_NEXT = {
+    open: ["ordered", "received", "declined"],
+    ordered: ["received"]
+  };
   var active = "dashboard";
   var ORDERS = [];              // the loaded list, newest first
   var loadedAt = 0;
@@ -91,12 +115,15 @@ var TAFAPP = (function () {
       // Wiring these up twice means two idle timers and a sheet that opens
       // on top of itself.
       document.getElementById("who").onclick = meSheet;
+      document.getElementById("bell").onclick = bellSheet;
       if (!showApp._wired) {
         showApp._wired = true;
         S.onChange(stateBar);
         S.start();
         watchIdle();
+        watchBell();
       }
+      pollBell();
       stateBar();
       show(active);
     }
@@ -2267,10 +2294,344 @@ var TAFAPP = (function () {
     });
   }
 
+  /* ── The bell ──────────────────────────────────────────────────────────
+     Same rules as the desktop's: nothing at all when nothing is unread, the
+     number up to 99, then "99+". Asked every half minute, and again the
+     moment the phone is picked back up - a phone that slept through the
+     morning should not show the morning's count for another thirty
+     seconds. */
+
+  var BELL_EVERY = 30000;
+  var bellTimer = null;
+
+  function badgeText(n) {
+    n = parseInt(n, 10);
+    if (!isFinite(n) || n <= 0) { return ""; }
+    return n > 99 ? "99+" : String(n);
+  }
+
+  function setBell(n) {
+    var bell = document.getElementById("bell");
+    var badge = document.getElementById("bell-badge");
+    if (!bell || !badge) { return; }
+    var text = badgeText(n);
+    badge.textContent = text;
+    badge.classList.toggle("hidden", !text);
+    bell.classList.toggle("has", !!text);
+    bell.setAttribute("aria-label", text
+      ? text + " new notification" + (text === "1" ? "" : "s")
+      : "Notifications");
+  }
+
+  function pollBell() {
+    if (!D.signedIn()) { return; }
+    // Out of signal, or before the migration is run, the bell keeps what
+    // it last knew rather than flashing an error every thirty seconds.
+    D.rpc("my_unread_count", {}).then(function (n) {
+      setBell(n);
+    }).catch(function () {});
+  }
+
+  function watchBell() {
+    if (bellTimer) { return; }
+    bellTimer = setInterval(pollBell, BELL_EVERY);
+    document.addEventListener("visibilitychange", function () {
+      if (!document.hidden) { pollBell(); }
+    });
+  }
+
+  function ago(iso) {
+    var t = Date.parse(iso || "");
+    if (!isFinite(t)) { return ""; }
+    var secs = Math.max(0, Math.floor((Date.now() - t) / 1000));
+    if (secs < 60) { return "just now"; }
+    if (secs < 3600) { return Math.floor(secs / 60) + " min ago"; }
+    if (secs < 86400) { return Math.floor(secs / 3600) + " h ago"; }
+    return Math.floor(secs / 86400) + " d ago";
+  }
+
+  /* A missing table is a setup step, not a fault. Said as what to do. */
+  function notSetUp(err) {
+    return /not there any more|does not exist|could not find/i
+      .test((err && err.message) || "");
+  }
+  var NOT_SET_UP = "Supply requests are not switched on yet. Somebody "
+                 + "needs to run migrate_supply_requests.sql in Supabase.";
+
+  function bellSheet() {
+    U.openSheet(function (body, close) {
+      body.appendChild(U.el("h2", { text: "Notifications" }));
+      var list = U.el("div", { kids: [U.el("div", { cls: "muted",
+                                                    text: "Loading…" })] });
+      body.appendChild(list);
+      var actions = U.el("div", { cls: "row-actions" });
+      body.appendChild(actions);
+
+      D.select("notifications", {
+        "select": "*", "order": "created_at.desc", "limit": 40
+      }).then(function (rows) {
+        U.clear(list);
+        var unread = rows.filter(function (r) { return !r.read_at; });
+        if (!rows.length) {
+          list.appendChild(U.empty("Nothing here yet.",
+            "When somebody asks for supplies, managers are told here."));
+        }
+        rows.forEach(function (r) {
+          list.appendChild(U.el("button", {
+            cls: "note-row" + (r.read_at ? "" : " new"),
+            attr: { type: "button", "data-note": r.id },
+            on: { click: function () { openNote(r, close); } },
+            kids: [
+              U.el("span", { cls: "when", text: ago(r.created_at) }),
+              U.el("strong", { text: r.title || "" }),
+              r.body ? U.el("span", { cls: "muted", text: r.body }) : null
+            ]
+          }));
+        });
+        U.clear(actions);
+        if (unread.length) {
+          actions.appendChild(U.button("Mark all read", function () {
+            D.rpc("mark_notifications_read", { p_ids: null })
+              .then(function () { setBell(0); close(); })
+              .catch(function (err) { U.notice(body, err.message); });
+          }, "quiet"));
+        }
+        actions.appendChild(U.button("Open Supplies", function () {
+          close(); show("supplies");
+        }, "quiet"));
+        actions.appendChild(U.button("Close", close, "quiet"));
+      }).catch(function (err) {
+        U.clear(list);
+        U.notice(body, notSetUp(err) ? NOT_SET_UP : err.message);
+        actions.appendChild(U.button("Close", close, "quiet"));
+      });
+    });
+  }
+
+  function openNote(row, close) {
+    close();
+    show("supplies");
+    if (!row.read_at) {
+      D.rpc("mark_notifications_read", { p_ids: [row.id] })
+        .then(pollBell).catch(function () {});
+    }
+  }
+
+  /* ── Supplies ──────────────────────────────────────────────────────────
+     Ask here and every manager's bell goes red. The list is everybody's,
+     so the second person out of tape sees it is already on its way. */
+
+  function sortRequests(rows) {
+    var rank = { open: 0, ordered: 1, received: 2, declined: 3,
+                 cancelled: 4 };
+    return rows.slice().sort(function (a, b) {
+      var ua = (a.status === "open" && a.urgent) ? 0 : 1;
+      var ub = (b.status === "open" && b.urgent) ? 0 : 1;
+      if (ua !== ub) { return ua - ub; }
+      var ra = rank[a.status] === undefined ? 9 : rank[a.status];
+      var rb = rank[b.status] === undefined ? 9 : rank[b.status];
+      if (ra !== rb) { return ra - rb; }
+      var ta = String(a.created_at || ""), tb = String(b.created_at || "");
+      // Waiting: the one waiting longest first. Everything else: newest.
+      if (a.status === "open") { return ta < tb ? -1 : (ta > tb ? 1 : 0); }
+      return ta > tb ? -1 : (ta < tb ? 1 : 0);
+    });
+  }
+
+  function describeRequest(r) {
+    var text = (r.item || "") + (r.detail ? " - " + r.detail : "");
+    return text;
+  }
+
+  SCREENS.supplies = function (main) {
+    var showDone = !!SCREENS.supplies._showDone;
+
+    // ── Asking ────────────────────────────────────────────────────────
+    var item = U.el("select", { attr: { id: "supply-item" },
+      kids: SUPPLY_ITEMS.map(function (s) {
+        return U.el("option", { text: s, attr: { value: s } });
+      }) });
+    var hint = U.el("span", { text: SUPPLY_HINTS[SUPPLY_ITEMS[0]] });
+    var detail = U.el("input", { attr: { type: "text", id: "supply-detail",
+                                         maxlength: "200" } });
+    var qty = U.el("input", { attr: { type: "text", id: "supply-qty",
+                                      maxlength: "60",
+                                      placeholder: "e.g. 3 rolls" } });
+    var urgent = U.el("input", { attr: { type: "checkbox",
+                                         id: "supply-urgent" } });
+    var note = U.el("input", { attr: { type: "text", id: "supply-note",
+                                       maxlength: "500",
+                                       placeholder: "Optional" } });
+    item.addEventListener("change", function () {
+      hint.textContent = SUPPLY_HINTS[item.value] || "";
+    });
+
+    var askCard = U.card("Ask for something", [
+      U.el("label", { cls: "f", kids: [U.el("span", { text: "What" }), item] }),
+      U.el("label", { cls: "f", kids: [hint, detail] }),
+      U.el("label", { cls: "f", kids: [
+        U.el("span", { text: "How many" }), qty] }),
+      U.el("label", { cls: "f", kids: [
+        U.el("span", { text: "Note" }), note] }),
+      U.el("label", { cls: "f", attr: { style: "color:#8A2A1E" }, kids: [
+        urgent, document.createTextNode("  Urgent - work has stopped")] })
+    ]);
+    var send = U.button("Send to managers", function () {
+      var what = item.value;
+      var said = detail.value.trim();
+      if (what === "Other" && !said) {
+        U.notice(askCard, "Say what you need - \"Other\" on its own does "
+                        + "not tell anybody what to order.");
+        return;
+      }
+      send.disabled = true;
+      var label = what + (said ? " - " + said : "");
+      // One reference per request, so a send that lost its answer to a
+      // dropout and got sent again is filed once, and managers told once.
+      S.send({
+        rpc: "request_supply",
+        label: "Supplies · " + label,
+        body: {
+          p_item: what, p_detail: said, p_quantity: qty.value.trim(),
+          p_urgent: !!urgent.checked, p_note: note.value.trim(),
+          p_client_ref: S.newRef()
+        },
+        log: { action: "supply_requested",
+               details: label + (qty.value.trim()
+                                 ? ", " + qty.value.trim() : "") }
+      }).then(function (res) {
+        detail.value = ""; qty.value = ""; note.value = "";
+        urgent.checked = false;
+        U.notice(askCard, res.queued
+          ? "Kept on this phone. It goes when the signal is back, and the "
+            + "managers are told then."
+          : "Sent - the managers have been told.", "ok");
+        if (!res.queued) { loadList(); }
+      }).catch(function (err) {
+        U.notice(askCard, notSetUp(err) ? NOT_SET_UP : err.message);
+      }).then(function () { send.disabled = false; });
+    }, "go");
+    send.setAttribute("id", "supply-send");
+    askCard.appendChild(U.el("div", { cls: "row-actions", kids: [send] }));
+
+    // ── What has been asked for ───────────────────────────────────────
+    var listCard = U.card("Asked for", []);
+    var toggle = U.button(showDone ? "Hide finished" : "Show finished",
+      function () {
+        SCREENS.supplies._showDone = !showDone;
+        show("supplies");
+      }, "quiet");
+    var listBody = U.el("div", { kids: [U.el("div", { cls: "muted",
+                                                      text: "Loading…" })] });
+    listCard.appendChild(listBody);
+    listCard.appendChild(U.el("div", { cls: "row-actions", kids: [toggle] }));
+
+    U.clear(main);
+    main.appendChild(askCard);
+    main.appendChild(listCard);
+
+    function loadList() {
+      var params = { "select": "*", "order": "created_at.desc",
+                     "limit": 200 };
+      if (!showDone) { params.status = "in.(open,ordered)"; }
+      D.select("supply_requests", params).then(function (rows) {
+        draw(sortRequests(rows));
+      }).catch(function (err) {
+        U.clear(listBody);
+        U.notice(listCard, notSetUp(err) ? NOT_SET_UP : err.message);
+      });
+    }
+
+    function draw(rows) {
+      U.clear(listBody);
+      if (!rows.length) {
+        listBody.appendChild(U.empty("Nothing waiting.",
+          "Anything asked for shows here until it has arrived."));
+        return;
+      }
+      var me = (D.whoami() || {}).id;
+      var manager = D.roleLevel() >= 3;
+      listBody.appendChild(U.table(
+        ["What", "How many", "Asked by", "When", "Status", ""],
+        rows.map(function (r) {
+          var status = r.status || "open";
+          var waiting = status === "open";
+          var label = SUPPLY_STATUS[status] || status;
+          var acts = U.el("div", { cls: "acts" });
+          // The buttons are a courtesy. The database refuses anybody who
+          // is not a manager, and anybody cancelling what is not theirs.
+          if (manager) {
+            (SUPPLY_NEXT[status] || []).forEach(function (to) {
+              acts.appendChild(U.button(
+                { ordered: "Ordered", received: "Received",
+                  declined: "Decline" }[to],
+                function () { move(r, to); }, "quiet"));
+            });
+          }
+          if (waiting && r.requested_by === me) {
+            acts.appendChild(U.button("Cancel", function () {
+              if (window.confirm("Cancel the request for "
+                                 + describeRequest(r) + "?")) {
+                move(r, "cancelled");
+              }
+            }, "quiet"));
+          }
+          var tr = U.el("tr", {
+            cls: (waiting && r.urgent) ? "urgent"
+               : (waiting || status === "ordered" ? "" : "done"),
+            attr: { "data-request": r.id },
+            kids: [
+              U.cell((waiting && r.urgent ? "URGENT  " : "")
+                     + describeRequest(r)),
+              U.cell(r.quantity || ""),
+              U.cell(r.requested_by_name || ""),
+              U.cell(ago(r.created_at)),
+              U.cell("", { node: U.el("span", {
+                cls: "pill s-" + label,
+                text: label + (status !== "open" && r.handled_by_name
+                               ? " · " + r.handled_by_name : "") }) }),
+              U.cell("", { node: acts })
+            ]
+          });
+          return tr;
+        })));
+    }
+
+    function move(r, to) {
+      // No row back means nothing changed - row-level security refuses by
+      // matching nothing, not by raising. Said, rather than shown as done.
+      D.update("supply_requests", { "id": "eq." + r.id }, { status: to })
+        .then(function (rows) {
+          if (!rows || !rows.length) {
+            throw new Error("That didn't change anything - it may have "
+                          + "been dealt with already, or it isn't yours "
+                          + "to change.");
+          }
+          D.insert("audit_log", {
+            user_id: (D.whoami() || {}).id,
+            username: D.cachedProfile().username
+                   || D.cachedProfile().full_name || "",
+            action: "supply_" + to,
+            details: describeRequest(r)
+          }, true).catch(function () {});
+          loadList();
+          pollBell();
+        }).catch(function (err) {
+          U.notice(listCard, err.message);
+        });
+    }
+
+    loadList();
+  };
+
   return {
     start: start,
     updateReady: updateReady,
     _screens: SCREENS,
+    _badgeText: badgeText,
+    _setBell: setBell,
+    _supplyItems: SUPPLY_ITEMS,
+    _sortRequests: sortRequests,
     _stateBar: stateBar,
     _lookUp: lookUp,
     _outbox: outbox,

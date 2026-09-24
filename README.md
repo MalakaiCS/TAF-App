@@ -55,6 +55,15 @@ log, stock management and a customer database.
   COLLECTION docket asking who collected it, a drop as a DELIVERY docket
   asking who received it. Prints the selected orders, or the whole run when
   nothing is selected.
+- **Order Supplies** and the **bell** — anyone on the floor can ask for
+  rivets, tape, media, mesh wire, channel or anything else, with how many, a
+  note and an "urgent" tick, from the desktop or a phone. Every manager is
+  told straight away: the bell next to the profile picture turns red with the
+  number waiting (1, 2, 3 … and 99+ past ninety-nine). Managers mark a request
+  Ordered, Received or Declined, and the bells clear once somebody has dealt
+  with it. The person who asked can cancel it while it's still waiting. The
+  database does the telling, so nobody can send a notification, ask as
+  somebody else, or have a request filed twice when a phone loses signal.
 - **Products** — the priced catalogue: search it, correct a price, add a
   product, import price spreadsheets. The part numbers here are the item codes
   in Xero.
@@ -286,6 +295,7 @@ just run it — nothing is lost and nothing is duplicated.
 | 29 | `migrate_features.sql` | Switching new features on, and how the workshop cuts | recommended |
 | 30 | `migrate_more_features.sql` | Kits, sites, returns, stocktakes, buying, agreed prices, shutdowns | optional |
 | 31 | `migrate_quote_shipping.sql` | Delivery charged on a quote, so the counter and the invoice agree | recommended |
+| 32 | `migrate_supply_requests.sql` | Asking for supplies, and the bell that tells managers (needs step 16 first) | recommended |
 
 **Step 16 is the one that matters most.** Every policy in the older scripts is
 `TO authenticated USING (true)` — meaning *anyone Supabase counts as signed
@@ -752,10 +762,13 @@ taf_order_app/
   stock_usage.py           What an order takes out of stock
   delivery.py              Run sheets and what's ready to go out
   dockets.py               The docket a customer signs for what they got
+  supplies.py              Asking for supplies, and the number on the bell
   backup.py                The dated zip of spreadsheets
   labels.py                Barcode labels for stock, on Avery sheets
 tests/                     Rule tests — `python tests/run.py`, run by CI
   smoke_gui.py             Builds every screen for real — also run by CI
+  db_rules.py              Checks the database rules on a real Postgres
+  web_app.py               Drives the web app in a real browser
   user_management.py       Roles & user admin
   models.py / validation.py
 fonts/                     Bundled Public Sans (OFL)
@@ -827,6 +840,7 @@ one.
 ```bash
 python tests/run.py       # the rules. No dependencies; pytest also works
 python tests/smoke_gui.py # starts the real window and builds every screen
+python tests/db_rules.py  # runs migrations on a throwaway Postgres and tries to break them
 ```
 
 Every test is a regression — something that went wrong in a shipped build and

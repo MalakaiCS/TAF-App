@@ -272,6 +272,40 @@ class StubDB:
         return value        # constants, classes, exception types
 
 
+# Something asked for, something urgent, and something already on order, so
+# the Supplies list is drawn with every kind of row rather than as an empty
+# table that would pass by being empty.
+SUPPLY_REQUESTS = [
+    {"id": "r1", "item": "Tape", "detail": "50mm foil", "quantity": "3 rolls",
+     "urgent": True, "note": "Out on bench 2", "status": "open",
+     "requested_by_name": "Dave Floor", "handled_by_name": "",
+     "created_at": "2026-09-24T01:00:00Z"},
+    {"id": "r2", "item": "Rivets", "detail": "4mm pop", "quantity": "1 box",
+     "urgent": False, "note": "", "status": "open",
+     "requested_by_name": "Amy Admin", "handled_by_name": "",
+     "created_at": "2026-09-24T00:30:00Z"},
+    {"id": "r3", "item": "Channel", "detail": "45mm", "quantity": "20 lengths",
+     "urgent": False, "note": "", "status": "ordered",
+     "requested_by_name": "Dave Floor", "handled_by_name": "Sarah Boss",
+     "created_at": "2026-09-23T03:00:00Z"},
+]
+
+
+def _stub_supplies():
+    """The supply calls answer from the list above instead of the network."""
+    from taf_order_app import supplies
+    supplies.list_requests = lambda include_done=False, limit=200: \
+        supplies.sort_requests([dict(r) for r in SUPPLY_REQUESTS])
+    supplies.unread_count = lambda: 3
+    supplies.my_notifications = lambda limit=40: [
+        {"id": "n1", "title": "URGENT: Tape - 50mm foil",
+         "body": "Dave Floor asked for 3 rolls. Out on bench 2",
+         "created_at": "2026-09-24T01:00:00Z", "read_at": None}]
+    supplies.request_supply = lambda *a, **k: dict(SUPPLY_REQUESTS[0])
+    supplies.set_status = lambda *a, **k: None
+    supplies.mark_read = lambda *a, **k: 0
+
+
 def install_stubs(manager: bool = True):
     """Swap in the stand-in database and silence anything that would block."""
     import taf_order_app
@@ -279,6 +313,7 @@ def install_stubs(manager: bool = True):
     stub = StubDB(real_db, manager=manager)
     sys.modules["taf_order_app.db"] = stub
     taf_order_app.db = stub
+    _stub_supplies()
 
     # A message box or a file chooser opened during a build would wait for a
     # click that is never coming.
@@ -980,6 +1015,18 @@ def _dialogs(gui, root):
         # Drawn with a real quote on it, delivery included, so the totals
         # block and an unpriced row are both actually laid out.
         ("CounterDisplay", lambda: _counter_with_a_quote(gui, root)),
+        # The bell at every count that draws differently: nothing, one
+        # digit, two digits, and past 99 where it has to say "99+".
+        ("NotificationBell", lambda: _bells(gui, root)),
+        ("NotificationsPanel", lambda: gui.NotificationsPanel(
+            root, [{"id": "n1", "title": "URGENT: Tape - 50mm foil",
+                    "body": "Dave asked for 3 rolls. Out on bench 2",
+                    "created_at": "2026-09-24T01:00:00Z", "read_at": None},
+                   {"id": "n2", "title": "Rivets", "body": "Amy asked for "
+                    "1 box", "created_at": "2026-09-23T01:00:00Z",
+                    "read_at": "2026-09-23T02:00:00Z"}])),
+        ("NotificationsPanel (empty)",
+         lambda: gui.NotificationsPanel(root, [])),
         # Two screens found, so the radio list, the fill box and the
         # drag-it-yourself option are all laid out for real.
         ("ScreenChooser", lambda: gui.ScreenChooser(root, _two_screens())),
@@ -991,6 +1038,40 @@ def _dialogs(gui, root):
             root, dict(ORDERS[0]["header"]), _quote_lines(), CUSTOMERS[0],
             "Smoke Test")),
     ]
+
+
+def _bells(gui, root):
+    """A window holding four bells, one per way the badge can be drawn."""
+    win = gui.tk.Toplevel(root)
+    for n, want in ((0, ""), (1, "1"), (12, "12"), (150, "99+")):
+        bell = gui.NotificationBell(win)
+        bell.pack(side="left", padx=4)
+        bell.set_count(n)
+        assert bell.badge == want, f"{n} unread drew {bell.badge!r}"
+        # Nothing unread is a quiet bell; anything unread is a red one.
+        drawn = []
+        for i in bell.find_all():
+            for opt in ("outline", "fill"):
+                try:
+                    drawn.append(str(bell.itemcget(i, opt)))
+                except Exception:
+                    pass            # a line has no outline, text no outline
+        red = any(c.upper() == gui.NotificationBell.RED for c in drawn)
+        assert red == bool(n), f"{n} unread: red={red}"
+        # The number has to sit inside its badge, and the badge inside the
+        # bell's own box. Guessed widths once let "99+" spill out of both
+        # ends - it looked fine to the count check and wrong to anyone who
+        # looked at it.
+        box = bell._badge_box
+        if n:
+            left, _top, right, _bottom = box
+            assert bell._badge_text_width < right - left, \
+                f"{want!r} is wider than its badge"
+            assert left >= 0 and right <= int(bell.cget("width")), \
+                f"the badge for {want!r} runs off the edge"
+        else:
+            assert box is None, "a badge was drawn with nothing unread"
+    return win
 
 
 def _two_screens():

@@ -133,6 +133,15 @@ def can_manage_roles() -> bool:
     return role_level() >= 3
 
 
+def can_handle_supplies() -> bool:
+    """Managers and above mark supply requests ordered, received or declined.
+
+    Only decides which buttons are offered. The database holds the same line
+    in migrate_supply_requests.sql whatever any screen shows.
+    """
+    return role_level() >= 3
+
+
 # ── Profiles ──────────────────────────────────────────────────────────────────
 
 def _load_profile(user_id: str) -> dict | None:
