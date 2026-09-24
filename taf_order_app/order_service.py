@@ -7,6 +7,8 @@ from typing import List, Dict, Any, Optional
 
 from .validation import validate_header, validate_items
 from template_filler import generate_order_workbook
+from . import cutting as _cutting
+from . import features as _features
 
 class OrderService:
     """
@@ -14,9 +16,27 @@ class OrderService:
     """
 
     def __init__(self, base_dir: Optional[Path] = None):
-        self.base_dir = Path(base_dir) if base_dir else Path.cwd()
+        # Never derive the orders location from the current working directory:
+        # when the app is relaunched by the updater (or any service), cwd can
+        # be C:\Windows\System32 — mkdir there is Access Denied and crashed
+        # startup. Anchor to the app data dir instead (same as the GUI's
+        # APP_DIR): the app data folder when frozen, repo dir otherwise.
+        import os, sys
+        from .paths import user_data_dir
+        if base_dir is not None:
+            self.base_dir = Path(base_dir)
+        elif getattr(sys, "frozen", False):
+            self.base_dir = user_data_dir()
+        else:
+            self.base_dir = Path(__file__).resolve().parents[1]
         self.orders_dir = self.base_dir / "orders"
-        self.orders_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            self.orders_dir.mkdir(parents=True, exist_ok=True)
+        except Exception:
+            # Last-ditch fallback — never let folder creation kill startup.
+            import tempfile
+            self.orders_dir = Path(tempfile.gettempdir()) / "TAF Order Entry" / "orders"
+            self.orders_dir.mkdir(parents=True, exist_ok=True)
 
     def save_order_json(self, header: Dict[str, Any], items: List[Dict[str, Any]]) -> Path:
         safe_customer = "".join(c for c in (header.get("Customer Name","") or "") if c.isalnum() or c in (" ","_","-")).strip().replace(" ", "_")
@@ -41,10 +61,18 @@ class OrderService:
                      extra_media_types: List[str] = None,
                      auto_open: bool = True,
                      page_start: int = 1,
-                     grand_total: int = None) -> Dict[str, Any]:
+                     grand_total: int = None,
+                     extra_filter_types: List[str] = None) -> Dict[str, Any]:
+        # How to cut each line, if the company has the calculator on. Stamped
+        # here rather than in the app because every path to a printed sheet
+        # comes through this one - generate, regenerate, reprint - and a
+        # note that only appeared on one of them would be worse than none.
+        _stamp_cut_notes(items)
+
         # Validate
         validate_header(header)
-        validate_items(items, extra_media_types=extra_media_types)
+        validate_items(items, extra_media_types=extra_media_types,
+                       extra_filter_types=extra_filter_types)
 
         # Persist
         json_path = None
@@ -76,3 +104,39 @@ class OrderService:
                                                   grand_total=grand_total)
 
         return {"output_path": output_path, "json_path": str(json_path) if json_path else None}
+
+
+def _stamp_cut_notes(items) -> None:
+    """Put "CUT AS G, 2 a length, LIP 18mm" on every made-to-measure line.
+
+    Swallowed on any failure: a sheet that would not print because the
+    calculator could not work something out is a job that does not get made,
+    and the marks it needs are on the sheet either way.
+    """
+    if not _features.is_on("cutlist_on_worksheet"):
+        return
+    try:
+        settings = _features.workshop()
+    except Exception:
+        settings = None
+    for item in items or []:
+        if not isinstance(item, dict):
+            continue
+        if str(item.get("item_kind", "filter") or "filter") != "filter":
+            continue
+        try:
+            short = float(item.get("Short") or 0)
+            long = float(item.get("Long") or 0)
+            qty = int(float(item.get("Quantity") or 1))
+        except (TypeError, ValueError):
+            continue
+        if short <= 0 or long <= 0:
+            continue
+        if short > long:
+            short, long = long, short
+        try:
+            note = _cutting.worksheet_note(short, long, qty, settings)
+        except Exception:
+            note = ""
+        if note:
+            item["Cut Note"] = note

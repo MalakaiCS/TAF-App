@@ -11,10 +11,12 @@ create table if not exists media_types (
 alter table media_types enable row level security;
 
 -- All authenticated users can read
+drop policy if exists "Authenticated users can view media types" on media_types;
 create policy "Authenticated users can view media types"
   on media_types for select to authenticated using (true);
 
 -- Managers and above can insert/update/delete
+drop policy if exists "Managers can manage media types" on media_types;
 create policy "Managers can manage media types"
   on media_types for insert to authenticated
   with check (
@@ -25,6 +27,7 @@ create policy "Managers can manage media types"
     )
   );
 
+drop policy if exists "Managers can update media types" on media_types;
 create policy "Managers can update media types"
   on media_types for update to authenticated
   using (
@@ -35,6 +38,7 @@ create policy "Managers can update media types"
     )
   );
 
+drop policy if exists "Managers can delete media types" on media_types;
 create policy "Managers can delete media types"
   on media_types for delete to authenticated
   using (

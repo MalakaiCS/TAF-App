@@ -11,9 +11,11 @@ create table if not exists stock_alerts (
 
 alter table stock_alerts enable row level security;
 
+drop policy if exists "Authenticated users can read stock alerts" on stock_alerts;
 create policy "Authenticated users can read stock alerts"
   on stock_alerts for select to authenticated using (true);
 
+drop policy if exists "Managers can manage stock alerts" on stock_alerts;
 create policy "Managers can manage stock alerts"
   on stock_alerts for all to authenticated
   using (

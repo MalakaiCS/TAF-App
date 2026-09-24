@@ -30,8 +30,10 @@ def validate_header(header: dict) -> None:
     if due and due.lower() != "asap" and not parse_date(due):
         raise ValueError("Date Due must be a valid date, 'ASAP', or left empty.")
 
-def validate_items(items: Iterable[dict], extra_media_types: list = None) -> None:
+def validate_items(items: Iterable[dict], extra_media_types: list = None,
+                   extra_filter_types: list = None) -> None:
     valid_media = VALID_MEDIA_TYPES + [m for m in (extra_media_types or []) if m not in VALID_MEDIA_TYPES]
+    valid_filter = VALID_FILTER_TYPES + [f for f in (extra_filter_types or []) if f not in VALID_FILTER_TYPES]
     items = list(items)
     if not items:
         raise ValueError("At least one line item is required.")
@@ -46,7 +48,7 @@ def validate_items(items: Iterable[dict], extra_media_types: list = None) -> Non
 
         # Lists
         ft = (item.get("Filter Type") or "").strip()
-        if ft not in VALID_FILTER_TYPES:
+        if ft not in valid_filter:
             raise ValueError(f"Line item {idx}: 'Filter Type' is invalid.")
 
         mt = (item.get("Media Type") or "").strip()
