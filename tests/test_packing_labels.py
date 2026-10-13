@@ -503,7 +503,8 @@ def _pdf_text(path: str) -> str:
     run" must not look like "the check passed")."""
     try:
         out = subprocess.run(["pdftotext", "-layout", path, "-"],
-                             capture_output=True, text=True, timeout=60)
+                             capture_output=True, text=True,
+                             encoding="utf-8", errors="replace", timeout=60)
         if out.returncode == 0 and out.stdout.strip():
             return out.stdout
     except Exception:

@@ -218,7 +218,8 @@ def main() -> int:
     proc = subprocess.Popen(
         [deno, "run", "--allow-net", "--allow-env", "--allow-read",
          "--no-lock", str(wrapper)],
-        env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+        env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+        encoding="utf-8", errors="replace")
     try:
         for _ in range(240):
             try:

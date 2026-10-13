@@ -337,7 +337,7 @@ def _run_js(cases):
     payload["_complete"] = COMPLETE
     r = subprocess.run([node, "-e", NODE_RUNNER, str(JS)],
                        input=json.dumps(payload), capture_output=True,
-                       text=True, timeout=120)
+                       text=True, encoding="utf-8", timeout=120)
     assert r.returncode == 0, r.stderr
     return json.loads(r.stdout)
 
@@ -369,7 +369,7 @@ def test_the_javascript_knows_the_same_filter_type_wordings():
         return
     r = subprocess.run([_node(), "-e", "process.stdout.write(JSON.stringify("
                         "require(process.argv[1]).FILTER_TYPE_WORDINGS))",
-                        str(JS)], capture_output=True, text=True, timeout=60)
+                        str(JS)], capture_output=True, text=True, encoding="utf-8", timeout=60)
     assert json.loads(r.stdout) == pn.FILTER_TYPE_WORDINGS
 
 
@@ -386,5 +386,5 @@ def test_the_worksheet_profiles_are_the_same_in_both():
         return
     r = subprocess.run([_node(), "-e", "process.stdout.write(JSON.stringify("
                         "require(process.argv[1]).BUILTIN_PROFILES))",
-                        str(JS)], capture_output=True, text=True, timeout=60)
+                        str(JS)], capture_output=True, text=True, encoding="utf-8", timeout=60)
     assert _norm(json.loads(r.stdout)) == _norm(fc.BUILTIN_PROFILES)
