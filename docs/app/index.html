@@ -138,6 +138,12 @@
     width:100%; font:15px/1.4 inherit; color:var(--text);
     padding:11px 12px; border:1px solid var(--line); border-radius:9px;
     background:#fff; }
+  .brace-note { margin:6px 0 10px; font-size:13px; font-weight:600;
+                color:var(--muted, #5C6B78); }
+  .brace-note.required { color:#C62828; }
+  .brace-note.advisory { color:#1187C9; }
+  .pack-row { padding:4px 0; font-size:13px; }
+  .pack-row.required strong { color:#C62828; }
   label.f { display:block; margin-bottom:10px; font-size:13px;
             color:var(--muted); }
   label.f span { display:block; margin-bottom:4px; }
@@ -274,6 +280,7 @@
 <script src="config.js" onerror="void 0"></script>
 <script src="data.js"></script>
 <script src="ui.js"></script>
+<script src="calc.js"></script>
 <script src="offline.js"></script>
 <script src="screens.js"></script>
 <script>

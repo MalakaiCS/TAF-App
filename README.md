@@ -64,6 +64,46 @@ log, stock management and a customer database.
   with it. The person who asked can cancel it while it's still waiting. The
   database does the telling, so nobody can send a notification, ask as
   somebody else, or have a request filed twice when a phone loses signal.
+- **Delivery labels** — one A4 landscape sheet per wrapped bundle, with the
+  TAF logo, the company's base address as From, the delivery address, filter
+  size, the quantity in that wrap (and the line's ordered quantity), the
+  wrap's weight and its wrap page: `1 of 2`, `2 of 2` for a one-line order;
+  `1A/2`, `1B/2`, `2/2` across several lines (after Z comes AA). The order
+  number appears once, as Order Number; Job Number shows N/A when there is
+  no job. Previous Orders → View Order → Actions → Delivery labels, or the
+  Delivery tab's Run ▾ menu for a whole run.
+- **Packing by weight** — every wrapped bundle is 10 kg at most, wrapping
+  included, and a size can carry a handling limit (412 × 412 × 90: five a
+  wrap). Lines are planned automatically, or the office sets the plan
+  exactly as a customer asked — filters per wrap, number of wraps, or each
+  wrap's quantity, optionally split into customer areas ("Area A = 10;
+  Area B = 10"). A plan that breaks a limit is shown with a suggested one
+  next to it, never quietly changed. Wraps can be weighed and the weight
+  recorded; a re-pack starts fresh wraps and keeps the old ones in history.
+  View Order → Actions → Packing and weights.
+- **Wrapping Instructions and Filter Calculator on the worksheet** — two
+  boxes under Notes: how to wrap each line, e.g. `(Wrap 5 Filters x 2 + Wrap
+  2 Filters x 1)`, with the label codes; and, on Flat Panel and Pleated
+  Panel (V-form) sheets, the cut sizes, blank weights, bracing and what is
+  still unknown. Notes keeps exactly what was typed. BRACE REQ? now shows the
+  answer.
+- **Bracing notices** — worked out as a line is typed (desktop and web) and
+  printed on the worksheet. Flat panels: both sides over 700 mm, one brace;
+  long side over 1300 mm, two in Cross Format. V-forms: long over 1300 and
+  short over 700. Flyscreens: short side 150 mm or under, or over 650 mm,
+  "use brace in filter"; long over 1300, "consider bracing".
+- **Weight calculator** — wire and media cut sizes and weights from the
+  stock TAF buys (rates worked out from the weighed rolls, never typed),
+  bracing, and mounting frames. It gives a complete filter weight only when
+  every part is known, and says exactly what is missing otherwise. The same
+  calculator runs on the desktop, the web app, and the
+  `filter-calculator` API for other programs.
+- **Merge duplicate customers** — Customers → ⇄ Merge duplicates (managers).
+  Suggestions say why they were made and never merge on their own; every
+  disagreement is chosen, agreed prices included; orders, quotes, sites,
+  returns, recurring jobs and prices move in one transaction; the others are
+  archived, still found by their old names, and the whole merge can be
+  undone. Creating a customer that looks like an existing one warns first.
 - **Products** — the priced catalogue: search it, correct a price, add a
   product, import price spreadsheets. The part numbers here are the item codes
   in Xero.
@@ -296,6 +336,7 @@ just run it — nothing is lost and nothing is duplicated.
 | 30 | `migrate_more_features.sql` | Kits, sites, returns, stocktakes, buying, agreed prices, shutdowns | optional |
 | 31 | `migrate_quote_shipping.sql` | Delivery charged on a quote, so the counter and the invoice agree | recommended |
 | 32 | `migrate_supply_requests.sql` | Asking for supplies, and the bell that tells managers (needs step 16 first) | recommended |
+| 33 | `migrate_packing_and_merge.sql` | Weights, packing, delivery labels and merging customers (needs step 16 first) | recommended |
 
 **Step 16 is the one that matters most.** Every policy in the older scripts is
 `TO authenticated USING (true)` — meaning *anyone Supabase counts as signed
@@ -664,6 +705,68 @@ Worth knowing: the link is the credential. Anyone it is forwarded to can see
 that customer's orders — so it goes to the customer and nowhere else, and if
 it goes astray you issue a new one.
 
+### Weights, packing and delivery labels (recommended)
+
+Run step 33. Then, under Settings → How the workshop cuts → **Open weights
+and packing…** (managers change these; everyone sees them):
+
+- **Company** — the base address every delivery label prints as From.
+  Starts as Unit 1/19 Tradelink Road, Hillcrest Queensland 4118 Australia.
+  Changing it changes every label generated afterwards, old orders included.
+- **Wire and media** — filled in from the supplied stock. LARGE_WIRE (25 ×
+  25 mesh, 1.24 mm, 1200 × 30000 mm roll, 24.87 kg) and SMALL_WIRE (12 × 12,
+  0.80 mm, 19.30 kg) are 0.6908… and 0.5361… kg/m². WASHABLE 0.240, F5 0.350,
+  G4 0.300, "180" 0.180 and GREY 0.150 kg/m² come from their stock mass and
+  area. BLACK has never been weighed, so it follows GREY (9.45 kg for its
+  63 m² is derived, not measured) until a weighed BLACK roll is entered.
+- **Packing** — the wrapping's own weight (until it is confirmed, label
+  weights stay blank to be written in), whether calculated label weights are
+  rounded up to 0.1 kg, and handling limits by size.
+- **Braces, Steel, Wire choice, Frames, Cut profiles, Mounting frames** —
+  verified numbers only. Every change is a new version kept in
+  `calc_settings_history`, and every calculation says which versions it used.
+
+**What is reused.** The worksheet's own wire and media formulas — the ones
+printed on every sheet for years — are the built-in cut profiles: flat panels
+(wire 10 mm under each side, two pieces; media at the filter size), V-forms at
+30–60, 65–80 and 85–100 mm deep (wire 15 or 10 mm under the short side by
+1.36, 1.55 or 1.785 × the long side, two pieces; media 60 and 40 mm over the
+wire), and flyscreens (media 20 mm over each side). The worksheet's columns now
+read from these same profiles; their printed values are unchanged. The
+existing mounting-frame sizes (610 × 610 and every compressor-pack frame) are
+listed for profiles to be entered against.
+
+**What still has to be entered before a complete filter weight exists.**
+Nothing below has been supplied, so none of it is guessed — each shows as
+"needs" in the calculator, and label weights stay blank until it is known or a
+wrap is weighed:
+
+1. Whether each blank stays whole in the finished filter (or the area kept),
+   per profile — the calculator's "kept in the filter".
+2. Filter-frame channel weight (kg per metre of perimeter, or per frame), and
+   the flyscreen's aluminium frame.
+3. Brace weight with its fixings; brace count for V-forms and flyscreens.
+4. Steel stock density, and mounting-frame profiles (strip width before
+   folding, side lengths, corners, holes, hardware) — 2.0 mm throughout.
+5. The wrapping's weight.
+6. Which wire flat panels and headers use (V-forms go by depth: 30–60 small,
+   65–110 large, 115+ small).
+7. Cut rules for V-form depths the worksheet has none for (under 30, 61–64,
+   81–84 and over 100 mm), and for stepped filters' flyscreen part.
+8. Media roll widths and lengths, if roll-fit checks are wanted (weights do
+   not need them).
+
+Measured cut pieces and measured wrap weights can be entered at any time
+(View Order → Actions → Packing and weights → Filter calculator / Record
+weight) and are used exactly as entered.
+
+**For other programs**: `supabase functions deploy filter-calculator`, then
+`POST /functions/v1/filter-calculator` with a signed-in staff token and a body
+such as `{"action": "calculate", "item": {...order line...}}`,
+`{"action": "pack", "quantity": 60, "width_mm": 412, "height_mm": 412,
+"depth_mm": 90}` or `{"action": "labels", "order": {...}}`. The function's
+header comment lists every action.
+
 ### Create the first admin account
 
 ```bash
@@ -763,12 +866,23 @@ taf_order_app/
   delivery.py              Run sheets and what's ready to go out
   dockets.py               The docket a customer signs for what they got
   supplies.py              Asking for supplies, and the number on the bell
+  materials.py             Wire and media rates from the weighed stock
+  filter_calc.py           Cut sizes and weights; the worksheet's profiles
+  bracing.py               When a filter needs a brace
+  mounting_frames.py       What a 2 mm steel mounting frame weighs
+  packing.py               Wraps: 10 kg, handling limits, codes, wording
+  order_packing.py         Packing plans saved on order lines; wrap weights
+  delivery_labels.py       The label data contract and the A4 label PDF
+  worksheet_blocks.py      Wrapping Instructions and Filter Calculator text
+  calc_settings.py         The shared, versioned settings behind all of it
+  customer_merge.py        Suggesting, checking and running a merge
   backup.py                The dated zip of spreadsheets
   labels.py                Barcode labels for stock, on Avery sheets
 tests/                     Rule tests — `python tests/run.py`, run by CI
   smoke_gui.py             Builds every screen for real — also run by CI
   db_rules.py              Checks the database rules on a real Postgres
   web_app.py               Drives the web app in a real browser
+  api_function.py          Serves the filter-calculator function and calls it
   user_management.py       Roles & user admin
   models.py / validation.py
 fonts/                     Bundled Public Sans (OFL)
@@ -776,12 +890,14 @@ price_lists/               The priced catalogue (import under Settings)
 *.sql                      Schema + migrations
 docs/phone/index.html      The page phones open (served by GitHub Pages)
 docs/app/                  The staff web app — orders, scanning, works offline
+docs/app/calc.js           The calculator for the web app and the API (kept
+                           answer-for-answer with the Python by a test)
 docs/sw.js                 Keeps the web app on the phone with no signal
 docs/quote/index.html      The quote page customers open
 docs/portal/index.html     The customer portal (orders, quotes, account)
 docs/company.js            Phone, email, address, hours — fill this in
 supabase/functions/        Edge Functions (order reading, email, the
-                           morning summary)
+                           morning summary, filter-calculator)
 TAFOrderEntry.spec         PyInstaller build spec (Windows and macOS)
 installer.iss              Inno Setup installer script
 make_mac_icon.py           Builds the Mac app icon from the logo
@@ -841,7 +957,13 @@ one.
 python tests/run.py       # the rules. No dependencies; pytest also works
 python tests/smoke_gui.py # starts the real window and builds every screen
 python tests/db_rules.py  # runs migrations on a throwaway Postgres and tries to break them
+python tests/web_app.py   # drives the web app in Chromium (needs Playwright)
+python tests/api_function.py  # serves the filter-calculator function with Deno
 ```
+
+`tests/test_calc_parity.py` (part of `run.py`) sends the same requests through
+the Python and the JavaScript calculators and compares every field of every
+answer; it needs Node, which CI provides.
 
 Every test is a regression — something that went wrong in a shipped build and
 reached the people using it. Add one whenever a bug gets out.

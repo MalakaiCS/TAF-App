@@ -69,7 +69,11 @@ ITEMS = {
     "o1": [
         {"line_id": "L1", "Quantity": 2, "Filter Type": "V-form",
          "Short": 500, "Long": 600, "Channel": 45, "Media Type": "G4",
-         "made": True},
+         "made": True,
+         # Planned by the office: one area, two wraps of one.
+         "Packing": {"mode": "manual", "groups": [],
+                     "wraps": [{"id": "W1", "quantity": 1},
+                               {"id": "W2", "quantity": 1}]}},
         {"line_id": "L2", "Quantity": 1, "Filter Type": "Flat Panel",
          "Short": 300, "Long": 400, "Channel": 50, "Media Type": "F5"},
         {"line_id": "L3", "Quantity": 4, "Filter Type": "Flyscreen",
@@ -553,8 +557,23 @@ def run() -> int:
               "measurements are needed" in lsheet.locator(".err").inner_text())
 
         nums = lsheet.locator('input[inputmode="numeric"]')
+        lsheet.locator("select").first.select_option("Flat Panel")
+        nums.nth(1).fill("700")
+        nums.nth(2).fill("1301")
+        page.wait_for_timeout(100)
+        check("bracing is worked out while the size is typed",
+              lsheet.locator("#brace-note").inner_text() ==
+              "Bracing: Brace Required - 2 braces, Cross Format",
+              lsheet.locator("#brace-note").inner_text())
+        check("and flagged as required",
+              "required" in lsheet.locator("#brace-note").get_attribute(
+                  "class"))
         nums.nth(1).fill("500")
         nums.nth(2).fill("600")
+        page.wait_for_timeout(100)
+        check("and cleared when it no longer applies",
+              lsheet.locator("#brace-note").inner_text() ==
+              "Bracing: No brace required")
         nums.nth(3).fill("45")
         lsheet.locator("select").first.select_option("V-form")
         lsheet.locator("button", has_text="Add it").click()
@@ -604,6 +623,78 @@ def run() -> int:
         page.fill('#screen input[type="search"]', "")
         page.wait_for_timeout(150)
 
+        print("\n── dropdowns ──")
+        # One choice in a dropdown is one action. The Orders filters used to
+        # listen for both "input" and "change", and a <select> fires both,
+        # so every choice rebuilt the list twice - with the rows being torn
+        # down and redrawn under the pointer, which on a phone is where the
+        # tap lands that opens an order nobody asked for.
+        page.evaluate("""() => {
+          window.__rebuilds = 0;
+          new MutationObserver(recs => recs.forEach(r => r.removedNodes
+            .forEach(n => { if (n.classList && n.classList.contains('card')
+                                && n.querySelector('table')) {
+                              window.__rebuilds++; } })))
+            .observe(document.getElementById('screen'),
+                     {childList: true, subtree: true});
+        }""")
+        due = page.locator("#screen select").nth(0)
+        due.select_option("Overdue")
+        page.wait_for_timeout(250)
+        check("choosing from a dropdown redraws the list once",
+              page.evaluate("window.__rebuilds") == 1,
+              f"{page.evaluate('window.__rebuilds')} redraws")
+        check("and opens nothing else", page.locator("#sheet").is_hidden())
+        check("and the choice is applied",
+              page.locator("#screen tbody tr.late").count() ==
+              page.locator("#screen tbody tr").count() == 1)
+        page.evaluate("window.__rebuilds = 0")
+        due.click()                       # open it with the mouse
+        page.keyboard.press("ArrowDown")  # move with the keyboard
+        page.keyboard.press("Enter")
+        page.wait_for_timeout(250)
+        check("opening it with a click and choosing by keyboard is one "
+              "action too", page.evaluate("window.__rebuilds") <= 1 and
+              page.locator("#sheet").is_hidden(),
+              f"{page.evaluate('window.__rebuilds')} redraws")
+        page.evaluate("window.__rebuilds = 0")
+        due.focus()
+        page.keyboard.press("Home")
+        page.wait_for_timeout(250)
+        check("keyboard alone still works",
+              page.locator("#screen tbody tr").count() == 3)
+        status = page.locator("#screen select").nth(1)
+        status.select_option("Complete")
+        page.wait_for_timeout(250)
+        status.select_option("All")
+        page.wait_for_timeout(250)
+        check("a second dropdown on the same screen behaves the same",
+              page.evaluate("window.__rebuilds") <= 3 and
+              page.locator("#sheet").is_hidden(),
+              f"{page.evaluate('window.__rebuilds')} redraws for 3 choices")
+        # A click that starts on a control inside a clickable row belongs to
+        # the control, not the row.
+        page.evaluate("""() => {
+          const tr = document.querySelector('#screen tbody tr');
+          const sel = document.createElement('select');
+          sel.id = 'probe'; sel.innerHTML = '<option>a</option><option>b</option>';
+          tr.firstElementChild.appendChild(sel);
+        }""")
+        page.click("#probe")
+        page.select_option("#probe", "b")
+        page.wait_for_timeout(250)
+        check("a dropdown inside a row does not open the row",
+              page.locator("#sheet").is_hidden())
+        # A tap on a phone arrives as touch events and then a synthesized
+        # click on the control under the finger.
+        page.dispatch_event("#probe", "touchstart")
+        page.dispatch_event("#probe", "touchend")
+        page.dispatch_event("#probe", "click")
+        page.wait_for_timeout(150)
+        check("nor does tapping it", page.locator("#sheet").is_hidden())
+        page.click('#tabs button[data-tab="orders"]')
+        page.wait_for_selector("#screen table")
+
         print("\n── one order ──")
         page.locator("#screen tbody tr", has_text="Bells Creek").first.click()
         page.wait_for_selector("#sheet:not(.hidden)")
@@ -617,6 +708,13 @@ def run() -> int:
               "1 of 3 lines made" in sheet.inner_text(), sheet.inner_text()[:200])
         check("the note is there",
               "Ring the site before delivery" in sheet.inner_text())
+        check("each line says how it is wrapped, as the office planned it",
+              "Line 1: (Wrap 1 Filter x 2)" in sheet.inner_text(),
+              sheet.inner_text()[-400:])
+        check("and one not planned yet says so",
+              "Wrapping not set yet" in sheet.inner_text())
+        check("and its bracing",
+              "No brace required" in sheet.inner_text())
 
         # Tick the second line off.
         ticks = sheet.locator("button.tick")

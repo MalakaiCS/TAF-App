@@ -195,8 +195,32 @@ OVERRIDES = {
     "get_stock_transactions": lambda *a, **k: [
         {"quantity_change": -4.0, "notes": "Order PO-8842"}],
     "merge_order_header":  lambda *a, **k: "o3",
+    "customer_for_order":  lambda *a, **k: dict(CUSTOMERS[0]),
+    "set_line_fields":     lambda oid="", line_id="", fields=None, *a, **k:
+        _set_line_fields(oid, line_id, fields or {}),
+    "former_customer_names": lambda *a, **k: [],
+    "resolve_customer_id": lambda cid="", *a, **k: cid,
     "SUPABASE_URL":        "https://example.supabase.co",
 }
+
+
+def _set_line_fields(order_id, line_id, fields):
+    """Changes one line's fields the way db.set_line_fields does, on the
+    stand-in orders, so a saved packing plan is there when it is read back."""
+    from taf_order_app.db import with_line_ids
+    for o in ORDERS:
+        if o["id"] != order_id:
+            continue
+        o["items"] = with_line_ids([dict(i) for i in o["items"]])
+        for line in o["items"]:
+            if str(line.get("line_id")) == str(line_id):
+                for k, v in fields.items():
+                    if v is None:
+                        line.pop(k, None)
+                    else:
+                        line[k] = v
+                return [dict(i) for i in o["items"]]
+    raise RuntimeError("That line was not found on the order.")
 
 # Rights are a real fork in what gets built: a manager sees the stock-alert
 # card and live buttons, everyone else sees the same buttons disabled. Those
@@ -566,6 +590,28 @@ def _steps(app, gui, root):
             w.update_idletasks()
             w.destroy()
     add("dialog: View Order", _order_view)
+
+    def _delivery_labels():
+        """Packing saved on the line, then labels made from the saved order -
+        the path the office takes - and the PDF actually written."""
+        from taf_order_app import order_packing
+        opened = []
+        was = gui._open_path
+        gui._open_path = lambda path: opened.append(path)
+        try:
+            items = [dict(i) for i in ORDERS[0]["items"]]
+            for it in items:
+                it["Packing"] = order_packing.set_manual(
+                    it, [int(it["Quantity"])])
+            path = gui.print_delivery_labels(
+                root, {"order_number": "PO-8842", "customer_name":
+                       "Bells Creek", "header": dict(ORDERS[0]["header"])},
+                items, settings=_calc_settings())
+        finally:
+            gui._open_path = was
+        if not path or not Path(path).exists() or opened != [path]:
+            raise AssertionError(f"no label PDF was made ({path})")
+    add("delivery labels for an order", _delivery_labels)
 
     def _account():
         # A menu, so nothing new is packed — this checks it builds at all.
@@ -1053,7 +1099,50 @@ def _dialogs(gui, root):
         ("QuoteDialog",      lambda: gui.QuoteDialog(
             root, dict(ORDERS[0]["header"]), _quote_lines(), CUSTOMERS[0],
             "Smoke Test")),
+        # An order with one line planned by hand into areas, and one left
+        # to the automatic plan, so both halves of the window are drawn.
+        ("PackingDialog", lambda: _packing_window(gui, root)),
+        ("FilterCalculatorDialog", lambda: gui.FilterCalculatorDialog(
+            root, dict(ORDERS[0]["items"][0], Calculator={
+                "wire": {"pieces": [{"cut_width_mm": 585,
+                                     "cut_length_mm": 1062,
+                                     "pieces_per_filter": 2}],
+                         "installed": "full_blank"},
+                "components": [{"name": "clips", "kg_per_filter": 0.05}]}),
+            _calc_settings(), on_save=lambda inputs: None)),
+        ("WeightsSettingsDialog", lambda: gui.WeightsSettingsDialog(
+            root, editable=True)),
+        ("WeightsSettingsDialog (read only)",
+         lambda: gui.WeightsSettingsDialog(root, editable=False)),
+        ("MergeCustomersDialog", lambda: _merge_window(gui, root)),
     ]
+
+
+def _calc_settings():
+    from taf_order_app import calc_settings
+    return calc_settings.defaults()
+
+
+def _packing_window(gui, root):
+    from taf_order_app import order_packing
+    items = [dict(i) for i in ORDERS[0]["items"]]
+    items[0]["Packing"] = order_packing.set_manual(
+        items[0], [6, 6], groups=[{"name": "Area A", "quantity": 6},
+                                  {"name": "Area B", "quantity": 6}],
+        group_of_wrap=["Area A", "Area B"])
+    row = {"db_id": "o1", "source": "db", "order_no": "PO-8842",
+           "customer": "Bells Creek", "db_header": dict(ORDERS[0]["header"])}
+    dlg = gui.PackingDialog(root, row, dict(ORDERS[0]["header"]), items)
+    dlg.lines.selection_set("1")
+    dlg._show_line()
+    return dlg
+
+
+def _merge_window(gui, root):
+    dlg = gui.MergeCustomersDialog(root)
+    dlg.chosen = [CUSTOMERS[0]["id"], CUSTOMERS[1]["id"]]
+    dlg._draw_compare()
+    return dlg
 
 
 def _bells(gui, root):

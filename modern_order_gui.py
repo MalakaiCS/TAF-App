@@ -44,6 +44,14 @@ from taf_order_app import counter_display as _counter
 from taf_order_app import monitors as _monitors
 from taf_order_app import dockets as _dockets
 from taf_order_app import supplies as _supplies
+from taf_order_app import bracing as _bracing
+from taf_order_app import calc_settings as _calc_settings
+from taf_order_app import customer_merge as _merge
+from taf_order_app import delivery_labels as _delivery_labels
+from taf_order_app import filter_calc as _filter_calc
+from taf_order_app import mounting_frames as _mounting_frames
+from taf_order_app import order_packing as _order_packing
+from taf_order_app import packing as _packing
 from taf_order_app.bag_filler import (
     BAG_PRODUCT_TYPES, BAG_MEDIA_TYPES, ROLL_MEDIA_TYPES,
     ROLL_WIDTHS, ROLL_LENGTHS, STANDARD_SIZES,
@@ -2699,6 +2707,15 @@ class LineItemDialog(tk.Toplevel):
             bg=CCA, fg=CMU, font=F_SM, anchor="w")
         self._auto_hint.grid(row=1, column=0, columnspan=4, sticky="w", pady=(10, 0))
 
+        # Bracing, worked out as the size and type are typed - so it is
+        # seen while the order is being taken, not discovered on the bench.
+        self._brace_var = tk.StringVar(value="")
+        self._brace_lbl = tk.Label(dim_f, textvariable=self._brace_var,
+                                   bg=CCA, fg=CMU, font=F_BOLD, anchor="w")
+        self._brace_lbl.grid(row=2, column=0, columnspan=4, sticky="w",
+                             pady=(6, 0))
+        self._initial = dict(initial)
+
         # ── Classification ────────────────────────────────────────────────
         cls_f = tk.LabelFrame(body, text=" Classification ",
                                bg=CCA, fg=CA, font=F_SEC,
@@ -2728,6 +2745,9 @@ class LineItemDialog(tk.Toplevel):
         # A stepped filter is always 50mm overall, so choosing it fills the
         # thickness in rather than leaving it to be typed (and mistyped).
         self.vars["Filter Type"].trace_add("write", self._on_filter_type_change)
+        for _key in ("Short", "Long", "Filter Type"):
+            self.vars[_key].trace_add("write", self._update_bracing)
+        self._update_bracing()
 
         # ── Options ───────────────────────────────────────────────────────
         opt_f = tk.LabelFrame(body, text=" Options ",
@@ -2804,6 +2824,27 @@ class LineItemDialog(tk.Toplevel):
         elif ft and self.vars["Media Type"].get().strip().upper() == "GREY":
             self.vars["Media Type"].set("G4")
 
+    def _update_bracing(self, *_):
+        """The bracing notice for what is typed right now."""
+        lbl = getattr(self, "_brace_lbl", None)
+        if lbl is None:
+            return
+        construction = _filter_calc.construction_of(
+            self.vars["Filter Type"].get())
+        short, long_ = self.vars["Short"].get(), self.vars["Long"].get()
+        if not (short.strip() and long_.strip()):
+            self._brace_var.set("")
+            return
+        b = _bracing.evaluate(construction, short, long_)
+        if b["status"] != "ok":
+            self._brace_var.set("Bracing: " + b["message"])
+            lbl.configure(fg=CMU)
+            return
+        self._brace_var.set(("⚠  " if b["required"] or b["advisory"] else "")
+                            + "Bracing: " + b["message"])
+        lbl.configure(fg=CRD if b["required"] else
+                      (CA if b["advisory"] else CGR))
+
     def _on_filter_type_change(self, *_):
         """A stepped filter is a 40mm V-form plus its 9mm flyscreen — 50mm
         overall, and 180 media, every time. Both are filled in on choosing it
@@ -2860,6 +2901,13 @@ class LineItemDialog(tk.Toplevel):
             "Notes":               self.txt_notes.get("1.0", "end").strip(),
             "item_job":            self.var_item_job.get().strip(),
         }
+        # The line's packing plan and calculator inputs belong to the line,
+        # not to this form, so editing the size keeps them. A changed
+        # quantity is caught when the plan is next looked at: the old wraps
+        # go to history rather than being reused.
+        for _keep in ("Packing", "Calculator"):
+            if _keep in self._initial:
+                self.result[_keep] = self._initial[_keep]
         # Stepped filters always carry the *STEPPED FILTER* customer note.
         apply_stepped_filter_note(self.result)
         self.destroy()
@@ -5329,6 +5377,1315 @@ class QuoteDialog(tk.Toplevel):
 # Main Application
 # ═══════════════════════════════════════════════════════════════════════════
 
+# ═══════════════════════════════════════════════════════════════════════════
+# Packing, the filter calculator, delivery labels, and merging customers
+# ═══════════════════════════════════════════════════════════════════════════
+
+def _who_now() -> str:
+    try:
+        return (_db.current_full_name() or _db.current_username() or "") \
+            if _db.is_ready() else ""
+    except Exception:
+        return ""
+
+
+def _line_size(item: dict) -> str:
+    w, h, d = _order_packing.line_dims(item)
+    parts = [str(p) for p in (w, h, d) if p not in (None, "", 0)]
+    return " × ".join(parts) if parts else "—"
+
+
+def print_delivery_labels(parent, order: dict, items: list,
+                          only_wrap_ids=None, settings=None) -> "str | None":
+    """Make the delivery labels for one saved order and open them.
+
+    The base address is read once, here, for the whole request. Returns the
+    PDF's path, or None after telling the person why it could not be made.
+    """
+    header = dict(order.get("header") or {})
+    try:
+        s = settings if settings is not None else _calc_settings.load(force=True)
+    except Exception:
+        s = _calc_settings.cached()
+    base = _calc_settings.base_address(s)
+    customer = _db.customer_for_order(
+        order.get("customer_name") or header.get("Customer Name", ""),
+        order.get("customer_id") or "") if _db.is_ready() else None
+    record = {"order_number": order.get("order_number")
+              or header.get("Order Number", ""),
+              "customer_name": order.get("customer_name")
+              or header.get("Customer Name", ""),
+              "header": header, "items": items}
+    try:
+        labels = _delivery_labels.build_for_order(record, customer, s, base,
+                                         only_wrap_ids=only_wrap_ids)
+    except _delivery_labels.LabelError as exc:
+        fix = "\n".join(f"  • {p}" for p in exc.problems[:12])
+        messagebox.showwarning(
+            "Delivery labels",
+            "These labels can't be printed yet:\n\n" + fix +
+            ("\n\nAddress problems are fixed on the customer's account; "
+             "packing problems under Packing and weights."
+             if customer else
+             "\n\nNo customer account matches this order's customer name, "
+             "so there is no delivery address. Link it to a customer first."),
+            parent=parent)
+        return None
+    safe = re.sub(r"[^A-Za-z0-9_-]+", "_",
+                  str(record["order_number"] or "order")).strip("_") or "order"
+    ORDERS_DIR.mkdir(parents=True, exist_ok=True)
+    stamp = _dt_module.datetime.now().strftime("%Y%m%d-%H%M%S")
+    path = ORDERS_DIR / f"delivery_labels_{safe}_{stamp}.pdf"
+    try:
+        _delivery_labels.render_pdf(labels, str(path))
+    except Exception as exc:
+        messagebox.showerror("Delivery labels",
+                             f"Could not make the labels:\n{exc}", parent=parent)
+        return None
+    try:
+        _db.log_action("delivery_labels_printed",
+                       f"O/N: {record['order_number']} | "
+                       f"{len(labels)} label{'s' if len(labels) != 1 else ''}")
+    except Exception:
+        pass
+    _open_path(str(path))
+    return str(path)
+
+
+class PackingDialog(tk.Toplevel):
+    """How each line of an order is wrapped, what each wrap weighs, and its
+    delivery labels.
+
+    The office sets a line's plan here - automatic, or exactly as the
+    customer asked - and it is saved on the order, so the floor sees the
+    same thing on the worksheet and the labels match. Nothing over 10 kg or
+    over a handling limit is let through quietly: a conflict is shown with a
+    suggested plan next to it, and the choice stays with the person.
+    """
+
+    def __init__(self, master, row: dict, header: dict, items: list,
+                 on_saved=None):
+        super().__init__(master)
+        self.title(f"Packing and weights — {row.get('order_no') or ''}")
+        self.transient(master)
+        self.grab_set()
+        self.configure(bg=CBG)
+        self.row, self.header = row, dict(header or {})
+        self.items = _db.with_line_ids([dict(i) for i in items or []])
+        self.on_saved = on_saved
+        self.settings = _calc_settings.cached()
+        self.order_id = row.get("db_id") if row.get("source") == "db" else None
+        _centre_on_parent(self, master, px(1040), px(700))
+        self.bind("<Escape>", lambda _e: self.destroy())
+
+        top = tk.Frame(self, bg=CA, padx=px(16), pady=px(10))
+        top.pack(fill="x")
+        tk.Label(top, text="Packing and weights", bg=CA, fg="white",
+                 font=(FAM, 13, "bold")).pack(anchor="w")
+        tk.Label(top, text="Up to 10 kg a wrap, wrapping included. A plan the "
+                           "office sets is kept exactly as set.",
+                 bg=CA, fg="white", font=F_SM).pack(anchor="w")
+
+        foot = tk.Frame(self, bg=CBG, padx=px(14), pady=px(10))
+        foot.pack(fill="x", side="bottom")
+        flat_btn(foot, "Close", self.destroy, bg=CNE,
+                 pady=px(6)).pack(side="right")
+        flat_btn(foot, "Print all delivery labels", self._print_all, bg=CA,
+                 pady=px(6)).pack(side="right", padx=(0, px(8)))
+        flat_btn(foot, "Reprint selected wraps", self._print_selected,
+                 bg=CNE, pady=px(6)).pack(side="right", padx=(0, px(8)))
+        self.status = tk.StringVar(value="")
+        tk.Label(foot, textvariable=self.status, bg=CBG, fg=CMU,
+                 font=F_SM).pack(side="left")
+
+        body = tk.Frame(self, bg=CBG, padx=px(14), pady=px(10))
+        body.pack(fill="both", expand=True)
+
+        cols = ("line", "size", "qty", "plan", "wraps", "status", "brace")
+        self.lines = ttk.Treeview(body, columns=cols, show="headings",
+                                  height=6, style="TAF.Treeview",
+                                  selectmode="browse")
+        for col, (txt, wd) in {"line": ("Line", 50), "size": ("Size", 150),
+                               "qty": ("Qty", 50), "plan": ("Plan", 280),
+                               "wraps": ("Wraps", 60),
+                               "status": ("Status", 170),
+                               "brace": ("Bracing", 170)}.items():
+            self.lines.heading(col, text=txt, anchor="w")
+            self.lines.column(col, width=px(wd), anchor="w",
+                              stretch=col in ("plan", "status"))
+        self.lines.tag_configure("problem", foreground=CRD)
+        self.lines.pack(fill="x")
+        self.lines.bind("<<TreeviewSelect>>", lambda _e: self._show_line())
+
+        mid = tk.Frame(body, bg=CCA, highlightbackground=CBR,
+                       highlightthickness=1, padx=px(12), pady=px(10))
+        mid.pack(fill="x", pady=(px(10), 0))
+        self.mode = tk.StringVar(value="automatic")
+        r1 = tk.Frame(mid, bg=CCA)
+        r1.pack(fill="x")
+        tk.Label(r1, text="Packing:", bg=CCA, fg=CTX, font=F_BOLD
+                 ).pack(side="left")
+        for val, txt in (("automatic", "Automatic"),
+                         ("manual", "Manual (as the customer asked)")):
+            tk.Radiobutton(r1, text=txt, value=val, variable=self.mode,
+                           bg=CCA, fg=CTX, font=F_BODY, activebackground=CCA,
+                           selectcolor=CBG).pack(side="left", padx=(px(8), 0))
+        self.awkward = tk.BooleanVar(value=False)
+        tk.Checkbutton(r1, text="Awkward to handle", variable=self.awkward,
+                       bg=CCA, fg=CTX, font=F_BODY, activebackground=CCA,
+                       selectcolor=CBG).pack(side="right")
+
+        r2 = tk.Frame(mid, bg=CCA)
+        r2.pack(fill="x", pady=(px(8), 0))
+        self.per_wrap = tk.StringVar()
+        self.n_wraps = tk.StringVar()
+        self.explicit = tk.StringVar()
+        self.areas = tk.StringVar()
+        for label, var, width in (("Filters per wrap", self.per_wrap, 6),
+                                  ("Number of wraps", self.n_wraps, 6),
+                                  ("Or each wrap (e.g. 5, 5, 2)",
+                                   self.explicit, 16)):
+            tk.Label(r2, text=label, bg=CCA, fg=CMU, font=F_SM
+                     ).pack(side="left", padx=(0, px(4)))
+            field_entry(r2, textvariable=var, width=width
+                        ).pack(side="left", padx=(0, px(14)))
+        r3 = tk.Frame(mid, bg=CCA)
+        r3.pack(fill="x", pady=(px(6), 0))
+        tk.Label(r3, text="Customer areas (e.g. Area A = 10; Area B = 10)",
+                 bg=CCA, fg=CMU, font=F_SM).pack(side="left", padx=(0, px(4)))
+        field_entry(r3, textvariable=self.areas, width=40
+                    ).pack(side="left", fill="x", expand=True)
+        r4 = tk.Frame(mid, bg=CCA)
+        r4.pack(fill="x", pady=(px(8), 0))
+        flat_btn(r4, "Save packing for this line", self._save_line, bg=CGR,
+                 pady=px(5)).pack(side="left")
+        flat_btn(r4, "Use the suggested plan", self._use_proposal,
+                 bg=CNE, pady=px(5)).pack(side="left", padx=(px(8), 0))
+        flat_btn(r4, "Filter calculator…", self._open_calculator,
+                 bg=CNE, pady=px(5)).pack(side="left", padx=(px(8), 0))
+        self.issues = tk.Label(mid, text="", bg=CCA, fg=CRD, font=F_SM,
+                               justify="left", anchor="w", wraplength=px(980))
+        self.issues.pack(fill="x", pady=(px(8), 0))
+
+        low = tk.Frame(body, bg=CBG)
+        low.pack(fill="both", expand=True, pady=(px(10), 0))
+        wcols = ("code", "qty", "area", "weight", "source")
+        self.wraps = ttk.Treeview(low, columns=wcols, show="headings",
+                                  style="TAF.Treeview", selectmode="extended")
+        for col, (txt, wd) in {"code": ("Wrap page", 110),
+                               "qty": ("Qty in wrap", 90),
+                               "area": ("Area", 140),
+                               "weight": ("Weight (kg)", 120),
+                               "source": ("Where the weight came from", 340)
+                               }.items():
+            self.wraps.heading(col, text=txt, anchor="w")
+            self.wraps.column(col, width=px(wd), anchor="w",
+                              stretch=col == "source")
+        self.wraps.tag_configure("over", foreground=CRD)
+        self.wraps.pack(side="left", fill="both", expand=True)
+        side = tk.Frame(low, bg=CBG, padx=px(10))
+        side.pack(side="left", fill="y")
+        flat_btn(side, "Record weight…", self._record_weight, bg=CA,
+                 pady=px(5)).pack(fill="x")
+        flat_btn(side, "Clear weight", lambda: self._record_weight(clear=True),
+                 bg=CNE, pady=px(5)).pack(fill="x", pady=(px(6), 0))
+
+        self._evals = []
+        self._refresh()
+        if self.items:
+            self.lines.selection_set("0")
+
+    # ── drawing ─────────────────────────────────────────────────────────
+    def _refresh(self, keep: "str | None" = None):
+        try:
+            wraps = _order_packing.order_wraps(self.items, self.settings)
+        except Exception as exc:
+            self.status.set(f"Could not work out the packing: {exc}")
+            return
+        self._order_lines = wraps["lines"]
+        for iid in self.lines.get_children():
+            self.lines.delete(iid)
+        for i, line in enumerate(self._order_lines):
+            ev = line["eval"] or {}
+            plan = ev.get("plan") or {}
+            calc = ev.get("calc") or {}
+            brace = (calc.get("bracing") or {}).get("message", "")
+            text = "  ".join(ev.get("instructions") or []) or "—"
+            if plan:
+                text = ("Manual: " if plan.get("mode") == "manual"
+                        else "Automatic: ") + text
+            status = {"ok": "Ready", "needs_weight_check": "Weigh the wraps",
+                      "conflict": "Needs a decision",
+                      "invalid_plan": "Plan does not add up",
+                      "needs_packing_input": "Set the packing",
+                      "single_item_exception": "One filter is over 10 kg"
+                      }.get(ev.get("status"), ev.get("status") or "")
+            bad = ev.get("status") in ("conflict", "invalid_plan",
+                                       "needs_packing_input",
+                                       "single_item_exception")
+            self.lines.insert("", "end", iid=str(i), tags=("problem",)
+                              if bad else (), values=(
+                i + 1, _line_size(line["item"]),
+                line["item"].get("Quantity", line["item"].get("quantity", "")),
+                text, len(line["wraps"]), status, brace))
+        if keep is not None and self.lines.exists(keep):
+            self.lines.selection_set(keep)
+        self._show_line()
+
+    def _selected(self) -> "int | None":
+        sel = self.lines.selection()
+        return int(sel[0]) if sel else None
+
+    def _show_line(self):
+        idx = self._selected()
+        for iid in self.wraps.get_children():
+            self.wraps.delete(iid)
+        if idx is None or idx >= len(self._order_lines):
+            return
+        line = self._order_lines[idx]
+        ev = line["eval"] or {}
+        plan = ev.get("plan") or {}
+        self.mode.set(plan.get("mode") or "automatic")
+        self.per_wrap.set(str(plan.get("max_per_wrap") or ""))
+        self.n_wraps.set("")
+        self.explicit.set(", ".join(str(w["quantity"])
+                                    for w in plan.get("wraps") or [])
+                          if plan.get("mode") == "manual" else "")
+        self.areas.set("; ".join(f"{g['name']} = {g['quantity']}"
+                                 for g in plan.get("groups") or []))
+        self.awkward.set(bool(plan.get("awkward")))
+        issues = list(ev.get("issues") or [])
+        prop = ev.get("proposal") or {}
+        if ev.get("status") == "conflict" and prop.get("wraps"):
+            issues.append("Suggested: " + _packing.instruction(
+                [w["quantity"] for w in prop["wraps"]]))
+        self.issues.config(text="\n".join(issues),
+                           fg=CRD if ev.get("status") not in (
+                               "ok", "needs_weight_check") else CMU)
+        for w in line["wraps"]:
+            weight = w.get("weight") or {}
+            src = {"measured": f"Weighed by {w.get('measured_by') or '—'}",
+                   "calculated": "Calculated from the filter weight",
+                   "unknown": "Not known: " + ", ".join(
+                       weight.get("missing") or [])}.get(
+                weight.get("source"), "")
+            over = (weight.get("raw_kg") or 0) > _packing.MAX_BUNDLE_KG + 1e-9
+            self.wraps.insert("", "end", iid=w.get("id") or "",
+                              tags=("over",) if over else (), values=(
+                w.get("code", ""), w.get("quantity", ""),
+                w.get("group") or "", weight.get("display") or "____",
+                src))
+
+    # ── saving ──────────────────────────────────────────────────────────
+    def _persist(self, idx: int, plan: dict) -> bool:
+        item = self.items[idx]
+        if self.order_id:
+            try:
+                saved = _db.set_line_fields(str(self.order_id),
+                                            item.get(_db.LINE_ID) or "",
+                                            {"Packing": plan})
+            except Exception as exc:
+                messagebox.showerror("Packing", str(exc), parent=self)
+                return False
+            self.items = saved
+            try:
+                _db.log_action("packing_set",
+                               f"O/N: {self.row.get('order_no','')} | "
+                               f"Line {idx + 1} | "
+                               + " ".join(_packing.plan_instructions(plan)))
+            except Exception:
+                pass
+        else:
+            item["Packing"] = plan
+        if self.on_saved:
+            self.on_saved(self.items)
+        self._refresh(keep=str(idx))
+        return True
+
+    def _save_line(self):
+        idx = self._selected()
+        if idx is None:
+            messagebox.showinfo("Packing", "Choose a line first.", parent=self)
+            return
+        item = self.items[idx]
+        who, at = _who_now(), _calc_settings.now_iso()
+        try:
+            groups = _packing.parse_groups(self.areas.get())
+            if self.mode.get() == "manual":
+                if groups:
+                    rows = _packing.grouped_rows(groups, self.per_wrap.get())
+                    if self.explicit.get().strip():
+                        raise _packing.PackingError(
+                            "With customer areas, give filters per wrap - "
+                            "each area is wrapped separately.")
+                    plan = _order_packing.set_manual(
+                        item, [r["quantity"] for r in rows], groups=groups,
+                        group_of_wrap=[r["group"] for r in rows], by=who,
+                        at=at)
+                else:
+                    qty = _order_packing._quantity(item)
+                    plan = _order_packing.set_manual(
+                        item, _packing.quantities_from_form(
+                            qty, self.per_wrap.get(), self.n_wraps.get(),
+                            self.explicit.get()), by=who, at=at)
+            else:
+                plan = _order_packing.set_automatic(
+                    item, self.settings, max_per_wrap=self.per_wrap.get()
+                    or None, groups=groups, awkward=self.awkward.get(),
+                    by=who, at=at)
+                if plan is None:
+                    raise _packing.PackingError(
+                        "There is not enough to plan this automatically - "
+                        "set filters per wrap, or choose Manual.")
+            plan["awkward"] = bool(self.awkward.get())
+        except _packing.PackingError as exc:
+            messagebox.showwarning("Packing", str(exc), parent=self)
+            return
+        if self._persist(idx, plan):
+            self.status.set(f"Line {idx + 1} saved.")
+
+    def _use_proposal(self):
+        idx = self._selected()
+        if idx is None:
+            return
+        prop = (self._order_lines[idx]["eval"] or {}).get("proposal") or {}
+        if not prop.get("wraps"):
+            messagebox.showinfo("Packing", "There is no other plan to suggest.",
+                                parent=self)
+            return
+        self.mode.set("manual")
+        self.per_wrap.set("")
+        self.n_wraps.set("")
+        self.explicit.set(", ".join(str(w["quantity"]) for w in prop["wraps"]))
+
+    def _record_weight(self, clear: bool = False):
+        idx = self._selected()
+        sel = self.wraps.selection()
+        if idx is None or len(sel) != 1:
+            messagebox.showinfo("Weight", "Choose one wrap.", parent=self)
+            return
+        wrap_id = sel[0]
+        if not self.items[idx].get("Packing"):
+            # An automatic plan nobody has saved yet: save it first (with the
+            # wrap ids on screen), so the weight belongs to a wrap that will
+            # still exist tomorrow.
+            ev = self._order_lines[idx]["eval"] or {}
+            if not ev.get("plan") or not self._persist(idx, ev["plan"]):
+                return
+        plan = self.items[idx].get("Packing") or {}
+        text = ""
+        if not clear:
+            text = simpledialog.askstring(
+                "Weigh this wrap",
+                "Weight of the wrapped bundle in kg, wrapping included:",
+                parent=self) or ""
+            if not text.strip():
+                return
+        try:
+            plan = _packing.record_weight(plan, wrap_id, text, _who_now(),
+                                          _calc_settings.now_iso())
+        except _packing.PackingError as exc:
+            messagebox.showwarning("Weight", str(exc), parent=self)
+            return
+        kg = _packing.positive(text) if text else None
+        if self._persist(idx, plan) and kg and kg > _packing.MAX_BUNDLE_KG:
+            messagebox.showwarning(
+                "Over 10 kg", f"That wrap weighs {text} kg - over the 10 kg "
+                "limit. Repack it into smaller wraps and weigh them again.",
+                parent=self)
+
+    def _open_calculator(self):
+        idx = self._selected()
+        if idx is None:
+            return
+        item = self.items[idx]
+        if not item.get("Filter Type"):
+            messagebox.showinfo("Filter calculator",
+                                "The calculator is for filter lines.",
+                                parent=self)
+            return
+
+        def _saved(inputs):
+            if self.order_id:
+                try:
+                    self.items = _db.set_line_fields(
+                        str(self.order_id), item.get(_db.LINE_ID) or "",
+                        {"Calculator": inputs or None})
+                except Exception as exc:
+                    messagebox.showerror("Filter calculator", str(exc),
+                                         parent=self)
+                    return
+            else:
+                item["Calculator"] = inputs
+            if self.on_saved:
+                self.on_saved(self.items)
+            self._refresh(keep=str(idx))
+
+        FilterCalculatorDialog(self, item, self.settings, on_save=_saved)
+
+    # ── labels ──────────────────────────────────────────────────────────
+    def _order_record(self) -> dict:
+        return {"order_number": self.row.get("order_no") or
+                self.header.get("Order Number", ""),
+                "customer_name": self.row.get("customer") or
+                self.header.get("Customer Name", ""),
+                "customer_id": self.row.get("customer_id") or "",
+                "header": self.header}
+
+    def _print_all(self):
+        unsaved = [i + 1 for i, it in enumerate(self.items)
+                   if not it.get("Packing")]
+        if unsaved and self.order_id:
+            if not messagebox.askyesno(
+                    "Delivery labels",
+                    "Lines " + ", ".join(map(str, unsaved)) + " have no "
+                    "saved packing yet. Save the automatic plan for them and "
+                    "print?", parent=self):
+                return
+            for i in [n - 1 for n in unsaved]:
+                ev = self._order_lines[i]["eval"] or {}
+                if ev.get("plan"):
+                    if not self._persist(i, ev["plan"]):
+                        return
+        print_delivery_labels(self, self._order_record(), self.items)
+
+    def _print_selected(self):
+        ids = [i for i in self.wraps.selection() if i]
+        if not ids:
+            messagebox.showinfo("Reprint", "Choose the wraps to reprint.",
+                                parent=self)
+            return
+        print_delivery_labels(self, self._order_record(), self.items,
+                              only_wrap_ids=ids)
+
+
+class FilterCalculatorDialog(tk.Toplevel):
+    """Cut sizes and weights for one line, and the measured inputs behind them.
+
+    The same calculation the worksheet, the packing plan and the labels use.
+    What is entered here - a measured cut, a confirmed retention, a wire
+    choice - is saved on the line, so all of those pick it up.
+    """
+
+    def __init__(self, master, item: dict, settings: dict, on_save=None,
+                 editable: bool = True):
+        super().__init__(master)
+        self.title("Filter calculator")
+        self.transient(master)
+        self.grab_set()
+        self.configure(bg=CBG)
+        self.item = dict(item)
+        self.settings = settings
+        self.on_save = on_save
+        _centre_on_parent(self, master, px(860), px(640))
+        self.bind("<Escape>", lambda _e: self.destroy())
+        saved = dict(item.get("Calculator") or {})
+
+        top = tk.Frame(self, bg=CA, padx=px(16), pady=px(10))
+        top.pack(fill="x")
+        tk.Label(top, text=f"Filter calculator — {item.get('Quantity','')} x "
+                           f"{item.get('Filter Type','')} {_line_size(item)} "
+                           f"{item.get('Media Type','')}",
+                 bg=CA, fg="white", font=(FAM, 12, "bold")).pack(anchor="w")
+
+        foot = tk.Frame(self, bg=CBG, padx=px(14), pady=px(10))
+        foot.pack(fill="x", side="bottom")
+        flat_btn(foot, "Close", self.destroy, bg=CNE,
+                 pady=px(6)).pack(side="right")
+        if editable and on_save:
+            flat_btn(foot, "Save to this line", self._save, bg=CGR,
+                     pady=px(6)).pack(side="right", padx=(0, px(8)))
+        flat_btn(foot, "Recalculate", self._recalc, bg=CA,
+                 pady=px(6)).pack(side="right", padx=(0, px(8)))
+
+        form = tk.Frame(self, bg=CCA, padx=px(14), pady=px(10),
+                        highlightbackground=CBR, highlightthickness=1)
+        form.pack(fill="x", padx=px(14), pady=(px(10), 0))
+        wire = saved.get("wire") or {}
+        self.wire_code = tk.StringVar(value=saved.get("wire_material_override")
+                                      or "Automatic")
+        self.wire_pieces = tk.StringVar(value="; ".join(
+            f"{p['cut_width_mm']:g} x {p['cut_length_mm']:g} x "
+            f"{p['pieces_per_filter']}" for p in wire.get("pieces") or []))
+        self.wire_kept = tk.StringVar(value=self._kept_text(wire.get("installed")))
+        comps = saved.get("media_components") or []
+        media = comps[0] if comps else {}
+        self.media_pieces = tk.StringVar(value="; ".join(
+            f"{p['cut_width_mm']:g} x {p['cut_length_mm']:g} x "
+            f"{p['pieces_per_filter']}" for p in media.get("pieces") or []))
+        self.media_kept = tk.StringVar(value=self._kept_text(media.get("installed")))
+        self.extra = tk.StringVar(value="; ".join(
+            f"{c['name']} = " + ("n/a" if c.get("not_applicable")
+                                 else f"{c.get('kg_per_filter')}")
+            for c in saved.get("components") or []))
+        kept_choices = ["Not confirmed", "Whole blank stays in the filter"]
+        rows = [
+            ("Wire", ttk.Combobox(form, textvariable=self.wire_code,
+                                  values=["Automatic", "LARGE_WIRE",
+                                          "SMALL_WIRE"], state="readonly",
+                                  width=14)),
+            ("Measured wire cuts (W x L x pieces; ...)",
+             field_entry(form, textvariable=self.wire_pieces, width=40)),
+            ("Wire kept in the filter", ttk.Combobox(
+                form, textvariable=self.wire_kept, values=kept_choices,
+                state="readonly", width=30)),
+            ("Measured media cuts (W x L x pieces; ...)",
+             field_entry(form, textvariable=self.media_pieces, width=40)),
+            ("Media kept in the filter", ttk.Combobox(
+                form, textvariable=self.media_kept, values=kept_choices,
+                state="readonly", width=30)),
+            ("Other parts (name = kg each, or n/a; ...)",
+             field_entry(form, textvariable=self.extra, width=40)),
+        ]
+        for r, (label, widget) in enumerate(rows):
+            tk.Label(form, text=label, bg=CCA, fg=CMU, font=F_SM,
+                     anchor="w").grid(row=r, column=0, sticky="w",
+                                      pady=px(2), padx=(0, px(10)))
+            widget.grid(row=r, column=1, sticky="ew", pady=px(2))
+        form.columnconfigure(1, weight=1)
+
+        self.out = tk.Text(self, wrap="word", font=F_BODY, bg=CCA, fg=CTX,
+                           relief="flat", highlightthickness=1,
+                           highlightbackground=CBR, padx=px(10), pady=px(8))
+        self.out.pack(fill="both", expand=True, padx=px(14), pady=px(10))
+        self.out.tag_configure("bold", font=F_BOLD)
+        self.out.tag_configure("warn", foreground=CRD, font=F_BOLD)
+        self._recalc()
+
+    @staticmethod
+    def _kept_text(rule) -> str:
+        if rule == "full_blank" or (isinstance(rule, dict)
+                                    and rule.get("rule") == "full_blank"):
+            return "Whole blank stays in the filter"
+        return "Not confirmed"
+
+    def _inputs(self) -> dict:
+        out: dict = {}
+        if self.wire_code.get() not in ("", "Automatic"):
+            out["wire_material_override"] = self.wire_code.get()
+        wire: dict = {}
+        if self.wire_pieces.get().strip():
+            wire["pieces"] = _filter_calc.parse_pieces(self.wire_pieces.get())
+        if self.wire_kept.get().startswith("Whole"):
+            wire["installed"] = "full_blank"
+        if wire:
+            out["wire"] = wire
+        media_code = str(self.item.get("Media Type") or "").strip()
+        comp: dict = {"media_code": media_code}
+        if self.media_pieces.get().strip():
+            comp["pieces"] = _filter_calc.parse_pieces(self.media_pieces.get())
+        if self.media_kept.get().startswith("Whole"):
+            comp["installed"] = "full_blank"
+        if len(comp) > 1 and media_code:
+            out["media_components"] = [comp]
+        extras = []
+        for chunk in self.extra.get().split(";"):
+            if not chunk.strip():
+                continue
+            if "=" not in chunk:
+                raise ValueError(f"Write other parts as name = kg (not "
+                                 f"{chunk.strip()!r}).")
+            name, val = [x.strip() for x in chunk.split("=", 1)]
+            if val.lower() in ("n/a", "na", "none"):
+                extras.append({"name": name, "not_applicable": True})
+            else:
+                kg = _packing.positive(val) if val not in ("0",) else 0.0
+                if kg is None:
+                    raise ValueError(f"{name}: {val!r} is not a weight.")
+                extras.append({"name": name, "kg_per_filter": kg})
+        if extras:
+            out["components"] = extras
+        return out
+
+    def _recalc(self):
+        self.out.config(state="normal")
+        self.out.delete("1.0", "end")
+        try:
+            inputs = self._inputs()
+        except ValueError as exc:
+            self.out.insert("end", str(exc), "warn")
+            self.out.config(state="disabled")
+            return
+        trial = dict(self.item, Calculator=inputs)
+        r = _filter_calc.calculate_item(trial, self.settings)
+        from taf_order_app import worksheet_blocks as _wb
+        for text, bold in _wb.calculator_lines({"calc": r}):
+            if text.startswith("Weight incomplete"):
+                continue          # listed in full just below
+            self.out.insert("end", text + "\n", "bold" if bold else "")
+        missing = list(dict.fromkeys(r.get("missing") or []))
+        if missing:
+            self.out.insert("end", "\nStill needed for a complete weight:\n",
+                            "warn")
+            for m in missing:
+                self.out.insert("end", f"  • {m}\n")
+        self.out.insert("end", "\nWorked out with: " + ", ".join(
+            f"{k} {v}" for k, v in (r.get("provenance") or {}).items()
+            if not isinstance(v, dict)) + "\n")
+        self.out.config(state="disabled")
+        self._result = r
+
+    def _save(self):
+        try:
+            inputs = self._inputs()
+        except ValueError as exc:
+            messagebox.showwarning("Filter calculator", str(exc), parent=self)
+            return
+        if self.on_save:
+            self.on_save(inputs)
+        self.destroy()
+
+
+class WeightsSettingsDialog(tk.Toplevel):
+    """The numbers behind weights, packing and labels, for everyone.
+
+    Managers change them; everyone else sees them. Each save is a new
+    version - the old value stays in the history - so a weight can always
+    be traced to the numbers it came from.
+    """
+
+    def __init__(self, master, editable: bool):
+        super().__init__(master)
+        self.title("Weights, packing and labels")
+        self.transient(master)
+        self.grab_set()
+        self.configure(bg=CBG)
+        self.editable = editable
+        self.s = _calc_settings.cached()
+        _centre_on_parent(self, master, px(900), px(640))
+        self.bind("<Escape>", lambda _e: self.destroy())
+
+        foot = tk.Frame(self, bg=CBG, padx=px(14), pady=px(10))
+        foot.pack(fill="x", side="bottom")
+        flat_btn(foot, "Close", self.destroy, bg=CNE,
+                 pady=px(6)).pack(side="right")
+        tk.Label(foot, text="" if editable else
+                 "Only a manager can change these.", bg=CBG, fg=CMU,
+                 font=F_SM).pack(side="left")
+
+        nb = ttk.Notebook(self)
+        nb.pack(fill="both", expand=True, padx=px(14), pady=px(10))
+        self._company(nb)
+        self._materials(nb)
+        self._packing_tab(nb)
+        for section, title, hint in (
+                ("brace_profiles", "Braces",
+                 'Per filter type: {"Flat Panel": {"kg_each_including_fixings":'
+                 ' 0.35, "count": null}}. Count is needed for V-form and '
+                 'flyscreen; flat panels take theirs from the rule.'),
+                ("steel", "Steel",
+                 '{"density_kg_m3": ..., "basis": "...", "material": '
+                 '"galvanised steel stock"} - the confirmed density of the '
+                 'steel stock, used for mounting frames.'),
+                ("wire_rules", "Wire choice",
+                 'Which wire each non-V-form filter is made with, e.g. '
+                 '{"Flat Panel": "SMALL_WIRE"}. V-forms go by depth.'),
+                ("component_profiles", "Frames",
+                 'Verified weights for parts: [{"name": "filter_frame", "id": '
+                 '"...", "version": 1, "verified": true, "constructions": '
+                 '["V-form"], "method": "per_perimeter_m", "kg_per_m": ...}]'),
+                ("cut_profiles", "Cut profiles",
+                 'Confirmed cut profiles that replace or add to the '
+                 'worksheet formulas (see the README).'),
+                ("mounting_frame_profiles", "Mounting frames",
+                 'Verified profiles: sizes, pieces (strip width, retained '
+                 'length, qty), holes, overlaps and hardware. Known sizes: '
+                 + ", ".join(f"{z['width_mm']}x{z['height_mm']}"
+                             for z in _mounting_frames.known_sizes()))):
+            self._json_tab(nb, section, title, hint)
+
+    def _page(self, nb, title):
+        f = tk.Frame(nb, bg=CCA, padx=px(14), pady=px(12))
+        nb.add(f, text=f"  {title}  ")
+        return f
+
+    def _store(self, section, value, quiet: bool = False) -> bool:
+        if not self.editable:
+            return False
+        try:
+            version = _calc_settings.save(section, value)
+            self.s = _calc_settings.load(force=True)
+            _db.log_action("calc_setting_changed",
+                           f"{section} -> version {version}")
+        except Exception as exc:
+            messagebox.showerror("Settings", f"Not saved:\n{exc}", parent=self)
+            return False
+        if not quiet:
+            messagebox.showinfo("Settings", "Saved for everyone. New "
+                                "worksheets and labels use it from now on.",
+                                parent=self)
+        return True
+
+    def _company(self, nb):
+        f = self._page(nb, "Company")
+        tk.Label(f, text="Base address — the From line on every delivery "
+                         "label", bg=CCA, fg=CTX, font=F_BOLD).pack(anchor="w")
+        var = tk.StringVar(value=_calc_settings.base_address(self.s))
+        e = field_entry(f, textvariable=var, width=80)
+        e.pack(fill="x", pady=(px(6), px(6)))
+        if not self.editable:
+            e.config(state="disabled")
+        tk.Label(f, text=f"{_calc_settings.COMPANY['name']}   ·   ABN "
+                         f"{_calc_settings.COMPANY['abn']}   ·   "
+                         f"{_calc_settings.COMPANY['phone']}",
+                 bg=CCA, fg=CMU, font=F_SM).pack(anchor="w")
+
+        def _save():
+            text = var.get().strip()
+            if not text:
+                messagebox.showwarning("Base address", "The address can't be "
+                                       "empty.", parent=self)
+                return
+            company = dict(self.s.get("company") or {})
+            company["base_address"] = text
+            self._store("company", company)
+        if self.editable:
+            flat_btn(f, "Save address", _save, bg=CGR,
+                     pady=px(5)).pack(anchor="w", pady=(px(10), 0))
+
+    def _materials(self, nb):
+        f = self._page(nb, "Wire and media")
+        cols = ("code", "kind", "mass", "area", "rate", "basis")
+        tree = ttk.Treeview(f, columns=cols, show="headings", height=9,
+                            style="TAF.Treeview")
+        for col, (txt, wd) in {"code": ("Code", 110), "kind": ("Kind", 70),
+                               "mass": ("Stock kg", 90),
+                               "area": ("Stock m²", 90),
+                               "rate": ("kg/m²", 120),
+                               "basis": ("Basis", 260)}.items():
+            tree.heading(col, text=txt, anchor="w")
+            tree.column(col, width=px(wd), anchor="w")
+        tree.pack(fill="both", expand=True)
+
+        def _fill():
+            mats = self.s["materials"]
+            for iid in tree.get_children():
+                tree.delete(iid)
+            for code in _filter_calc._mat.WIRE_CODES:
+                m = _filter_calc._mat.wire_material(code, mats)
+                tree.insert("", "end", iid="wire:" + code, values=(
+                    code, "wire", f"{m['roll_weight_kg']:g}",
+                    f"{m['roll_area_m2']:g}", f"{m['kg_per_m2']:.6f}",
+                    m["basis"]))
+            for code in _filter_calc._mat.MEDIA_CODES:
+                m = _filter_calc._mat.media_material(code, mats)
+                tree.insert("", "end", iid="media:" + code, values=(
+                    code, "media", f"{m['stock_weight_kg']:g}",
+                    f"{m['stock_area_m2']:g}", f"{m['kg_per_m2']:.6f}",
+                    m["basis"]))
+        _fill()
+
+        def _edit():
+            sel = tree.selection()
+            if not sel:
+                return
+            kind, code = sel[0].split(":", 1)
+            mats = self.s["materials"]
+            row = mats[kind][code]
+            mass_key = "roll_weight_kg" if kind == "wire" else "stock_weight_kg"
+            mass = simpledialog.askstring(
+                "Weighed stock", f"{code}: what the stock weighs, kg "
+                "(as weighed)", parent=self,
+                initialvalue=str(row.get(mass_key) or ""))
+            if mass is None:
+                return
+            area_note = ("roll width x length is kept as supplied"
+                         if kind == "wire" else "stock area in m²")
+            area = None
+            if kind == "media":
+                area = simpledialog.askstring(
+                    "Weighed stock", f"{code}: {area_note}", parent=self,
+                    initialvalue=str(row.get("stock_area_m2") or ""))
+                if area is None:
+                    return
+            try:
+                if kind == "media" and code == "BLACK":
+                    new = _filter_calc._mat.replace_black_with_measurement(
+                        mats, mass, area, _who_now(),
+                        _calc_settings.now_iso())
+                else:
+                    new = json.loads(json.dumps(mats))
+                    value = float(mass)
+                    if value <= 0:
+                        raise ValueError
+                    new[kind][code][mass_key] = value
+                    new[kind][code]["basis"] = (
+                        "supplied_roll_mass" if kind == "wire"
+                        else "supplied_stock_mass")
+                    if area is not None:
+                        a = float(area)
+                        if a <= 0:
+                            raise ValueError
+                        new[kind][code]["stock_area_m2"] = a
+                    new[kind][code]["measured_by"] = _who_now()
+                    new[kind][code]["measured_at"] = _calc_settings.now_iso()
+            except (ValueError, TypeError, _filter_calc._mat.MaterialError):
+                messagebox.showwarning("Weighed stock", "Both have to be "
+                                       "numbers above zero.", parent=self)
+                return
+            new["version"] = f"{_filter_calc._mat.DEFAULTS_VERSION}+edit"
+            if self._store("materials", new):
+                _fill()
+        if self.editable:
+            flat_btn(f, "Enter a weighed roll for the selected row…", _edit,
+                     bg=CA, pady=px(5)).pack(anchor="w", pady=(px(8), 0))
+        tk.Label(f, text="Rates are worked out from the stock's weight and "
+                         "size, never typed. BLACK follows GREY until a "
+                         "BLACK roll is weighed.", bg=CCA, fg=CMU,
+                 font=F_SM, wraplength=px(820), justify="left"
+                 ).pack(anchor="w", pady=(px(6), 0))
+
+    def _packing_tab(self, nb):
+        f = self._page(nb, "Packing")
+        pack = dict(self.s.get("packaging") or {})
+        confirmed = tk.BooleanVar(value=bool(pack.get("confirmed")))
+        base = tk.StringVar(value=str(pack.get("base_kg", "")))
+        per = tk.StringVar(value=str(pack.get("per_filter_kg", "")))
+        rounding = tk.StringVar(value=self.s.get("shipping_rounding") or "none")
+        tk.Label(f, text="What the wrapping itself weighs", bg=CCA, fg=CTX,
+                 font=F_BOLD).grid(row=0, column=0, columnspan=4, sticky="w")
+        tk.Checkbutton(f, text="Confirmed (until it is, weights stay blank)",
+                       variable=confirmed, bg=CCA, fg=CTX, font=F_BODY,
+                       activebackground=CCA, selectcolor=CBG
+                       ).grid(row=1, column=0, columnspan=4, sticky="w")
+        for r, (label, var) in enumerate((("Per wrap, kg", base),
+                                          ("Plus per filter, kg", per)), 2):
+            tk.Label(f, text=label, bg=CCA, fg=CMU, font=F_SM
+                     ).grid(row=r, column=0, sticky="w")
+            field_entry(f, textvariable=var, width=10
+                        ).grid(row=r, column=1, sticky="w", pady=px(2))
+        tk.Label(f, text="Calculated weights on labels", bg=CCA, fg=CMU,
+                 font=F_SM).grid(row=4, column=0, sticky="w", pady=(px(8), 0))
+        ttk.Combobox(f, textvariable=rounding, state="readonly", width=34,
+                     values=["none", "up_0.1"]).grid(row=4, column=1,
+                                                     sticky="w",
+                                                     pady=(px(8), 0))
+        tk.Label(f, text="none = three decimal places;  up_0.1 = rounded up "
+                         "to 0.1 kg, once, on the whole wrap", bg=CCA,
+                 fg=CMU, font=F_SM).grid(row=5, column=0, columnspan=4,
+                                         sticky="w")
+
+        tk.Label(f, text="Handling limits (filters per wrap, by size)",
+                 bg=CCA, fg=CTX, font=F_BOLD).grid(row=6, column=0,
+                                                   columnspan=4, sticky="w",
+                                                   pady=(px(14), 0))
+        hp = list(self.s.get("handling_profiles") or [])
+        lb = tk.Listbox(f, height=6, font=F_BODY, bg=CFD, relief="flat",
+                        highlightthickness=0)
+        lb.grid(row=7, column=0, columnspan=4, sticky="ew")
+        f.columnconfigure(3, weight=1)
+
+        def _fill():
+            lb.delete(0, "end")
+            for p in hp:
+                m = p.get("match") or {}
+                lb.insert("end", f"  {m.get('width_mm')} x {m.get('height_mm')}"
+                                 f" x {m.get('depth_mm') or 'any'}  ->  "
+                                 f"{p.get('max_per_wrap')} a wrap   "
+                                 f"({p.get('source') or ''})")
+        _fill()
+
+        def _add():
+            text = simpledialog.askstring(
+                "Handling limit", "Width x height x depth, and the most per "
+                "wrap - e.g. 412 x 412 x 90 = 5", parent=self)
+            if not text:
+                return
+            m = re.match(r"^\s*(\d+)\s*[x×]\s*(\d+)\s*(?:[x×]\s*(\d+))?\s*"
+                         r"=\s*(\d+)\s*$", text)
+            if not m or int(m.group(4)) < 1:
+                messagebox.showwarning("Handling limit", "Write it like "
+                                       "412 x 412 x 90 = 5", parent=self)
+                return
+            hp.append({"id": f"HANDLING-{m.group(1)}x{m.group(2)}x"
+                             f"{m.group(3) or 'any'}", "version": 1,
+                       "verified": True,
+                       "match": {"width_mm": int(m.group(1)),
+                                 "height_mm": int(m.group(2)),
+                                 "depth_mm": int(m.group(3))
+                                 if m.group(3) else None},
+                       "max_per_wrap": int(m.group(4)),
+                       "source": f"set by {_who_now() or 'staff'}"})
+            _fill()
+
+        def _remove():
+            sel = lb.curselection()
+            if sel:
+                hp.pop(sel[0])
+                _fill()
+
+        def _save():
+            try:
+                packaging = {"confirmed": bool(confirmed.get())}
+                if base.get().strip():
+                    packaging["base_kg"] = float(base.get())
+                if per.get().strip():
+                    packaging["per_filter_kg"] = float(per.get())
+                if any(v < 0 for k, v in packaging.items()
+                       if k != "confirmed"):
+                    raise ValueError
+            except ValueError:
+                messagebox.showwarning("Packing", "Wrapping weights are "
+                                       "numbers, zero or more.", parent=self)
+                return
+            if self._store("packaging", packaging, quiet=True) and \
+                    self._store("shipping_rounding", rounding.get(),
+                                quiet=True):
+                self._store("handling_profiles", hp)
+        if self.editable:
+            bar = tk.Frame(f, bg=CCA)
+            bar.grid(row=8, column=0, columnspan=4, sticky="w",
+                     pady=(px(8), 0))
+            flat_btn(bar, "Add a limit…", _add, bg=CNE,
+                     pady=px(5)).pack(side="left")
+            flat_btn(bar, "Remove selected", _remove, bg=CNE,
+                     pady=px(5)).pack(side="left", padx=(px(8), 0))
+            flat_btn(bar, "Save packing settings", _save, bg=CGR,
+                     pady=px(5)).pack(side="left", padx=(px(8), 0))
+
+    def _json_tab(self, nb, section, title, hint):
+        f = self._page(nb, title)
+        tk.Label(f, text=hint, bg=CCA, fg=CMU, font=F_SM, justify="left",
+                 wraplength=px(820)).pack(anchor="w")
+        txt = tk.Text(f, height=14, font=F_NUM, bg=CFD, fg=CTX,
+                      relief="flat", wrap="none")
+        txt.pack(fill="both", expand=True, pady=(px(6), 0))
+        txt.insert("1.0", json.dumps(self.s.get(section), indent=2))
+        if not self.editable:
+            txt.config(state="disabled")
+            return
+
+        def _save():
+            try:
+                value = json.loads(txt.get("1.0", "end") or "null")
+            except ValueError as exc:
+                messagebox.showwarning(title, f"That is not valid JSON:\n{exc}",
+                                       parent=self)
+                return
+            want = dict if section in ("brace_profiles", "steel",
+                                       "wire_rules") else list
+            if not isinstance(value, want):
+                messagebox.showwarning(title, f"This setting is a "
+                                       f"{'set of named entries' if want is dict else 'list'}.",
+                                       parent=self)
+                return
+            if want is list and any(not isinstance(p, dict) for p in value):
+                messagebox.showwarning(title, "Each profile is an object.",
+                                       parent=self)
+                return
+            self._store(section, value)
+        flat_btn(f, f"Save {title.lower()}", _save, bg=CGR,
+                 pady=px(5)).pack(anchor="w", pady=(px(8), 0))
+
+
+class MergeCustomersDialog(tk.Toplevel):
+    """Fold accounts that are the same company into one.
+
+    Nothing is merged on a guess. Suggestions say why they were made, every
+    field the accounts disagree on is chosen, the counts of what will move
+    are shown, and the merge is confirmed in words before it runs. It can be
+    undone from here afterwards.
+    """
+
+    def __init__(self, master, on_done=None):
+        super().__init__(master)
+        self.title("Merge customer accounts")
+        self.transient(master)
+        self.grab_set()
+        self.configure(bg=CBG)
+        self.on_done = on_done
+        _centre_on_parent(self, master, px(1060), px(720))
+        self.bind("<Escape>", lambda _e: self.destroy())
+        self.request_id = _merge.new_request_id()
+        try:
+            self.people = _db.get_customers(active_only=True)
+        except Exception:
+            self.people = []
+        self.by_id = {c["id"]: c for c in self.people if c.get("id")}
+        self.chosen: list = []
+        self.field_vars: dict = {}
+        self.price_vars: dict = {}
+        self.prices: list = []
+
+        top = tk.Frame(self, bg=CA, padx=px(16), pady=px(10))
+        top.pack(fill="x")
+        tk.Label(top, text="Merge customer accounts", bg=CA, fg="white",
+                 font=(FAM, 13, "bold")).pack(anchor="w")
+        tk.Label(top, text="For one company entered twice. Different branches "
+                           "of a company stay separate accounts.",
+                 bg=CA, fg="white", font=F_SM).pack(anchor="w")
+
+        foot = tk.Frame(self, bg=CBG, padx=px(14), pady=px(10))
+        foot.pack(fill="x", side="bottom")
+        flat_btn(foot, "Close", self.destroy, bg=CNE,
+                 pady=px(6)).pack(side="right")
+        self.merge_btn = flat_btn(foot, "Merge…", self._merge, bg=CRD,
+                                  pady=px(6))
+        self.merge_btn.pack(side="right", padx=(0, px(8)))
+        flat_btn(foot, "Undo a merge…", self._undo, bg=CNE,
+                 pady=px(6)).pack(side="left")
+
+        body = tk.Frame(self, bg=CBG, padx=px(14), pady=px(10))
+        body.pack(fill="both", expand=True)
+        left = tk.Frame(body, bg=CBG)
+        left.pack(side="left", fill="y")
+        self.search = tk.StringVar()
+        tk.Label(left, text="Find an account", bg=CBG, fg=CMU,
+                 font=F_SM).pack(anchor="w")
+        field_entry(left, textvariable=self.search, width=34).pack(fill="x")
+        self.search.trace_add("write", lambda *_: self._fill_list())
+        self.listing = ttk.Treeview(left, columns=("name", "where"),
+                                    show="headings", height=12,
+                                    style="TAF.Treeview", selectmode="extended")
+        self.listing.heading("name", text="Account", anchor="w")
+        self.listing.heading("where", text="Delivers to", anchor="w")
+        self.listing.column("name", width=px(200))
+        self.listing.column("where", width=px(140))
+        self.listing.pack(fill="y", expand=True, pady=(px(6), 0))
+        flat_btn(left, "Compare the selected accounts", self._use_selection,
+                 bg=CA, pady=px(5)).pack(fill="x", pady=(px(6), 0))
+        tk.Label(left, text="Suggested (check before merging):", bg=CBG,
+                 fg=CMU, font=F_SM).pack(anchor="w", pady=(px(10), 0))
+        self.suggest = tk.Listbox(left, height=6, font=F_SM, bg=CCA,
+                                  relief="flat", highlightthickness=0)
+        self.suggest.pack(fill="x")
+        self.suggest.bind("<<ListboxSelect>>", self._use_suggestion)
+        self._groups = _merge.suggest_duplicates(self.people)
+        for g in self._groups:
+            names = " + ".join(a.get("name", "") for a in g["accounts"])
+            self.suggest.insert("end", f"{names}  ({'; '.join(g['reasons'])})"
+                                + ("  ⚠ different ABNs" if g["abn_conflict"]
+                                   else ""))
+
+        self.right = tk.Frame(body, bg=CCA, highlightbackground=CBR,
+                              highlightthickness=1, padx=px(12), pady=px(10))
+        self.right.pack(side="left", fill="both", expand=True,
+                        padx=(px(12), 0))
+        self._fill_list()
+        self._draw_compare()
+
+    def _fill_list(self):
+        q = self.search.get().strip().lower()
+        for iid in self.listing.get_children():
+            self.listing.delete(iid)
+        for c in self.people:
+            text = " ".join(str(c.get(k) or "") for k in (
+                "name", "short_name", "legal_name", "delivery_city",
+                "phone", "email")).lower()
+            if q and q not in text:
+                continue
+            self.listing.insert("", "end", iid=c["id"], values=(
+                c.get("name", ""), c.get("delivery_city", "")))
+
+    def _use_selection(self):
+        ids = list(self.listing.selection())
+        if len(ids) < 2:
+            messagebox.showinfo("Merge", "Choose two or more accounts "
+                                "(hold Ctrl to choose more than one).",
+                                parent=self)
+            return
+        self.chosen = ids
+        self._draw_compare()
+
+    def _use_suggestion(self, _e=None):
+        sel = self.suggest.curselection()
+        if not sel:
+            return
+        self.chosen = list(self._groups[sel[0]]["ids"])
+        self._draw_compare()
+
+    def _draw_compare(self):
+        for w in self.right.winfo_children():
+            w.destroy()
+        self.field_vars, self.price_vars = {}, {}
+        if len(self.chosen) < 2:
+            tk.Label(self.right, text="Choose the accounts to compare, from "
+                                      "the list or a suggestion.", bg=CCA,
+                     fg=CMU, font=F_BODY).pack(anchor="w")
+            return
+        accounts = [self.by_id[i] for i in self.chosen if i in self.by_id]
+        self.survivor = tk.StringVar(value=accounts[0]["id"])
+        tk.Label(self.right, text="The account that stays", bg=CCA, fg=CTX,
+                 font=F_BOLD).pack(anchor="w")
+        try:
+            counts = {r["id"]: r for r in _merge.preview(self.chosen)}
+        except Exception:
+            counts = {}
+        for a in accounts:
+            n = counts.get(a["id"], {})
+            tk.Radiobutton(
+                self.right, variable=self.survivor, value=a["id"],
+                text=f"{a.get('name','')}  —  {n.get('orders', '?')} orders, "
+                     f"{n.get('quotes', '?')} quotes, "
+                     f"{n.get('customer_prices', '?')} agreed prices, "
+                     f"{n.get('sites', 0)} sites",
+                bg=CCA, fg=CTX, font=F_BODY, activebackground=CCA,
+                selectcolor=CBG, anchor="w").pack(fill="x")
+        grid = tk.Frame(self.right, bg=CCA)
+        grid.pack(fill="x", pady=(px(10), 0))
+        conflicts = _merge.conflicts(accounts)
+        names = [str(a.get("name") or "") for a in accounts]
+        self.name_var = tk.StringVar(value=names[0])
+        tk.Label(grid, text="Company name to keep", bg=CCA, fg=CMU,
+                 font=F_SM).grid(row=0, column=0, sticky="w")
+        ttk.Combobox(grid, textvariable=self.name_var, values=names,
+                     width=46).grid(row=0, column=1, sticky="w")
+        r = 1
+        for field, values in conflicts.items():
+            if field == "name":
+                continue
+            var = tk.StringVar(value="")
+            self.field_vars[field] = var
+            tk.Label(grid, text=field.replace("_", " ").capitalize(),
+                     bg=CCA, fg=CMU, font=F_SM).grid(row=r, column=0,
+                                                     sticky="w")
+            ttk.Combobox(grid, textvariable=var, values=values,
+                         state="readonly", width=46).grid(row=r, column=1,
+                                                          sticky="w")
+            r += 1
+        self.abn_ok = tk.BooleanVar(value=False)
+        if _merge.abn_conflict(accounts):
+            tk.Checkbutton(self.right, variable=self.abn_ok, bg=CCA, fg=CRD,
+                           font=F_BOLD, activebackground=CCA, selectcolor=CBG,
+                           text="These have different ABNs. I have checked "
+                                "they are the same company."
+                           ).pack(anchor="w", pady=(px(6), 0))
+        try:
+            self.prices = (_db.get_client().table("customer_prices")
+                           .select("customer_id,part_number,unit_price,"
+                                   "discount").in_("customer_id", self.chosen)
+                           .execute().data or [])
+        except Exception:
+            self.prices = []
+        # Any part priced on two or more of the chosen accounts, whichever
+        # of them ends up staying.
+        for part in _merge.price_conflicts(self.prices, self.chosen[0],
+                                           self.chosen[1:]):
+            var = tk.StringVar(value="")
+            self.price_vars[part] = var
+            opts = []
+            for p in self.prices:
+                if str(p.get("part_number") or "").strip().upper() == part:
+                    who = self.by_id.get(p["customer_id"], {}).get("name", "")
+                    opts.append(f"{who}: {p.get('unit_price') or ''}"
+                                f"{' ' + str(p.get('discount')) + '% off' if p.get('discount') else ''}"
+                                f"  [{p['customer_id']}]")
+            tk.Label(grid, text=f"Agreed price {part or '(discount)'}",
+                     bg=CCA, fg=CMU, font=F_SM).grid(row=r, column=0,
+                                                     sticky="w")
+            ttk.Combobox(grid, textvariable=var, values=opts,
+                         state="readonly", width=46).grid(row=r, column=1,
+                                                          sticky="w")
+            r += 1
+        notes = _merge.external_ids(accounts, self.name_var.get())
+        if notes:
+            tk.Label(self.right, text="Left to tidy outside the program:\n"
+                     + "\n".join("• " + n for n in notes), bg=CCA, fg=CMU,
+                     font=F_SM, justify="left", wraplength=px(620)
+                     ).pack(anchor="w", pady=(px(10), 0))
+
+    def _decided(self):
+        accounts = [self.by_id[i] for i in self.chosen if i in self.by_id]
+        survivor = self.survivor.get()
+        chosen = {"name": self.name_var.get().strip()}
+        for field, var in self.field_vars.items():
+            if var.get():
+                chosen[field] = var.get()
+        prices = {}
+        for part, var in self.price_vars.items():
+            m = re.search(r"\[([0-9a-f-]+)\]$", var.get())
+            if m:
+                prices[part] = "survivor" if m.group(1) == survivor \
+                    else m.group(1)
+        todo = _merge.check_ready(accounts, survivor, chosen, prices,
+                                  self.prices, self.abn_ok.get())
+        return accounts, survivor, chosen, prices, todo
+
+    def _merge(self):
+        if not _db.can_merge_customers():
+            messagebox.showinfo("Merge", "Only a manager can merge accounts.",
+                                parent=self)
+            return
+        if len(self.chosen) < 2:
+            messagebox.showinfo("Merge", "Choose the accounts first.",
+                                parent=self)
+            return
+        accounts, survivor, chosen, prices, todo = self._decided()
+        if todo:
+            messagebox.showwarning("Still to decide", "\n".join(
+                "• " + t for t in todo), parent=self)
+            return
+        gone = [a for a in accounts if a["id"] != survivor]
+        keep = self.by_id[survivor]
+        summary = (f"Keep \"{keep.get('name')}\" as \"{chosen['name']}\", and "
+                   f"merge into it:\n\n" + "\n".join(
+                       f"  • {a.get('name')}" for a in gone) +
+                   "\n\nTheir orders, quotes, sites, returns, recurring jobs "
+                   "and agreed prices move to it. The merged accounts are "
+                   "archived, not deleted, and their names still find it.\n\n"
+                   "Merge now?")
+        if not messagebox.askyesno("Merge customer accounts", summary,
+                                   icon="warning", parent=self):
+            return
+        expected = {a["id"]: a.get("updated_at") for a in accounts
+                    if a.get("updated_at")}
+        decided = _merge.decisions(keep, chosen, prices,
+                                   bool(self.abn_ok.get()))
+        try:
+            merge_id = _merge.merge(self.request_id, survivor,
+                                    [a["id"] for a in gone], decided,
+                                    expected or None)
+        except Exception as exc:
+            messagebox.showerror("Merge", f"Nothing was merged:\n{exc}",
+                                 parent=self)
+            return
+        try:
+            _db.log_action("customers_merged",
+                           f"Into: {chosen['name']} | From: " +
+                           ", ".join(a.get("name", "") for a in gone) +
+                           f" | Merge {merge_id}")
+        except Exception:
+            pass
+        messagebox.showinfo("Merged", "Done. It can be undone from "
+                            "\"Undo a merge…\" if it was wrong.", parent=self)
+        self.request_id = _merge.new_request_id()
+        if self.on_done:
+            self.on_done()
+        self.destroy()
+
+    def _undo(self):
+        try:
+            merges = [m for m in _merge.recent_merges() if not m.get("undone_at")]
+        except Exception as exc:
+            messagebox.showerror("Undo", str(exc), parent=self)
+            return
+        if not merges:
+            messagebox.showinfo("Undo", "There are no merges to undo.",
+                                parent=self)
+            return
+        lines = [f"{i + 1}. {m.get('merged_at','')[:16]}  by "
+                 f"{m.get('merged_by_name') or '—'}  →  "
+                 f"{((m.get('decisions') or {}).get('set') or {}).get('name', '')}"
+                 for i, m in enumerate(merges[:10])]
+        pick = simpledialog.askinteger(
+            "Undo a merge", "\n".join(lines) + "\n\nWhich one?", parent=self,
+            minvalue=1, maxvalue=len(lines))
+        if not pick:
+            return
+        try:
+            out = _merge.undo(merges[pick - 1]["id"])
+        except Exception as exc:
+            messagebox.showerror("Undo", f"Not undone:\n{exc}", parent=self)
+            return
+        skipped = out.get("skipped") or []
+        messagebox.showinfo("Undo", "Undone." + (
+            f"\n\n{len(skipped)} record(s) had been changed since the merge "
+            "and were left as they are now." if skipped else ""), parent=self)
+        if self.on_done:
+            self.on_done()
+        self.destroy()
+
+
 class ModernOrderApp(tk.Frame):
 
     def __init__(self, master):
@@ -6890,6 +8247,8 @@ class ModernOrderApp(tk.Frame):
         flat_btn(bot, "✓  Mark Dispatched", self._mark_dispatched,
                  bg=CA, pady=7).pack(side="left", padx=(0, 8))
         menu_btn(bot, "Run  ▾", [
+            ("Print delivery labels",     self._print_delivery_labels_run),
+            None,
             ("View what's on this order", self._view_delivery_items),
             ("Freight / delay…",          self._edit_delivery_freight),
             None,
@@ -7053,6 +8412,91 @@ class ModernOrderApp(tk.Frame):
                 self.status_var.set(
                     f"{_dockets.summary(built)} — printing…")
                 self._send_dockets_to_printer(path)
+            self.master.after(0, _done)
+
+        threading.Thread(target=_work, daemon=True).start()
+
+    def _print_delivery_labels_run(self):
+        """A label for every wrap: the selected orders, or the whole run.
+
+        One PDF, but each order numbered on its own - order two's first
+        wrap is 1 of n again. An order that can't be labelled yet (no
+        packing saved, no delivery address) is named rather than skipped
+        without a word.
+        """
+        picked = self._selected_delivery_orders()
+        if not picked:
+            grouped = getattr(self, "_run_grouped", None) or []
+            picked = [o for _region, rows in grouped for o in rows]
+        if not picked:
+            messagebox.showinfo("Delivery Labels",
+                                "Nothing is ready to go out.")
+            return
+        if len(picked) == 1:
+            self._labels_for_order(picked[0])
+            return
+        self.status_var.set(f"Making labels for {len(picked)} orders…")
+
+        def _work():
+            try:
+                settings = _calc_settings.load(force=True)
+            except Exception:
+                settings = _calc_settings.cached()
+            base = _calc_settings.base_address(settings)    # once, for all
+            labels, problems = [], []
+            for order in picked:
+                header, items = self._order_header_items(order,
+                                                         "Delivery Labels")
+                name = f"{order.get('order_no') or '—'} " \
+                       f"({order.get('customer') or ''})"
+                if not items:
+                    problems.append(f"{name}: no lines")
+                    continue
+                if any(not it.get("Packing") for it in items):
+                    problems.append(f"{name}: packing not saved yet")
+                    continue
+                customer = _db.customer_for_order(order.get("customer", ""))
+                try:
+                    labels += _delivery_labels.build_for_order(
+                        {"order_number": order.get("order_no", ""),
+                         "customer_name": order.get("customer", ""),
+                         "header": header, "items": items},
+                        customer, settings, base)
+                except _delivery_labels.LabelError as exc:
+                    problems.append(f"{name}: {exc.problems[0]}")
+            path, err = "", ""
+            if labels:
+                try:
+                    ORDERS_DIR.mkdir(parents=True, exist_ok=True)
+                    path = str(ORDERS_DIR / (
+                        "Delivery_Labels_"
+                        f"{_dt_module.datetime.now():%Y-%m-%d_%H%M%S}.pdf"))
+                    _delivery_labels.render_pdf(labels, path)
+                except Exception as exc:
+                    path, err = "", str(exc)
+
+            def _done():
+                if problems:
+                    messagebox.showwarning(
+                        "Delivery Labels",
+                        "Not labelled:\n\n" + "\n".join(
+                            "  • " + p for p in problems[:15]) +
+                        "\n\nOpen each from Previous Orders → Packing and "
+                        "weights.")
+                if err:
+                    messagebox.showerror("Delivery Labels",
+                                         f"The labels could not be made:\n{err}")
+                if path:
+                    self.status_var.set(f"{len(labels)} delivery labels.")
+                    try:
+                        _db.log_action("delivery_labels_printed",
+                                       f"{len(labels)} labels, "
+                                       f"{len(picked) - len(problems)} orders")
+                    except Exception:
+                        pass
+                    _open_path(path)
+                else:
+                    self.status_var.set("No delivery labels made.")
             self.master.after(0, _done)
 
         threading.Thread(target=_work, daemon=True).start()
@@ -9622,6 +11066,11 @@ class ModernOrderApp(tk.Frame):
 
     # ── Customers tab ─────────────────────────────────────────────────────
 
+    def _merge_customers(self):
+        dlg = MergeCustomersDialog(self.master,
+                                   on_done=self._refresh_customers_list)
+        self.master.wait_window(dlg)
+
     def _build_customers_tab(self):
         frm = tk.Frame(self.content, bg=CBG, padx=14, pady=12)
         frm.grid(row=0, column=0, sticky="nsew")
@@ -9658,6 +11107,10 @@ class ModernOrderApp(tk.Frame):
         flat_btn(top, "+ Add Customer",
                  lambda: self._open_customer_dialog(),
                  bg=CA, pady=5, padx=12, font=F_BOLD).pack(side="right")
+        if _db.is_ready() and _db.can_merge_customers():
+            flat_btn(top, "⇄ Merge duplicates…", self._merge_customers,
+                     variant="secondary", pady=5, padx=12,
+                     font=F_BODY).pack(side="right", padx=(0, 8))
 
         # ── Treeview ──────────────────────────────────────────────────────
         tbl_wrap = tk.Frame(frm, bg=CCA,
@@ -10193,6 +11646,26 @@ class ModernOrderApp(tk.Frame):
                 "is_active":        v_act.get(),
                 "notes":            txt_notes.get("1.0", "end").strip(),
             }
+            if is_new:
+                # Most duplicates are made here, by somebody who didn't know
+                # the account already existed under another name. Say so
+                # before it exists, not after.
+                try:
+                    hits = _merge.likely_matches(
+                        data, _db.get_customers(active_only=True))
+                except Exception:
+                    hits = []
+                if hits and not messagebox.askyesno(
+                        "This customer may already exist",
+                        "These accounts look like the same company:\n\n" +
+                        "\n".join(f"  • {h['customer'].get('name','')}  "
+                                   f"({'; '.join(h['reasons'])})"
+                                   for h in hits) +
+                        "\n\nCreate a new account anyway?",
+                        icon="warning", default="no", parent=dlg):
+                    err_lbl.config(text="Not created - use the existing "
+                                        "account instead.")
+                    return
             try:
                 if is_new:
                     saved  = _db.create_customer(data) or dict(data)
@@ -12602,6 +14075,9 @@ class ModernOrderApp(tk.Frame):
             # showing people screens they have not seen before.
             _features.load()
             _features.load_workshop()
+            # The weights, profiles and base address, so a worksheet or a
+            # label printed later uses what is in hand without waiting.
+            _calc_settings.load(force=True)
 
             def _apply():
                 _apply_catalog(data)
@@ -15252,6 +16728,27 @@ class ModernOrderApp(tk.Frame):
                      bg=CNE, pady=5, padx=10,
                      font=F_BODY).pack(anchor="w", pady=(px(6), 0))
 
+        # ── Weights, packing and labels ───────────────────────────────────
+        tk.Frame(card, bg=CBR, height=1).pack(fill="x", pady=(px(14), px(12)))
+        tk.Label(card, text="Weights, packing and delivery labels", bg=CCA,
+                 fg=CA, font=F_SEC, anchor="w").pack(anchor="w")
+        tk.Label(card,
+                 text="The base address labels print as From, the weighed "
+                      "wire and media, handling limits, what the wrapping "
+                      "weighs, and the frame, brace and cut profiles. Only "
+                      "what has been supplied is filled in; the rest stays "
+                      "unknown until somebody enters it.",
+                 bg=CCA, fg=CMU, font=F_SM, justify="left", anchor="w",
+                 wraplength=px(620)).pack(anchor="w", pady=(2, 8))
+        flat_btn(card, "Open weights and packing…", self._open_weights_settings,
+                 bg=CNE, pady=5, padx=10,
+                 font=F_BODY).pack(anchor="w")
+
+    def _open_weights_settings(self):
+        dlg = WeightsSettingsDialog(
+            self.master, editable=_db.is_ready() and _db.can_manage_prices())
+        self.master.wait_window(dlg)
+
     def _refresh_feature_switches(self):
         """Redraw the ticks after the switches come down from the database."""
         if not getattr(self, "_feature_vars", None):
@@ -16284,7 +17781,11 @@ class ModernOrderApp(tk.Frame):
         if idx is None:
             messagebox.showinfo("Duplicate", "Select a line item to duplicate.")
             return
-        self.items.insert(idx + 1, dict(self.items[idx]))
+        copy = dict(self.items[idx])
+        # A copy is a new line: it gets its own wraps, not the original's
+        # wrap ids and weights.
+        copy.pop("Packing", None)
+        self.items.insert(idx + 1, copy)
         self._refresh_items_tree()
         self.tree.selection_set(str(idx + 1))
         self.status_var.set("Line item duplicated.")
@@ -17696,9 +19197,22 @@ class ModernOrderApp(tk.Frame):
             apply_stepped_filter_note(_it)
         # Re-derive square metreage and part numbers from the final dimensions.
         self._stamp_all_items()
+        # Packing plans settled now, before anything is printed or saved, so
+        # the worksheet, the saved order and the delivery labels all carry
+        # the same wraps. A plan the office set by hand is left as it is.
+        try:
+            self.items, _ = _order_packing.refresh_items(
+                self.items, _calc_settings.cached(),
+                by=(_db.current_full_name() or _db.current_username() or "")
+                if _db.is_ready() else "",
+                at=_calc_settings.now_iso())
+        except Exception:
+            pass
+        _printing = _order_packing.stamp_codes(self.items,
+                                               _calc_settings.cached())
 
-        filter_items = [i for i in self.items if i.get("item_kind", "filter") != "bag"]
-        bag_items    = [i for i in self.items if i.get("item_kind") == "bag"]
+        filter_items = [i for i in _printing if i.get("item_kind", "filter") != "bag"]
+        bag_items    = [i for i in _printing if i.get("item_kind") == "bag"]
         total        = len(self.items)
         n_filter     = len(filter_items)
         bag_start    = n_filter + 1
@@ -19755,6 +21269,11 @@ class ModernOrderApp(tk.Frame):
             actions.append(("Cut list for this order…",
                             lambda r=row: self._cut_list_for_order(r)))
             actions.append(None)
+        actions += [
+            ("Packing and weights…",   _act(lambda r=row: self._packing_for_order(r))),
+            ("Delivery labels…",       _act(lambda r=row: self._labels_for_order(r))),
+            None,
+        ]
         menu_btn(foot, "Actions  ▾", actions + [
             ("Print",                  _act(self._print_prev_order)),
             ("Regenerate worksheets",  _act(self._regen_prev_order)),
@@ -19764,6 +21283,65 @@ class ModernOrderApp(tk.Frame):
             ("Invoice to Xero",        _act(self._invoice_selected_orders)),
             ("Full history…",          _act(self._view_order_history)),
         ], variant="secondary", pady=px(6)).pack(side="right", padx=(0, px(8)))
+
+    def _packing_summary(self, items) -> list:
+        """One line per order line: its wrapping and its bracing."""
+        try:
+            from taf_order_app import worksheet_blocks as _wb
+            contexts = _wb.order_context(items, _calc_settings.cached())
+        except Exception:
+            return []
+        out = []
+        for i, ctx in enumerate(contexts, start=1):
+            ev = ctx.get("eval") or {}
+            wrap = " ".join(ev.get("instructions") or []) or \
+                "packing not set"
+            brace = ((ctx.get("calc") or {}).get("bracing") or {}).get(
+                "message", "")
+            flag = {"conflict": "  ⚠ needs a decision",
+                    "invalid_plan": "  ⚠ plan does not add up",
+                    "needs_packing_input": "  ⚠ set the packing",
+                    "single_item_exception": "  ⚠ one filter is over 10 kg",
+                    "needs_weight_check": "  · weigh the wraps"}.get(
+                ev.get("status"), "")
+            out.append(f"Line {i}:  {wrap}" + (f"   ·   {brace}" if brace
+                                                else "") + flag)
+        return out
+
+    def _packing_for_order(self, row):
+        """The packing window for one order."""
+        header, items = self._order_header_items(row, "Packing")
+        if items is None:
+            return
+
+        def _saved(new_items):
+            row["db_items"] = new_items
+
+        dlg = PackingDialog(self.master, row, header, items, on_saved=_saved)
+        self.master.wait_window(dlg)
+
+    def _labels_for_order(self, row):
+        """Delivery labels for one order: straight to print when every line
+        has its packing saved, or to the packing window when not."""
+        header, items = self._order_header_items(row, "Delivery labels")
+        if items is None:
+            return
+        if not items:
+            messagebox.showinfo("Delivery labels", "This order has no lines.")
+            return
+        if row.get("source") != "db":
+            messagebox.showinfo(
+                "Delivery labels",
+                "This order is only on this PC. Labels are printed from the "
+                "saved order, so its packing is on record - save it first.")
+            return
+        if any(not it.get("Packing") for it in items):
+            self._packing_for_order(row)
+            return
+        print_delivery_labels(self.master, {
+            "order_number": row.get("order_no", ""),
+            "customer_name": row.get("customer", ""),
+            "header": header}, items)
 
     def _reread_order(self, row) -> dict:
         """Fetch one order again so the window can show what an action did."""
@@ -19887,6 +21465,15 @@ class ModernOrderApp(tk.Frame):
         prog_lbl = tk.Label(prog, bg=CCA, fg=CMU, font=F_SM,
                             text=self._line_progress_text(made_n, total_n))
         prog_lbl.pack(side="left")
+
+        # How each line is wrapped, and whether it needs a brace - the same
+        # words the worksheet prints under Notes.
+        pack_lines = self._packing_summary(items)
+        if pack_lines:
+            tk.Label(tbl_wrap, text="\n".join(pack_lines), bg=CCA, fg=CTX,
+                     font=F_SM, justify="left", anchor="w", padx=px(10),
+                     pady=px(4)).grid(row=2, column=0, columnspan=2,
+                                      sticky="ew")
 
         def _toggle_line(event):
             if tree.identify_region(event.x, event.y) != "cell":

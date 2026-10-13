@@ -87,6 +87,14 @@ a = Analysis(
         'taf_order_app.bag_filler',
         'taf_order_app.po_import',
         'taf_order_app.phone_page',
+        # Reached only from inside functions (the worksheet's blocks under
+        # Notes, the labels), so named here rather than left to discovery.
+        'taf_order_app.worksheet_blocks',
+        'taf_order_app.order_packing',
+        'taf_order_app.delivery_labels',
+        'taf_order_app.filter_calc',
+        'taf_order_app.calc_settings',
+        'reportlab.lib.utils',
         # Phone-pairing QR code
         'qrcode',
         'qrcode.image.pil',

@@ -327,6 +327,355 @@ def run_checks(pg: Postgres) -> None:
     check("and only that person's bell", out == "2", out)
 
 
+
+# ── Calculator settings and merging customers ──────────────────────────────
+# These run on the REAL schema: every migration in the documented order, so
+# the merge is tested against the orders, quotes, sites and prices tables as
+# they actually are rather than a guess at them. The three that need
+# Supabase Storage are left out; nothing here touches storage.
+
+MERGE_MIGRATION = ROOT / "migrate_packing_and_merge.sql"
+NEEDS_STORAGE = {"migrate_po_inbox.sql", "migrate_avatars.sql",
+                 "migrate_order_files.sql"}
+
+A = "10000000-0000-0000-0000-00000000000a"    # stays: CAS - Tweed Heads
+B = "10000000-0000-0000-0000-00000000000b"    # duplicate of A
+C = "10000000-0000-0000-0000-00000000000c"    # a different company
+D = "10000000-0000-0000-0000-00000000000d"    # another branch of A's company
+E = "10000000-0000-0000-0000-00000000000e"    # a second duplicate of A
+
+
+def full_schema(pg: Postgres, db: str = "f") -> None:
+    sys.path.insert(0, str(ROOT / "tests"))
+    from test_migrations import ORDER
+    pg.psql(f"DROP DATABASE IF EXISTS {db};")
+    pg.psql(f"CREATE DATABASE {db};")
+    shim = SHIM.replace(
+        "CREATE TABLE public.profiles (",
+        "CREATE TABLE auth.users (id uuid PRIMARY KEY, email text, "
+        "raw_user_meta_data jsonb);\nCREATE TABLE public.profiles (")
+    ok, _o, err = pg.psql(shim, db)
+    assert ok, err
+    for name in ORDER:
+        if name in NEEDS_STORAGE:
+            continue
+        ok, _o, err = pg.psql((ROOT / name).read_text(encoding="utf-8"), db)
+        assert ok, f"{name} did not load: {err}"
+    # migrate_staff_access.sql approves everybody already there when it runs,
+    # so the people who work here are not locked out on the day. That
+    # includes the stranger the shim made earlier - who has to be a stranger
+    # again for the checks to mean anything.
+    ok, _o, err = pg.psql(f"UPDATE profiles SET approved = false "
+                          f"WHERE id = '{STRANGER}';", db)
+    assert ok, err
+
+
+def as_in(pg: Postgres, db: str, who: str, sql: str):
+    return pg.psql("SET ROLE authenticated;\n"
+                   f"SELECT set_config('request.jwt.claim.sub', '{who}', "
+                   "false) \\g /dev/null\n" + sql, db)
+
+
+def q(pg: Postgres, sql: str, db: str = "f") -> str:
+    ok, out, err = pg.psql(sql, db)
+    assert ok, err
+    return out
+
+
+FIXTURES = f"""
+INSERT INTO auth.users (id) SELECT id FROM profiles ON CONFLICT DO NOTHING;
+INSERT INTO customers (id, name, short_name, legal_name, abn, payment_terms,
+                       delivery_address1, delivery_city, delivery_state,
+                       delivery_postcode, po_aliases, updated_at) VALUES
+ ('{A}', 'CAS - Tweed Heads', 'CAS Tweed', 'Complete Air Supply Pty Ltd',
+  '11 111 111 111', 'Net 30', '3A/38 Enterprise Avenue', 'Tweed Heads',
+  'NSW', '2486', '["CAS TWEED HEADS"]', '2026-10-01 09:00+10'),
+ ('{B}', 'Complete Air Supply Tweed', '', 'Complete Air Supply Pty Ltd',
+  '', 'Net 30', 'Rear 40 Enterprise Avenue', 'Tweed Heads', 'NSW', '2486',
+  '["COMPLETE AIR TWEED"]', '2026-10-01 09:00+10'),
+ ('{C}', 'Total Comfort Air', '', 'Total Comfort Pty Ltd', '22 222 222 222',
+  'COD', '1 Other St', 'Logan', 'QLD', '4114', '[]', '2026-10-01 09:00+10'),
+ ('{D}', 'CAS - Bells Creek', 'CAS Bells', 'Complete Air Supply Pty Ltd',
+  '11 111 111 111', 'Net 30', '19 Fred Chaplin Cct', 'Bells Creek', 'QLD',
+  '4551', '[]', '2026-10-01 09:00+10'),
+ ('{E}', 'C.A.S. Tweed (old)', '', '', '', '', '3A/38 Enterprise Avenue',
+  'Tweed Heads', 'NSW', '2486', '[]', '2026-10-01 09:00+10');
+
+INSERT INTO orders (id, user_id, customer_name, order_number, header, items)
+SELECT gen_random_uuid(), '{DAVE}', n, o,
+       jsonb_build_object('Customer Name', n, 'Order Number', o),
+       '[]'::jsonb
+  FROM (VALUES ('CAS Tweed', 'A-1'), ('CAS - Tweed Heads', 'A-2'),
+               ('cas tweed ', 'A-3'),
+               ('Complete Air Supply Tweed', 'B-1'),
+               ('COMPLETE AIR SUPPLY TWEED', 'B-2'),
+               ('C.A.S. Tweed (old)', 'E-1'),
+               ('Total Comfort Air', 'C-1'), ('CAS Bells', 'D-1')) v(n, o);
+
+INSERT INTO quotes (quote_number, customer_id, customer_name, total, status)
+VALUES ('Q-1', '{B}', 'Complete Air Supply Tweed', 1234.50, 'sent'),
+       ('Q-2', NULL, 'CAS Tweed', 100.25, 'accepted'),
+       ('Q-3', '{C}', 'Total Comfort Air', 77.00, 'sent');
+
+INSERT INTO customer_prices (customer_id, part_number, unit_price) VALUES
+ ('{A}', 'FPFG425-040', 10.00), ('{B}', 'FPFG425-040', 9.50),
+ ('{B}', 'PPFG450-060', 5.00), ('{C}', 'FPFG425-040', 8.00);
+
+INSERT INTO sites (customer_name, name, location)
+VALUES ('Complete Air Supply Tweed', 'Plant room 2', 'Level 3');
+INSERT INTO returns (customer_name, order_number, reason)
+VALUES ('Complete Air Supply Tweed', 'B-1', 'Wrong size');
+INSERT INTO recurring_jobs (customer_name, every_months, job, next_due)
+VALUES ('Complete Air Supply Tweed', 6, 'AHU service', '2027-01-01');
+"""
+
+GOOD = {"set": {"name": "CAS - Tweed Heads", "payment_terms": "Net 30"},
+        "prices": {"FPFG425-040": "survivor"}}
+
+
+def merge_sql(req: str, survivor: str, merged, decisions=None,
+              expected="NULL") -> str:
+    import json as _json
+    ids = "ARRAY[" + ",".join(f"'{m}'::uuid" for m in merged) + "]"
+    dec = _json.dumps(decisions if decisions is not None else GOOD)
+    return (f"SELECT merge_customers('{req}', '{survivor}', {ids}, "
+            f"'{dec}'::jsonb, {expected});")
+
+
+def snapshot(pg: Postgres) -> str:
+    return q(pg, "SELECT string_agg(order_number || '=' || customer_name || "
+                 "'/' || COALESCE(customer_id::text, '-'), ',' ORDER BY "
+                 "order_number) FROM orders;")
+
+
+def run_merge_checks(pg: Postgres) -> None:
+    print("\n── calculator settings ──")
+    full_schema(pg)
+    ok, _o, err = pg.psql(MERGE_MIGRATION.read_text(encoding="utf-8"), "f")
+    check("the migration runs on the real schema, twice over", ok, err)
+    addr = q(pg, "SELECT value ->> 'base_address' FROM calc_settings "
+                 "WHERE key = 'company';")
+    check("the base address starts as supplied",
+          addr == "Unit 1/19 Tradelink Road, Hillcrest Queensland 4118 "
+                  "Australia", addr)
+    ok, out, err = as_in(pg, "f", DAVE, "SELECT set_calc_setting('company', "
+                         "'{\"base_address\": \"Somewhere else\"}');")
+    check("somebody on the floor cannot change a setting",
+          not ok and "row-level security" in err, err)
+    ok, out, err = as_in(pg, "f", SARAH, "SELECT set_calc_setting('company', "
+                         "'{\"base_address\": \"2 New Road, Logan QLD 4114\"}');")
+    check("a manager can, and the version moves on", ok and out == "2",
+          out or err)
+    ok, out, err = as_in(pg, "f", SARAH, "SELECT set_calc_setting('packing', "
+                         "'{}');")
+    check("only known sections can be stored", not ok, err)
+    hist = q(pg, "SELECT string_agg(version || ':' || changed_by || ':' || "
+                 "(value ->> 'base_address'), '|' ORDER BY version) FROM "
+                 "calc_settings_history WHERE key = 'company';")
+    check("every version is kept, with who made it",
+          hist.startswith("1::Unit 1/19") and
+          hist.endswith("2:Sarah Boss:2 New Road, Logan QLD 4114"), hist)
+    ok, _o, err = as_in(pg, "f", SARAH, "INSERT INTO calc_settings_history "
+                        "(key, version, value) VALUES ('company', 9, '{}');")
+    check("history cannot be written by hand", not ok, err)
+    ok, _o, err = as_in(pg, "f", SARAH, "DELETE FROM calc_settings;")
+    check("settings cannot be deleted", not ok, err)
+    ok, out, err = as_in(pg, "f", DAVE, "SELECT value ->> 'base_address' "
+                         "FROM calc_settings WHERE key = 'company';")
+    check("everyone on staff reads the current one",
+          out == "2 New Road, Logan QLD 4114", out or err)
+    pg.psql(MERGE_MIGRATION.read_text(encoding="utf-8"), "f")
+    addr = q(pg, "SELECT value ->> 'base_address' FROM calc_settings "
+                 "WHERE key = 'company';")
+    check("re-running the migration keeps the changed address",
+          addr == "2 New Road, Logan QLD 4114", addr)
+
+    print("\n── merging customer accounts ──")
+    ok, _o, err = pg.psql(FIXTURES, "f")
+    assert ok, err
+    before = snapshot(pg)
+    totals_before = q(pg, "SELECT sum(total) FROM quotes;")
+
+    ok, _o, err = as_in(pg, "f", DAVE, merge_sql("r0", A, [B]))
+    check("somebody on the floor cannot merge accounts",
+          not ok and "Only a manager" in err, err)
+    ok, _o, err = as_in(pg, "f", STRANGER, merge_sql("r0", A, [B]))
+    check("nor can an unapproved account calling itself a manager",
+          not ok and "Only a manager" in err, err)
+    ok, _o, err = as_in(pg, "f", SARAH, merge_sql("r0", A, [A]))
+    check("an account cannot be merged into itself",
+          not ok and "into itself" in err, err)
+    ok, _o, err = as_in(pg, "f", SARAH, merge_sql("r0", A, [B, B]))
+    check("or listed twice", not ok and "twice" in err, err)
+    ok, _o, err = as_in(pg, "f", SARAH, merge_sql(
+        "r0", A, [B], {"set": {"name": "CAS - Tweed Heads"}}))
+    check("a price both accounts have must be chosen, not defaulted",
+          not ok and "FPFG425-040" in err, err)
+    check("and a refused merge changes nothing", snapshot(pg) == before)
+    ok, _o, err = as_in(pg, "f", SARAH, merge_sql(
+        "r0", A, [B], {"prices": {"FPFG425-040": "survivor"}}))
+    check("the company name to keep has to be chosen",
+          not ok and "company name" in err, err)
+    ok, _o, err = as_in(pg, "f", SARAH, merge_sql("r0", A, [C], {
+        "set": {"name": "CAS - Tweed Heads"},
+        "prices": {"FPFG425-040": "survivor"}}))
+    check("different ABNs stop a merge until confirmed",
+          not ok and "different ABNs" in err, err)
+    ok, _o, err = as_in(pg, "f", SARAH, merge_sql("r0", A, [B], GOOD,
+                        "'{\"" + B + "\": \"2026-09-01T00:00:00Z\"}'::jsonb"))
+    check("an account changed since the preview is not merged",
+          not ok and "changed after the preview" in err, err)
+
+    # A failure part-way through rolls everything back.
+    pg.psql("CREATE FUNCTION boom() RETURNS trigger LANGUAGE plpgsql AS $$ "
+            "BEGIN IF NEW.order_number = 'B-2' THEN RAISE EXCEPTION 'disk "
+            "full'; END IF; RETURN NEW; END $$; CREATE TRIGGER boom BEFORE "
+            "UPDATE ON quotes FOR EACH ROW EXECUTE FUNCTION boom();"
+            "DROP TRIGGER boom ON quotes; CREATE TRIGGER boom BEFORE UPDATE "
+            "ON orders FOR EACH ROW EXECUTE FUNCTION boom();", "f")
+    ok, _o, err = as_in(pg, "f", SARAH, merge_sql("r1", A, [B]))
+    name = q(pg, f"SELECT is_active || ' ' || COALESCE(merged_into::text, "
+                 f"'-') FROM customers WHERE id = '{B}';")
+    check("a merge that fails part-way leaves nothing half done",
+          not ok and "disk full" in err and snapshot(pg) == before
+          and name == "true -", err + " / " + name)
+    pg.psql("DROP TRIGGER boom ON orders;", "f")
+
+    ok, mid, err = as_in(pg, "f", SARAH, merge_sql("r1", A, [B, E]))
+    check("a manager merges two duplicates into the account that stays",
+          ok and len(mid) == 36, err)
+    after = snapshot(pg)
+    rows = dict(r.split("=") for r in after.split(","))
+    check("the duplicates' orders now belong to it, by id",
+          all(rows[o] == f"CAS Tweed/{A}" for o in ("B-1", "B-2", "E-1")),
+          after)
+    check("its own orders are linked by id as well",
+          all(rows[o].endswith(A) for o in ("A-1", "A-2", "A-3")), after)
+    check("other companies and other branches are untouched",
+          rows["C-1"] == "Total Comfort Air/-" and rows["D-1"] ==
+          "CAS Bells/-", after)
+    ids_same = q(pg, "SELECT count(*) FROM orders;") == "8"
+    hdr = q(pg, "SELECT header ->> 'Customer Name' FROM orders "
+                "WHERE order_number = 'B-1';")
+    check("no order was recreated, and what was printed is unchanged",
+          ids_same and hdr == "Complete Air Supply Tweed", hdr)
+    qs = q(pg, "SELECT string_agg(quote_number || ':' || total || ':' || "
+               "status || ':' || COALESCE(customer_id::text, '-'), ',' "
+               "ORDER BY quote_number) FROM quotes;")
+    check("quotes move with their numbers, totals and status as they were",
+          qs == f"Q-1:1234.50:sent:{A},Q-2:100.25:accepted:{A},"
+                f"Q-3:77.00:sent:{C}", qs)
+    check("money is not double counted",
+          q(pg, "SELECT sum(total) FROM quotes;") == totals_before)
+    prices = q(pg, "SELECT string_agg(part_number || '=' || unit_price || "
+                   "'/' || (customer_id = '" + A + "'), ',' ORDER BY "
+                   "part_number, unit_price) FROM customer_prices "
+                   f"WHERE customer_id IN ('{A}', '{B}');")
+    check("the chosen agreed price stays and the other one moves over",
+          prices == "FPFG425-040=10.00/true,PPFG450-060=5.00/true", prices)
+    archived = q(pg, "SELECT string_agg(name || ':' || is_active || ':' || "
+                     "(merged_into = '" + A + "'), ',' ORDER BY name) FROM "
+                     f"customers WHERE id IN ('{B}', '{E}');")
+    check("the duplicates are archived, not deleted, pointing at it",
+          archived == "C.A.S. Tweed (old):false:true,"
+                      "Complete Air Supply Tweed:false:true", archived)
+    check("an old id leads to the account that stayed",
+          q(pg, f"SELECT resolve_customer('{B}');") == A)
+    aliases = q(pg, "SELECT string_agg(former_name, ',' ORDER BY "
+                    "former_name) FROM customer_aliases;")
+    check("and so do the old names",
+          aliases == "C.A.S. Tweed (old),Complete Air Supply Tweed", aliases)
+    po = q(pg, f"SELECT po_aliases FROM customers WHERE id = '{A}';")
+    check("purchase-order wording learned on any of them still matches",
+          "COMPLETE AIR TWEED" in po and "CAS TWEED HEADS" in po, po)
+    sites = q(pg, "SELECT string_agg(name || '@' || customer_name, ',' "
+                  "ORDER BY name) FROM sites;")
+    check("sites move, and a different delivery address is kept as a site",
+          sites == "Delivery address from Complete Air Supply Tweed@CAS "
+                   "Tweed,Plant room 2@CAS Tweed", sites)
+    check("returns and recurring jobs move",
+          q(pg, "SELECT customer_name FROM returns;") == "CAS Tweed" and
+          q(pg, "SELECT customer_name FROM recurring_jobs;") == "CAS Tweed")
+    who = q(pg, f"SELECT merged_by_name || ':' || cardinality(merged_ids) "
+                f"FROM customer_merges WHERE id = '{mid}';")
+    check("who merged what, and when, is written down", who == "Sarah Boss:2",
+          who)
+
+    ok, again, err = as_in(pg, "f", SARAH, merge_sql("r1", A, [E, B]))
+    check("a retry is answered with the same merge and moves nothing twice",
+          ok and again == mid and snapshot(pg) == after and
+          q(pg, "SELECT count(*) FROM customer_merges;") == "1", err)
+    ok, _o, err = as_in(pg, "f", SARAH, merge_sql("r1", A, [C]))
+    check("a request id cannot be reused for a different merge",
+          not ok and "already used" in err, err)
+    ok, _o, err = as_in(pg, "f", SARAH, merge_sql("r2", D, [B]))
+    check("an account already merged cannot be merged again",
+          not ok and "already been merged" in err, err)
+    ok, _o, err = as_in(pg, "f", SARAH, merge_sql("r3", B, [A]))
+    check("nor can anything be merged into one (no cycles)",
+          not ok and "already been merged" in err, err)
+    ok, _o, err = as_in(pg, "f", DAVE, "UPDATE customer_merges SET "
+                        "merged_by_name = 'someone';")
+    check("the record of a merge cannot be edited", not ok, err)
+
+    print("\n── undoing it ──")
+    ok, _o, err = as_in(pg, "f", DAVE, f"SELECT undo_customer_merge('{mid}');")
+    check("somebody on the floor cannot undo a merge",
+          not ok and "Only a manager" in err, err)
+    ok, out, err = as_in(pg, "f", KAI, f"SELECT undo_customer_merge('{mid}');")
+    check("a director can", ok and '"skipped": []' in out, out or err)
+    check("every order is back exactly as it was", snapshot(pg) == before,
+          snapshot(pg))
+    prices = q(pg, "SELECT string_agg(part_number || '=' || unit_price || "
+                   "'/' || (customer_id = '" + A + "'), ',' ORDER BY "
+                   "part_number, unit_price) FROM customer_prices "
+                   f"WHERE customer_id IN ('{A}', '{B}');")
+    check("both agreed prices are back with their owners",
+          prices == "FPFG425-040=9.50/false,FPFG425-040=10.00/true,"
+                    "PPFG450-060=5.00/false", prices)
+    back = q(pg, "SELECT string_agg(name || ':' || is_active, ',' ORDER BY "
+                 f"name) FROM customers WHERE id IN ('{B}', '{E}');")
+    check("the duplicates are live again",
+          back == "C.A.S. Tweed (old):true,Complete Air Supply Tweed:true",
+          back)
+    check("the site made from the old address is gone, the real one is back",
+          q(pg, "SELECT string_agg(name || '@' || customer_name, ',') "
+                "FROM sites;") == "Plant room 2@Complete Air Supply Tweed")
+    check("the aliases are gone",
+          q(pg, "SELECT count(*) FROM customer_aliases;") == "0")
+    ok, out, err = as_in(pg, "f", KAI, f"SELECT undo_customer_merge('{mid}');")
+    check("undoing twice does nothing the second time",
+          ok and '"already_undone": true' in out, out or err)
+
+    # When the duplicate's price is the one kept, the survivor's is the one
+    # removed - and undo has to move the duplicate's back off before the
+    # survivor's can return to the same part number.
+    ok, mid2, err = as_in(pg, "f", SARAH, merge_sql("r5", A, [B], {
+        "set": {"name": "CAS - Tweed Heads"},
+        "prices": {"FPFG425-040": B}}))
+    won = q(pg, f"SELECT unit_price FROM customer_prices WHERE customer_id = "
+                f"'{A}' AND part_number = 'FPFG425-040';")
+    check("the duplicate's agreed price can be the one kept",
+          ok and won == "9.50", won or err)
+    ok, out, err = as_in(pg, "f", SARAH, f"SELECT undo_customer_merge('{mid2}');")
+    prices = q(pg, "SELECT string_agg(part_number || '=' || unit_price || "
+                   "'/' || (customer_id = '" + A + "'), ',' ORDER BY "
+                   "part_number, unit_price) FROM customer_prices "
+                   f"WHERE customer_id IN ('{A}', '{B}');")
+    check("and undoing that puts both prices back with their owners",
+          ok and '"skipped": []' in out and
+          prices == "FPFG425-040=9.50/false,FPFG425-040=10.00/true,"
+                    "PPFG450-060=5.00/false", (out or err) + " " + prices)
+
+    # A name another live account also uses does not say whose a record is.
+    q(pg, f"UPDATE customers SET short_name = 'Complete Air Supply Tweed' "
+          f"WHERE id = '{D}';")
+    ok, _o, err = as_in(pg, "f", SARAH, merge_sql("r9", A, [B]))
+    rows = dict(r.split("=") for r in snapshot(pg).split(","))
+    check("records under a name two live accounts share are not moved",
+          ok and rows["B-1"] == "Complete Air Supply Tweed/-", rows["B-1"])
+
+
 def _skip(why: str) -> int:
     """Skipping is fine on a laptop. In CI it is not: a workflow that goes
     green having checked nothing is worse than no workflow, because it is
@@ -347,6 +696,7 @@ def main() -> int:
         return _skip("could not start a throwaway Postgres")
     try:
         run_checks(pg)
+        run_merge_checks(pg)
     finally:
         pg.stop()
     print(f"\n{len(FAILURES)} FAILED" if FAILURES

@@ -32,6 +32,7 @@ var SHELL = [
   "app/index.html",
   "app/data.js",
   "app/ui.js",
+  "app/calc.js",
   "app/offline.js",
   "app/screens.js",
   "app/manifest.webmanifest",

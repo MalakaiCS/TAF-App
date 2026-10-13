@@ -1,0 +1,70 @@
+name: Calculator and API
+
+# The weight calculator, the packing planner and the delivery-label numbering
+# live twice: in Python for the desktop app, and in docs/app/calc.js for the
+# web app and the filter-calculator Edge Function other programs call. The
+# release build runs on Windows and never starts the Edge Function, so this
+# is where the two are held to each other and the function is actually run.
+#
+#   - test_calc_parity runs the same requests through both and compares every
+#     field of every answer. Node is required here, so it cannot skip.
+#   - api_function.py serves the real function with Deno against a stand-in
+#     for Supabase's auth and REST API, and calls it over HTTP.
+
+on:
+  push:
+    paths:
+      - 'taf_order_app/**'
+      - 'docs/app/calc.js'
+      - 'supabase/functions/**'
+      - 'tests/test_calc_parity.py'
+      - 'tests/api_function.py'
+      - '.github/workflows/calculator.yml'
+  pull_request:
+    paths:
+      - 'taf_order_app/**'
+      - 'docs/app/calc.js'
+      - 'supabase/functions/**'
+      - 'tests/test_calc_parity.py'
+      - 'tests/api_function.py'
+  workflow_dispatch:
+
+jobs:
+  twins:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - uses: denoland/setup-deno@v2
+        with:
+          deno-version: v2.x
+
+      - name: Python and JavaScript give the same answers
+        env:
+          REQUIRE_NODE: "1"
+        run: |
+          python -c "
+          import sys, traceback
+          sys.path.insert(0, '.')
+          import tests.test_calc_parity as t
+          bad = 0
+          for n in sorted(x for x in dir(t) if x.startswith('test_')):
+              try:
+                  getattr(t, n)(); print('  PASS ', n)
+              except Exception:
+                  bad += 1; print('  FAIL ', n); traceback.print_exc()
+          sys.exit(1 if bad else 0)
+          "
+
+      - name: The API answers over HTTP
+        env:
+          REQUIRE_DENO: "1"
+        run: python tests/api_function.py

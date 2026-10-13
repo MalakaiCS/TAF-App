@@ -409,6 +409,66 @@ def set_line_made(order_id: str, line_id: str, made: bool = True,
             "deleted, or your account may not be allowed to change it.")
 
 
+def set_line_fields(order_id: str, line_id: str, fields: dict) -> list:
+    """Change named fields on one line of a saved order - its packing plan,
+    its calculator inputs - and nothing else.
+
+    The order is read fresh first and only that line's named fields change,
+    so a line ticked as made on the floor a minute ago is not undone by an
+    office screen that opened before the tick. Returns the saved items.
+    Refused writes (row-level security matches nothing) raise.
+    """
+    resp = (get_client().table("orders")
+            .select("items").eq("id", order_id).single().execute())
+    items = with_line_ids(list((resp.data or {}).get("items") or []))
+    hit = False
+    for line in items:
+        if str(line.get(LINE_ID)) == str(line_id):
+            for key, value in fields.items():
+                if value is None:
+                    line.pop(key, None)
+                else:
+                    line[key] = value
+            hit = True
+    if not hit:
+        raise RuntimeError(
+            "That line was not found on the order. It may have been "
+            "changed or removed since this screen was opened.")
+    out = (get_client().table("orders")
+           .update({"items": items}).eq("id", order_id).execute())
+    if not (out.data or []):
+        raise RuntimeError(
+            "The database did not change that order. It may have been "
+            "deleted, or your account may not be allowed to change it.")
+    return items
+
+
+def customer_for_order(customer_name: str, customer_id: str = "") -> "dict | None":
+    """The customer account an order belongs to: by id when it has one
+    (following a merge), else by its short or trading name."""
+    try:
+        if customer_id:
+            got = get_customer(resolve_customer_id(customer_id))
+            if got:
+                return got
+        name = (customer_name or "").strip().lower()
+        if not name:
+            return None
+        people = get_customers(active_only=False)
+        for c in people:
+            if not c.get("merged_into") and name in (
+                    (c.get("short_name") or "").strip().lower(),
+                    (c.get("name") or "").strip().lower()):
+                return c
+        for a in former_customer_names():
+            if name in ((a.get("former_name") or "").strip().lower(),
+                        (a.get("former_short_name") or "").strip().lower()):
+                return get_customer(a.get("survivor_id"))
+    except Exception:
+        return None
+    return None
+
+
 def save_order(header: dict, items: list, order_type: str) -> "str | None":
     """Insert an order and return its new id (or None if it can't be read)."""
     user = _current_user
@@ -1155,16 +1215,52 @@ def get_customers(search: str = "", active_only: bool = True) -> list:
         items = resp.data or []
         if search:
             s     = search.lower()
+            # A merged account's old names still find the one it became.
+            former = {a.get("survivor_id") for a in former_customer_names()
+                      if s in (a.get("former_name") or "").lower()
+                      or s in (a.get("former_short_name") or "").lower()}
             items = [c for c in items
                      if s in (c.get("name") or "").lower()
+                     or s in (c.get("short_name") or "").lower()
                      or s in (c.get("legal_name") or "").lower()
                      or s in (c.get("abn") or "").lower()
                      or s in (c.get("email") or "").lower()
                      or s in (c.get("contact_person") or "").lower()
-                     or s in (c.get("delivery_city") or "").lower()]
+                     or s in (c.get("delivery_city") or "").lower()
+                     or c.get("id") in former]
         return items
     except Exception:
         return []
+
+
+def former_customer_names() -> list:
+    """Accounts merged away and the account each became. Empty before
+    migrate_packing_and_merge.sql has been run."""
+    try:
+        resp = (get_client().table("customer_aliases")
+                .select("former_id,survivor_id,former_name,former_short_name")
+                .execute())
+        return resp.data or []
+    except Exception:
+        return []
+
+
+def resolve_customer_id(customer_id: str) -> str:
+    """The account an old id now means - itself, or what it was merged into."""
+    try:
+        resp = get_client().rpc("resolve_customer",
+                                {"p_id": customer_id}).execute()
+        data = resp.data
+        if isinstance(data, list):
+            data = data[0] if data else None
+        return str(data or customer_id)
+    except Exception:
+        return customer_id
+
+
+def can_merge_customers() -> bool:
+    """Managers and above. The database checks the same thing itself."""
+    return role_level() >= 3
 
 
 def get_customer(customer_id: str) -> "dict | None":

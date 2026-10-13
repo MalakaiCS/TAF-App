@@ -61,3 +61,24 @@ def test_a_button_is_not_quietly_switched_off_by_hasattr():
     never = sorted(set(n for n in guarded
                        if n not in defined and f"self.{n}(" in src))
     assert not never, f"called behind hasattr but never written: {never}"
+
+
+def test_no_module_is_imported_under_another_ones_name():
+    """Two imports under one alias: the second quietly replaces the first,
+    and every use of the first breaks the moment it runs. delivery_labels
+    imported "as _labels" took over the barcode labels' name this way, and
+    Print Barcode Labels stopped working."""
+    for path in SOURCES:
+        if not path.exists():
+            continue
+        seen = {}
+        for line in path.read_text(encoding="utf-8").splitlines():
+            m = re.match(r"\s*(?:from\s+(\S+)\s+)?import\s+(\S+)\s+as\s+(\w+)",
+                         line)
+            if not m:
+                continue
+            target = f"{m.group(1) or ''}.{m.group(2)}"
+            alias = m.group(3)
+            assert seen.get(alias, target) == target, \
+                f"{path.name}: {alias} is both {seen[alias]} and {target}"
+            seen[alias] = target

@@ -129,18 +129,10 @@ def _markings(short, long_):
 
 
 def _wire_media(short, long_, channel, label, qty):
-    lbl = str(label).upper()
-    if lbl.startswith("F"):
-        ws, wl, ms, ml = short-10, long_-10, short, long_
-    elif lbl.startswith("V"):
-        d = min(channel, 100)
-        if   30 <= d <= 60:  ws = short-15; wl = int(round(long_*1.36))
-        elif 65 <= d <= 80:  ws = short-10; wl = int(round(long_*1.55))
-        elif 85 <= d <= 100: ws = short-10; wl = int(round(long_*1.785))
-        else:                ws, wl = short, long_
-        ms, ml = ws+60, wl+40
-    else:
-        ws, wl, ms, ml = short, long_, short, long_
+    # The formulas live in filter_calc's worksheet profiles, which the weight
+    # calculator uses too - one rule, not two copies that can drift apart.
+    from taf_order_app.filter_calc import worksheet_cuts
+    ws, wl, ms, ml = worksheet_cuts(short, long_, channel, label)
     return dict(wc=f"{ws}*{wl}", wq=qty*2, mc=f"{ms}*{ml}", mq=qty)
 
 
@@ -182,6 +174,78 @@ def _txt(c, x, y, w, h, text, bold=False, size=8, align="left", valign="center",
         if align == "center": c.drawCentredString(x + w/2, ty, line)
         elif align == "right": c.drawRightString(x + w - 2, ty, line)
         else: c.drawString(x + 2, ty, line)
+
+
+# ── The blocks under Notes ────────────────────────────────────────────────────
+
+def _block(c, x, top, w, title, lines, floor, size=7.5):
+    """A boxed block: a bold title, then lines wrapped to the width. Stops at
+    `floor` rather than drawing over whatever is below, and says so.
+    Returns the y of its bottom edge."""
+    from reportlab.lib.utils import simpleSplit
+    pad, lead = 3.0, size + 1.6
+    rows = []
+    for text, bold in lines:
+        font = "Helvetica-Bold" if bold else "Helvetica"
+        for part in simpleSplit(text, font, size, w - 2 * pad):
+            rows.append((part, font))
+    room = int((top - floor - 2 * pad - 11) // lead)
+    if len(rows) > room:
+        rows = rows[:max(0, room - 1)] + [("(more on screen in the app)",
+                                           "Helvetica-Oblique")]
+    h = 2 * pad + 11 + lead * len(rows)
+    bottom = top - h
+    _box(c, x, bottom, w, h)
+    c.setFillColor(BLACK)
+    c.setFont("Helvetica-Bold", 8)
+    c.drawString(x + pad, top - pad - 7, title)
+    y = top - pad - 11 - size
+    for text, font in rows:
+        c.setFont(font, size)
+        c.drawString(x + pad, y, text)
+        y -= lead
+    return bottom
+
+
+def _under_notes(c, x, top, w, ctx, calculator):
+    """Wrapping Instructions, then (Flat and Pleated Panel pages) the
+    calculator, each in its own box below the Notes line."""
+    if ctx is None:
+        return
+    try:
+        from taf_order_app import worksheet_blocks as wb
+    except Exception:
+        return
+    floor = MARGIN + 46            # clear of the barcode at the foot
+    try:
+        bottom = _block(c, x, top, w, "WRAPPING INSTRUCTIONS",
+                        wb.wrapping_lines(ctx), floor)
+        if calculator:
+            _block(c, x, bottom - 4, w, "FILTER CALCULATOR",
+                   wb.calculator_lines(ctx), floor)
+    except Exception:
+        pass                       # never lose a worksheet over its extras
+
+
+def _brace(c, cx, ry, cw, rh, ctx):
+    """BRACE REQ?: the calculated answer in the box, the exact notice
+    beside it. A sheet with nothing calculated keeps the Y/N to circle."""
+    short, message = "", ""
+    if ctx is not None:
+        try:
+            from taf_order_app import worksheet_blocks as wb
+            short, message = wb.brace_cell(ctx)
+        except Exception:
+            short, message = "", ""
+    if not short:
+        _txt(c, cx('E'), ry(22), cw('E'), rh(22), "Y/N", size=8, align="center")
+        return
+    _txt(c, cx('E'), ry(22), cw('E'), rh(22), short, bold=True, size=7,
+         align="center")
+    if message:
+        from reportlab.lib.utils import simpleSplit
+        lines = simpleSplit(message, "Helvetica", 6, cw('F') - 3)[:3]
+        _txt(c, cx('F'), ry(22), cw('F'), rh(22), lines, size=6)
 
 
 # ── Geometry ──────────────────────────────────────────────────────────────────
@@ -268,7 +332,8 @@ def _draw_header(c, col_x, col_w, row_y, row_h,
 
 # ── VorF page ─────────────────────────────────────────────────────────────────
 
-def _draw_vorf(c, header, item, page_num, total_pages, d_ord, d_due):
+def _draw_vorf(c, header, item, page_num, total_pages, d_ord, d_due,
+               ctx=None):
     col_x, col_w, row_y, row_h = _geom(_VORF_CHARS, _VORF_ROW_H)
     CI = {l:i for i,l in enumerate("ABCDEFGHIJKLMNOPQ")}
     cx  = lambda l: col_x[CI[l]]
@@ -394,7 +459,12 @@ def _draw_vorf(c, header, item, page_num, total_pages, d_ord, d_due):
 
     # ── Row 22: BRACE REQ? ────────────────────────────────────────────────
     _txt(c, cx('B'), ry(22), cw('B','C','D'), rh(22), "BRACE REQ?", bold=True, size=8)
-    _txt(c, cx('E'), ry(22), cw('E'),         rh(22), "Y/N", size=8, align="center")
+    _brace(c, cx, ry, cw, rh, ctx)
+
+    # ── Under Notes: wrapping, then the calculator ────────────────────────
+    _under_notes(c, cx('G'), yb(18) - 3,
+                 cw('G','H','I','J','K','L','M','N','O','P','Q'), ctx,
+                 calculator=not use_sv)
 
     # ── Bottom table rows 24-26 (B-F) — exact borders ─────────────────────
     # Row 24: single cell B-F
@@ -413,7 +483,8 @@ def _draw_vorf(c, header, item, page_num, total_pages, d_ord, d_due):
 
 # ── FS page ───────────────────────────────────────────────────────────────────
 
-def _draw_fs(c, header, item, page_num, total_pages, d_ord, d_due):
+def _draw_fs(c, header, item, page_num, total_pages, d_ord, d_due,
+             ctx=None):
     col_x, col_w, row_y, row_h = _geom(_FS_CHARS, _FS_ROW_H)
     CI = {l:i for i,l in enumerate("ABCDEFGHIJKL")}
     cx  = lambda l: col_x[CI[l]]
@@ -488,7 +559,11 @@ def _draw_fs(c, header, item, page_num, total_pages, d_ord, d_due):
 
     # ── Row 22: BRACE REQ? (matches VorF row 22) ─────────────────────────
     _txt(c, cx('B'), ry(22), cw('B','C','D'), rh(22), "BRACE REQ?", bold=True, size=8)
-    _txt(c, cx('E'), ry(22), cw('E'),         rh(22), "Y/N", size=8, align="center")
+    _brace(c, cx, ry, cw, rh, ctx)
+
+    # ── Under Notes: wrapping (a flyscreen has no calculator block) ───────
+    _under_notes(c, cx('G'), yb(18) - 3, cw('G','H','I','J','K','L'), ctx,
+                 calculator=False)
 
     # ── Bottom table rows 24-26 (B-F) — matches VorF ─────────────────────
     _box(c, cx('B'), ry(24), cw('B','C','D','E','F'), rh(24))
@@ -510,22 +585,44 @@ def generate_pdf(header_data, items, output_path, page_start=1, grand_total=None
     total_pages  = grand_total if grand_total is not None else len(items)
     page_counter = page_start
     c = rl_canvas.Canvas(output_path, pagesize=landscape(A4))
+    # Packing plans, wrap codes and calculations for the whole order at once,
+    # so a sheet's wrap codes are the ones on the delivery labels.
+    try:
+        from taf_order_app import worksheet_blocks as _wb
+        contexts = _wb.order_context(items)
+    except Exception:
+        _wb, contexts = None, [None] * len(items)
 
     for i, item in enumerate(items):
         ftype = (item.get("Filter Type") or "").lower()
+        ctx = contexts[i] if i < len(contexts) else None
         if ftype == "stepped filter":
-            _draw_fs(c, header_data, item, page_counter, total_pages, d_ord, d_due)
+            _draw_fs(c, header_data, item, page_counter, total_pages, d_ord, d_due,
+                     ctx)
             c.showPage()
             inner = {**item,
                      "Short":       max(0, int(item.get("Short",   0)) - 25),
                      "Long":        max(0, int(item.get("Long",    0)) - 25),
                      "Channel":     max(0, int(item.get("Channel", 0)) - 10),
                      "Filter Type": "V-form"}
-            _draw_vorf(c, header_data, inner, page_counter, total_pages, d_ord, d_due)
+            inner_ctx = ctx
+            if ctx is not None and _wb is not None:
+                # Same wraps; the V-form inside is calculated at its own size.
+                try:
+                    from taf_order_app import filter_calc as _fc
+                    from taf_order_app import calc_settings as _cs
+                    inner_ctx = dict(ctx, calc=_fc.calculate_item(
+                        inner, _cs.cached()))
+                except Exception:
+                    inner_ctx = ctx
+            _draw_vorf(c, header_data, inner, page_counter, total_pages, d_ord, d_due,
+                       inner_ctx)
         elif ftype == "flyscreen":
-            _draw_fs(c, header_data, item, page_counter, total_pages, d_ord, d_due)
+            _draw_fs(c, header_data, item, page_counter, total_pages, d_ord, d_due,
+                     ctx)
         else:
-            _draw_vorf(c, header_data, item, page_counter, total_pages, d_ord, d_due)
+            _draw_vorf(c, header_data, item, page_counter, total_pages, d_ord, d_due,
+                       ctx)
         page_counter += 1
         if i < len(items) - 1:
             c.showPage()

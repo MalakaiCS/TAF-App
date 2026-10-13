@@ -52,6 +52,7 @@ ORDER = [
     "migrate_more_features.sql",
     "migrate_quote_shipping.sql",
     "migrate_supply_requests.sql",
+    "migrate_packing_and_merge.sql",
 ]
 
 

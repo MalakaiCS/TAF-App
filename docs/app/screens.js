@@ -637,10 +637,7 @@ var TAFAPP = (function () {
       var out = U.el("div");
       function redraw() { drawOrders(out, rows, search.value, due.value,
                                      status.value); }
-      [search, due, status].forEach(function (node) {
-        node.addEventListener("input", redraw);
-        node.addEventListener("change", redraw);
-      });
+      U.onPick([search, due, status], redraw);
 
       main.appendChild(U.card(null, [
         U.el("div", { cls: "filters", kids: [
@@ -833,8 +830,37 @@ var TAFAPP = (function () {
       U.table([" ", { text: "Qty" }, "Item", "Size (mm)", "Media"], rows),
       count
     ]));
+    var packing = packingNotes(items);
+    if (packing) { into.appendChild(packing); }
     tally();
     void made;
+  }
+
+  /* How each line is wrapped (from the plan the office saved, which is what
+     the worksheet and the delivery labels print) and whether it needs a
+     brace (worked out here with the shared rules). */
+  function packingNotes(items) {
+    var C = window.TAFCALC;
+    if (!C) { return null; }
+    var notes = items.map(function (it, idx) {
+      var plan = it.Packing;
+      var wrap = plan && plan.wraps && plan.wraps.length
+        ? C.planInstructions(plan).join("  ")
+        : "Wrapping not set yet - the office sets it before packing";
+      var kind = C.constructionOf(it["Filter Type"]);
+      var b = kind ? C.bracing(kind, it.Short, it.Long) : null;
+      var line = U.el("div", { cls: "pack-row" + (b && b.required
+                                                 ? " required" : ""),
+        attr: { "data-line": String(idx + 1) } });
+      line.appendChild(U.el("strong", { text: "Line " + (idx + 1) + ": " }));
+      line.appendChild(U.el("span", { text: wrap }));
+      if (b && b.status === "ok") {
+        line.appendChild(U.el("span", { cls: "muted",
+                                        text: "  ·  " + b.message }));
+      }
+      return line;
+    });
+    return U.card("Wrapping and bracing", notes);
   }
 
   function stamp() {
@@ -1226,10 +1252,7 @@ var TAFAPP = (function () {
             }))]));
       }
 
-      [search, who, when].forEach(function (n) {
-        n.addEventListener("input", redraw);
-        n.addEventListener("change", redraw);
-      });
+      U.onPick([search, who, when], redraw);
       main.appendChild(U.card(null, [
         U.el("div", { cls: "filters", kids: [
           U.el("label", { cls: "f", kids: [
@@ -1737,6 +1760,25 @@ var TAFAPP = (function () {
       var noteInput = body.querySelectorAll("input")[
         body.querySelectorAll("input").length - 1];
 
+      // Bracing, worked out as the size is typed, with the same rules the
+      // desktop and the worksheet use.
+      var brace = U.el("div", { cls: "brace-note", attr: { id: "brace-note" } });
+      body.appendChild(brace);
+      function showBrace() {
+        brace.textContent = "";
+        brace.className = "brace-note";
+        var C = window.TAFCALC;
+        if (!C || !String(v.Short.value).trim() || !String(v.Long.value).trim()) {
+          return;
+        }
+        var b = C.bracing(C.constructionOf(v["Filter Type"].value),
+                          v.Short.value, v.Long.value);
+        brace.textContent = "Bracing: " + b.message;
+        if (b.required) { brace.className = "brace-note required"; }
+        else if (b.advisory) { brace.className = "brace-note advisory"; }
+      }
+      U.onPick([v.Short, v.Long, v["Filter Type"]], showBrace);
+
       body.appendChild(U.el("div", { cls: "muted",
         text: "The part number and square metreage are worked out by the "
             + "desktop app when it opens this order to make the worksheets." }));
@@ -1973,10 +2015,7 @@ var TAFAPP = (function () {
               });
             }))]));
       }
-      [search, state].forEach(function (n) {
-        n.addEventListener("input", redraw);
-        n.addEventListener("change", redraw);
-      });
+      U.onPick([search, state], redraw);
       main.appendChild(U.card(null, [U.el("div", { cls: "filters", kids: [
         U.el("label", { cls: "f", kids: [
           U.el("span", { text: "Search" }), search] }),
@@ -2179,10 +2218,7 @@ var TAFAPP = (function () {
                 });
               }))]));
         }
-        [search, lowOnly].forEach(function (n) {
-          n.addEventListener("input", redraw);
-          n.addEventListener("change", redraw);
-        });
+        U.onPick([search, lowOnly], redraw);
         main.appendChild(U.card(null, [
           U.el("label", { cls: "f", kids: [
             U.el("span", { text: "Search" }), search] }),

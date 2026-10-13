@@ -127,7 +127,12 @@ WITH checks(step, file, purpose, needed, present) AS (VALUES
 
   (32, 'migrate_supply_requests.sql', 'Asking for supplies, and the bell that tells managers', 'recommended',
       to_regclass('public.supply_requests') IS NOT NULL
-      AND to_regclass('public.notifications') IS NOT NULL)
+      AND to_regclass('public.notifications') IS NOT NULL),
+
+  (33, 'migrate_packing_and_merge.sql', 'Weights, packing, delivery labels and merging customers', 'recommended',
+      to_regclass('public.calc_settings') IS NOT NULL
+      AND to_regclass('public.customer_merges') IS NOT NULL
+      AND to_regprocedure('public.merge_customers(text,uuid,uuid[],jsonb,jsonb)') IS NOT NULL)
 )
 SELECT step,
        CASE WHEN present THEN 'already done' ELSE 'RUN THIS' END AS status,

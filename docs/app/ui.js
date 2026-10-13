@@ -12,6 +12,20 @@
 
 var TAFUI = (function () {
 
+  // Controls whose clicks are their own. A click on one of these that sits
+  // inside a clickable row belongs to the control: opening a dropdown in a
+  // row must not also open the order the row stands for.
+  var CONTROLS = "select, option, input, textarea, button, a, label";
+
+  function ownClick(node, handler) {
+    return function (e) {
+      var hit = e.target && e.target.closest ? e.target.closest(CONTROLS)
+                                             : null;
+      if (hit && hit !== node && node.contains(hit)) { return; }
+      return handler.call(this, e);
+    };
+  }
+
   function el(tag, opts) {
     var node = document.createElement(tag);
     var o = opts || {};
@@ -19,7 +33,11 @@ var TAFUI = (function () {
     if (o.cls) { node.className = o.cls; }
     if (o.on) {
       Object.keys(o.on).forEach(function (k) {
-        node.addEventListener(k, o.on[k]);
+        // Every clickable container gets the guard, so no screen has to
+        // remember it. A control's own click handler is left alone.
+        var guard = k === "click" && !/^(SELECT|OPTION|INPUT|TEXTAREA|BUTTON|A|LABEL)$/
+          .test(node.tagName);
+        node.addEventListener(k, guard ? ownClick(node, o.on[k]) : o.on[k]);
       });
     }
     if (o.attr) {
@@ -31,6 +49,29 @@ var TAFUI = (function () {
     }
     (o.kids || []).forEach(function (kid) { if (kid) { node.appendChild(kid); } });
     return node;
+  }
+
+  /* One choice, one action. A <select> fires "input" and then "change" for
+     the same choice, so a screen that listened for both did everything
+     twice - including tearing the list down and drawing it again under the
+     pointer. Text boxes still update as they are typed in; dropdowns,
+     ticks and dates act once, when the value has actually changed. */
+  function onPick(nodes, fn) {
+    (nodes || []).forEach(function (node) {
+      var typed = node.tagName === "TEXTAREA" ||
+        (node.tagName === "INPUT" &&
+         !/^(checkbox|radio|date|range|color|file)$/i.test(node.type || ""));
+      var last = typed ? null : node.value;
+      node.addEventListener(typed ? "input" : "change", function (e) {
+        if (!typed) {
+          var now = node.type === "checkbox" || node.type === "radio"
+            ? String(node.checked) + node.value : node.value;
+          if (now === last) { return; }
+          last = now;
+        }
+        fn(e);
+      });
+    });
   }
 
   function clear(node) {
@@ -197,7 +238,7 @@ var TAFUI = (function () {
   }
 
   return {
-    el: el, clear: clear, card: card, table: table, cell: cell,
+    el: el, clear: clear, onPick: onPick, card: card, table: table, cell: cell,
     button: button, pill: pill, empty: empty, notice: notice,
     parseDate: parseDate, dueBucket: dueBucket, today: today, money: money,
     openSheet: openSheet, closeSheet: closeSheet,
