@@ -3754,7 +3754,7 @@ class BagLineItemDialog(tk.Toplevel):
             self.desc_frame.pack_forget()
 
         # A Custom Bag Filter: pockets, and the depth is the pockets' depth.
-        # It is ordered framed, so the header starts ticked.
+        # Header starts unticked, as on every bag: it is asked for.
         is_custom = pt == _bag_headers.CUSTOM_BAG
         pk_sub = self._dim_labels["Pockets"].master
         if is_custom:
@@ -3762,8 +3762,6 @@ class BagLineItemDialog(tk.Toplevel):
             self._custom_hint.grid(row=1, column=0, columnspan=4, sticky="w",
                                    pady=(6, 0))
             self._dim_labels["Depth"].config(text="Pocket depth")
-            if not restore:
-                self.var_bhdr.set(True)
         else:
             pk_sub.grid_remove()
             self._custom_hint.grid_forget()
@@ -7554,33 +7552,37 @@ class CChannelTableDialog(tk.Toplevel):
 
 
 class PalletLabelsDialog(tk.Toplevel):
-    """Pallet labels for one order: how many pallets, and how many of each
-    line go on each. One sheet per pallet - see taf_order_app/pallet_labels.
+    """Pallet labels for one order, or several sharing the pallets: how many
+    pallets, and how many of each line go on each. One sheet per pallet -
+    see taf_order_app/pallet_labels.
+
+    `add_order()` (optional) is asked for another order to put on the same
+    pallets; it returns {"order", "items", "customer"} or None.
     """
 
     MAX_PALLETS = 40
 
-    def __init__(self, master, order: dict, items: list, customer=None):
+    def __init__(self, master, order: dict, items: list, customer=None,
+                 add_order=None, more=None):
         super().__init__(master)
         self.title("Pallet labels")
         self.transient(master)
         self.grab_set()
         self.configure(bg=CBG)
-        self.order = order
-        self.items = list(items)
-        self.customer = customer
+        self.entries = [{"order": order, "items": list(items),
+                         "customer": customer}] + list(more or [])
+        self.add_order = add_order
         self.cells: list = []
-        _centre_on_parent(self, master, px(980), px(620))
+        _centre_on_parent(self, master, px(1020), px(640))
         self.bind("<Escape>", lambda _e: self.destroy())
 
         top = tk.Frame(self, bg=CA, padx=px(16), pady=px(10))
         top.pack(fill="x")
         tk.Label(top, text="Pallet labels", bg=CA, fg="white",
                  font=(FAM, 13, "bold")).pack(anchor="w")
-        who = (customer or {}).get("name") or order.get("customer_name", "")
-        tk.Label(top, text=f"O/N {order.get('order_number', '')}  ·  {who}"
-                           "  ·  one sheet per pallet",
-                 bg=CA, fg="white", font=F_SM).pack(anchor="w")
+        self.subtitle = tk.Label(top, text="", bg=CA, fg="white", font=F_SM,
+                                 justify="left", anchor="w")
+        self.subtitle.pack(anchor="w")
 
         foot = tk.Frame(self, bg=CBG, padx=px(14), pady=px(10))
         foot.pack(fill="x", side="bottom")
@@ -7607,6 +7609,9 @@ class PalletLabelsDialog(tk.Toplevel):
                          ("All on pallet 1", self._all_first)):
             flat_btn(bar, text, fn, bg=CNE, pady=px(4),
                      font=F_SM).pack(side="left", padx=(0, px(6)))
+        if add_order is not None:
+            flat_btn(bar, "+ Add another order…", self._add, bg=CA,
+                     pady=px(4), font=F_SM).pack(side="right")
 
         wrap = tk.Frame(self, bg=CCA, highlightbackground=CBR,
                         highlightthickness=1)
@@ -7626,6 +7631,79 @@ class PalletLabelsDialog(tk.Toplevel):
         self._rebuild()
         self._all_first()
 
+    # ── The orders on these pallets ───────────────────────────────────────
+
+    @property
+    def items(self) -> list:
+        """Every line of every order, in order: one row of the grid each."""
+        return [it for e in self.entries for it in e["items"]]
+
+    @property
+    def order(self) -> dict:
+        return self.entries[0]["order"]
+
+    def _subtitle(self):
+        parts = []
+        for e in self.entries:
+            who = (e.get("customer") or {}).get("name") or \
+                e["order"].get("customer_name", "")
+            parts.append(f"O/N {_pallets.order_number(e['order'])}  ·  {who}")
+        tail = ("  ·  one sheet per pallet" if len(parts) == 1 else
+                f"\n{len(parts)} orders on the same pallets  ·  one sheet "
+                "per pallet")
+        self.subtitle.config(text="   +   ".join(parts) + tail)
+
+    def add_entry(self, entry) -> bool:
+        """Put another order on these pallets. Refused when it is already
+        here or goes to a different address."""
+        if not entry or not entry.get("items"):
+            return False
+        on = _pallets.order_number(entry["order"])
+        if any(_pallets.order_number(e["order"]) == on and on
+               for e in self.entries):
+            messagebox.showinfo("Pallet labels",
+                                f"O/N {on} is already on these pallets.",
+                                parent=self)
+            return False
+        if not _pallets.same_place(self.entries + [entry]):
+            messagebox.showwarning(
+                "Pallet labels",
+                f"O/N {on} is going to a different address. A pallet goes "
+                "to one place - print its pallet labels on their own.",
+                parent=self)
+            return False
+        old = self._grid()
+        self.entries.append(entry)
+        n = self._n()
+        self._shown = 0
+        self._rebuild()
+        self._fill(old + [[_pallets.ordered(it)] + [0] * (n - 1)
+                          for it in entry["items"]])
+        return True
+
+    def _add(self):
+        try:
+            entry = self.add_order(self)
+        except Exception as exc:
+            messagebox.showerror("Pallet labels", str(exc), parent=self)
+            return
+        try:
+            self.grab_set()   # a picker took the grab - take it back
+        except Exception:
+            pass
+        self.add_entry(entry)
+
+    def _remove(self, idx: int):
+        if len(self.entries) < 2:
+            return
+        old = self._grid()
+        start = sum(len(e["items"]) for e in self.entries[:idx])
+        stop = start + len(self.entries[idx]["items"])
+        del self.entries[idx]
+        self._shown = 0
+        self._rebuild()
+        self._fill(old[:start] + old[stop:])
+
     def _n(self) -> int:
         try:
             return max(1, min(self.MAX_PALLETS, int(self.count.get())))
@@ -7636,6 +7714,7 @@ class PalletLabelsDialog(tk.Toplevel):
         n = self._n()
         if n == self._shown and self.cells:
             return
+        self._subtitle()
         old = [[v.get() for v in row] for row in self.cells]
         for w in self.grid_frame.winfo_children():
             w.destroy()
@@ -7646,28 +7725,50 @@ class PalletLabelsDialog(tk.Toplevel):
                      anchor="w").grid(row=0, column=col, sticky="w",
                                       padx=px(4), pady=(0, px(4)))
         self.cells, self.left = [], []
-        for i, item in enumerate(self.items):
-            tk.Label(self.grid_frame, text=_pallets.line_text(item),
-                     bg=CCA, fg=CTX, font=F_BODY, anchor="w",
-                     width=34).grid(row=i + 1, column=0, sticky="w",
-                                    padx=px(4), pady=px(1))
-            tk.Label(self.grid_frame, text=str(_pallets.ordered(item)),
-                     bg=CCA, fg=CTX, font=F_BODY).grid(row=i + 1, column=1,
-                                                       padx=px(4))
-            row = []
-            for j in range(n):
-                prev = old[i][j] if i < len(old) and j < len(old[i]) else ""
-                var = tk.StringVar(value=prev)
-                var.trace_add("write", lambda *_: self._update_left())
-                field_entry(self.grid_frame, textvariable=var, width=5
-                            ).grid(row=i + 1, column=2 + j, padx=px(3),
-                                   pady=px(1))
-                row.append(var)
-            self.cells.append(row)
-            lab = tk.Label(self.grid_frame, text="", bg=CCA, fg=CMU,
-                           font=F_SM)
-            lab.grid(row=i + 1, column=2 + n, padx=px(6), sticky="w")
-            self.left.append(lab)
+        multi = len(self.entries) > 1
+        r = 1
+        i = 0
+        for k, e in enumerate(self.entries):
+            if multi:
+                head = tk.Frame(self.grid_frame, bg=CCA)
+                head.grid(row=r, column=0, columnspan=3 + n, sticky="w",
+                          pady=(px(6) if k else 0, px(2)))
+                who = (e.get("customer") or {}).get("name") or \
+                    e["order"].get("customer_name", "")
+                tk.Label(head, text=f"O/N {_pallets.order_number(e['order'])}"
+                                    f"  ·  {who}",
+                         bg=CCA, fg=CA, font=F_BOLD).pack(side="left")
+                tk.Button(head, text="Remove", font=F_SM, bg=CCA, fg=CRD,
+                          relief="flat", bd=0, cursor="hand2",
+                          activebackground=CCA,
+                          command=lambda x=k: self._remove(x)
+                          ).pack(side="left", padx=(px(10), 0))
+                r += 1
+            for item in e["items"]:
+                tk.Label(self.grid_frame, text=_pallets.line_text(item),
+                         bg=CCA, fg=CTX, font=F_BODY, anchor="w",
+                         width=34).grid(row=r, column=0, sticky="w",
+                                        padx=px(4), pady=px(1))
+                tk.Label(self.grid_frame, text=str(_pallets.ordered(item)),
+                         bg=CCA, fg=CTX, font=F_BODY).grid(row=r, column=1,
+                                                           padx=px(4))
+                row = []
+                for j in range(n):
+                    prev = old[i][j] if i < len(old) and j < len(old[i]) \
+                        else ""
+                    var = tk.StringVar(value=prev)
+                    var.trace_add("write", lambda *_: self._update_left())
+                    field_entry(self.grid_frame, textvariable=var, width=5
+                                ).grid(row=r, column=2 + j, padx=px(3),
+                                       pady=px(1))
+                    row.append(var)
+                self.cells.append(row)
+                lab = tk.Label(self.grid_frame, text="", bg=CCA, fg=CMU,
+                               font=F_SM)
+                lab.grid(row=r, column=2 + n, padx=px(6), sticky="w")
+                self.left.append(lab)
+                r += 1
+                i += 1
         self._shown = n
         self._update_left()
 
@@ -7691,8 +7792,8 @@ class PalletLabelsDialog(tk.Toplevel):
 
     def _fill(self, rows):
         for vars_, values in zip(self.cells, rows):
-            for v, q in zip(vars_, values):
-                v.set(str(q) if q else "")
+            for v, q in zip(vars_, list(values) + [""] * len(vars_)):
+                v.set(str(q) if q not in (0, "0", None) else "")
 
     def _spread(self):
         n = self._n()
@@ -7715,9 +7816,8 @@ class PalletLabelsDialog(tk.Toplevel):
 
     def _print(self):
         try:
-            labels, warnings = _pallets.build(self.order, self.items,
-                                              self.customer, self._n(),
-                                              self._grid())
+            labels, warnings = _pallets.build_orders(self.entries, self._n(),
+                                                     self._grid())
         except _pallets.PalletError as exc:
             messagebox.showwarning("Pallet labels",
                                    "Not printed yet:\n\n" + "\n".join(
@@ -7728,8 +7828,10 @@ class PalletLabelsDialog(tk.Toplevel):
                 "Pallet labels", "\n".join(warnings) + "\n\nPrint anyway?",
                 parent=self):
             return
-        safe = re.sub(r"[^A-Za-z0-9_-]+", "_", str(
-            self.order.get("order_number") or "order")).strip("_") or "order"
+        numbers = [_pallets.order_number(e["order"]) or "order"
+                   for e in self.entries]
+        safe = re.sub(r"[^A-Za-z0-9_-]+", "_", "+".join(numbers)
+                      ).strip("_")[:60] or "order"
         ORDERS_DIR.mkdir(parents=True, exist_ok=True)
         stamp = _dt_module.datetime.now().strftime("%Y%m%d-%H%M%S")
         path = ORDERS_DIR / f"pallet_labels_{safe}_{stamp}.pdf"
@@ -7741,7 +7843,7 @@ class PalletLabelsDialog(tk.Toplevel):
             return
         try:
             _db.log_action("pallet_labels_printed",
-                           f"O/N: {self.order.get('order_number', '')} | "
+                           f"O/N: {', '.join(numbers)} | "
                            f"{len(labels)} pallet"
                            f"{'s' if len(labels) != 1 else ''}")
         except Exception:
@@ -7749,6 +7851,71 @@ class PalletLabelsDialog(tk.Toplevel):
         self.note.config(text=f"Saved {path.name}")
         self.last_path = str(path)
         _open_path(str(path))
+
+
+class _OrderPicker(tk.Toplevel):
+    """Pick one order from a list, with a search box. result = the row."""
+
+    def __init__(self, master, title: str, rows: list):
+        super().__init__(master)
+        self.title(title)
+        self.transient(master)
+        self.grab_set()
+        self.configure(bg=CBG)
+        self.rows = list(rows)
+        self.result = None
+        _centre_on_parent(self, master, px(620), px(460))
+        self.bind("<Escape>", lambda _e: self.destroy())
+        top = tk.Frame(self, bg=CBG, padx=px(14), pady=px(10))
+        top.pack(fill="x")
+        tk.Label(top, text=title, bg=CBG, fg=CTX, font=F_BOLD).pack(anchor="w")
+        self.q = tk.StringVar()
+        ent = field_entry(top, textvariable=self.q)
+        ent.pack(fill="x", pady=(px(6), 0))
+        self.q.trace_add("write", lambda *_: self._fill())
+        foot = tk.Frame(self, bg=CBG, padx=px(14), pady=px(10))
+        foot.pack(fill="x", side="bottom")
+        flat_btn(foot, "Cancel", self.destroy, bg=CNE,
+                 pady=px(6)).pack(side="right")
+        flat_btn(foot, "Add", self._pick, bg=CGR,
+                 pady=px(6)).pack(side="right", padx=(0, px(8)))
+        self.lb = tk.Listbox(self, font=F_BODY, bg=CCA, fg=CTX,
+                             selectbackground=CA, selectforeground="white",
+                             relief="flat", highlightthickness=1,
+                             highlightbackground=CBR, activestyle="none")
+        self.lb.pack(fill="both", expand=True, padx=px(14))
+        self.lb.bind("<Double-Button-1>", lambda _e: self._pick())
+        self.lb.bind("<Return>", lambda _e: self._pick())
+        ent.bind("<Return>", lambda _e: self._pick())
+        ent.bind("<Down>", lambda _e: (self.lb.focus_set(),
+                                       self.lb.selection_set(0)))
+        self.shown: list = []
+        self._fill()
+        self.after(50, ent.focus_set)
+
+    @staticmethod
+    def text(row) -> str:
+        return "   ·   ".join(p for p in (
+            f"O/N {row.get('order_no') or '—'}", row.get("customer") or "",
+            f"due {row.get('date_due')}" if row.get("date_due") else "",
+            row.get("status") or "") if p)
+
+    def _fill(self):
+        q = self.q.get().strip().lower()
+        self.shown = [r for r in self.rows if not q or q in self.text(r).lower()]
+        self.lb.delete(0, "end")
+        for r in self.shown[:300]:
+            self.lb.insert("end", "  " + self.text(r))
+        if self.shown:
+            self.lb.selection_set(0)
+
+    def _pick(self):
+        sel = self.lb.curselection()
+        if not sel and len(self.shown) == 1:
+            sel = (0,)
+        if sel:
+            self.result = self.shown[sel[0]]
+            self.destroy()
 
 
 class MergeCustomersDialog(tk.Toplevel):
@@ -9106,8 +9273,7 @@ class ModernOrderApp(tk.Frame):
         self.hvars["Customer Name"].trace_add(
             "write", lambda *_: self._customer_name_changed())
         self.hvars["Customer Name"].trace_add(
-            "write", lambda *_: self.master.after(50, self._customer_autocomplete)
-        )
+            "write", lambda *_: self._schedule_customer_list())
 
         DATE_FIELDS = {"Date Ordered", "Date Due"}
         REQUIRED    = {"Customer Name", "Order Number", "Date Ordered"}
@@ -9646,7 +9812,7 @@ class ModernOrderApp(tk.Frame):
                  bg=CA, pady=7).pack(side="left", padx=(0, 8))
         menu_btn(bot, "Run  ▾", [
             ("Print delivery labels",     self._print_delivery_labels_run),
-            ("Pallet labels for an order…", self._pallet_labels_from_run),
+            ("Pallet labels for the selected orders…", self._pallet_labels_from_run),
             None,
             ("View what's on this order", self._view_delivery_items),
             ("Freight / delay…",          self._edit_delivery_freight),
@@ -9816,13 +9982,15 @@ class ModernOrderApp(tk.Frame):
         threading.Thread(target=_work, daemon=True).start()
 
     def _pallet_labels_from_run(self):
-        """Pallet labels for the order picked in the run."""
+        """Pallet labels for the orders picked in the run - one, or several
+        going out on the same pallets."""
         picked = self._selected_delivery_orders()
-        if len(picked) != 1:
+        if not picked:
             messagebox.showinfo("Pallet labels",
-                                "Select the one order going on pallets.")
+                                "Select the order going on pallets - or "
+                                "several, when they share the pallets.")
             return
-        self._pallet_labels_for_order(picked[0])
+        self._pallet_labels_for_orders(picked)
 
     def _print_delivery_labels_run(self):
         """A label for every wrap: the selected orders, or the whole run.
@@ -18891,30 +19059,57 @@ class ModernOrderApp(tk.Frame):
 
     # ── The customer list under Customer Name ─────────────────────────────
 
+    # How long typing has to pause before the list is redrawn. Short enough
+    # to feel immediate; long enough that a quick typist does not pay for a
+    # redraw on every letter.
+    _AC_DELAY_MS = 120
+    # Matches drawn at once. Each is a dozen widgets; more than a screenful
+    # only made every keystroke slower. Typing another letter narrows it.
+    _AC_SHOWN = 12
+
+    def _schedule_customer_list(self):
+        pending = getattr(self, "_ac_after", None)
+        if pending:
+            try:
+                self.master.after_cancel(pending)
+            except Exception:
+                pass
+        self._ac_after = self.master.after(self._AC_DELAY_MS,
+                                           self._customer_autocomplete)
+
     def _customer_autocomplete(self):
         """List the accounts the typed name could mean, under the entry:
         "Create ... as a new customer" first, then each match with its
         initials badge, the typed part in bold and a grey line beneath."""
+        self._ac_after = None
         typed = self.hvars["Customer Name"].get().strip()
-        self._close_ac_popup()
         ent = getattr(self, "_customer_entry", None)
         if not typed or not ent:
+            self._close_ac_popup()
             return
         # Only while somebody is typing in the box - not when an order is
         # loaded into the form, and not once the name is an account's.
         try:
             if self.master.focus_get() is not ent:
+                self._close_ac_popup()
                 return
         except Exception:
+            self._close_ac_popup()
             return
         if self._selected_customer_id:
+            self._close_ac_popup()
             return
 
         records = self._customer_records or [
             {"name": n} for n in self._known_customers]
-        matches = _picker.matches(records, typed)
+        matches = _picker.matches(records, typed, limit=self._AC_SHOWN)
         can_create = _db.is_ready()
         if not matches and not can_create:
+            self._close_ac_popup()
+            return
+        # The same list as is already showing: leave it, highlight and all.
+        key = (typed, tuple(id(m) for m in matches), can_create)
+        if self._ac_popup and getattr(self, "_ac_key_shown", None) == key:
             return
 
         ent.update_idletasks()
@@ -18922,12 +19117,29 @@ class ModernOrderApp(tk.Frame):
         y = ent.winfo_rooty() + ent.winfo_height() + 2
         w = max(ent.winfo_width(), px(380))
 
-        popup = tk.Toplevel(self.master)
-        popup.overrideredirect(True)
-        popup.configure(bg=CSP)
+        # One window, kept while typing: only what is in it is redrawn, so
+        # the list does not flash or jump on every letter.
+        popup = self._ac_popup
+        try:
+            alive = bool(popup) and popup.winfo_exists()
+        except Exception:
+            alive = False
+        if alive:
+            for child in popup.winfo_children():
+                child.destroy()
+            for seq in ("<MouseWheel>", "<Button-4>", "<Button-5>"):
+                popup.unbind(seq)
+        else:
+            popup = tk.Toplevel(self.master)
+            popup.overrideredirect(True)
+            popup.configure(bg=CSP)
+            popup.withdraw()
         self._ac_popup = popup
+        self._ac_key_shown = key
         self._ac_rows = []          # (frame, action) in list order
         self._ac_index = -1
+        self._ac_canvas = None
+        self._ac_wheel = None
 
         hover_bg = "#E8F4FC"
         outer = tk.Frame(popup, bg=CCA)
@@ -18980,7 +19192,10 @@ class ModernOrderApp(tk.Frame):
                 def _wheel(e):
                     step = -1 if (getattr(e, "num", 0) == 4
                                   or getattr(e, "delta", 0) > 0) else 1
-                    cv.yview_scroll(step, "units")
+                    try:
+                        cv.yview_scroll(step, "units")
+                    except tk.TclError:
+                        pass          # the list was redrawn under the wheel
                     return "break"
                 for seq in ("<MouseWheel>", "<Button-4>", "<Button-5>"):
                     popup.bind(seq, _wheel)
@@ -19030,6 +19245,8 @@ class ModernOrderApp(tk.Frame):
         popup.update_idletasks()
         h = outer.winfo_reqheight() + 2
         popup.geometry(f"{w}x{h}+{x}+{y}")
+        if popup.state() == "withdrawn":
+            popup.deiconify()
         popup.lift()
         # The first account is what Enter picks; nothing is, when there are
         # none - Enter never makes an account by accident.
@@ -19094,6 +19311,7 @@ class ModernOrderApp(tk.Frame):
         return False
 
     def _close_ac_popup(self):
+        self._ac_key_shown = None
         if self._ac_popup:
             try:
                 self._ac_popup.destroy()
@@ -23193,12 +23411,17 @@ class ModernOrderApp(tk.Frame):
 
     def _pallet_labels_for_order(self, row):
         """Pallet labels for one order: how many pallets, what is on each."""
+        self._pallet_labels_for_orders([row])
+
+    def _pallet_entry(self, row):
+        """An order as the pallet labels take it, or None (said why)."""
         header, items = self._order_header_items(row, "Pallet labels")
         if items is None:
-            return
+            return None
         if not items:
-            messagebox.showinfo("Pallet labels", "This order has no lines.")
-            return
+            messagebox.showinfo("Pallet labels",
+                                f"O/N {row.get('order_no', '')} has no lines.")
+            return None
         customer = None
         if _db.is_ready():
             try:
@@ -23207,11 +23430,47 @@ class ModernOrderApp(tk.Frame):
                     header.get("customer_id") or "")
             except Exception:
                 customer = None
-        dlg = PalletLabelsDialog(self.master, {
-            "order_number": row.get("order_no", "")
-            or header.get("Order Number", ""),
-            "customer_name": row.get("customer", ""), "header": header},
-            items, customer)
+        return {"order": {"order_number": row.get("order_no", "")
+                          or header.get("Order Number", ""),
+                          "customer_name": row.get("customer", ""),
+                          "header": header},
+                "items": items, "customer": customer}
+
+    def _pick_pallet_order(self, parent):
+        """Another order to put on the same pallets: anything not yet
+        dispatched, newest first."""
+        rows = [r for r in (getattr(self, "_all_orders_data", None) or [])
+                if str(r.get("status") or "").lower() not in
+                ("dispatched", "delivered", "cancelled")]
+        if not rows:
+            messagebox.showinfo("Pallet labels", "No other orders are "
+                                "loaded - open Previous Orders first.",
+                                parent=parent)
+            return None
+        pick = _OrderPicker(parent, "Add an order to these pallets", rows)
+        parent.wait_window(pick)
+        return self._pallet_entry(pick.result) if pick.result else None
+
+    def _pallet_labels_for_orders(self, rows):
+        """Pallet labels for one or more orders sharing the pallets."""
+        entries = []
+        for row in rows:
+            entry = self._pallet_entry(row)
+            if entry is None:
+                return
+            entries.append(entry)
+        if not _pallets.same_place(entries):
+            messagebox.showwarning(
+                "Pallet labels",
+                "These orders are going to different addresses. A pallet "
+                "goes to one place - print each address's pallets on their "
+                "own.")
+            return
+        first = entries[0]
+        dlg = PalletLabelsDialog(self.master, first["order"], first["items"],
+                                 first["customer"],
+                                 add_order=self._pick_pallet_order,
+                                 more=entries[1:])
         self.master.wait_window(dlg)
 
     def _reread_order(self, row) -> dict:

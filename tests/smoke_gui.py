@@ -722,6 +722,17 @@ def _steps(app, gui, root):
             # Create row + Access Towing (name) + c3 matched by contact too
             if len(app._ac_rows) != 2:
                 raise AssertionError(f"{len(app._ac_rows)} rows listed")
+            # Another letter redraws inside the same window: no flash.
+            shown = app._ac_popup
+            ent.insert("end", "c")
+            deadline = time.monotonic() + 3
+            while time.monotonic() < deadline and \
+                    app._ac_key_shown and app._ac_key_shown[0] != "acc":
+                root.update()
+                time.sleep(0.02)
+            if app._ac_popup is not shown or len(app._ac_rows) != 2:
+                raise AssertionError("the list window was rebuilt, not "
+                                     "reused")
             app._ac_key("Return")              # the first account
             root.update()
             if app.hvars["Customer Name"].get() != "Access Towing" or \
@@ -834,11 +845,13 @@ def _steps(app, gui, root):
             dlg.var_pt.set("Custom Bag Filter")
             dlg._on_type_change()
             root.update()
-            if not dlg.var_bhdr.get() or \
+            if dlg.var_bhdr.get() or \
                     not dlg._dim_labels["Pockets"].winfo_ismapped():
-                raise AssertionError("custom bag: no header or no pockets")
+                raise AssertionError("custom bag: header ticked by default, "
+                                     "or no pockets")
             dlg.var_w.set("855"); dlg.var_h.set("570"); dlg.var_d.set("480")
-            dlg.var_wire.set(True); dlg._option_changed()
+            dlg.var_wire.set(True); dlg.var_bhdr.set(True)
+            dlg._option_changed()
             if (dlg.var_hw.get(), dlg.var_hh.get()) != ("855", "570"):
                 raise AssertionError("custom header is not the size ordered")
             dlg.var_hd.set("20")
@@ -1026,6 +1039,62 @@ def _steps(app, gui, root):
             gui._open_path = was
             dlg.destroy()
     add("pallet labels for an order", _pallet_labels)
+
+    def _pallet_labels_two_orders():
+        """A second order added to the same pallets: its lines join the
+        grid under its own order number, one PDF covers both, and an order
+        for somewhere else is refused."""
+        items = [dict(i) for i in ORDERS[0]["items"]]
+        other = [dict(i) for i in ORDERS[0]["items"]][:1]
+        opened = []
+        was = gui._open_path
+        gui._open_path = lambda path: opened.append(path)
+        second = {"order": {"order_number": "PO-9001",
+                            "header": {"Job": "J-77"}},
+                  "items": other, "customer": dict(CUSTOMERS[0])}
+        elsewhere = {"order": {"order_number": "PO-9002", "header": {}},
+                     "items": other,
+                     "customer": dict(CUSTOMERS[0],
+                                      delivery_address1="9 Other St")}
+        queue = [second, second, elsewhere]
+        was_info, was_warn = gui.messagebox.showinfo, gui.messagebox.showwarning
+        said = []
+        gui.messagebox.showinfo = lambda *a, **k: said.append(a)
+        gui.messagebox.showwarning = lambda *a, **k: said.append(a)
+        dlg = gui.PalletLabelsDialog(
+            root, {"order_number": "PO-8842",
+                   "header": dict(ORDERS[0]["header"])},
+            items, dict(CUSTOMERS[0]),
+            add_order=lambda parent: dict(queue.pop(0)))
+        try:
+            root.update()
+            dlg._add()
+            root.update()
+            if len(dlg.entries) != 2 or len(dlg.cells) != len(items) + 1:
+                raise AssertionError("the second order's lines were not "
+                                     "added")
+            if [r[0].get() for r in dlg.cells][-1] != \
+                    str(gui._pallets.ordered(other[0])):
+                raise AssertionError("the added order did not start on "
+                                     "pallet 1")
+            dlg._add()                         # the same order again
+            dlg._add()                         # somewhere else
+            if len(dlg.entries) != 2 or len(said) != 2:
+                raise AssertionError(f"a duplicate or another address was "
+                                     f"let in: {said}")
+            dlg._print()
+            if len(opened) != 1 or "PO-8842_PO-9001" not in opened[0]:
+                raise AssertionError(f"no shared PDF: {opened}")
+            dlg._remove(1)
+            if len(dlg.entries) != 1 or len(dlg.cells) != len(items):
+                raise AssertionError("removing the order left its lines")
+        finally:
+            gui._open_path = was
+            gui.messagebox.showinfo, gui.messagebox.showwarning = \
+                was_info, was_warn
+            dlg.destroy()
+    add("pallet labels: several orders on the same pallets",
+        _pallet_labels_two_orders)
 
     def _preset_with_bags():
         """A dedicated filter preset with bag filters: the bags come out as

@@ -136,3 +136,39 @@ def test_each_line_carries_its_job_number():
     pl.render_pdf(pl.build(order, items, CUSTOMER, 1,
                            [[40], [12], [6]])[0], str(path))
     assert path.read_bytes().startswith(b"%PDF")
+
+
+def test_several_orders_share_the_pallets():
+    """Two orders for the same site on the same pallets: each line says
+    which order it is, the top says "See each line" when a pallet carries
+    both, and an order going somewhere else is refused."""
+    second = {"order": {"order_number": "57931", "header": {"Job": "J-2"}},
+              "items": [dict(ITEMS[0], Quantity=5)], "customer": CUSTOMER}
+    first = {"order": ORDER, "items": ITEMS[:2], "customer": CUSTOMER}
+    labels, warnings = pl.build_orders([first, second], 2,
+                                       [[40, 0], [0, 12], [0, 5]])
+    assert warnings == []
+    assert [(r["order"], r["line"], r["quantity"])
+            for r in labels[1]["items"]] == [("57920", 2, 12), ("57931", 1, 5)]
+    assert labels[0]["order_number"] == "57920"
+    assert labels[1]["order_number"] == "See each line"
+    assert labels[1]["multi_order"] and labels[1]["orders"] == ["57920",
+                                                                "57931"]
+    try:
+        pl.build_orders([first, second], 1, [[40], [12], [6]])
+    except pl.PalletError as exc:
+        assert "O/N 57931 line 1: 6 on pallets but 5" in exc.problems[0]
+    else:
+        raise AssertionError("over-quantity printed")
+    away = dict(second, customer=dict(CUSTOMER,
+                                      delivery_address1="1 Other Road"))
+    assert not pl.same_place([first, away])
+    try:
+        pl.build_orders([first, away], 1, [[40], [12], [5]])
+    except pl.PalletError as exc:
+        assert "different addresses" in exc.problems[0]
+    else:
+        raise AssertionError("printed for two addresses")
+    path = Path(tempfile.mkdtemp()) / "two.pdf"
+    pl.render_pdf(labels, str(path))
+    assert path.read_bytes().startswith(b"%PDF")

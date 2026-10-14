@@ -11,6 +11,10 @@ pallet gets an A4 landscape sheet with
 
 The delivery address comes from the customer's account, the same as the
 delivery labels, so the two cannot disagree. Nothing here changes the order.
+
+Several orders can share the pallets - two orders for the same site going
+out together. Their lines are listed together, each with its order number,
+and they must all be going to the same address: a pallet goes to one place.
 """
 from __future__ import annotations
 
@@ -69,13 +73,19 @@ def spread(quantity: int, pallets: int) -> List[int]:
 
 
 def check(items: Sequence[Dict[str, Any]], pallets: Any,
-          grid: Sequence[Sequence[Any]]) -> Tuple[List[List[int]], List[str]]:
+          grid: Sequence[Sequence[Any]],
+          names: Optional[Sequence[str]] = None
+          ) -> Tuple[List[List[int]], List[str]]:
     """The quantities on each pallet, checked. grid[line][pallet].
 
     Returns (quantities, warnings). Raises PalletError for what cannot
     print: no pallets, a quantity that is not a whole number, more of a
     line on pallets than was ordered, an empty pallet. A line not all on
-    pallets is a warning - part of an order can go on pallets."""
+    pallets is a warning - part of an order can go on pallets. `names`
+    says what to call each line ("O/N 57920 line 2"); "line 1" and up
+    otherwise."""
+    names = list(names) if names else [f"line {i}"
+                                       for i in range(1, len(items) + 1)]
     n = positive_int(pallets)
     problems: List[str] = []
     if n is None:
@@ -88,8 +98,8 @@ def check(items: Sequence[Dict[str, Any]], pallets: Any,
     for i, (item, row) in enumerate(zip(items, grid), start=1):
         row = list(row) + [0] * (n - len(row))
         if len(row) > n:
-            problems.append(f"line {i} has quantities for {len(row)} pallets, "
-                            f"not {n}")
+            problems.append(f"{names[i - 1]} has quantities for {len(row)} "
+                            f"pallets, not {n}")
             row = row[:n]
         qs = []
         for j, v in enumerate(row, start=1):
@@ -98,17 +108,17 @@ def check(items: Sequence[Dict[str, Any]], pallets: Any,
                 continue
             q = 0 if str(v).strip() == "0" else positive_int(v)
             if q is None:
-                problems.append(f"line {i}, pallet {j}: a whole number, "
-                                "0 or more")
+                problems.append(f"{names[i - 1]}, pallet {j}: a whole "
+                                "number, 0 or more")
                 q = 0
             qs.append(q)
         total, want = sum(qs), ordered(item)
         if total > want:
-            problems.append(f"line {i}: {total} on pallets but {want} "
+            problems.append(f"{names[i - 1]}: {total} on pallets but {want} "
                             "ordered")
         elif total < want:
-            warnings.append(f"line {i}: {want - total} of {want} not on a "
-                            "pallet")
+            warnings.append(f"{names[i - 1]}: {want - total} of {want} not "
+                            "on a pallet")
         out.append(qs)
     for j in range(n):
         if out and not any(row[j] for row in out):
@@ -118,55 +128,129 @@ def check(items: Sequence[Dict[str, Any]], pallets: Any,
     return out, warnings
 
 
+def order_number(order: Dict[str, Any]) -> str:
+    header = order.get("header") or {}
+    return str(order.get("order_number") or header.get("Order Number") or "")
+
+
+def address_key(customer: Optional[Dict[str, Any]]) -> str:
+    """Where an account's deliveries go, for telling whether two orders are
+    going to the same place: street, suburb and postcode, any case."""
+    c = customer or {}
+    parts = [str(c.get(k) or "") for k in ("delivery_address1",
+                                             "delivery_city",
+                                             "delivery_postcode")]
+    return "|".join(" ".join(p.lower().split()) for p in parts)
+
+
+def same_place(entries: Sequence[Dict[str, Any]]) -> bool:
+    """True when every order with an address is going to the same one."""
+    keys = {address_key(e.get("customer")) for e in entries
+            if str((e.get("customer") or {}).get("delivery_address1")
+                   or "").strip()}
+    return len(keys) <= 1
+
+
 def build(order: Dict[str, Any], items: Sequence[Dict[str, Any]],
           customer: Optional[Dict[str, Any]], pallets: Any,
           grid: Sequence[Sequence[Any]]) -> Tuple[List[Dict[str, Any]],
                                                    List[str]]:
-    """Every pallet's label, in order. Raises PalletError."""
-    quantities, warnings = check(items, pallets, grid)
-    header = dict(order.get("header") or {})
-    c = customer or {}
+    """Every pallet's label for one order, in order. Raises PalletError."""
+    return build_orders([{"order": order, "items": items,
+                          "customer": customer}], pallets, grid)
+
+
+def build_orders(entries: Sequence[Dict[str, Any]], pallets: Any,
+                 grid: Sequence[Sequence[Any]]
+                 ) -> Tuple[List[Dict[str, Any]], List[str]]:
+    """Every pallet's label for one or more orders sharing the pallets.
+
+    `entries` are {"order", "items", "customer"}; `grid` has a row for
+    every line of every order, in that order. Raises PalletError."""
+    if not entries:
+        raise PalletError(["choose an order"])
+    multi = len(entries) > 1
+    lines, names = [], []
+    for e in entries:
+        on = order_number(e["order"])
+        header = dict(e["order"].get("header") or {})
+        for i, item in enumerate(e.get("items") or [], start=1):
+            lines.append((on, i, item, header))
+            names.append(f"O/N {on or '?'} line {i}" if multi else f"line {i}")
+    quantities, warnings = check([l[2] for l in lines], pallets, grid, names)
+
     problems = []
-    addr1 = str(c.get("delivery_address1") or "").strip()
-    if not addr1:
-        problems.append("the customer has no delivery address on their "
-                        "account - add it first")
+    for e in entries:
+        c = e.get("customer") or {}
+        if not str(c.get("delivery_address1") or "").strip():
+            who = c.get("name") or e["order"].get("customer_name") or ""
+            problems.append(
+                (f"O/N {order_number(e['order'])} ({who}): " if multi else "")
+                + "the customer has no delivery address on their account - "
+                "add it first")
+    if not problems and not same_place(entries):
+        problems.append("these orders are going to different addresses - a "
+                        "pallet goes to one place, so print them separately")
     if problems:
         raise PalletError(problems)
+
+    first = entries[0]
+    c = first.get("customer") or {}
+    header = dict(first["order"].get("header") or {})
     n = len(quantities[0]) if quantities else positive_int(pallets)
+    addr1 = str(c.get("delivery_address1") or "").strip()
     address = [addr1] + ([str(c["delivery_address2"]).strip()]
                          if str(c.get("delivery_address2") or "").strip()
                          else [])
     state = _dl.normalise_state(c.get("delivery_state")) or \
         str(c.get("delivery_state") or "")
+    who = []
+    for e in entries:
+        ce = e.get("customer") or {}
+        name = str(ce.get("name") or e["order"].get("customer_name")
+                   or (e["order"].get("header") or {}).get("Customer Name")
+                   or "")
+        if name and name not in who:
+            who.append(name)
+    numbers = []
+    for e in entries:
+        on = order_number(e["order"])
+        if on not in numbers:
+            numbers.append(on)
     common = {
         "company": _settings.COMPANY["name"],
         "abn": _settings.COMPANY["abn"],
         "phone": _settings.COMPANY["phone"],
-        "customer_name": str(c.get("name") or order.get("customer_name")
-                             or header.get("Customer Name") or ""),
+        "customer_name": " / ".join(who),
         "address_lines": address,
         "locality": f"{c.get('delivery_city') or ''}  {state}  "
                     f"{c.get('delivery_postcode') or ''}".strip(),
-        "order_number": str(order.get("order_number")
-                            or header.get("Order Number") or ""),
-        "job_number": _dl.job_text(header.get("Job", order.get("job"))),
+        "order_number": numbers[0] if len(numbers) == 1 else "See each line",
+        "orders": numbers,
+        "multi_order": multi,
+        "job_number": _dl.job_text(header.get("Job",
+                                              first["order"].get("job"))),
         "contact_name": str(header.get("Attention")
                             or c.get("contact_person") or ""),
         "contact_phone": str(c.get("phone") or ""),
     }
     labels = []
     for j in range(n):
-        rows = [{"line": i + 1, "text": line_text(item),
-                 "job": line_job(item, header),
-                 "quantity": quantities[i][j], "ordered": ordered(item)}
-                for i, item in enumerate(items) if quantities[i][j]]
+        rows = [{"line": num, "order": on, "text": line_text(item),
+                 "job": line_job(item, hdr),
+                 "quantity": quantities[k][j], "ordered": ordered(item)}
+                for k, (on, num, item, hdr) in enumerate(lines)
+                if quantities[k][j]]
         # The job at the top: the one every line on the pallet shares, or
-        # "see lines" when they differ. Never the order number.
+        # "see lines" when they differ. Never the order number. The same
+        # for the order number when the pallet carries more than one order.
         jobs = {r["job"] for r in rows}
         top_job = (_dl.job_text(next(iter(jobs))) if len(jobs) == 1
                    else "See each line")
-        labels.append(dict(common, job_number=top_job, pallet=j + 1, pallets=n,
+        ons = {r["order"] for r in rows}
+        top_on = next(iter(ons)) if len(ons) == 1 else "See each line"
+        labels.append(dict(common, job_number=top_job, order_number=top_on,
+                           pallet=j + 1, pallets=n,
                            pallet_text=f"{j + 1} of {n}", items=rows,
                            filters_on_pallet=sum(r["quantity"]
                                                  for r in rows)))
@@ -275,13 +359,18 @@ def render_pdf(labels: Sequence[Dict[str, Any]], path: str) -> str:
             qx = left + 5 * mm
             tx = left + 30 * mm
             ox = right - 5 * mm
-            # A job column when any line on this pallet has a job.
+            # A job column when any line on this pallet has a job, and an
+            # order column when the pallets carry more than one order.
             jobs_shown = any(r.get("job") for r in lab["items"])
+            orders_shown = bool(lab.get("multi_order"))
             jx = ox - 85 * mm
+            orx = (jx if jobs_shown else ox - 25 * mm) - 40 * mm
             c.setFont("Helvetica-Bold", 10)
             c.setFillColor(soft)
             c.drawString(qx, ty - 15 * mm, "QTY")
             c.drawString(tx, ty - 15 * mm, "FILTER")
+            if orders_shown:
+                c.drawString(orx, ty - 15 * mm, "ORDER")
             if jobs_shown:
                 c.drawString(jx, ty - 15 * mm, "JOB")
             c.drawRightString(ox, ty - 15 * mm, "ORDERED")
@@ -294,6 +383,12 @@ def render_pdf(labels: Sequence[Dict[str, Any]], path: str) -> str:
                 c.setFont("Helvetica-Bold", 18)
                 c.drawString(qx, y, str(r["quantity"]))
                 width = (jx - tx - 4 * mm) if jobs_shown else ox - tx - 25 * mm
+                if orders_shown:
+                    width = orx - tx - 4 * mm
+                    on = str(r.get("order") or "")
+                    os_ = fit(on, "Helvetica-Bold", 14, 36 * mm, 8)
+                    c.setFont("Helvetica-Bold", os_)
+                    c.drawString(orx, y, on)
                 fs = fit(r["text"], "Helvetica", 15, width, 9)
                 c.setFont("Helvetica", fs)
                 c.drawString(tx, y, r["text"])

@@ -27,7 +27,7 @@ log, stock management and a customer database.
   Logan, Gold Coast, Sunshine Coast, Ipswich, Freight or Pick Up — and that
   is what goes in the order's Location; the delivery address is only for the
   labels. An account with no Location is asked for one when it is picked.
-- **Bag headers** — tick Header on any bag filter and the header gets its
+- **Bag headers** — off by default; tick Header on any bag filter and the header gets its
   own page on the filter worksheet: 15 mm smaller than the bag each way and
   25 deep (a 610 × 610 bag takes a 595 × 595 header), with a wire cut 15 mm
   smaller again on a wire header (bag On Wire): 580 × 580. The header's size
@@ -99,7 +99,9 @@ log, stock management and a customer database.
   pallets and how many of each line go on each (or spread them evenly), and
   each pallet gets an A4 sheet: `Pallet 1 of 3`, the filters on it, the
   customer, delivery address, order and job number. View Order → Actions →
-  Pallet labels…, or the Delivery tab's Run ▾ menu.
+  Pallet labels…, or the Delivery tab's Run ▾ menu. Several orders going to
+  the same address can share the pallets: select them together in the run,
+  or press **+ Add another order…** — each line then shows its order number.
 - **Packing by weight** — every wrapped bundle is 10 kg at most, wrapping
   included, and a size can carry a handling limit (412 × 412 × 90: five a
   wrap). Lines are planned automatically, or the office sets the plan
