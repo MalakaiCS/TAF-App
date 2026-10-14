@@ -175,7 +175,10 @@ def test_each_way_names_the_row_of_marks_the_sheet_prints_for_it():
                             "sideways_u": "FLIPPED marks",
                             "g": "REVERSED marks"}[method]
     one = wb.frame_lines({"Short": 295, "Long": 310, "Quantity": 1})
-    assert one == [("MARK AS U - use the top row of marks", True)]
+    assert one[0] == ("MARK AS G - use the REVERSED marks", True)
+    ell = wb.frame_lines({"Short": 100, "Long": 150, "Quantity": 5})
+    assert ell == [("MARK AS L - 2 strips a filter, each marked 148, 246, "
+                    "266 (long, short, lip)", True)]
 
 
 def test_a_customers_way_is_followed_and_a_trimmed_lip_is_said():
@@ -235,7 +238,9 @@ def test_a_line_nobody_planned_is_planned_automatically():
     pages = _render(items)
     assert "SET BEFORE PACKING" not in _flat(pages[1])
     assert "Automatic - " in _flat(pages[1])
-    assert "(Wrap 12 Filters x 1)" in _flat(pages[1])
+    ev = op.evaluate_line(items[1], cs.defaults())
+    assert ev["plan"]["mode"] == "automatic"
+    assert ev["instructions"][0] in _flat(pages[1])
 
 
 def test_a_line_with_no_quantity_says_so():

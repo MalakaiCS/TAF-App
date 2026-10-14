@@ -46,6 +46,7 @@ from taf_order_app import dockets as _dockets
 from taf_order_app import supplies as _supplies
 from taf_order_app import bracing as _bracing
 from taf_order_app import calc_settings as _calc_settings
+from taf_order_app import cchannel as _cchannel
 from taf_order_app import customer_merge as _merge
 from taf_order_app import delivery_labels as _delivery_labels
 from taf_order_app import filter_calc as _filter_calc
@@ -6078,7 +6079,7 @@ class WeightsSettingsDialog(tk.Toplevel):
         self.configure(bg=CBG)
         self.editable = editable
         self.s = _calc_settings.cached()
-        _centre_on_parent(self, master, px(900), px(640))
+        _centre_on_parent(self, master, px(1060), px(720))
         self.bind("<Escape>", lambda _e: self.destroy())
 
         foot = tk.Frame(self, bg=CBG, padx=px(14), pady=px(10))
@@ -6094,6 +6095,7 @@ class WeightsSettingsDialog(tk.Toplevel):
         self._company(nb)
         self._materials(nb)
         self._packing_tab(nb)
+        self._cchannel_tab(nb)
         self._frames_tab(nb)
         for section, title, hint in (
                 ("steel", "Steel",
@@ -6361,6 +6363,274 @@ class WeightsSettingsDialog(tk.Toplevel):
                      pady=px(5)).pack(side="left", padx=(px(8), 0))
             flat_btn(bar, "Save packing settings", _save, bg=CGR,
                      pady=px(5)).pack(side="left", padx=(px(8), 0))
+
+    # ── C-channel ─────────────────────────────────────────────────────────
+    MATERIAL_FIELDS = (
+        ("material", "Material", "text"),
+        ("steel_grade", "Steel grade", "text"),
+        ("galvanising", "Galvanising", "text"),
+        ("nominal_thickness_mm", "Thickness, mm (as supplied)", "num"),
+        ("thickness_basis", "That thickness is", "basis"),
+        ("base_metal_thickness_mm", "Base-metal thickness, mm (if known)",
+         "num"),
+        ("coating_mass_g_m2", "Coating, g/m² (both sides)", "num"),
+        ("density_kg_m3", "Steel density, kg/m³", "num"),
+        ("stock_length_mm", "Stock length, mm", "num"),
+        ("left_flange_mm", "Left flange, mm", "num"),
+        ("right_flange_mm", "Right flange, mm", "num"),
+        ("bend_correction_mm", "Bend correction to developed width, mm",
+         "num"),
+        ("mass_calibration_factor", "Measured-mass calibration factor",
+         "num"),
+    )
+    BASES = {"nominal_supplied": "Nominal, as supplied",
+             "base_metal": "Base metal (no zinc)",
+             "coated": "Coated (zinc included)"}
+
+    def _cchannel_tab(self, nb):
+        f = self._page(nb, "C-channel")
+        cc = json.loads(json.dumps(self.s.get("c_channel")
+                                   or _cchannel.default_settings()))
+        left = tk.Frame(f, bg=CCA)
+        left.pack(side="left", fill="y", padx=(0, px(14)))
+        right = tk.Frame(f, bg=CCA)
+        right.pack(side="left", fill="both", expand=True)
+
+        code = tk.StringVar(value=cc.get("default_material")
+                            or _cchannel.DEFAULT_MATERIAL)
+        row0 = tk.Frame(left, bg=CCA)
+        row0.pack(fill="x")
+        tk.Label(row0, text="Material code", bg=CCA, fg=CTX,
+                 font=F_BOLD).pack(side="left")
+        codes = ttk.Combobox(row0, textvariable=code, state="readonly",
+                             width=26, values=sorted(cc["materials"]))
+        codes.pack(side="left", padx=(px(6), 0))
+        grid = tk.Frame(left, bg=CCA)
+        grid.pack(fill="x", pady=(px(6), 0))
+        fvars = {}
+        for r, (key, label, kind) in enumerate(self.MATERIAL_FIELDS):
+            tk.Label(grid, text=label, bg=CCA, fg=CMU, font=F_SM
+                     ).grid(row=r, column=0, sticky="w", pady=px(1))
+            var = tk.StringVar()
+            fvars[key] = var
+            if kind == "basis":
+                w = ttk.Combobox(grid, textvariable=var, state="readonly",
+                                 width=24, values=list(self.BASES.values()))
+            else:
+                w = field_entry(grid, textvariable=var, width=22)
+            w.grid(row=r, column=1, sticky="w", pady=0)
+            if not self.editable:
+                w.config(state="disabled")
+        coat = tk.BooleanVar()
+        tk.Checkbutton(left, text="Add the zinc coating's mass (only once "
+                                  "the steel's base-metal thickness is "
+                                  "known)", variable=coat, bg=CCA, fg=CTX,
+                       font=F_SM, activebackground=CCA, selectcolor=CBG,
+                       wraplength=px(360), justify="left"
+                       ).pack(anchor="w", pady=(px(4), 0))
+        sub = tk.StringVar(value=str((cc.get("estimate_rule") or {})
+                                     .get("subtract_mm", 2)))
+        er = tk.Frame(left, bg=CCA)
+        er.pack(fill="x", pady=(px(6), 0))
+        tk.Label(er, text="Estimated centre width = depth less", bg=CCA,
+                 fg=CMU, font=F_SM).pack(side="left")
+        field_entry(er, textvariable=sub, width=5).pack(side="left",
+                                                        padx=px(4))
+        tk.Label(er, text="mm", bg=CCA, fg=CMU, font=F_SM).pack(side="left")
+
+        def _load(*_):
+            m = cc["materials"].get(code.get()) or {}
+            for key, _label, kind in self.MATERIAL_FIELDS:
+                v = m.get(key)
+                if kind == "basis":
+                    fvars[key].set(self.BASES.get(v or "nominal_supplied", ""))
+                else:
+                    fvars[key].set("" if v is None else str(v))
+            coat.set(bool(m.get("include_coating_mass")))
+        code.trace_add("write", _load)
+        _load()
+
+        def _store_material() -> bool:
+            m = dict(cc["materials"].get(code.get()) or {})
+            for key, label, kind in self.MATERIAL_FIELDS:
+                text = fvars[key].get().strip()
+                if kind == "text":
+                    m[key] = text
+                elif kind == "basis":
+                    m[key] = next((k for k, v in self.BASES.items()
+                                   if v == text), "nominal_supplied")
+                else:
+                    if not text:
+                        m[key] = None
+                        continue
+                    try:
+                        m[key] = float(text)
+                    except ValueError:
+                        messagebox.showwarning("C-channel", f"{label} has to "
+                                               "be a number.", parent=self)
+                        return False
+            m["include_coating_mass"] = bool(coat.get())
+            cc["materials"][code.get()] = m
+            return True
+
+        # Centre widths: every depth, where its width came from.
+        tk.Label(right, text="Centre width for each nominal depth",
+                 bg=CCA, fg=CTX, font=F_BOLD).pack(anchor="w")
+        cols = ("depth", "width", "status")
+        tree = ttk.Treeview(right, columns=cols, show="headings", height=9,
+                            style="TAF.Treeview")
+        for col, text, wd in (("depth", "Depth", 70), ("width", "Width", 70),
+                              ("status", "Status", 220)):
+            tree.heading(col, text=text, anchor="w")
+            tree.column(col, width=px(wd), anchor="w")
+        tree.pack(fill="both", expand=True)
+        wbar = tk.Frame(right, bg=CCA)
+        wbar.pack(fill="x", pady=(px(4), 0))
+
+        def _fill():
+            for iid in tree.get_children():
+                tree.delete(iid)
+            for d in _cchannel.depths({"c_channel": cc}):
+                r = _cchannel.resolve_dimensions(d, settings={"c_channel": cc})
+                tree.insert("", "end", iid=str(d), values=(
+                    f"{d:g}", f"{r['actual_centre_width_mm']:g}"
+                    if r["actual_centre_width_mm"] is not None else "",
+                    _cchannel.STATUS_LABELS.get(r["verification_status"],
+                                                "")))
+        _fill()
+
+        def _edit_width():
+            sel = tree.selection()
+            if not sel:
+                return
+            depth = sel[0]
+            cur = (cc["centre_widths"].get(depth) or {})
+            text = simpledialog.askstring(
+                "Centre width", f"Actual centre width for the {depth}mm "
+                "channel, in mm (blank to go back to the estimate)",
+                parent=self, initialvalue=str(cur.get("width_mm") or ""))
+            if text is None:
+                return
+            if not text.strip():
+                cc["centre_widths"].pop(depth, None)
+                _fill()
+                return
+            try:
+                width = float(text)
+                if width <= 0:
+                    raise ValueError
+            except ValueError:
+                messagebox.showwarning("Centre width", "A width above zero, "
+                                       "in mm.", parent=self)
+                return
+            verified = messagebox.askyesno(
+                "Centre width", f"Has {width:g}mm been measured on the "
+                f"{depth}mm channel TAF makes?\n\nYes marks it verified; No "
+                "keeps it as supplied but unconfirmed.", parent=self)
+            cc["centre_widths"][depth] = {
+                "width_mm": width,
+                "status": "verified" if verified else
+                "supplied_unconfirmed_mapping",
+                "source": f"set by {_who_now() or 'staff'}",
+                "at": _calc_settings.now_iso()}
+            _fill()
+
+        def _verify():
+            for depth in tree.selection():
+                row = cc["centre_widths"].get(depth)
+                if row and row.get("status") == "supplied_unconfirmed_mapping":
+                    row.update(status="verified",
+                               source=f"{row.get('source', '')}; confirmed "
+                                      f"by {_who_now() or 'staff'}",
+                               at=_calc_settings.now_iso())
+            _fill()
+
+        # Measured weights: one length weighed, used before the sum.
+        tk.Label(right, text="Measured weights (used instead of the sum)",
+                 bg=CCA, fg=CTX, font=F_BOLD).pack(anchor="w",
+                                                   pady=(px(8), 0))
+        mlist = tk.Listbox(right, height=3, font=F_SM, bg=CFD, relief="flat",
+                           highlightthickness=0)
+        mlist.pack(fill="x")
+        mbar = tk.Frame(right, bg=CCA)
+        mbar.pack(fill="x", pady=(px(4), 0))
+
+        def _fill_measured():
+            mlist.delete(0, "end")
+            for m in cc.get("measured_weights") or []:
+                mlist.insert("end", f"  {m.get('nominal_depth_mm')}mm x "
+                                    f"{m.get('length_mm')}mm = {m.get('kg')} "
+                                    f"kg  ({'verified' if m.get('verified') else 'not verified'})")
+        _fill_measured()
+
+        def _add_measured():
+            text = simpledialog.askstring(
+                "Measured weight", "Depth, length and weight - e.g. "
+                "45 x 2440 = 0.95", parent=self)
+            if not text:
+                return
+            m = re.match(r"^\s*(\d+(?:\.\d+)?)\s*[x×]\s*(\d+(?:\.\d+)?)\s*="
+                         r"\s*(\d*\.?\d+)\s*(?:kg)?\s*$", text)
+            if not m or min(float(m.group(i)) for i in (1, 2, 3)) <= 0:
+                messagebox.showwarning("Measured weight", "Write it like "
+                                       "45 x 2440 = 0.95", parent=self)
+                return
+            cc.setdefault("measured_weights", []).append({
+                "material_code": code.get(),
+                "nominal_depth_mm": float(m.group(1)),
+                "length_mm": float(m.group(2)), "kg": float(m.group(3)),
+                "verified": True, "by": _who_now(),
+                "at": _calc_settings.now_iso()})
+            _fill_measured()
+
+        def _remove_measured():
+            sel = mlist.curselection()
+            if sel:
+                cc["measured_weights"].pop(sel[0])
+                _fill_measured()
+
+        def _save():
+            if not _store_material():
+                return
+            try:
+                cc["estimate_rule"] = {"subtract_mm": float(sub.get())}
+            except ValueError:
+                messagebox.showwarning("C-channel", "The estimate rule takes "
+                                       "a number of mm.", parent=self)
+                return
+            cc["default_material"] = code.get()
+            if self._store("c_channel", cc):
+                _fill()
+
+        def _new_code():
+            name = simpledialog.askstring(
+                "New material", "Material code (it starts as a copy of "
+                f"{code.get()})", parent=self)
+            name = (name or "").strip().upper().replace(" ", "_")
+            if not name or name in cc["materials"]:
+                return
+            cc["materials"][name] = dict(cc["materials"][code.get()],
+                                         material_code=name)
+            codes.config(values=sorted(cc["materials"]))
+            code.set(name)
+
+        buttons = tk.Frame(f, bg=CCA)
+        buttons.pack(side="bottom", fill="x", pady=(px(8), 0), before=left)
+        flat_btn(buttons, "Weight table…",
+                 lambda: CChannelTableDialog(self, {"c_channel": cc}),
+                 bg=CA, pady=px(5)).pack(side="right")
+        if self.editable:
+            flat_btn(buttons, "Save C-channel", _save, bg=CGR,
+                     pady=px(5)).pack(side="left", padx=(0, px(6)))
+            flat_btn(buttons, "New material code…", _new_code, bg=CNE,
+                     pady=px(5)).pack(side="left")
+            for bar, items in ((wbar, (("Edit width…", _edit_width),
+                                       ("Mark verified", _verify))),
+                               (mbar, (("Add measured…", _add_measured),
+                                       ("Remove", _remove_measured)))):
+                for text, fn in items:
+                    flat_btn(bar, text, fn, bg=CNE, pady=px(3),
+                             font=F_SM).pack(side="left", padx=(0, px(6)))
 
     # What the frames table writes: one profile for the steel channel, one
     # for the flyscreen frame, kept alongside any other part profiles.
@@ -6702,6 +6972,158 @@ class AddAddressDialog(tk.Toplevel):
         if self.on_saved:
             self.on_saved(self.cust)
         self.destroy()
+
+
+class CChannelTableDialog(tk.Toplevel):
+    """Every C-channel depth, what its channel is and what a stack weighs.
+
+    Nothing in the table is typed: each row comes from the C-channel
+    calculator (taf_order_app/cchannel.py) with the current settings. Stacks
+    are worked out from the unrounded weight of one length and rounded up to
+    the next 0.1 kg once.
+    """
+
+    COLS = ("depth", "size", "status", "one", "s1", "s2", "s5", "s10",
+            "custom")
+
+    def __init__(self, master, settings=None):
+        super().__init__(master)
+        self.title("C-channel weights")
+        self.transient(master)
+        self.configure(bg=CBG)
+        self.settings = settings if settings is not None else \
+            _calc_settings.cached()
+        _centre_on_parent(self, master, px(1180), px(680))
+        self.bind("<Escape>", lambda _e: self.destroy())
+
+        top = tk.Frame(self, bg=CA, padx=px(16), pady=px(10))
+        top.pack(fill="x")
+        mat = _cchannel.material(self.settings) or {}
+        tk.Label(top, text="C-channel weights", bg=CA, fg="white",
+                 font=(FAM, 13, "bold")).pack(anchor="w")
+        tk.Label(top, text=(f"{mat.get('material', '')}, "
+                            f"{mat.get('nominal_thickness_mm', '')} mm, "
+                            f"{mat.get('density_kg_m3', '')} kg/m³, "
+                            f"{mat.get('left_flange_mm', '')} × centre × "
+                            f"{mat.get('right_flange_mm', '')} mm. Stacks "
+                            "rounded up to the next 0.1 kg."),
+                 bg=CA, fg="white", font=F_SM).pack(anchor="w")
+
+        bar = tk.Frame(self, bg=CBG, padx=px(14), pady=px(8))
+        bar.pack(fill="x")
+        self.search = tk.StringVar()
+        self.status = tk.StringVar(value="All")
+        self.custom = tk.StringVar(value="20")
+        tk.Label(bar, text="Depth", bg=CBG, fg=CMU, font=F_SM).pack(side="left")
+        field_entry(bar, textvariable=self.search, width=8).pack(
+            side="left", padx=(px(4), px(14)))
+        tk.Label(bar, text="Show", bg=CBG, fg=CMU, font=F_SM).pack(side="left")
+        ttk.Combobox(bar, textvariable=self.status, state="readonly", width=30,
+                     values=["All"] + list(_cchannel.STATUS_LABELS.values())
+                     ).pack(side="left", padx=(px(4), px(14)))
+        tk.Label(bar, text="Custom stack", bg=CBG, fg=CMU,
+                 font=F_SM).pack(side="left")
+        field_entry(bar, textvariable=self.custom, width=6).pack(
+            side="left", padx=(px(4), 0))
+        for v in (self.search, self.status, self.custom):
+            v.trace_add("write", lambda *_: self._fill())
+
+        wrap = tk.Frame(self, bg=CCA, highlightbackground=CBR,
+                        highlightthickness=1)
+        wrap.pack(fill="both", expand=True, padx=px(14))
+        self.tree = ttk.Treeview(wrap, columns=self.COLS, show="headings",
+                                 style="TAF.Treeview", selectmode="extended")
+        heads = {"depth": ("Depth", 70), "size": ("Actual C-channel size", 175),
+                 "status": ("Centre width", 165), "one": ("1 length (raw)", 115),
+                 "s1": ("Stack of 1", 85), "s2": ("Stack of 2", 85),
+                 "s5": ("Stack of 5", 85), "s10": ("Stack of 10", 90),
+                 "custom": ("Custom", 90)}
+        for col, (text, wd) in heads.items():
+            self.tree.heading(col, text=text, anchor="w")
+            self.tree.column(col, width=px(wd), minwidth=px(wd), anchor="w",
+                             stretch=False)
+        sb = ttk.Scrollbar(wrap, orient="vertical", command=self.tree.yview)
+        self.tree.configure(yscrollcommand=sb.set)
+        sb.pack(side="right", fill="y")
+        self.tree.pack(fill="both", expand=True)
+        self.tree.tag_configure("verified", foreground=CGR)
+        self.tree.tag_configure("estimate", foreground="#B26A00")
+        self.tree.bind("<Control-c>", lambda _e: self._copy())
+
+        foot = tk.Frame(self, bg=CBG, padx=px(14), pady=px(10))
+        foot.pack(fill="x", side="bottom")
+        flat_btn(foot, "Close", self.destroy, bg=CNE,
+                 pady=px(6)).pack(side="right")
+        flat_btn(foot, "Export CSV…", self._export, bg=CA,
+                 pady=px(6)).pack(side="right", padx=(0, px(8)))
+        flat_btn(foot, "Copy selected", self._copy, bg=CNE,
+                 pady=px(6)).pack(side="right", padx=(0, px(8)))
+        self.note = tk.Label(foot, text="", bg=CBG, fg=CMU, font=F_SM)
+        self.note.pack(side="left")
+        self.rows = []
+        self._fill()
+
+    def _custom_qty(self):
+        from taf_order_app.numbers import positive_int
+        return positive_int(self.custom.get())
+
+    def _fill(self):
+        qty = self._custom_qty()
+        qs = [1, 2, 5, 10] + ([qty] if qty else [])
+        rows = _cchannel.table(self.settings, qs)
+        want = self.search.get().strip()
+        label = self.status.get()
+        self.rows = []
+        for iid in self.tree.get_children():
+            self.tree.delete(iid)
+        for r in rows:
+            if want and not str(r["nominal_depth_mm"]).startswith(want):
+                continue
+            shown = _cchannel.STATUS_LABELS.get(r["verification_status"], "")
+            if label != "All" and shown != label:
+                continue
+            stacks = [_cchannel.kg_text(x["stack_display_weight_kg"])
+                      for x in r["stacks"]]
+            if not qty:
+                stacks.append("")
+            values = (f"{r['nominal_depth_mm']:g} mm", r["size"], shown,
+                      "" if r["raw_weight_kg"] is None
+                      else f"{r['raw_weight_kg']:.6f} kg", *stacks)
+            tag = "verified" if r["verification_status"] == "verified" else \
+                "estimate" if r["verification_status"] in (
+                    "estimated", "provisional_estimate") else ""
+            self.tree.insert("", "end", iid=str(len(self.rows)),
+                             values=values, tags=(tag,) if tag else ())
+            self.rows.append(values)
+        self.tree.heading("custom", text=f"Stack of {qty}" if qty else
+                          "Custom")
+        self.note.config(text=f"{len(self.rows)} depths shown")
+
+    def _lines(self, rows):
+        head = [self.tree.heading(c)["text"] for c in self.COLS]
+        return [head] + [list(r) for r in rows]
+
+    def _copy(self):
+        sel = self.tree.selection() or self.tree.get_children()
+        rows = [self.rows[int(i)] for i in sel]
+        text = "\n".join("\t".join(str(v) for v in line)
+                         for line in self._lines(rows))
+        self.clipboard_clear()
+        self.clipboard_append(text)
+        self.note.config(text=f"Copied {len(rows)} row"
+                              f"{'' if len(rows) == 1 else 's'}")
+
+    def _export(self):
+        import csv
+        path = filedialog.asksaveasfilename(
+            parent=self, title="Save C-channel weights",
+            defaultextension=".csv", initialfile="c_channel_weights.csv",
+            filetypes=[("CSV", "*.csv")])
+        if not path:
+            return
+        with open(path, "w", newline="", encoding="utf-8-sig") as fh:
+            csv.writer(fh).writerows(self._lines(self.rows))
+        self.note.config(text=f"Saved {path}")
 
 
 class MergeCustomersDialog(tk.Toplevel):
@@ -12137,7 +12559,8 @@ class ModernOrderApp(tk.Frame):
         tbl_wrap.rowconfigure(0, weight=1)
         tbl_wrap.columnconfigure(0, weight=1)
 
-        scols = ("img", "name", "sku", "type", "unit", "on_hand", "minimum", "status", "location")
+        scols = ("img", "name", "sku", "type", "unit", "on_hand", "minimum",
+                 "status", "weight", "location")
         self._stock_tree = ttk.Treeview(tbl_wrap, columns=scols,
                                         show="headings",
                                         style="TAF.Treeview",
@@ -12158,6 +12581,7 @@ class ModernOrderApp(tk.Frame):
             "on_hand":  ("On Hand",     80, "center"),
             "minimum":  ("Minimum",     80, "center"),
             "status":   ("Status",      90, "center"),
+            "weight":   ("Weight",      80, "center"),
             "location": ("Location",   999, "w"),
         }
         for col, (hd, wd, anc) in s_col_defs.items():
@@ -12200,6 +12624,9 @@ class ModernOrderApp(tk.Frame):
 
         menu_btn(bot, "Item  ▾", _stock_actions, variant="secondary",
                  pady=7).pack(side="left")
+        flat_btn(bot, "C-channel weights…",
+                 lambda: CChannelTableDialog(self.master),
+                 variant="secondary", pady=7).pack(side="right")
 
         # Cache for the full stock list
         self._stock_data: list = []
@@ -12286,6 +12713,7 @@ class ModernOrderApp(tk.Frame):
                 _fmt(on_hand),
                 _fmt(minimum) if minimum > 0 else "—",
                 status,
+                self._stock_weight_text(item),
                 item.get("location", "") or "—",
             ))
 
@@ -12296,6 +12724,17 @@ class ModernOrderApp(tk.Frame):
         self.status_var.set(
             f"{len(shown)} item{'s' if len(shown) != 1 else ''} shown"
             + (f"  ·  {n_low} low/out" if n_low else ""))
+
+    def _stock_weight_text(self, item) -> str:
+        """What the channel on hand weighs, from the C-channel calculator.
+        Blank for anything that is not channel."""
+        try:
+            w = _cchannel.stock_item_weight(item, _calc_settings.cached())
+        except Exception:
+            return ""
+        if not w:
+            return ""
+        return _cchannel.kg_text(w.get("on_hand_display_weight_kg")) or "—"
 
     def _get_selected_stock(self) -> "dict | None":
         sel = self._stock_tree.selection()
@@ -15245,7 +15684,8 @@ class ModernOrderApp(tk.Frame):
         flat_btn(foot, "Close", dlg.destroy, bg=CNE,
                  pady=px(6)).pack(side="right")
         for label, pref in (("Whichever is cheapest", ""), ("G", "g"),
-                            ("Sideways U", "sideways_u"), ("U", "u")):
+                            ("L", "l"), ("Sideways U", "sideways_u"),
+                            ("U", "u")):
             flat_btn(foot, label, lambda p=pref: _set(p), bg=CNE, pady=px(6),
                      variant="secondary").pack(side="left", padx=(0, px(6)))
         _reload()
@@ -17074,11 +17514,9 @@ class ModernOrderApp(tk.Frame):
         tk.Label(card, text="Weights, packing and delivery labels", bg=CCA,
                  fg=CA, font=F_SEC, anchor="w").pack(anchor="w")
         tk.Label(card,
-                 text="The base address labels print as From, the weighed "
-                      "wire and media, handling limits, what the wrapping "
-                      "weighs, and the frame, brace and cut profiles. Only "
-                      "what has been supplied is filled in; the rest stays "
-                      "unknown until somebody enters it.",
+                 text="The base address labels print as From, the wire, "
+                      "media and C-channel the weights come from, handling "
+                      "limits, the wrapping, braces and cut profiles.",
                  bg=CCA, fg=CMU, font=F_SM, justify="left", anchor="w",
                  wraplength=px(620)).pack(anchor="w", pady=(2, 8))
         flat_btn(card, "Open weights and packing…", self._open_weights_settings,

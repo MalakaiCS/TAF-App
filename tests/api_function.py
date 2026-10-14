@@ -132,11 +132,16 @@ def run_checks(port: int) -> None:
           code == 200 and piece.get("cut_width_mm") == 585 and
           piece.get("cut_length_mm") == 1062, json.dumps(piece))
     res = out["result"]
-    check("and weighed from the supplied rates with nothing entered",
-          res["weight_complete"] and abs(
+    frame = [c for c in res.get("components", [])
+             if c["name"] == "filter_frame"]
+    check("and weighed from the supplied rates and the C-channel, with "
+          "nothing entered",
+          res["weight_complete"] and frame and
+          frame[0]["basis"] == "c_channel" and abs(
               res["complete_filter_weight_kg_per_filter"]
               - res["installed_wire_weight_kg_per_filter"]
-              - res["installed_media_weight_kg_per_filter"]) < 1e-9,
+              - res["installed_media_weight_kg_per_filter"]
+              - frame[0]["installed_kg_per_filter"]) < 1e-9,
           json.dumps(res.get("missing")))
     code, out = call(port, {"action": "calculate", "item": {
         "Filter Type": "V-form", "Short": 595, "Long": 595, "Channel": 90,
@@ -190,7 +195,50 @@ def run_checks(port: int) -> None:
           {l["from_address"] for l in labels} == {"9 New Road, Logan QLD 4114"})
     check("with N/A for no job and the weight worked out",
           labels and labels[0]["job_number"] == "N/A" and
-          labels[2]["weight_kg"] == "3.200", json.dumps(labels[2:])[:200])
+          labels[2]["weight_kg"] == "3.2", json.dumps(labels[2:])[:200])
+    described = dict(order, items=[{
+        "quantity": 10, "description": "CH45 - 45mm channel 2440",
+        "wrap_quantities": [10],
+        "complete_filter_weight_kg_per_filter": 0.948123}])
+    code, out = call(port, {"action": "labels", "order": described})
+    lab = (out.get("labels") or [{}])[0]
+    # Ten lengths at 0.948123 kg plus the 0.2 kg wrapping these settings
+    # carry: 9.68123, rounded up once to 9.7.
+    check("a channel line is labelled by what it is, weighed and rounded up",
+          code == 200 and lab.get("filter_size") == "CH45 - 45mm channel "
+          "2440" and lab.get("weight_kg") == "9.7", json.dumps(out)[:300])
+
+    print("\n── C-channel ──")
+    code, out = call(port, {"action": "c_channel_weight",
+                            "nominal_depth_mm": 45})
+    r = out.get("result", {})
+    check("23 x 44 x 23 x 2440 weighs 0.948123 kg",
+          code == 200 and abs(r.get("raw_weight_kg", 0) - 0.948123) < 1e-9
+          and [x["stack_display_weight_kg"] for x in r.get("stacks", [])]
+          == [1.0, 1.9, 4.8, 9.5], json.dumps(r)[:300])
+    check("and says its centre width is supplied, not yet verified",
+          r.get("verification_status") == "supplied_unconfirmed_mapping")
+    code, out = call(port, {"action": "c_channel_table"})
+    rows = out.get("result", [])
+    check("the table has every depth from 10 to 250",
+          [row["nominal_depth_mm"] for row in rows] == list(range(10, 255, 5)),
+          str(len(rows)))
+    code, out = call(port, {"action": "c_channel_frame", "short_mm": 595,
+                            "long_mm": 595, "nominal_depth_mm": 25,
+                            "method": "u", "order_quantity": 10})
+    r = out.get("result", {})
+    per_mm = 68 * 0.55 * 7850 / 1e9
+    check("a frame weighs its cut strip and cap, not whole lengths",
+          code == 200 and abs(r.get("frame_weight_kg", 0)
+                              - per_mm * (1819 + 593)) < 1e-9, json.dumps(r)[:200])
+    code, out = call(port, {"action": "c_channel_frame"})
+    check("no cut list is said, not guessed",
+          out.get("result", {}).get("calculation_status")
+          == "needs_frame_cut_rule", json.dumps(out)[:200])
+    code, out = call(port, {"action": "c_channel_stock",
+                            "nominal_depth_mm": 45, "lengths": 2.5})
+    check("half a length is refused", code == 422, str(code))
+
     bad = dict(order, fax="07 0000 0000")
     code, out = call(port, {"action": "labels", "order": bad})
     check("a field that is not on labels is refused, by name",

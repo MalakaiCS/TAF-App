@@ -476,6 +476,9 @@ def test_a_required_brace_is_counted_once_and_its_weight_is_needed():
 def test_an_unknown_frame_keeps_the_total_empty_not_zero():
     s = _complete_settings()
     s["component_profiles"] = []
+    # A channel the calculator cannot weigh (no density): the frame is
+    # unknown, never nothing.
+    s["c_channel"]["materials"]["C_CHANNEL_G2_Z275_055"]["density_kg_m3"] = 0
     r = fc.calculate({"filter_type": "Flat Panel", "width_mm": 500,
                       "height_mm": 600, "nominal_depth_mm": 25,
                       "media_code": "G4"}, s)
@@ -745,23 +748,42 @@ def test_the_frame_comes_from_kg_per_metre_of_channel():
                  10 * (wire + media + 0.5 * 2.232))
 
 
-def test_a_thickness_with_no_channel_weight_says_which():
-    s = _with_channel({"25": 0.5})
+def test_the_frame_is_weighed_from_its_channel_and_cut_list():
+    """With nothing entered, a frame weighs the C-channel its strips are cut
+    from - the filter calculator's cut list for the way it is made."""
+    from taf_order_app import cchannel as cch
     item = {"Filter Type": "V-form", "Short": 595, "Long": 595,
             "Channel": 50, "Quantity": 1, "Media Type": "G4"}
-    # By default the frame is counted once it has a weight, and left out
-    # until then - the filter still has its wire and media weight.
-    r = fc.calculate_item(item, s)
+    r = fc.calculate_item(dict(item, **{"Frame Method": "u"}), cs.defaults())
+    frame = [c for c in r["components"] if c["name"] == "filter_frame"][0]
+    # A U: a 20+593+593+593+20 strip and a 593 cap of 23 x 48 x 23 channel.
+    per_mm = (23 + 48 + 23) * 0.55 * 7850 / 1e9
+    assert close(frame["installed_kg_per_filter"], per_mm * (1819 + 593))
+    assert frame["frame_method"] == "u" and frame["basis"] == "c_channel"
     assert r["weight_complete"]
     assert close(r["complete_filter_weight_kg_per_filter"],
                  r["installed_wire_weight_kg_per_filter"]
-                 + r["installed_media_weight_kg_per_filter"])
-    assert "filter_frame" not in [c["name"] for c in r["components"]]
-    # Required, it holds the weight back and says which thickness.
-    s["required_components"] = dict(STRICT)
-    r = fc.calculate_item(item, s)
-    assert r["complete_filter_weight_kg_per_filter"] is None
-    assert "filter frame: kg per metre of 50mm channel" in r["missing"]
+                 + r["installed_media_weight_kg_per_filter"]
+                 + frame["installed_kg_per_filter"])
+    # Left to the calculator, the frame is weighed the way the worksheet
+    # says to make it.
+    auto = fc.calculate_item(item, cs.defaults())
+    f2 = [c for c in auto["components"] if c["name"] == "filter_frame"][0]
+    assert f2["frame_method"] == fc.frame_method_for(item)
+    assert cch.frame_cut_list(595, 595, "g", 50)[0]["cut_length_mm"] == 2392
+
+
+def test_a_channel_weight_entered_by_hand_wins_for_its_thickness():
+    s = _with_channel({"25": 0.5})
+    flat = {"Filter Type": "Flat Panel", "Short": 500, "Long": 600,
+            "Channel": 25, "Quantity": 1, "Media Type": "F5"}
+    r = fc.calculate_item(flat, s)
+    frame = [c for c in r["components"] if c["name"] == "filter_frame"][0]
+    assert close(frame["installed_kg_per_filter"], 0.5 * 2.232)
+    # A thickness with nothing entered falls back to the C-channel.
+    r = fc.calculate_item(dict(flat, Channel=50), s)
+    frame = [c for c in r["components"] if c["name"] == "filter_frame"][0]
+    assert frame["basis"] == "c_channel"
 
 
 def test_a_needed_brace_is_counted_once_it_has_a_weight():

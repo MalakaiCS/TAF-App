@@ -28,9 +28,51 @@ import math
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from . import calc_settings as _settings
+from . import cchannel as _cch
 from . import filter_calc as _calc
 from . import packing as _pk
 from .numbers import positive, positive_int, trim_zeros
+
+
+# What a filter's weight is worked out from. A line's weight is kept with it
+# when the order is generated, against these inputs: change the line and it
+# is worked out afresh; change a material setting and orders already made
+# keep the weight they were labelled with.
+SNAPSHOT_INPUTS = ("Filter Type", "Short", "Long", "Channel", "Media Type",
+                   "Pleat Insert", "Header", "Calculator", "Frame Method")
+
+
+def _inputs(item: Dict[str, Any]) -> Dict[str, Any]:
+    return {k: item.get(k) for k in SNAPSHOT_INPUTS}
+
+
+def kept_weight(item: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """The weight kept with this line, if it still matches the line."""
+    snap = item.get("Weight Snapshot")
+    if not isinstance(snap, dict) or snap.get("inputs") != _inputs(item):
+        return None
+    if positive(snap.get("complete_filter_weight_kg_per_filter")) is None:
+        return None
+    return snap
+
+
+def make_snapshot(item: Dict[str, Any], calc: Dict[str, Any],
+                  settings: Dict[str, Any], at: str = "") -> Dict[str, Any]:
+    frame = next((c for c in calc.get("components") or []
+                  if c.get("name") == "filter_frame"), None) or {}
+    versions = dict(settings.get("versions") or {})
+    versions["c_channel"] = (settings.get("c_channel") or {}).get("version")
+    versions["materials"] = (settings.get("materials") or {}).get("version")
+    versions["calc"] = calc.get("calc_version")
+    return {"inputs": _inputs(item),
+            "complete_filter_weight_kg_per_filter":
+                calc.get("complete_filter_weight_kg_per_filter"),
+            "frame_weight_kg_per_filter": frame.get("installed_kg_per_filter"),
+            "frame_method": frame.get("frame_method"),
+            "components": [{"name": c.get("name"),
+                            "kg": c.get("installed_kg_per_filter")}
+                           for c in calc.get("components") or []],
+            "versions": versions, "at": at}
 
 
 def _quantity(item: Dict[str, Any]) -> Optional[int]:
@@ -43,6 +85,38 @@ def line_dims(item: Dict[str, Any]) -> Tuple[Any, Any, Any]:
     if "Short" in item or "Long" in item:
         return item.get("Short"), item.get("Long"), item.get("Channel")
     return item.get("width"), item.get("height"), item.get("depth")
+
+
+def line_description(item: Dict[str, Any]) -> str:
+    """What a line that is not made to a size is, for its label."""
+    parts = [str(item.get(k) or "").strip()
+             for k in ("Part Number", "Description")]
+    text = " - ".join(p for p in parts if p)
+    return text or str(item.get("Product Type") or item.get("product_type")
+                       or "Item").strip()
+
+
+def channel_line(item: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """A line selling lengths of C-channel: its depth and length, or None.
+    Read from the line's own wording - 'Channel', 'CH45', '45mm channel'
+    - and a length of 1000mm or more if it gives one, else a stock length."""
+    import re
+    if item.get("Filter Type") or item.get("item_kind") == "bag":
+        return None
+    words = " ".join(str(item.get(k) or "") for k in
+                     ("Product Type", "Part Number", "Description", "Name"))
+    if "CHANNEL" not in words.upper() and not re.search(
+            r"\bC-?CH\d", words.upper()):
+        return None
+    depth = _cch.depth_from_text(words)
+    if depth is None:
+        return None
+    length = None
+    for n in re.findall(r"(\d{4,5})(?:\s*MM)?", words.upper()):
+        if 1000 <= int(n) <= 12000:
+            length = float(n)
+            break
+    return {"nominal_depth_mm": depth, "length_mm": length}
 
 
 def evaluate_line(item: Dict[str, Any], settings: Dict[str, Any],
@@ -65,7 +139,19 @@ def evaluate_line(item: Dict[str, Any], settings: Dict[str, Any],
             calc = None
         out["calc"] = calc
     unit = (calc or {}).get("complete_filter_weight_kg_per_filter")
+    ch = channel_line(item)
+    if ch is not None:
+        # Whole lengths of channel: each weighs a length, from the same
+        # C-channel calculator as the frames.
+        stock = _cch.channel_weight(ch["nominal_depth_mm"], None,
+                                    ch["length_mm"], settings)
+        unit = stock["raw_weight_kg"]
+        out["channel"] = stock
+    kept = kept_weight(item)
+    if kept is not None:
+        unit = kept["complete_filter_weight_kg_per_filter"]
     out["unit_kg"] = unit
+    out["weight_kept"] = kept is not None
     w, h, d = line_dims(item)
     construction = _calc.construction_of(item.get("Filter Type")) \
         if item.get("Filter Type") else ""
@@ -142,6 +228,11 @@ def refresh_items(items: Sequence[Dict[str, Any]], settings: Dict[str, Any],
             out.append(item)
             continue
         ev = evaluate_line(item, settings)
+        calc = ev.get("calc") or {}
+        if not ev.get("weight_kept") and \
+                calc.get("complete_filter_weight_kg_per_filter") is not None:
+            item["Weight Snapshot"] = make_snapshot(item, calc, settings, at)
+            changed = True
         if ev["plan"] and ev["changed"]:
             plan = dict(ev["plan"])
             plan.update(updated_at=at, updated_by=by)

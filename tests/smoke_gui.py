@@ -712,6 +712,50 @@ def _steps(app, gui, root):
     add("list window closed before its list arrives",
         _closed_before_its_list_arrives)
 
+    def _c_channel_table():
+        """Every depth listed, searched, filtered, a custom stack added,
+        copied and exported - and every weight says kg."""
+        dlg = gui.CChannelTableDialog(root)
+        try:
+            root.update()
+            if len(dlg.rows) != 49:
+                raise AssertionError(f"{len(dlg.rows)} depths, not 49")
+            row45 = [r for r in dlg.rows if r[0] == "45 mm"][0]
+            if row45[1] != "23 x 44 x 23 x 2440 mm" or \
+                    list(row45[4:8]) != ["1.0 kg", "1.9 kg", "4.8 kg",
+                                         "9.5 kg"]:
+                raise AssertionError(f"45mm row is {row45}")
+            dlg.search.set("4")
+            root.update()
+            if [r[0] for r in dlg.rows] != ["40 mm", "45 mm"]:
+                raise AssertionError(f"search gave {[r[0] for r in dlg.rows]}")
+            dlg.search.set("")
+            dlg.status.set("Estimated")
+            dlg.custom.set("7")
+            root.update()
+            if len(dlg.rows) != 30 or not all(
+                    r[2] == "Estimated" and r[8].endswith(" kg")
+                    for r in dlg.rows):
+                raise AssertionError("the estimated filter or the custom "
+                                     "stack is wrong")
+            dlg._copy()
+            copied = root.clipboard_get()
+            if "Stack of 7" not in copied or "150 mm" not in copied:
+                raise AssertionError("copy left things out")
+            out = Path(tempfile.mkdtemp()) / "cc.csv"
+            was = gui.filedialog.asksaveasfilename
+            gui.filedialog.asksaveasfilename = lambda **k: str(out)
+            try:
+                dlg._export()
+            finally:
+                gui.filedialog.asksaveasfilename = was
+            text = out.read_text(encoding="utf-8-sig")
+            if text.count("\n") != 31 or "kg" not in text:
+                raise AssertionError("the CSV export is not the table")
+        finally:
+            dlg.destroy()
+    add("C-channel weight table", _c_channel_table)
+
     generated: dict = {}
 
     def _generate_prints_the_labels():
@@ -1281,6 +1325,7 @@ def _dialogs(gui, root):
             root, editable=True)),
         ("WeightsSettingsDialog (read only)",
          lambda: gui.WeightsSettingsDialog(root, editable=False)),
+        ("CChannelTableDialog", lambda: gui.CChannelTableDialog(root)),
         ("MergeCustomersDialog", lambda: _merge_window(gui, root)),
     ]
 

@@ -25,6 +25,7 @@ sys.path.insert(0, str(ROOT))
 
 from taf_order_app import bracing as br                    # noqa: E402
 from taf_order_app import calc_settings as cs              # noqa: E402
+from taf_order_app import cchannel as cch                   # noqa: E402
 from taf_order_app import delivery_labels as dl            # noqa: E402
 from taf_order_app import filter_calc as fc                # noqa: E402
 from taf_order_app import materials as m                   # noqa: E402
@@ -179,6 +180,31 @@ CALCULATE = (
 )
 
 
+def _cch(**material):
+    out = cs.defaults()
+    out["c_channel"]["materials"]["C_CHANNEL_G2_Z275_055"].update(material)
+    return out
+
+
+CCH_VERIFIED = cs.defaults()
+CCH_VERIFIED["c_channel"]["centre_widths"]["45"] = {"width_mm": 43,
+                                                    "status": "verified"}
+CCH_VERIFIED["c_channel"]["centre_widths"]["12.5"] = {"width_mm": 11,
+                                                      "status": "custom"}
+CCH_VERIFIED["c_channel"]["estimate_rule"] = {"subtract_mm": 3}
+CCH_VERIFIED["c_channel"]["measured_weights"] = [
+    {"nominal_depth_mm": 50, "length_mm": 2440, "kg": 1.01,
+     "verified": True},
+    {"centre_width_mm": 63, "length_mm": 1000, "kg": 0.5, "verified": True},
+    {"nominal_depth_mm": 90, "length_mm": 2440, "kg": 9, "verified": False}]
+CCH_SETTINGS = [None, CCH_VERIFIED, _cch(include_coating_mass=True),
+                _cch(include_coating_mass=True, base_metal_thickness_mm=0.51),
+                _cch(thickness_basis="coated", include_coating_mass=True),
+                _cch(bend_correction_mm=-1.5, mass_calibration_factor=1.02),
+                _cch(density_kg_m3=0), _cch(left_flange_mm=-1),
+                _cch(bend_correction_mm="x")]
+
+
 def _python_cases():
     calc = [{"req": r, "settings": s} for r, s in CALCULATE]
     braces = [(k, w, h, p) for k in ("Flat Panel", "V-form", "Flyscreen",
@@ -244,7 +270,47 @@ def _python_cases():
                         "depth_mm": 90}]
     labels = [(base_order, "Base", None), (base_order, "Base", COMPLETE),
               (bad, "Base", None), (single, "Base", None)]
+    cch_weight = []
+    for st in CCH_SETTINGS:
+        for depth in (10, 12.5, 25, 45, 50, 62, 65, 150, 250, 0, -5, None):
+            cch_weight.append([depth, None, None, st, None, None, None])
+    cch_weight += [[None, 60, 1000, None, None, 20, 25],
+                   [45, None, 3000, None, None, None, None],
+                   [45, None, None, None, "NOPE", None, None],
+                   [None, None, None, None, None, None, None],
+                   ["deep", None, None, None, None, None, None],
+                   [45, None, 0, None, None, None, None]]
+    cch_stacks = [[45, None], [45, [3, 7, 20, "4"]],
+                  [45, [0, -1, 2.5, True, "x", None]], [250, [1, 2, 5, 10]]]
+    cch_frames = []
+    for method in ("u", "sideways_u", "g", "l", "x"):
+        for (sh, lo, d) in ((595, 595, 25), (295, 310, 90), (1200, 1200, 50),
+                            (0, 595, 25), (595, 595, None)):
+            cch_frames.append({"shape": [sh, lo, method, d], "qty": 7,
+                               "settings": None})
+    cch_frames += [{"cut": [{"nominal_depth_mm": 25, "cut_length_mm": 1000,
+                             "section_quantity": 2},
+                            {"nominal_depth_mm": 90, "cut_length_mm": 500,
+                             "section_quantity": 1, "measured_kg": 0.33}],
+                    "qty": 3, "settings": CCH_VERIFIED},
+                   {"cut": [], "qty": 1, "settings": None},
+                   {"cut": [{"nominal_depth_mm": 25, "cut_length_mm": -1}],
+                    "qty": 1, "settings": None},
+                   {"cut": [{"nominal_depth_mm": 25, "cut_length_mm": 100,
+                             "section_quantity": 1.5}], "qty": 1,
+                    "settings": None},
+                   {"cut": [{"nominal_depth_mm": 25, "cut_length_mm": 100}],
+                    "qty": 0, "settings": None},
+                   {"cut": [{"nominal_depth_mm": 25, "cut_length_mm": 100}],
+                    "qty": 2, "settings": _cch(density_kg_m3=0)}]
+    cch_stock = [[45, 10, None, None, None], [90, 3, 3000, None, CCH_VERIFIED],
+                 [45, 0, None, None, None], [45, 2.5, None, None, None],
+                 [None, 4, 2440, 30, None]]
+    cch_table = [[None, None], [CCH_VERIFIED, [1, 2, 5, 10, 13]]]
     return {"calculate": calc, "bracing": braces, "frames": frames,
+            "cch_weight": cch_weight, "cch_stacks": cch_stacks,
+            "cch_frames": cch_frames, "cch_stock": cch_stock,
+            "cch_table": cch_table,
             "propose": proposals, "check_plan": plans, "weights": weights,
             "labels": labels,
             "codes": [[1], [2], [5, 5, 1], [30, 1], [1, 1, 1]],
@@ -285,7 +351,16 @@ def _python(cases):
            "media_codes": [_err(m.normalise_media_code, c)
                            for c in cases["media_codes"]],
            "constructions": [fc.construction_of(c)
-                             for c in cases["constructions"]]}
+                             for c in cases["constructions"]],
+           "cch_weight": [cch.channel_weight(*c) for c in cases["cch_weight"]],
+           "cch_stacks": [cch.stack_weights(cch.channel_weight(d), q)
+                          for d, q in cases["cch_stacks"]],
+           "cch_frames": [cch.frame_weight(
+               c["cut"] if "cut" in c else cch.frame_cut_list(*c["shape"]),
+               c["qty"], c["settings"]) for c in cases["cch_frames"]],
+           "cch_stock": [cch.stock_weight(d, n, ln, w, st)
+                         for d, n, ln, w, st in cases["cch_stock"]],
+           "cch_table": [cch.table(st, q) for st, q in cases["cch_table"]]}
     return out
 
 
@@ -311,6 +386,13 @@ const out = {
   instruction: cases.instruction.map(q => C.instruction(q)),
   media_codes: cases.media_codes.map(c => err(() => C.normaliseMediaCode(c))),
   constructions: cases.constructions.map(c => C.constructionOf(c)),
+  cch_weight: cases.cch_weight.map(c => C.calculateCChannelWeight(c[0], c[1], c[2], c[3], c[4], c[5], c[6])),
+  cch_stacks: cases.cch_stacks.map(c => C.calculateCChannelStackWeights(C.calculateCChannelWeight(c[0]), c[1])),
+  cch_frames: cases.cch_frames.map(c => C.calculateCChannelFrameWeight(
+      "cut" in c ? c.cut : C.frameCutList(c.shape[0], c.shape[1], c.shape[2], c.shape[3]),
+      c.qty, c.settings)),
+  cch_stock: cases.cch_stock.map(c => C.calculateCChannelStockWeight(c[0], c[1], c[2], c[3], c[4])),
+  cch_table: cases.cch_table.map(c => C.cChannelTable(c[0], c[1])),
 };
 process.stdout.write(JSON.stringify(out));
 """

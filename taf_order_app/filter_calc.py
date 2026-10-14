@@ -50,6 +50,7 @@ import math
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 from . import bracing as _bracing
+from . import cchannel as _cch
 from . import calc_settings as _settings
 from . import materials as _mat
 from . import mounting_frames as _frames
@@ -895,6 +896,29 @@ def _profile_component(name: str, construction: str,
     return None, "unknown", {}
 
 
+FRAMED_IN_CHANNEL = ("Flat Panel", "Header", "V-form")
+
+
+def _cchannel_frame(request: Dict[str, Any], construction: str,
+                    dims: Dict[str, float], s: Dict[str, Any]
+                    ) -> Tuple[Optional[float], Dict[str, Any]]:
+    """The frame's steel channel, from the cut list the filter calculator
+    makes it with (a U unless the line says otherwise) and the C-channel
+    for its depth."""
+    if construction not in FRAMED_IN_CHANNEL or request.get("pleat_insert") \
+            or "width" not in dims or dims.get("depth") is None:
+        return None, {}
+    method = str(request.get("frame_method") or "u")
+    cut = _cch.frame_cut_list(dims["width"], dims["height"], method,
+                              dims["depth"])
+    r = _cch.frame_weight(cut, 1, s)
+    extra = {"basis": "c_channel", "frame_method": method,
+             "sections": r["sections"],
+             "c_channel_version": r["settings_version"],
+             "warnings": r["calculation_warnings"]}
+    return r["frame_weight_kg"], extra
+
+
 def _frame_missing(name: str, dims: Dict[str, float]) -> str:
     if name == "filter_frame" and dims.get("depth") is not None:
         return (f"filter frame: kg per metre of {_depth_key(dims['depth'])}mm "
@@ -922,17 +946,19 @@ def _components(request, out, s, construction, required, dims, qty) -> None:
     if request.get("pleat_insert"):
         optional = [c for c in optional if c != "filter_frame"]
     for name in ("filter_frame", "flyscreen_frame", "flyscreen_part"):
+        if name not in required and name not in optional:
+            continue
+        kg, status, extra = _profile_component(
+            name, construction, s.get("component_profiles"), dims)
+        if kg is None and name == "filter_frame":
+            kg, extra = _cchannel_frame(request, construction, dims, s)
+            status = "known" if kg is not None else "unknown"
         if name in required:
-            kg, status, extra = _profile_component(
-                name, construction, s.get("component_profiles"), dims)
             if kg is None:
                 missing.append(_frame_missing(name, dims))
             comps.append(_component(name, True, status, kg, **extra))
-        elif name in optional:
-            kg, status, extra = _profile_component(
-                name, construction, s.get("component_profiles"), dims)
-            if kg is not None:
-                comps.append(_component(name, False, status, kg, **extra))
+        elif kg is not None:
+            comps.append(_component(name, False, status, kg, **extra))
 
     if "braces" in optional:
         # Counted when one is needed and its weight is known; otherwise left
@@ -1093,13 +1119,40 @@ def request_from_item(item: Dict[str, Any]) -> Dict[str, Any]:
                 "components", "includes_mounting_frame", "mounting_frame"):
         if key in saved:
             req[key] = saved[key]
+    if item.get("Frame Method"):
+        req["frame_method"] = str(item["Frame Method"])
     return req
 
 
 def calculate_item(item: Dict[str, Any],
-                   settings: Optional[Dict[str, Any]] = None
-                   ) -> Dict[str, Any]:
-    return calculate(request_from_item(item), settings)
+                   settings: Optional[Dict[str, Any]] = None,
+                   prefer: str = "") -> Dict[str, Any]:
+    """A saved line, with its frame weighed the way the worksheet says to
+    make it (the filter calculator's choice, or the customer's)."""
+    req = request_from_item(item)
+    if "frame_method" not in req:
+        req["frame_method"] = frame_method_for(item, prefer)
+    return calculate(req, settings)
+
+
+def frame_method_for(item: Dict[str, Any], prefer: str = "") -> str:
+    """U, Sideways U, G or L - what the worksheet prints for this line."""
+    from . import cutting as _cut
+    try:
+        from . import features as _features
+        workshop = _features.workshop()
+    except Exception:
+        workshop = None
+    try:
+        qty = max(1, int(float(item.get("Quantity") or 1)))
+        answer = _cut.best(float(item.get("Short") or 0),
+                           float(item.get("Long") or 0), qty, workshop, None,
+                           prefer or "")
+        if answer.get("ok"):
+            return answer["best"]["method"]
+    except (TypeError, ValueError):
+        pass
+    return "u"
 
 
 def parse_pieces(text: str) -> List[Dict[str, Any]]:

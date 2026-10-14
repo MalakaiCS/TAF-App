@@ -10,6 +10,8 @@ question as which uses less material. The three:
                     of the short, and a cap the short size.
     G               All four sides off one strip with a single lip where it
                     closes. No cap.
+    L               Two identical strips, each the long side, the short side
+                    and a lip - long, short, lip - cut twice for one filter.
 
 Every side is cut at its size less 2mm. Confirmed against worksheet
 O/N 12576 - a 295 x 310 - which prints all three and whose fifteen marks this
@@ -64,17 +66,21 @@ DEFAULTS: Dict[str, float] = {
     "labour_per_hour":     55.0,
 }
 
-METHODS = ("u", "sideways_u", "g")
+METHODS = ("u", "sideways_u", "g", "l")
 
 NAMES = {
     "u":          "U",
     "sideways_u": "Sideways U",
     "g":          "G",
+    "l":          "L",
 }
 
-# How many lips each way of making it has. It is the whole of the difference
-# between a U with its cap and a G: two lips against one.
-LIPS = {"u": 2, "sideways_u": 2, "g": 1}
+# How many lips each strip has. It is the whole of the difference between a
+# U with its cap and a G: two lips against one.
+LIPS = {"u": 2, "sideways_u": 2, "g": 1, "l": 1}
+
+# How many strips one filter takes. An L is two of the same strip.
+STRIPS = {"u": 1, "sideways_u": 1, "g": 1, "l": 2}
 
 
 def _settings(overrides: Dict[str, float] | None = None) -> Dict[str, float]:
@@ -128,6 +134,9 @@ def layout(short: float, long: float, method: str,
     elif method == "sideways_u":
         segments = [lip_len, l, s, l, lip_len]
         cap = s
+    elif method == "l":
+        segments = [l, s, lip_len]
+        cap = 0.0
     else:
         segments = [l, s, l, s, lip_len]
         cap = 0.0
@@ -144,9 +153,10 @@ def layout(short: float, long: float, method: str,
         "marks":    marks,
         "lip":      _tidy(lip_len),
         "lips":     LIPS[method],
+        "strips":   STRIPS[method],
         "frame":    _tidy(sum(segments)),
         "cap":      _tidy(cap),
-        "total":    _tidy(sum(segments) + cap),
+        "total":    _tidy(sum(segments) * STRIPS[method] + cap),
     }
 
 
@@ -312,7 +322,8 @@ def _run(short, long, method, qty, w, offcuts):
                          w["keep_offcut_mm"])
 
     lengths: List[Dict[str, Any]] = []
-    left = int(qty)
+    strips = STRIPS[method]
+    left = int(qty) * strips
     while left > 0:
         # A part-full stick has nothing to gain from a shortened lip, so it
         # gets the full 20mm. Only shorten what actually buys a frame.
@@ -339,10 +350,18 @@ def _run(short, long, method, qty, w, offcuts):
                     list(spare) + list(offcuts or []))
 
     fresh = len(lengths) + (caps["sticks"] if caps else 0)
-    keepable = sum(b["offcut"] for b in lengths if b["keep"])
+    # What is worth keeping is what is left once the caps are cut too. A
+    # frame stick's offcut that a cap then came out of is not still on the
+    # rack - counting it made a U look as if it saved channel it had used.
+    left_over = [b["offcut"] for b in lengths if b["offcut"] > 0]
     if caps:
-        keepable += sum(b["offcut"] for b in caps["lengths"]
-                        if b["keep"] and not b["from_offcut"])
+        for b in caps["lengths"]:
+            if not b["from_offcut"]:
+                left_over.append(b["offcut"])        # a fresh length's end
+            elif b["length"] in left_over:           # a frame stick's end,
+                left_over.remove(b["length"])        # now with a cap out
+                left_over.append(b["offcut"])
+    keepable = sum(x for x in left_over if x >= keep)
 
     return {
         "method":       method,
@@ -355,9 +374,9 @@ def _run(short, long, method, qty, w, offcuts):
         "frame_sticks": lengths,
         "caps":         caps,
         "sticks":       fresh,
-        "channel_each": _tidy(fit["frame"] + full["cap"]),
+        "channel_each": _tidy(fit["frame"] * strips + full["cap"]),
         "keepable":     _tidy(keepable),
-        "pieces_each":  2 if full["cap"] else 1,
+        "pieces_each":  strips + (1 if full["cap"] else 0),
     }
 
 
@@ -456,7 +475,8 @@ def _why(won: Dict[str, Any], others: List[Dict[str, Any]], qty: int) -> str:
     ignores it entirely.
     """
     n = won["frames_per_stick"]
-    head = (f"{won['name']}: {n} frame{'' if n == 1 else 's'} a length, "
+    unit = "strip" if won["full"].get("strips", 1) > 1 else "frame"
+    head = (f"{won['name']}: {n} {unit}{'' if n == 1 else 's'} a length, "
             f"{won['sticks']} length{'' if won['sticks'] == 1 else 's'} "
             f"for {qty}")
     if won["shortened"]:

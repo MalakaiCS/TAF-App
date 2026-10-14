@@ -154,7 +154,7 @@ def test_the_blade_comes_off_the_offcut_too():
 
 
 def test_a_piece_longer_than_a_stick_is_reported_not_guessed():
-    out = _cut.best(1200, 1200, 1)
+    out = _cut.best(1300, 1300, 1)
     assert out["ok"] is False
     assert "2440" in out["why"] and "not come off" in out["why"]
 
@@ -193,7 +193,37 @@ def test_the_answer_changes_with_the_size():
     assert _cut.frames_per_stick(100, 100, "u")["n"] == 7
     assert _cut.frames_per_stick(300, 300, "g")["n"] == 2
     assert _cut.best(300, 300, 10)["best"]["method"] == "g"
-    assert _cut.best(100, 100, 50)["best"]["method"] in ("u", "sideways_u")
+    assert _cut.best(595, 295, 20)["best"]["method"] == "sideways_u"
+    assert _cut.best(595, 1195, 4)["best"]["method"] == "u"
+    assert _cut.best(100, 150, 5)["best"]["method"] == "l"
+
+
+def test_an_l_is_long_short_lip_cut_twice():
+    out = _cut.layout(295, 310, "l")
+    assert out["segments"] == [308, 293, 20]
+    assert out["marks"] == [308, 601, 621]
+    assert out["strips"] == 2 and out["cap"] == 0 and out["total"] == 1242
+    # Two strips a filter: ten filters is twenty strips.
+    run = _cut.best(295, 310, 10, prefer="l")["best"]
+    assert run["method"] == "l" and run["pieces_each"] == 2
+    assert sum(len(b["pieces"]) for b in run["frame_sticks"]) == 20
+    assert run["channel_each"] == 1242
+
+
+def test_a_filter_too_big_for_one_strip_is_made_as_an_l():
+    out = _cut.best(1200, 1200, 1)
+    assert out["ok"] and out["best"]["method"] == "l"
+    assert out["best"]["sticks"] == 2
+
+
+def test_offcuts_a_cap_was_cut_from_are_not_counted_as_kept():
+    """595 x 595: a U's 621mm offcut has its 593mm cap cut from it, leaving
+    28mm - nothing worth keeping. Counting the 621 made the U look as if it
+    saved channel, and won it nearly every tie."""
+    out = _cut.best(595, 595, 10)
+    u = [o for o in out["options"] if o["method"] == "u"][0]
+    assert u["keepable"] == 0
+    assert out["best"]["method"] == "g"
 
 
 def test_it_says_what_it_turned_down():
@@ -201,7 +231,9 @@ def test_it_says_what_it_turned_down():
     otherwise. Somebody told only the answer either follows it blindly or
     ignores it."""
     why = _cut.best(300, 300, 10)["why"]
-    assert "G" in why and "U would be" in why
+    assert why.startswith("G:") and "L takes the same channel" in why
+    why = _cut.best(595, 295, 20)["why"]
+    assert why.startswith("Sideways U:") and "G would be 20" in why
 
 
 def test_a_square_is_not_offered_the_same_answer_twice():
@@ -224,12 +256,13 @@ def test_fewer_sticks_beats_less_channel():
     """A G uses less channel per filter than a U and its cap, and still loses
     when it wastes the end of every stick. Counting material rather than
     lengths is the mistake this exists to avoid."""
-    out = _cut.best(100, 100, 50)
+    out = _cut.best(595, 295, 20)
     won = out["best"]
+    assert won["method"] == "sideways_u"
     beaten = [o for o in out["others"] if o["method"] == "g"][0]
     assert won["channel_each"] > beaten["channel_each"], \
         "the winner was not the one using more channel"
-    assert won["sticks"] <= beaten["sticks"]
+    assert won["sticks"] < beaten["sticks"]
 
 
 # ── A whole job ──────────────────────────────────────────────────────────────
@@ -244,8 +277,9 @@ def test_a_job_adds_up():
 
 
 def test_a_line_that_cannot_be_made_does_not_take_the_job_with_it():
+    # 1300 x 1300 is past even an L: its strip is 2616mm.
     out = _cut.plan([{"short": 100, "long": 100, "qty": 2},
-                     {"short": 1200, "long": 1200, "qty": 1}])
+                     {"short": 1300, "long": 1300, "qty": 1}])
     assert out["lines"][0]["ok"] is True
     assert out["lines"][1]["ok"] is False
     assert out["sticks"] == 1
@@ -384,7 +418,8 @@ def test_the_bench_rate_is_the_workshop_s_own():
 def test_a_free_saving_is_not_dressed_up_as_a_trade_off():
     """When the quicker way takes no more channel, material has nothing to
     say and the answer is simply "make them that way"."""
-    out = _cut.with_labour(_cut.best(100, 100, 50))
+    out = _cut.with_labour(_cut.best(100, 150, 5))
+    assert out["best"]["method"] == "l"
     assert out.get("labour_beats_material") is True
     assert "takes no more channel" in out["labour_note"]
 

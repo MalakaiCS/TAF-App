@@ -469,6 +469,20 @@ def run_merge_checks(pg: Postgres) -> None:
     ok, out, err = as_in(pg, "f", SARAH, "SELECT set_calc_setting('packing', "
                          "'{}');")
     check("only known sections can be stored", not ok, err)
+    ok, out, err = as_in(pg, "f", SARAH, "SELECT set_calc_setting("
+                         "'c_channel', '{\"estimate_rule\": "
+                         "{\"subtract_mm\": 3}}');")
+    check("a manager can save the C-channel settings", ok and out == "1",
+          out or err)
+    ok, _o, err = as_in(pg, "f", DAVE, "SELECT set_calc_setting("
+                        "'c_channel', '{}');")
+    check("and somebody on the floor cannot", not ok, err)
+    ok, _o, err = pg.psql((ROOT / "migrate_c_channel.sql").read_text(
+        encoding="utf-8"), "f")
+    kept = q(pg, "SELECT value -> 'estimate_rule' ->> 'subtract_mm' FROM "
+                 "calc_settings WHERE key = 'c_channel';")
+    check("re-running step 34 keeps what was saved", ok and kept == "3",
+          kept or err)
     hist = q(pg, "SELECT string_agg(version || ':' || changed_by || ':' || "
                  "(value ->> 'base_address'), '|' ORDER BY version) FROM "
                  "calc_settings_history WHERE key = 'company';")

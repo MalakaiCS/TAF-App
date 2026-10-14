@@ -129,10 +129,17 @@ log, stock management and a customer database.
 - **Dashboard** — orders-per-week, order-type and busiest-customer charts, low
   stock alerts, and what's due.
 - **Stock** — items with images, on-hand / minimum levels, adjustments &
-  history, and optional automatic deduction as orders are generated.
+  history, and optional automatic deduction as orders are generated. Channel
+  items show what the channel on hand weighs.
+- **C-channel weights** — every channel from 10 to 250 mm deep: its actual
+  size (23 × centre × 23 × 2440 mm), what one length weighs and what stacks
+  of 1, 2, 5, 10 or any number weigh, rounded up to the next 0.1 kg. Search,
+  filter by how sure the width is, copy, export to CSV. Stock tab →
+  C-channel weights…, or Settings → Open weights and packing → C-channel.
 - **Customers** — full customer database with delivery/billing details.
-- **Filter calculator** — the three ways to bend a frame (U, sideways U, G),
-  which one gets the most filters out of a 2440 length of channel, and the
+- **Filter calculator** — the four ways to bend a frame (U, sideways U, G,
+  and L: long side, short side, lip, cut twice for one filter), which one
+  gets the most filters out of a 2440 length of channel, and the
   marks to strike off the tape. **The lip is part of the sum**: it's nominally
   20mm but anything down to 10mm still closes the filter, so where shortening
   it wins a whole extra frame it does — two G frames of a 295 × 310 are 2444
@@ -343,6 +350,7 @@ just run it — nothing is lost and nothing is duplicated.
 | 31 | `migrate_quote_shipping.sql` | Delivery charged on a quote, so the counter and the invoice agree | recommended |
 | 32 | `migrate_supply_requests.sql` | Asking for supplies, and the bell that tells managers (needs step 16 first) | recommended |
 | 33 | `migrate_packing_and_merge.sql` | Weights, packing, delivery labels and merging customers (needs step 16 first) | recommended |
+| 34 | `migrate_c_channel.sql` | C-channel weights: material, centre widths and measured weights saved with the other settings (needs step 33) | recommended |
 
 **Step 16 is the one that matters most.** Every policy in the older scripts is
 `TO authenticated USING (true)` — meaning *anyone Supabase counts as signed
@@ -767,11 +775,61 @@ Measured cut pieces and measured wrap weights can be entered at any time
 (View Order → Actions → Packing and weights → Weight calculator / Record
 weight) and are used exactly as entered.
 
+### C-channel
+
+One calculator (`taf_order_app/cchannel.py`, with the same arithmetic in
+`docs/app/calc.js` for the web app and the API) answers for frames, stock,
+delivery labels and the weight table.
+
+**The channel.** G2 Z275 galvanised steel, 0.55 mm, 7850 kg/m³, 2440 mm
+lengths, 23 mm flanges — all editable (Settings → Open weights and packing →
+C-channel), each change versioned. Material code `C_CHANNEL_G2_Z275_055`.
+
+**Centre widths.** TAF's measured channels (13, 18, 22, 28, 33, 38, 44, 48,
+53, 58, 63, 68, 74, 78, 84, 89, 94, 98 mm) are matched in order to nominal
+depths 15–100. That matching is inferred from the sequence, so they show as
+*Supplied, unconfirmed* until a manager marks them verified. Every other depth
+is *Estimated* at depth less 2 mm (10 mm is a *Provisional estimate* of 10 mm).
+A verified width always wins; nothing estimated is ever shown as verified.
+
+**The weight.** `(left + centre + right flange) × length × thickness ×
+density / 1e9` — 23 × 44 × 23 × 2440 at 0.55 mm is 0.948123 kg. That is base
+steel: the Z275 zinc is only added once the steel's base-metal thickness is
+entered (or the 0.55 is marked as coated), so it is never counted twice. A
+verified measured weight for a profile is used instead of the sum, and every
+result says which it is. Bend corrections and a calibration factor are
+optional settings.
+
+**Stacks and packages** are worked out from the unrounded weight of one
+length and rounded up to the next 0.1 kg once, at the end: 1.0, 1.9, 4.8 and
+9.5 kg for 1, 2, 5 and 10 of the 45 mm channel.
+
+**Frames.** A filter does not take a whole length: its frame weighs the
+strips the filter calculator cuts — a U's strip and cap, a G's one strip, an
+L's two — at the channel for its depth. The rest of the length is offcut, not
+filter. Corner notches and trimmed lip flanges are not deducted (their size
+is not confirmed), so a frame weight errs heavy. Flat panels, headers and
+V-forms are weighed this way automatically; a kg-per-metre entered under
+Frames and braces overrides it for that thickness.
+
+**Orders and labels.** Each line's weight is kept with the order when it is
+generated, with the settings versions it came from, so changing a setting
+later does not change a label reprinted for an old order. Order lines selling
+channel ("Channel", "CH45", "45mm channel 2440") are weighed by the length and
+labelled by what they are; anything that cannot be weighed is labelled by its
+description with the weight left to write in.
+
+**Still to confirm:** which nominal depth each measured width belongs to;
+centre widths for 105–250 mm and 10 mm; whether 0.55 mm is base-metal or
+coated thickness; and the size of the corner notches and lip trims.
+
 **For other programs**: `supabase functions deploy filter-calculator`, then
 `POST /functions/v1/filter-calculator` with a signed-in staff token and a body
 such as `{"action": "calculate", "item": {...order line...}}`,
 `{"action": "pack", "quantity": 60, "width_mm": 412, "height_mm": 412,
-"depth_mm": 90}` or `{"action": "labels", "order": {...}}`. The function's
+"depth_mm": 90}`, `{"action": "labels", "order": {...}}`, or the C-channel
+actions `c_channel_weight`, `c_channel_table`, `c_channel_frame` and
+`c_channel_stock`. The function's
 header comment lists every action.
 
 ### Create the first admin account
@@ -881,6 +939,7 @@ taf_order_app/
   order_packing.py         Packing plans saved on order lines; wrap weights
   delivery_labels.py       The label data contract and the A4 label PDF
   worksheet_blocks.py      Wrapping Instructions and Filter Calculator text
+  cchannel.py              C-channel sizes, weights, stacks, frames, stock
   calc_settings.py         The shared, versioned settings behind all of it
   customer_merge.py        Suggesting, checking and running a merge
   backup.py                The dated zip of spreadsheets

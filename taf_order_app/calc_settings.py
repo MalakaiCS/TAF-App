@@ -34,6 +34,7 @@ import datetime as _dt
 from typing import Any, Dict, Optional
 
 from . import materials as _mat
+from . import cchannel as _cch
 
 BASE_ADDRESS_DEFAULT = ("Unit 1/19 Tradelink Road, Hillcrest Queensland 4118 "
                         "Australia")
@@ -95,7 +96,7 @@ SECTIONS = (
     "materials", "steel", "cut_profiles", "component_profiles",
     "brace_profiles", "mounting_frame_profiles", "wire_rules",
     "required_components", "packaging", "handling_profiles",
-    "max_bundle_kg", "shipping_rounding", "company",
+    "max_bundle_kg", "shipping_rounding", "company", "c_channel",
 )
 
 
@@ -115,8 +116,11 @@ def defaults() -> Dict[str, Any]:
         "default_max_per_wrap": DEFAULT_MAX_PER_WRAP,
         "handling_profiles": copy.deepcopy(DEFAULT_HANDLING_PROFILES),
         "max_bundle_kg": MAX_BUNDLE_KG,
-        "shipping_rounding": "none",
+        # Delivery weights: rounded up to the next 0.1 kg, once, on the
+        # whole package.
+        "shipping_rounding": "up_0.1",
         "company": {"base_address": BASE_ADDRESS_DEFAULT},
+        "c_channel": _cch.default_settings(),
         "versions": {},
     }
 
@@ -137,6 +141,8 @@ def merge(stored: Optional[Dict[str, Dict[str, Any]]]) -> Dict[str, Any]:
             company.update({k: v for k, v in (value or {}).items()
                             if isinstance(v, str)})
             out["company"] = company
+        elif section == "c_channel":
+            out["c_channel"] = _cch.merged(value)
         elif section == "max_bundle_kg":
             try:
                 number = float(value)

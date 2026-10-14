@@ -47,8 +47,8 @@ CATALOGUE: List[Feature] = [
 
     # ── Making it ────────────────────────────────────────────────────────
     Feature("channel_calculator", "Filter calculator",
-            "Work out the three ways to make each filter - U, sideways U or "
-            "G - and say which gets the most out of a length of channel.",
+            "Work out the four ways to make each filter - U, sideways U, G "
+            "or L - and say which gets the most out of a length of channel.",
             "Making it", built=True),
     Feature("cut_list_day", "The day's cut list",
             "Every filter due, grouped by depth and nested across sticks, as "

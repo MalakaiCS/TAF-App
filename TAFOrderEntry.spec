@@ -90,6 +90,7 @@ a = Analysis(
         # Reached only from inside functions (the worksheet's blocks under
         # Notes, the labels), so named here rather than left to discovery.
         'taf_order_app.worksheet_blocks',
+        'taf_order_app.cchannel',
         'taf_order_app.order_packing',
         'taf_order_app.delivery_labels',
         'taf_order_app.filter_calc',

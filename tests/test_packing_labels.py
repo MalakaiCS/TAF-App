@@ -153,7 +153,9 @@ def test_a_measured_weight_beats_a_calculated_one_and_adds_no_wrapping():
     labs = dl.build(o, BASE, s)
     assert labs[0]["weight_kg"] == "4.8" and labs[0]["weight_source"] == \
         "measured"
-    assert labs[1]["weight_kg"] == "5.250"
+    # 5 x 1.0 + 0.25 = 5.25, rounded up once, on the whole wrap.
+    assert labs[1]["weight_kg"] == "5.3"
+    assert labs[1]["weight_raw_kg"] == 5.25
     assert labs[1]["weight_source"] == "calculated"
 
 
@@ -193,11 +195,11 @@ def test_zero_wrapping_only_when_confirmed():
     o["items"][0].update(complete_filter_weight_kg_per_filter=1.0,
                          packaging_weights_kg=[0, None])
     labs = dl.build(o, BASE, s)
-    assert labs[0]["weight_kg"] == "5.000" and labs[1]["weight_kg"] == ""
+    assert labs[0]["weight_kg"] == "5.0" and labs[1]["weight_kg"] == ""
     # By default the wrapping counts as 0 kg until it is weighed, so every
     # wrap with a known filter weight gets a weight on its label.
     labs = dl.build(o, BASE)
-    assert labs[0]["weight_kg"] == "5.000" and labs[1]["weight_kg"] == "5.000"
+    assert labs[0]["weight_kg"] == "5.0" and labs[1]["weight_kg"] == "5.0"
 
 
 def test_weight_arrays_must_line_up():
@@ -433,7 +435,9 @@ def test_a_manual_plan_survives_save_and_reload():
     item["Packing"] = op.set_manual(item, [10, 10], by="Office")
     saved = json.loads(json.dumps(item))                  # through the db
     items, changed = op.refresh_items([saved], s, by="Floor")
-    assert not changed
+    # The plan is left exactly as the office set it (the line's weight is
+    # kept alongside it, which is the only thing added).
+    assert items[0]["Packing"] == saved["Packing"]
     ev = op.evaluate_line(items[0], s)
     assert ev["plan"]["mode"] == "manual"
     assert [w["quantity"] for w in ev["plan"]["wraps"]] == [10, 10]
@@ -446,7 +450,7 @@ def test_manual_plans_are_not_overwritten_and_conflicts_stay_visible():
             "Long": 412, "Channel": 90, "Media Type": "G4"}
     item["Packing"] = op.set_manual(item, [10])
     items, changed = op.refresh_items([item], s)
-    assert not changed
+    assert items[0]["Packing"] == item["Packing"]
     ev = op.evaluate_line(items[0], s)
     assert [w["quantity"] for w in ev["plan"]["wraps"]] == [10]
     assert ev["status"] == "conflict"

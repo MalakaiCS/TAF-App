@@ -68,6 +68,7 @@ ITEM_FIELDS = {
     "wrap_quantities", "max_per_wrap", "wrap_weights_kg",
     "packaging_weights_kg", "complete_filter_weight_kg_per_filter",
     "wrap_ids", "wrap_groups", "profile_refs", "packing_status",
+    "description",
 }
 # Kept off labels on purpose. Named so the refusal can say why.
 REMOVED_FIELDS = {"fax", "purchase_order_number", "po_number",
@@ -162,7 +163,17 @@ def _validate_item(it: Any, i: int, problems: List[str]) -> Dict[str, Any]:
         elif key not in ITEM_FIELDS:
             problems.append(f"{where}: {key} is not a label field")
     out = dict(it)
+    desc = it.get("description")
+    if desc is not None and not isinstance(desc, str):
+        problems.append(f"{where}: description has to be text")
+    # A line that is not made to a size - channel, spline, hardware - is
+    # described instead of measured.
+    described = isinstance(desc, str) and desc.strip() != "" and all(
+        it.get(k) is None for k in ("width_mm", "height_mm", "depth_mm"))
     for key in ("width_mm", "height_mm", "depth_mm"):
+        if described:
+            out[key] = None
+            continue
         if key == "depth_mm" and it.get(key) is None and \
                 str(it.get("product_type") or "") == "Mounting Frame":
             out[key] = None              # a frame has no filter depth
@@ -281,8 +292,13 @@ def build(order: Dict[str, Any], base_address: str,
                 "address_lines": address_lines,
                 "locality": f"{clean['suburb']}  {clean['state']}  "
                             f"{clean['postcode']}",
-                "filter_size": size_text(it["width_mm"], it["height_mm"],
-                                         it.get("depth_mm")),
+                "filter_size": (it["description"].strip()
+                                if it.get("width_mm") is None
+                                and it.get("description")
+                                else size_text(it["width_mm"],
+                                               it["height_mm"],
+                                               it.get("depth_mm"))),
+                "described": it.get("width_mm") is None,
                 "wrap_quantity": wrap["quantity"],
                 "line_quantity": it["quantity"],
                 "weight_kg": wrap["weight"]["display"],
@@ -336,14 +352,20 @@ def order_contract(order: Dict[str, Any], customer: Optional[Dict[str, Any]],
         plan = ev["plan"] or {}
         wraps = plan.get("wraps") or []
         w, h, d = _op.line_dims(item)
+        described = _op.line_description(item) \
+            if finite(w) is None and finite(h) is None else ""
         entry: Dict[str, Any] = {
             "width_mm": finite(w), "height_mm": finite(h),
             "depth_mm": finite(d) if d not in (None, "", 0) else None,
             "quantity": positive_int(item.get("Quantity",
                                               item.get("quantity"))),
             "product_type": str(item.get("Filter Type")
-                                or item.get("product_type") or ""),
+                                or item.get("product_type")
+                                or item.get("Product Type") or ""),
         }
+        if described:
+            entry.update(width_mm=None, height_mm=None, depth_mm=None,
+                         description=described)
         if wraps:
             entry["wrap_quantities"] = [x["quantity"] for x in wraps]
             entry["wrap_weights_kg"] = [x.get("measured_weight_kg")
@@ -497,8 +519,11 @@ def render_pdf(labels: Sequence[Dict[str, Any]], path: str) -> str:
         widths = [0.40, 0.17, 0.22, 0.21]
         total = right - left - 3 * gap
         x = left
-        cells = [("Filter size", lab["filter_size"], "Width × Height × Depth"
-                  if lab["filter_size"].count("×") == 2 else "Width × Height"),
+        cells = [(("Item", lab["filter_size"], "")
+                  if lab.get("described") else
+                  ("Filter size", lab["filter_size"], "Width × Height × Depth"
+                   if lab["filter_size"].count("×") == 2
+                   else "Width × Height")),
                  ("Qty in this wrap", str(lab["wrap_quantity"]),
                   f"Ordered {lab['line_quantity']}"),
                  ("Wrap weight", (lab["weight_kg"] or BLANK_WEIGHT) + " kg",
@@ -506,8 +531,8 @@ def render_pdf(labels: Sequence[Dict[str, Any]], path: str) -> str:
                   .get(lab["weight_source"], "Weigh and write in")),
                  ("Wrap page", lab["wrap_page"],
                   f"Area: {lab['group']}" if lab.get("group") else "")]
-        big = {"Filter size": 30, "Qty in this wrap": 54, "Wrap weight": 30,
-               "Wrap page": 44}
+        big = {"Filter size": 30, "Item": 26, "Qty in this wrap": 54,
+               "Wrap weight": 30, "Wrap page": 44}
         for (title, value, sub), frac in zip(cells, widths):
             cw = total * frac
             box(x, by, cw, bh)

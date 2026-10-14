@@ -275,7 +275,7 @@
   var SECTIONS = ["materials", "steel", "cut_profiles", "component_profiles",
     "brace_profiles", "mounting_frame_profiles", "wire_rules",
     "required_components", "packaging", "handling_profiles", "max_bundle_kg",
-    "shipping_rounding", "company"];
+    "shipping_rounding", "company", "c_channel"];
 
   function settingsDefaults() {
     return {
@@ -289,7 +289,8 @@
       packaging: clone(DEFAULT_PACKAGING),
       default_max_per_wrap: DEFAULT_MAX_PER_WRAP,
       handling_profiles: clone(DEFAULT_HANDLING_PROFILES),
-      max_bundle_kg: MAX_BUNDLE_KG, shipping_rounding: "none",
+      max_bundle_kg: MAX_BUNDLE_KG, shipping_rounding: "up_0.1",
+      c_channel: cChannelDefaults(),
       company: { base_address: BASE_ADDRESS_DEFAULT }, versions: {}
     };
   }
@@ -311,6 +312,8 @@
         Object.keys(v || {}).forEach(function (k) {
           if (typeof v[k] === "string") { out.company[k] = v[k]; }
         });
+      } else if (section === "c_channel") {
+        out.c_channel = cChannelMerged(v);
       } else if (section === "max_bundle_kg") {
         var n = Number(v);
         if (isFinite(n) && n > 0) { out.max_bundle_kg = n; }
@@ -1048,6 +1051,17 @@
     if (rate === null) { return null; }
     return rate * channelLengthMm(dims, p) / 1000;
   }
+  var FRAMED_IN_CHANNEL = ["Flat Panel", "Header", "V-form"];
+  function cChannelFrame(req, construction, dims, hasDims, s) {
+    if (FRAMED_IN_CHANNEL.indexOf(construction) === -1 || req.pleat_insert || !hasDims ||
+        dims.depth === undefined || dims.depth === null) { return [null, {}]; }
+    var method = String(req.frame_method || "u");
+    var cut = frameCutList(dims.width, dims.height, method, dims.depth);
+    var r = calculateCChannelFrameWeight(cut, 1, s);
+    return [r.frame_weight_kg, { basis: "c_channel", frame_method: method,
+      sections: r.sections, c_channel_version: r.settings_version,
+      warnings: r.calculation_warnings }];
+  }
   function frameMissing(name, dims) {
     if (name === "filter_frame" && dims.depth !== undefined && dims.depth !== null) {
       return "filter frame: kg per metre of " + depthKey(dims.depth) + "mm channel";
@@ -1100,13 +1114,17 @@
       return required.indexOf(c) === -1 && !(req.pleat_insert && c === "filter_frame");
     });
     ["filter_frame", "flyscreen_frame", "flyscreen_part"].forEach(function (name) {
+      if (required.indexOf(name) === -1 && optional.indexOf(name) === -1) { return; }
+      var r = profileComponent(name, construction, s.component_profiles, dims, hasDims);
+      if (r[0] === null && name === "filter_frame") {
+        var cf = cChannelFrame(req, construction, dims, hasDims, s);
+        r = [cf[0], cf[0] !== null ? "known" : "unknown", cf[1]];
+      }
       if (required.indexOf(name) !== -1) {
-        var r = profileComponent(name, construction, s.component_profiles, dims, hasDims);
         if (r[0] === null) { missing.push(frameMissing(name, dims)); }
         comps.push(comp(name, true, r[1], r[0], r[2]));
-      } else if (optional.indexOf(name) !== -1) {
-        var o = profileComponent(name, construction, s.component_profiles, dims, hasDims);
-        if (o[0] !== null) { comps.push(comp(name, false, o[1], o[0], o[2])); }
+      } else if (r[0] !== null) {
+        comps.push(comp(name, false, r[1], r[0], r[2]));
       }
     });
     if (optional.indexOf("braces") !== -1) {
@@ -1198,6 +1216,7 @@
      "includes_mounting_frame", "mounting_frame"].forEach(function (k) {
       if (k in saved) { req[k] = saved[k]; }
     });
+    if (item["Frame Method"]) { req.frame_method = String(item["Frame Method"]); }
     return req;
   }
 
@@ -1463,7 +1482,7 @@
   var ITEM_FIELDS = ["width_mm", "height_mm", "depth_mm", "quantity",
     "product_type", "wrap_quantities", "max_per_wrap", "wrap_weights_kg",
     "packaging_weights_kg", "complete_filter_weight_kg_per_filter",
-    "wrap_ids", "wrap_groups", "profile_refs", "packing_status"];
+    "wrap_ids", "wrap_groups", "profile_refs", "packing_status", "description"];
   var REMOVED_FIELDS = ["fax", "purchase_order_number", "po_number",
     "dispatch_date", "delivery_instructions"];
   function LabelError(problems) {
@@ -1520,7 +1539,14 @@
       else if (ITEM_FIELDS.indexOf(k) === -1) { problems.push(where + ": " + k + " is not a label field"); }
     });
     var out = clone(it);
+    var desc = it.description;
+    if (desc !== null && desc !== undefined && typeof desc !== "string") {
+      problems.push(where + ": description has to be text");
+    }
+    var described = typeof desc === "string" && desc.trim() !== "" &&
+      ["width_mm", "height_mm", "depth_mm"].every(function (k) { return it[k] === null || it[k] === undefined; });
     ["width_mm", "height_mm", "depth_mm"].forEach(function (k) {
+      if (described) { out[k] = null; return; }
       if (k === "depth_mm" && (it[k] === null || it[k] === undefined) &&
           String(it.product_type || "") === "Mounting Frame") { out[k] = null; return; }
       if (typeof it[k] === "boolean" || typeof it[k] === "string" || positive(it[k]) === null) {
@@ -1595,7 +1621,9 @@
         labels.push({ company: COMPANY.name, abn: COMPANY.abn, phone: COMPANY.phone,
           from_address: base, customer_name: clean.customer_name,
           address_lines: addr, locality: clean.suburb + "  " + clean.state + "  " + clean.postcode,
-          filter_size: sizeText(it.width_mm, it.height_mm, it.depth_mm),
+          filter_size: it.width_mm === null && it.description ? it.description.trim()
+            : sizeText(it.width_mm, it.height_mm, it.depth_mm),
+          described: it.width_mm === null,
           wrap_quantity: wrap.quantity, line_quantity: it.quantity,
           weight_kg: wrap.weight.display, weight_source: wrap.weight.source,
           weight_raw_kg: wrap.weight.raw_kg, weight_missing: wrap.weight.missing,
@@ -1607,6 +1635,381 @@
     });
     return labels;
   }
+
+  /* ── C-channel (taf_order_app/cchannel.py) ───────────────────────── */
+
+  var CCH_VERSION = "TAF-CCHANNEL-2026-10";
+  var CCH_DEFAULT_MATERIAL = "C_CHANNEL_G2_Z275_055";
+  var CCH_STACKS = [1, 2, 5, 10];
+  var ZINC_DENSITY_KG_M3 = 7140;
+  var CCH_SUPPLIED = [[15, 13], [20, 18], [25, 22], [30, 28], [35, 33], [40, 38],
+    [45, 44], [50, 48], [55, 53], [60, 58], [65, 63], [70, 68], [75, 74], [80, 78],
+    [85, 84], [90, 89], [95, 94], [100, 98]];
+  var CCH_VERIFIED = "verified", CCH_SUPPLIED_S = "supplied_unconfirmed_mapping",
+      CCH_ESTIMATED = "estimated", CCH_PROVISIONAL = "provisional_estimate",
+      CCH_CUSTOM = "custom";
+  var CCH_STATUS_LABELS = {};
+  CCH_STATUS_LABELS[CCH_VERIFIED] = "Verified";
+  CCH_STATUS_LABELS[CCH_SUPPLIED_S] = "Supplied, unconfirmed";
+  CCH_STATUS_LABELS[CCH_ESTIMATED] = "Estimated";
+  CCH_STATUS_LABELS[CCH_PROVISIONAL] = "Provisional estimate";
+  CCH_STATUS_LABELS[CCH_CUSTOM] = "Custom";
+
+  function cChannelDefaults() {
+    var widths = { "10": { width_mm: 10, status: CCH_PROVISIONAL,
+                           source: "initial estimate - confirm" } };
+    CCH_SUPPLIED.forEach(function (p) {
+      widths[String(p[0])] = { width_mm: p[1], status: CCH_SUPPLIED_S,
+        source: "TAF measurement; nominal depth inferred from the sequence" };
+    });
+    var mats = {};
+    mats[CCH_DEFAULT_MATERIAL] = {
+      material_code: CCH_DEFAULT_MATERIAL, material: "G2 Z275 galvanised steel",
+      steel_grade: "G2", galvanising: "Z275", nominal_thickness_mm: 0.55,
+      thickness_basis: "nominal_supplied", base_metal_thickness_mm: null,
+      coating_mass_g_m2: 275, include_coating_mass: false, density_kg_m3: 7850,
+      stock_length_mm: 2440, left_flange_mm: 23, right_flange_mm: 23,
+      bend_correction_mm: 0, mass_calibration_factor: null };
+    return { version: CCH_VERSION, default_material: CCH_DEFAULT_MATERIAL,
+      materials: mats, depth_range: { min_mm: 10, max_mm: 250, step_mm: 5 },
+      estimate_rule: { subtract_mm: 2 }, centre_widths: widths,
+      measured_weights: [], stack_quantities: CCH_STACKS.slice(), rounding: "up_0.1" };
+  }
+  function cchKey(depth) {
+    var d = finite(depth);
+    return d === null ? "" : String(d);
+  }
+  function cChannelMerged(stored) {
+    var out = cChannelDefaults();
+    if (!stored || typeof stored !== "object" || Array.isArray(stored)) { return out; }
+    Object.keys(stored).forEach(function (key) {
+      var value = stored[key];
+      if (key === "materials" && value && typeof value === "object") {
+        Object.keys(value).forEach(function (code) {
+          var base = clone(out.materials[code] || {});
+          var m = value[code] || {};
+          Object.keys(m).forEach(function (k) { base[k] = m[k]; });
+          base.material_code = code;
+          out.materials[code] = base;
+        });
+      } else if (key === "centre_widths" && value && typeof value === "object") {
+        Object.keys(value).forEach(function (d) {
+          if (value[d] && typeof value[d] === "object") { out.centre_widths[cchKey(d)] = clone(value[d]); }
+        });
+      } else if (value !== null && value !== undefined) {
+        out[key] = clone(value);
+      }
+    });
+    return out;
+  }
+  function cchSettings(settings) {
+    if (settings === null || settings === undefined) { return cChannelDefaults(); }
+    if (typeof settings === "object" && "c_channel" in settings) { return cChannelMerged(settings.c_channel); }
+    return cChannelMerged(settings);
+  }
+  function cChannelDepths(settings) {
+    var r = cchSettings(settings).depth_range;
+    var lo = positive(r.min_mm) || 10, hi = positive(r.max_mm) || 250, step = positive(r.step_mm) || 5;
+    var out = [], d = lo;
+    while (d <= hi + 1e-9) { out.push(d); d += step; }
+    return out;
+  }
+  function roundUpKg(kg) {
+    if (kg === null || kg === undefined) { return null; }
+    return Math.ceil(round9(kg * 10)) / 10;
+  }
+  function kgTextOne(kg) { return kg === null || kg === undefined ? "" : kg.toFixed(1) + " kg"; }
+  function cChannelMaterial(settings, code) {
+    var s = cchSettings(settings);
+    var c = String(code || s.default_material || CCH_DEFAULT_MATERIAL);
+    var m = (s.materials || {})[c];
+    if (!m) { return null; }
+    var out = clone(m); out.material_code = c;
+    return out;
+  }
+  function blankish(v) { return v === null || v === undefined || v === ""; }
+
+  function resolveCChannelDimensions(nominalDepth, centreWidth, settings, materialCode, length, left, right) {
+    var s = cchSettings(settings);
+    var out = { calculation_status: "ok", material_code: null, nominal_depth_mm: null,
+      actual_centre_width_mm: null, left_flange_mm: null, right_flange_mm: null,
+      channel_length_mm: null, dimension_source: null, verification_status: null,
+      missing_inputs: [], validation_errors: [], calculation_warnings: [] };
+    var errors = out.validation_errors, warnings = out.calculation_warnings;
+    var mat = cChannelMaterial(s, materialCode);
+    if (mat === null) {
+      errors.push("there is no C-channel material '" + materialCode + "'");
+      out.calculation_status = "invalid_input";
+      return out;
+    }
+    out.material_code = mat.material_code;
+    function pos(value, label) {
+      var v = positive(value);
+      if (v === null) { errors.push(label + " must be a number above zero"); }
+      return v;
+    }
+    var depth = null;
+    if (!blankish(nominalDepth)) { depth = pos(nominalDepth, "nominal depth"); }
+    out.nominal_depth_mm = depth;
+    if (!blankish(centreWidth)) {
+      out.actual_centre_width_mm = pos(centreWidth, "centre width");
+      out.dimension_source = "custom";
+      out.verification_status = CCH_CUSTOM;
+    } else if (depth !== null) {
+      var row = (s.centre_widths || {})[cchKey(depth)];
+      var width = positive((row || {}).width_mm);
+      if (row && width !== null) {
+        var status = String(row.status || CCH_ESTIMATED);
+        if (!(status in CCH_STATUS_LABELS)) { status = CCH_ESTIMATED; }
+        out.actual_centre_width_mm = width;
+        out.verification_status = status;
+        out.dimension_source = status === CCH_VERIFIED ? "verified_measurement"
+          : status === CCH_SUPPLIED_S ? "supplied_measurement"
+          : status === CCH_CUSTOM ? "custom" : "estimated_rule";
+      } else {
+        var sub = finite((s.estimate_rule || {}).subtract_mm);
+        if (sub === null) { sub = 2; }
+        var w = depth - sub;
+        if (w <= 0) {
+          errors.push("a " + depth + "mm depth less " + sub + "mm leaves no centre width - enter one");
+        } else {
+          out.actual_centre_width_mm = w;
+          out.dimension_source = "estimated_rule";
+          out.verification_status = CCH_ESTIMATED;
+        }
+      }
+      if (out.verification_status === CCH_ESTIMATED || out.verification_status === CCH_PROVISIONAL) {
+        warnings.push("the centre width for " + depth + "mm is an estimate - confirm it");
+      } else if (out.verification_status === CCH_SUPPLIED_S) {
+        warnings.push("the " + out.actual_centre_width_mm + "mm centre width for " + depth +
+          "mm is a supplied measurement whose depth match is not yet confirmed");
+      }
+    } else if (!errors.length) {
+      out.missing_inputs.push("a nominal depth or a centre width");
+    }
+    out.left_flange_mm = pos(blankish(left) ? mat.left_flange_mm : left, "left flange");
+    out.right_flange_mm = pos(blankish(right) ? mat.right_flange_mm : right, "right flange");
+    out.channel_length_mm = pos(blankish(length) ? mat.stock_length_mm : length, "channel length");
+    if (errors.length) { out.calculation_status = "invalid_input"; }
+    else if (out.missing_inputs.length) { out.calculation_status = "needs_input"; }
+    return out;
+  }
+  function cChannelSizeText(d) {
+    var parts = [d.left_flange_mm, d.actual_centre_width_mm, d.right_flange_mm, d.channel_length_mm];
+    if (parts.some(function (p) { return p === null || p === undefined; })) { return ""; }
+    return parts.map(String).join(" x ") + " mm";
+  }
+  function nonNegOrNull(v) { var n = finite(v); return n !== null && n >= 0 ? n : null; }
+  function cchThickness(mat, errors) {
+    var basis = String(mat.thickness_basis || "nominal_supplied");
+    var base = positive(mat.base_metal_thickness_mm);
+    if (base !== null) { return base; }
+    var nominal = positive(mat.nominal_thickness_mm);
+    if (nominal === null) { errors.push("material thickness must be a number above zero"); return null; }
+    if (basis === "coated") {
+      var coat = nonNegOrNull(mat.coating_mass_g_m2);
+      if (coat === null) { errors.push("a coated thickness needs the coating mass"); return null; }
+      var t = nominal - coat / ZINC_DENSITY_KG_M3;
+      if (t <= 0) { errors.push("the coating is thicker than the steel"); return null; }
+      return t;
+    }
+    return nominal;
+  }
+  function cchMeasured(s, code, dims) {
+    var list = s.measured_weights || [];
+    for (var i = 0; i < list.length; i++) {
+      var m = list[i];
+      if (!m.verified || String(m.material_code || code) !== code) { continue; }
+      var kg = positive(m.kg), len = positive(m.length_mm);
+      if (kg === null || len === null) { continue; }
+      var width = positive(m.centre_width_mm), depth = positive(m.nominal_depth_mm);
+      if (width !== null) {
+        if (Math.abs(width - (dims.actual_centre_width_mm || -1)) > 1e-9) { continue; }
+      } else if (depth === null || dims.nominal_depth_mm === null ||
+                 Math.abs(depth - dims.nominal_depth_mm) > 1e-9) { continue; }
+      var out = clone(m); out.kg = kg; out.length_mm = len;
+      return out;
+    }
+    return null;
+  }
+  function calculateCChannelWeight(nominalDepth, centreWidth, length, settings, materialCode,
+                                   left, right, useMeasured) {
+    var s = cchSettings(settings);
+    var out = resolveCChannelDimensions(nominalDepth, centreWidth, s, materialCode, length, left, right);
+    out.material_thickness_mm = null; out.steel_density_kg_m3 = null;
+    out.developed_width_mm = null; out.weight_basis = null; out.weight_per_mm_kg = null;
+    out.raw_weight_kg = null; out.display_weight_kg = null; out.settings_version = s.version;
+    if (out.calculation_status !== "ok") { return out; }
+    var errors = out.validation_errors, warnings = out.calculation_warnings;
+    var mat = cChannelMaterial(s, out.material_code) || {};
+    var t = cchThickness(mat, errors);
+    var density = positive(mat.density_kg_m3);
+    if (density === null) { errors.push("steel density must be a number above zero"); }
+    var bend = finite(mat.bend_correction_mm);
+    if (bend === null && !blankish(mat.bend_correction_mm)) { errors.push("the bend correction must be a number"); }
+    var developed = out.left_flange_mm + out.actual_centre_width_mm + out.right_flange_mm + (bend || 0);
+    if (developed <= 0) { errors.push("the developed width comes out at nothing"); }
+    if (errors.length) { out.calculation_status = "invalid_input"; return out; }
+    out.material_thickness_mm = t; out.steel_density_kg_m3 = density; out.developed_width_mm = developed;
+    var len = out.channel_length_mm, perMm;
+    var measured = useMeasured === false ? null : cchMeasured(s, out.material_code, out);
+    if (measured !== null) {
+      perMm = measured.kg / measured.length_mm;
+      out.weight_basis = "measured";
+      if (Math.abs(measured.length_mm - len) > 1e-9) {
+        out.weight_basis = "measured_scaled_to_length";
+        warnings.push("measured over " + measured.length_mm + "mm, scaled to " + len + "mm");
+      }
+    } else {
+      perMm = developed * t * density / 1e9;
+      var basis = "calculated_base_steel";
+      var coat = nonNegOrNull(mat.coating_mass_g_m2);
+      if (mat.include_coating_mass) {
+        var confirmed = !blankish(mat.base_metal_thickness_mm) ||
+          mat.thickness_basis === "base_metal" || mat.thickness_basis === "coated";
+        if (confirmed && coat !== null) {
+          perMm += developed * coat / 1e9;
+          basis = "calculated_steel_and_coating";
+        } else {
+          warnings.push("coating not added: the 0.55mm may already include it until the steel's base-metal thickness is confirmed");
+        }
+      }
+      var cal = positive(mat.mass_calibration_factor);
+      if (cal !== null) { perMm *= cal; basis += "_calibrated"; }
+      out.weight_basis = basis;
+    }
+    out.weight_per_mm_kg = perMm;
+    out.raw_weight_kg = perMm * len;
+    out.display_weight_kg = roundUpKg(out.raw_weight_kg);
+    return out;
+  }
+  function calculateCChannelStackWeights(channel, quantities) {
+    var qs = quantities === undefined || quantities === null ? CCH_STACKS.slice() : quantities;
+    var raw = channel.raw_weight_kg;
+    return qs.map(function (q) {
+      var n = positiveInt(q);
+      if (n === null) {
+        return { stack_quantity: q, stack_raw_weight_kg: null, stack_display_weight_kg: null,
+                 validation_errors: ["a stack is a whole number of 1 or more lengths"] };
+      }
+      var total = raw === null || raw === undefined ? null : raw * n;
+      return { stack_quantity: n, stack_raw_weight_kg: total,
+               stack_display_weight_kg: roundUpKg(total), validation_errors: [] };
+    });
+  }
+  function calculateCChannelCutSectionWeight(channel, cutLength, sectionQuantity, measuredKg) {
+    var out = { cut_length_mm: positive(cutLength),
+      section_quantity: positiveInt(sectionQuantity === undefined ? 1 : sectionQuantity),
+      section_weight_kg: null, weight_basis: null, validation_errors: [] };
+    if (out.cut_length_mm === null) { out.validation_errors.push("a cut length must be above zero"); }
+    if (out.section_quantity === null) { out.validation_errors.push("a section count is a whole number of 1 or more"); }
+    if (out.validation_errors.length) { return out; }
+    var m = positive(measuredKg);
+    if (m !== null) { out.section_weight_kg = m; out.weight_basis = "measured"; return out; }
+    var perMm = channel.weight_per_mm_kg;
+    if (perMm === null || perMm === undefined) { return out; }
+    out.section_weight_kg = perMm * out.cut_length_mm * out.section_quantity;
+    out.weight_basis = channel.weight_basis;
+    return out;
+  }
+
+  // cutting.layout, for the frame's cut list: U / Sideways U a strip and a
+  // cap, G one strip, L two strips (long, short, lip).
+  var FRAME_NAMES = { u: "U", sideways_u: "Sideways U", g: "G", l: "L" };
+  var FRAME_STRIPS = { u: 1, sideways_u: 1, g: 1, l: 2 };
+  function frameLayout(short, long, method) {
+    if (!(method in FRAME_NAMES)) { return null; }
+    var sh = finite(short), lo = finite(long);
+    if (sh === null || lo === null || sh <= 0 || lo <= 0) { return null; }
+    var lip = 20, allow = 2;
+    var s = sh - allow, l = lo - allow;
+    if (s <= 0 || l <= 0) { return null; }
+    var segs, cap;
+    if (method === "u") { segs = [lip, s, l, s, lip]; cap = l; }
+    else if (method === "sideways_u") { segs = [lip, l, s, l, lip]; cap = s; }
+    else if (method === "l") { segs = [l, s, lip]; cap = 0; }
+    else { segs = [l, s, l, s, lip]; cap = 0; }
+    return { name: FRAME_NAMES[method], frame: sum(segs), cap: cap, strips: FRAME_STRIPS[method] };
+  }
+  function frameCutList(short, long, method, nominalDepth, materialCode) {
+    var shape = frameLayout(short, long, method || "u");
+    if (shape === null) { return null; }
+    var rows = [{ name: shape.name + " strip", cut_length_mm: shape.frame,
+                  section_quantity: shape.strips }];
+    if (shape.cap) { rows.push({ name: "cap", cut_length_mm: shape.cap, section_quantity: 1 }); }
+    rows.forEach(function (r) {
+      r.nominal_depth_mm = nominalDepth === undefined ? null : nominalDepth;
+      r.material_code = materialCode || CCH_DEFAULT_MATERIAL;
+    });
+    return rows;
+  }
+  function calculateCChannelFrameWeight(cutList, orderQuantity, settings) {
+    var s = cchSettings(settings);
+    var out = { calculation_status: "ok", sections: [], frame_weight_kg: null,
+      frame_weight_kg_order: null,
+      order_quantity: positiveInt(orderQuantity === undefined ? 1 : orderQuantity),
+      missing_inputs: [], validation_errors: [], calculation_warnings: [],
+      settings_version: s.version };
+    var rows = cutList || [];
+    if (!rows.length) {
+      out.calculation_status = "needs_frame_cut_rule";
+      out.missing_inputs.push("a verified frame cut list (cut lengths and how many of each per filter)");
+      return out;
+    }
+    if (out.order_quantity === null) { out.validation_errors.push("the order quantity is a whole number of 1 or more"); }
+    var total = 0;
+    rows.forEach(function (row, i) {
+      var ch = calculateCChannelWeight(row.nominal_depth_mm, row.centre_width_mm, null, s, row.material_code);
+      var sec = calculateCChannelCutSectionWeight(ch, row.cut_length_mm,
+        row.section_quantity === undefined ? 1 : row.section_quantity, row.measured_kg);
+      sec.name = row.name || ("section " + (i + 1));
+      sec.nominal_depth_mm = ch.nominal_depth_mm;
+      sec.actual_centre_width_mm = ch.actual_centre_width_mm;
+      sec.verification_status = ch.verification_status;
+      sec.material_code = ch.material_code;
+      out.sections.push(sec);
+      ch.validation_errors.concat(sec.validation_errors).forEach(function (e) { out.validation_errors.push(sec.name + ": " + e); });
+      ch.missing_inputs.forEach(function (m) { out.missing_inputs.push(sec.name + ": " + m); });
+      ch.calculation_warnings.forEach(function (w) {
+        if (out.calculation_warnings.indexOf(w) === -1) { out.calculation_warnings.push(w); }
+      });
+      if (sec.section_weight_kg === null) { total = null; }
+      else if (total !== null) { total += sec.section_weight_kg; }
+    });
+    if (out.validation_errors.length) { out.calculation_status = "invalid_input"; return out; }
+    if (total === null) { out.calculation_status = "needs_input"; return out; }
+    out.calculation_warnings.push("corner notches and trimmed lip flanges are not deducted (their size is not confirmed), so this errs heavy");
+    out.frame_weight_kg = total;
+    out.frame_weight_kg_order = total * out.order_quantity;
+    return out;
+  }
+  function calculateCChannelStockWeight(nominalDepth, lengths, length, centreWidth, settings, materialCode) {
+    var ch = calculateCChannelWeight(nominalDepth, centreWidth, length, settings, materialCode);
+    var out = clone(ch);
+    var n = positiveInt(lengths === undefined ? 1 : lengths);
+    if (n === null) {
+      out.validation_errors = ch.validation_errors.concat(["a number of lengths is a whole number of 1 or more"]);
+      out.calculation_status = "invalid_input";
+    }
+    out.stack_quantity = n;
+    var raw = ch.raw_weight_kg;
+    out.stack_raw_weight_kg = raw === null || n === null ? null : raw * n;
+    out.stack_display_weight_kg = roundUpKg(out.stack_raw_weight_kg);
+    return out;
+  }
+  function cChannelTable(settings, quantities) {
+    var s = cchSettings(settings);
+    var qs = quantities === undefined || quantities === null ? (s.stack_quantities || CCH_STACKS) : quantities;
+    return cChannelDepths(s).map(function (d) {
+      var ch = calculateCChannelWeight(d, null, null, s);
+      return { nominal_depth_mm: d, actual_centre_width_mm: ch.actual_centre_width_mm,
+        size: cChannelSizeText(ch), verification_status: ch.verification_status,
+        dimension_source: ch.dimension_source, weight_basis: ch.weight_basis,
+        raw_weight_kg: ch.raw_weight_kg, stacks: calculateCChannelStackWeights(ch, qs),
+        calculation_status: ch.calculation_status };
+    });
+  }
+
 
   var api = {
     // numbers
@@ -1637,7 +2040,19 @@
     // labels
     LabelError: LabelError, roundPackage: roundPackage,
     resolveWrapWeight: resolveWrapWeight, validateLabels: validateLabels,
-    buildLabels: buildLabels, jobText: jobText
+    buildLabels: buildLabels, jobText: jobText,
+    // C-channel
+    C_CHANNEL_VERSION: CCH_VERSION, C_CHANNEL_STATUS_LABELS: CCH_STATUS_LABELS,
+    cChannelDefaults: cChannelDefaults, cChannelMerged: cChannelMerged,
+    cChannelDepths: cChannelDepths, roundUpKg: roundUpKg, kgText: kgTextOne,
+    resolveCChannelDimensions: resolveCChannelDimensions,
+    calculateCChannelWeight: calculateCChannelWeight,
+    calculateCChannelStackWeights: calculateCChannelStackWeights,
+    calculateCChannelCutSectionWeight: calculateCChannelCutSectionWeight,
+    calculateCChannelFrameWeight: calculateCChannelFrameWeight,
+    calculateCChannelStockWeight: calculateCChannelStockWeight,
+    cChannelTable: cChannelTable, cChannelSizeText: cChannelSizeText,
+    frameCutList: frameCutList
   };
 
   root.TAFCALC = api;

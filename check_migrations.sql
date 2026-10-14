@@ -132,7 +132,12 @@ WITH checks(step, file, purpose, needed, present) AS (VALUES
   (33, 'migrate_packing_and_merge.sql', 'Weights, packing, delivery labels and merging customers', 'recommended',
       to_regclass('public.calc_settings') IS NOT NULL
       AND to_regclass('public.customer_merges') IS NOT NULL
-      AND to_regprocedure('public.merge_customers(text,uuid,uuid[],jsonb,jsonb)') IS NOT NULL)
+      AND to_regprocedure('public.merge_customers(text,uuid,uuid[],jsonb,jsonb)') IS NOT NULL),
+
+  (34, 'migrate_c_channel.sql', 'C-channel weights: material, centre widths and measured weights', 'recommended',
+      EXISTS (SELECT 1 FROM pg_constraint
+               WHERE conname = 'calc_settings_key_check'
+                 AND pg_get_constraintdef(oid) LIKE '%c_channel%'))
 )
 SELECT step,
        CASE WHEN present THEN 'already done' ELSE 'RUN THIS' END AS status,

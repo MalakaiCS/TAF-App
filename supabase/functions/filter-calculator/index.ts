@@ -26,6 +26,19 @@
 //   {"action": "settings"}                         what is in force, with
 //                                                  versions
 //
+// C-channel (the same calculator the frames, stock and labels use):
+//   {"action": "c_channel_weight", "nominal_depth_mm": 45,
+//                                  "centre_width_mm": null, "length_mm": 2440,
+//                                  "stacks": [1, 2, 5, 10, 20]}
+//   {"action": "c_channel_table", "stacks": [1, 2, 5, 10]}   every depth
+//   {"action": "c_channel_frame", "short_mm": 595, "long_mm": 595,
+//                                 "nominal_depth_mm": 25, "method": "g",
+//                                 "order_quantity": 10}
+//                     or "cut_list": [{"nominal_depth_mm": 25,
+//                                      "cut_length_mm": 1819,
+//                                      "section_quantity": 1}, ...]
+//   {"action": "c_channel_stock", "nominal_depth_mm": 45, "lengths": 10}
+//
 // Answers are JSON. Weights are plain kg numbers at full precision; nothing
 // is rounded for display except the label weight text, which follows the
 // company's shipping-rounding setting exactly as the printed label does.
@@ -145,9 +158,41 @@ Deno.serve(async (req: Request) => {
       }
       case "settings":
         return json({ ...meta, settings });
+      case "c_channel_weight": {
+        const result = C.calculateCChannelWeight(
+          body.nominal_depth_mm ?? null, body.centre_width_mm ?? null,
+          body.length_mm ?? null, settings, body.material_code ?? null,
+          body.left_flange_mm ?? null, body.right_flange_mm ?? null);
+        result.stacks = C.calculateCChannelStackWeights(result,
+                                                        body.stacks ?? null);
+        return json({ ...meta, result },
+                    result.calculation_status === "ok" ? 200 : 422);
+      }
+      case "c_channel_table":
+        return json({ ...meta,
+                      result: C.cChannelTable(settings, body.stacks ?? null) });
+      case "c_channel_frame": {
+        const cut = Array.isArray(body.cut_list) ? body.cut_list
+          : C.frameCutList(body.short_mm, body.long_mm, body.method ?? "u",
+                           body.nominal_depth_mm ?? null);
+        const result = C.calculateCChannelFrameWeight(
+          cut, body.order_quantity ?? 1, settings);
+        return json({ ...meta, result },
+                    result.calculation_status === "invalid_input" ? 422 : 200);
+      }
+      case "c_channel_stock": {
+        const result = C.calculateCChannelStockWeight(
+          body.nominal_depth_mm ?? null, body.lengths ?? 1,
+          body.length_mm ?? null, body.centre_width_mm ?? null, settings,
+          body.material_code ?? null);
+        return json({ ...meta, result },
+                    result.calculation_status === "ok" ? 200 : 422);
+      }
       default:
         return json({ error: "Unknown action. Use calculate, bracing, " +
-                             "mounting_frame, pack, labels or settings." }, 400);
+                             "mounting_frame, pack, labels, settings, " +
+                             "c_channel_weight, c_channel_table, " +
+                             "c_channel_frame or c_channel_stock." }, 400);
     }
   } catch (err) {
     return json({ ...meta, error: "The request could not be worked out.",

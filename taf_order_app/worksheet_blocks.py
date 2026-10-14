@@ -171,8 +171,9 @@ def calculator_lines(ctx: Dict[str, Any], qty: Any = None) -> List[Line]:
 
 
 # Which row of marks on the sheet each way of making the frame is. The
-# worksheet prints all three: the top row is a U, FLIPPED a Sideways U and
-# REVERSED a G (cutting.py reproduces those marks exactly).
+# worksheet prints three: the top row is a U, FLIPPED a Sideways U and
+# REVERSED a G (cutting.py reproduces those marks exactly). An L has no row;
+# its marks are written out in the box.
 MARK_ROWS = {"u": "top row of marks", "sideways_u": "FLIPPED marks",
              "g": "REVERSED marks"}
 
@@ -201,6 +202,13 @@ def frame_lines(item: Dict[str, Any], prefer: str = "",
     row = MARK_ROWS.get(won["method"])
     if row:
         text += f" - use the {row}"
+    else:
+        # The sheet prints no row for an L, so its marks go here: long,
+        # short, lip, and two strips to a filter.
+        shape = won.get("shape") or won["full"]
+        marks = ", ".join(f"{m:g}" for m in shape["marks"])
+        text += (f" - 2 strips a filter, each marked {marks} "
+                 "(long, short, lip)")
     out: List[Line] = [(text, True)]
     if won["shortened"] and qty > 1:
         full = won["frames_per_stick"] * len(

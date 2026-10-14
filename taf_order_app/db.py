@@ -2402,7 +2402,8 @@ def offcut_lengths(profile: str = "") -> list:
 # ── Which way a customer's filters get made ──────────────────────────────────
 
 def frame_preference(customer_name: str) -> str:
-    """'u', 'sideways_u', 'g', or '' for whichever is cheapest that day."""
+    """'u', 'sideways_u', 'g', 'l', or '' for whichever is cheapest that
+    day."""
     name = str(customer_name or "").strip()
     if not name:
         return ""
@@ -2414,7 +2415,7 @@ def frame_preference(customer_name: str) -> str:
             if wanted in (str(row.get("name") or "").strip().upper(),
                           str(row.get("short_name") or "").strip().upper()):
                 pref = str(row.get("frame_preference") or "").strip().lower()
-                return pref if pref in ("u", "sideways_u", "g") else ""
+                return pref if pref in ("u", "sideways_u", "g", "l") else ""
     except Exception:
         pass
     return ""
@@ -2422,7 +2423,7 @@ def frame_preference(customer_name: str) -> str:
 
 def set_frame_preference(customer_id: str, preference: str) -> None:
     pref = str(preference or "").strip().lower()
-    if pref not in ("", "u", "sideways_u", "g"):
+    if pref not in ("", "u", "sideways_u", "g", "l"):
         raise ValueError(f"{preference!r} is not a way of making a filter.")
     get_client().table("customers").update(
         {"frame_preference": pref}).eq("id", str(customer_id)).execute()
