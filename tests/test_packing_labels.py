@@ -588,3 +588,25 @@ def test_packing_never_touches_the_notes():
     assert out[0]["Notes"] == "Customer: label each one"
     assert item["Notes"] == "Customer: label each one"
     assert "Notes" not in auto and "Notes" not in item["Packing"]
+
+
+def test_every_quantity_gets_labels_with_nothing_entered():
+    """2.28.2 printed labels for a quantity of 1 and refused 2 or more: one
+    filter always fitted one wrap, but more needed a weight that waited on
+    the frame, braces and wrapping being typed in. With the defaults alone,
+    every quantity is planned and labelled, every wrap weighed."""
+    s = cs.defaults()
+    cust = {"name": "X", "delivery_address1": "1 St", "delivery_city": "Y",
+            "delivery_state": "QLD", "delivery_postcode": "4000"}
+    for q in (1, 2, 3, 7, 12, 25, 60):
+        items = [{"Filter Type": "Flat Panel", "Short": 595, "Long": 595,
+                  "Channel": 25, "Quantity": q, "Media Type": "F5"},
+                 {"Filter Type": "V-form", "Short": 592, "Long": 592,
+                  "Channel": 45, "Quantity": q, "Media Type": "G4"}]
+        labs = dl.build_for_order({"order_number": "1", "header": {},
+                                   "items": items}, cust, s, "Base")
+        for line in (1, 2):
+            mine = [l for l in labs if l["line"] == line]
+            assert sum(l["wrap_quantity"] for l in mine) == q, (q, line)
+            assert all(l["weight_kg"] and l["weight_raw_kg"] <= 10
+                       for l in mine), (q, line)
