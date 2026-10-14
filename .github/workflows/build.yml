@@ -189,7 +189,8 @@ jobs:
           if [ -s release_notes.md ]; then
             gh release view "$TAG" --json body -q .body > published_notes.txt
             head -c 60 release_notes.md > expected_head.txt
-            grep -qF "$(cat expected_head.txt)" published_notes.txt || {
+            # "--": notes that start with "- " are a pattern, not an option.
+            grep -qF -- "$(cat expected_head.txt)" published_notes.txt || {
               echo "::error::Release notes were not published correctly."
               exit 1
             }
