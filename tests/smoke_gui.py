@@ -613,6 +613,71 @@ def _steps(app, gui, root):
             raise AssertionError(f"no label PDF was made ({path})")
     add("delivery labels for an order", _delivery_labels)
 
+    def _add_address_on_the_order_form():
+        """Picking a customer whose account has no delivery address asks for
+        one - "Add Address for ..." - saves it to the account, and does not
+        ask again; a customer with an address is not asked at all."""
+        saved = []
+        gui._db.update_customer = lambda cid, data: saved.append((cid, data))
+        app._address_asked = set()
+        was_loc = app.hvars["Location"].get()
+        app.hvars["Location"].set("")
+
+        def _dialogs():
+            deadline = time.monotonic() + 0.6
+            while time.monotonic() < deadline:
+                root.update()
+                time.sleep(0.02)
+            return [w for w in root.winfo_children()
+                    if isinstance(w, gui.AddAddressDialog)]
+        try:
+            app._pick_customer(dict(CUSTOMERS[0]))         # has an address
+            if _dialogs():
+                raise AssertionError("asked for an address it already has")
+            app.hvars["Location"].set("")
+            app._pick_customer(dict(CUSTOMERS[1]))         # has none
+            found = _dialogs()
+            if len(found) != 1:
+                raise AssertionError(f"expected one Add Address window, "
+                                     f"got {len(found)}")
+            dlg = found[0]
+            if dlg.title() != 'Add Address for "CAS - Tweed"':
+                raise AssertionError(f"titled {dlg.title()!r}")
+            dlg.vars["delivery_address1"].set("3A/38 Enterprise Avenue")
+            dlg.vars["delivery_city"].set("Tweed Heads")
+            dlg.vars["delivery_state"].set("NSW")
+            dlg.vars["delivery_postcode"].set("248")
+            dlg._save()
+            if saved or "postcode" not in dlg.err.cget("text"):
+                raise AssertionError("a three-digit postcode was saved")
+            dlg.vars["delivery_postcode"].set("2486")
+            dlg._save()
+            if len(saved) != 1 or saved[0][0] != "c2" or \
+                    saved[0][1]["delivery_postcode"] != "2486" or \
+                    saved[0][1]["billing_city"] != "Tweed Heads":
+                raise AssertionError(f"saved {saved}")
+            if app.hvars["Location"].get() != "Tweed Heads, NSW":
+                raise AssertionError("Location was not filled in")
+            app._pick_customer(dict(CUSTOMERS[1]))
+            if _dialogs():
+                raise AssertionError("asked twice for the same customer")
+            # Typed out in full rather than picked: asked on leaving the box.
+            app._address_asked = set()
+            app._customer_records = [dict(c) for c in CUSTOMERS]
+            app.hvars["Customer Name"].set("cas - tweed")
+            app._customer_left()
+            found = _dialogs()
+            if len(found) != 1:
+                raise AssertionError("a typed name was not checked")
+            found[0].destroy()
+        finally:
+            del gui._db.update_customer
+            app.hvars["Location"].set(was_loc)
+            app.hvars["Customer Name"].set("")
+            app._close_ac_popup()
+    add("order form: Add Address for a customer without one",
+        _add_address_on_the_order_form)
+
     generated: dict = {}
 
     def _generate_prints_the_labels():

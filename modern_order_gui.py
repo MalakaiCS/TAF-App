@@ -6570,6 +6570,140 @@ class WeightsSettingsDialog(tk.Toplevel):
                  pady=px(5)).pack(anchor="w", pady=(px(8), 0))
 
 
+ADDRESS_FIELDS = ("delivery_address1", "delivery_city", "delivery_state",
+                  "delivery_postcode")
+
+
+def customer_needs_address(cust) -> bool:
+    """True when an account has no delivery address a label could use:
+    street, suburb, state and postcode all have to be there."""
+    if not cust or not cust.get("id"):
+        return False
+    return any(not str(cust.get(k) or "").strip() for k in ADDRESS_FIELDS)
+
+
+class AddAddressDialog(tk.Toplevel):
+    """Add Address for "Customer" - the delivery address a customer account
+    is missing, asked for on the order form as the customer is chosen, so
+    the delivery labels have somewhere to send the order.
+
+    Saves to the customer's account. `on_saved(record)` gets the account as
+    it now is.
+    """
+
+    def __init__(self, master, cust: dict, on_saved=None):
+        super().__init__(master)
+        self.cust = dict(cust)
+        self.on_saved = on_saved
+        name = cust.get("name") or "this customer"
+        self.title(f'Add Address for "{name}"')
+        self.transient(master)
+        self.grab_set()
+        self.configure(bg=CBG)
+        self.resizable(False, False)
+        self.bind("<Escape>", lambda _e: self.destroy())
+
+        top = tk.Frame(self, bg=CA, padx=px(16), pady=px(10))
+        top.pack(fill="x")
+        tk.Label(top, text=f'Add Address for "{name}"', bg=CA, fg="white",
+                 font=(FAM, 13, "bold")).pack(anchor="w")
+        tk.Label(top, text="This customer has no delivery address yet. It "
+                           "goes on their delivery labels and is saved to "
+                           "their account.", bg=CA, fg="white", font=F_SM,
+                 wraplength=px(420), justify="left").pack(anchor="w")
+
+        # The buttons are packed before the fields so they always get their
+        # room; a window sized a touch small loses a field's padding, never
+        # the Save button.
+        foot = tk.Frame(self, bg=CBG, padx=px(18), pady=px(10))
+        foot.pack(fill="x", side="bottom")
+        flat_btn(foot, "Save address", self._save, bg=CGR,
+                 pady=px(6)).pack(side="right")
+        flat_btn(foot, "Not now", self.destroy, bg=CNE,
+                 pady=px(6)).pack(side="right", padx=(0, px(8)))
+
+        body = tk.Frame(self, bg=CBG, padx=px(18), pady=px(12))
+        body.pack(fill="both", expand=True)
+        body.columnconfigure(1, weight=1)
+        self.vars = {}
+        rows = (("delivery_address1", "Street address *"),
+                ("delivery_address2", "Address line 2"),
+                ("delivery_city", "Suburb *"),
+                ("delivery_state", "State *"),
+                ("delivery_postcode", "Postcode *"))
+        first = None
+        for r, (key, label) in enumerate(rows):
+            tk.Label(body, text=label, bg=CBG, fg=CTX, font=F_BODY,
+                     anchor="w").grid(row=r, column=0, sticky="w",
+                                      pady=px(3), padx=(0, px(10)))
+            var = tk.StringVar(value=str(cust.get(key) or ""))
+            self.vars[key] = var
+            if key == "delivery_state":
+                w = ttk.Combobox(body, textvariable=var, state="readonly",
+                                 values=list(_db.AU_STATES), width=10)
+                w.grid(row=r, column=1, sticky="w", pady=px(3))
+            else:
+                w = field_entry(body, textvariable=var,
+                                width=10 if key == "delivery_postcode" else 40)
+                w.grid(row=r, column=1, sticky="w" if key ==
+                       "delivery_postcode" else "ew", pady=px(3))
+                if first is None:
+                    first = w
+        self.err = tk.Label(body, text="", bg=CBG, fg=CRD, font=F_SM,
+                            anchor="w")
+        self.err.grid(row=len(rows), column=0, columnspan=2, sticky="w",
+                      pady=(px(6), 0))
+
+        self.bind("<Return>", lambda _e: self._save())
+        self.update_idletasks()
+        _centre_on_parent(self, master, max(px(520), self.winfo_reqwidth()),
+                          self.winfo_reqheight())
+        if first is not None:
+            self.after(50, first.focus_set)
+
+    def values(self) -> dict:
+        return {k: v.get().strip() for k, v in self.vars.items()}
+
+    def problems(self) -> list:
+        v = self.values()
+        out = []
+        for key, label in (("delivery_address1", "street address"),
+                           ("delivery_city", "suburb"),
+                           ("delivery_state", "state")):
+            if not v[key]:
+                out.append(label)
+        if not re.fullmatch(r"\d{4}", v["delivery_postcode"]):
+            out.append("a four-digit postcode")
+        return out
+
+    def _save(self):
+        missing = self.problems()
+        if missing:
+            self.err.config(text="Still needs: " + ", ".join(missing) + ".")
+            return
+        data = self.values()
+        # An account whose billing follows its delivery address keeps doing
+        # so; a separate billing address is left alone.
+        if self.cust.get("billing_same", True):
+            for part in ("address1", "address2", "city", "state", "postcode"):
+                data[f"billing_{part}"] = data[f"delivery_{part}"]
+        try:
+            _db.update_customer(self.cust["id"], data)
+        except Exception as exc:
+            self.err.config(text=f"Not saved: {exc}")
+            return
+        try:
+            _db.log_action("customer_updated",
+                           f"Delivery address added for "
+                           f"{self.cust.get('name', '')} from the order form")
+        except Exception:
+            pass
+        self.cust.update(data)
+        if self.on_saved:
+            self.on_saved(self.cust)
+        self.destroy()
+
+
 class MergeCustomersDialog(tk.Toplevel):
     """Fold accounts that are the same company into one.
 
@@ -7990,6 +8124,11 @@ class ModernOrderApp(tk.Frame):
                 self._hentries[key] = e
                 if key == "Customer Name":
                     self._customer_entry = e
+                    # Picking from the list asks in _pick_customer; this
+                    # catches a name typed out in full. After a moment, so
+                    # a click on the suggestions list is handled first.
+                    e.bind("<FocusOut>", lambda _e: self.master.after(
+                        200, self._customer_left), add="+")
 
         # Clear individual field error as user types + trigger draft save
         for req_key in REQUIRED:
@@ -17433,6 +17572,44 @@ class ModernOrderApp(tk.Frame):
         # Store the customer_id for order linking
         self._selected_customer_id = cust.get("id", "")
         self._close_ac_popup()
+        self.master.after(150, lambda c=cust: self._ask_for_address(c))
+
+    def _ask_for_address(self, cust) -> None:
+        """Add Address for "Customer", when the account has no delivery
+        address. Asked once per customer per session: "Not now" means not
+        now, not every time the field is touched."""
+        if not customer_needs_address(cust):
+            return
+        asked = self.__dict__.setdefault("_address_asked", set())
+        if cust.get("id") in asked:
+            return
+        asked.add(cust.get("id"))
+
+        def _saved(record):
+            for rec in getattr(self, "_customer_records", None) or []:
+                if rec.get("id") == record.get("id"):
+                    rec.update(record)
+            if not self.hvars["Location"].get().strip():
+                loc = ", ".join(p for p in (record.get("delivery_city", ""),
+                                            record.get("delivery_state", ""))
+                                if p)
+                if loc:
+                    self.hvars["Location"].set(loc)
+            self.status_var.set(f"Delivery address saved for "
+                                f"{record.get('name', '')}.")
+        AddAddressDialog(self.master, cust, on_saved=_saved)
+
+    def _customer_left(self, _event=None) -> None:
+        """The customer was typed rather than picked: if it is exactly an
+        account's name, check that account has an address."""
+        typed = self.hvars["Customer Name"].get().strip().upper()
+        if not typed:
+            return
+        for rec in getattr(self, "_customer_records", None) or []:
+            if typed in (str(rec.get("name") or "").strip().upper(),
+                         str(rec.get("short_name") or "").strip().upper()):
+                self._ask_for_address(rec)
+                return
 
     def _customer_autocomplete(self):
         """Show a dropdown of matching customer records below the entry."""
