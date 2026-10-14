@@ -51,6 +51,13 @@ def line_text(item: Dict[str, Any]) -> str:
         str(item.get("Product Type") or "Item")
 
 
+def line_job(item: Dict[str, Any], header: Dict[str, Any]) -> str:
+    """The job a line belongs to: its own job number (a preset or a line
+    given its own job), else the order's. "" when there is none."""
+    own = str(item.get("item_job") or "").strip()
+    return own or str((header or {}).get("Job") or "").strip()
+
+
 def ordered(item: Dict[str, Any]) -> int:
     return positive_int(item.get("Quantity", item.get("quantity"))) or 0
 
@@ -151,9 +158,15 @@ def build(order: Dict[str, Any], items: Sequence[Dict[str, Any]],
     labels = []
     for j in range(n):
         rows = [{"line": i + 1, "text": line_text(item),
+                 "job": line_job(item, header),
                  "quantity": quantities[i][j], "ordered": ordered(item)}
                 for i, item in enumerate(items) if quantities[i][j]]
-        labels.append(dict(common, pallet=j + 1, pallets=n,
+        # The job at the top: the one every line on the pallet shares, or
+        # "see lines" when they differ. Never the order number.
+        jobs = {r["job"] for r in rows}
+        top_job = (_dl.job_text(next(iter(jobs))) if len(jobs) == 1
+                   else "See each line")
+        labels.append(dict(common, job_number=top_job, pallet=j + 1, pallets=n,
                            pallet_text=f"{j + 1} of {n}", items=rows,
                            filters_on_pallet=sum(r["quantity"]
                                                  for r in rows)))
@@ -262,10 +275,15 @@ def render_pdf(labels: Sequence[Dict[str, Any]], path: str) -> str:
             qx = left + 5 * mm
             tx = left + 30 * mm
             ox = right - 5 * mm
+            # A job column when any line on this pallet has a job.
+            jobs_shown = any(r.get("job") for r in lab["items"])
+            jx = ox - 85 * mm
             c.setFont("Helvetica-Bold", 10)
             c.setFillColor(soft)
             c.drawString(qx, ty - 15 * mm, "QTY")
             c.drawString(tx, ty - 15 * mm, "FILTER")
+            if jobs_shown:
+                c.drawString(jx, ty - 15 * mm, "JOB")
             c.drawRightString(ox, ty - 15 * mm, "ORDERED")
             c.setFillColor(black)
             row_h = 9 * mm
@@ -275,10 +293,15 @@ def render_pdf(labels: Sequence[Dict[str, Any]], path: str) -> str:
             for r in shown:
                 c.setFont("Helvetica-Bold", 18)
                 c.drawString(qx, y, str(r["quantity"]))
-                width = ox - tx - 25 * mm
+                width = (jx - tx - 4 * mm) if jobs_shown else ox - tx - 25 * mm
                 fs = fit(r["text"], "Helvetica", 15, width, 9)
                 c.setFont("Helvetica", fs)
                 c.drawString(tx, y, r["text"])
+                if jobs_shown:
+                    job = r.get("job") or "N/A"
+                    js = fit(job, "Helvetica-Bold", 14, ox - jx - 22 * mm, 8)
+                    c.setFont("Helvetica-Bold", js)
+                    c.drawString(jx, y, job)
                 c.setFont("Helvetica", 11)
                 c.setFillColor(soft)
                 c.drawRightString(ox, y, f"of {r['ordered']}")

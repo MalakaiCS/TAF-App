@@ -111,3 +111,28 @@ def test_a_long_pallet_runs_onto_another_sheet():
     one, _ = pl.build(ORDER, many[:3], CUSTOMER, 1, [[1]] * 3)
     pl.render_pdf(one, str(path))
     assert len(re.findall(rb"/Type /Page(?!s)", path.read_bytes())) == 1
+
+
+def test_each_line_carries_its_job_number():
+    """A line's own job (a preset, or a line given its own job) wins; else
+    the order's job; else nothing - and the top says which."""
+    items = [dict(ITEMS[0], item_job="Housing L11"),
+             dict(ITEMS[1], item_job="Housing L15-L22"),
+             dict(ITEMS[2])]
+    order = {"order_number": "57920", "header": {"Job": "J-4410"}}
+    labels, _ = pl.build(order, items, CUSTOMER, 2,
+                         [[40, 0], [12, 0], [0, 6]])
+    assert [(r["line"], r["job"]) for r in labels[0]["items"]] == \
+        [(1, "Housing L11"), (2, "Housing L15-L22")]
+    assert labels[0]["job_number"] == "See each line"
+    assert labels[1]["items"][0]["job"] == "J-4410"
+    assert labels[1]["job_number"] == "J-4410"
+    # No job anywhere: N/A, never the order number.
+    labels, _ = pl.build({"order_number": "57920", "header": {}}, items[2:3],
+                         CUSTOMER, 1, [[6]])
+    assert labels[0]["items"][0]["job"] == ""
+    assert labels[0]["job_number"] == "N/A"
+    path = Path(tempfile.mkdtemp()) / "jobs.pdf"
+    pl.render_pdf(pl.build(order, items, CUSTOMER, 1,
+                           [[40], [12], [6]])[0], str(path))
+    assert path.read_bytes().startswith(b"%PDF")
