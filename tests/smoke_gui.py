@@ -623,20 +623,26 @@ def _steps(app, gui, root):
         was_loc = app.hvars["Location"].get()
         app.hvars["Location"].set("")
 
-        def _dialogs():
-            deadline = time.monotonic() + 0.6
-            while time.monotonic() < deadline:
+        def _dialogs(expect=False):
+            """The Add Address windows open now. When one is expected, wait
+            up to five seconds for it - a slow build machine is slow - and
+            when none is, give a stray one long enough to appear."""
+            deadline = time.monotonic() + (5.0 if expect else 0.8)
+            while True:
                 root.update()
+                found = [w for w in root.winfo_children()
+                         if isinstance(w, gui.AddAddressDialog)
+                         and w.winfo_exists()]
+                if (expect and found) or time.monotonic() > deadline:
+                    return found
                 time.sleep(0.02)
-            return [w for w in root.winfo_children()
-                    if isinstance(w, gui.AddAddressDialog)]
         try:
             app._pick_customer(dict(CUSTOMERS[0]))         # has an address
             if _dialogs():
                 raise AssertionError("asked for an address it already has")
             app.hvars["Location"].set("")
             app._pick_customer(dict(CUSTOMERS[1]))         # has none
-            found = _dialogs()
+            found = _dialogs(expect=True)
             if len(found) != 1:
                 raise AssertionError(f"expected one Add Address window, "
                                      f"got {len(found)}")
@@ -666,7 +672,7 @@ def _steps(app, gui, root):
             app._customer_records = [dict(c) for c in CUSTOMERS]
             app.hvars["Customer Name"].set("cas - tweed")
             app._customer_left()
-            found = _dialogs()
+            found = _dialogs(expect=True)
             if len(found) != 1:
                 raise AssertionError("a typed name was not checked")
             found[0].destroy()
@@ -695,7 +701,7 @@ def _steps(app, gui, root):
             "_validate_header": lambda: True,
             "_collect_header": lambda: dict(ORDERS[0]["header"]),
             "_print_file": lambda path: printed.append(path) or "",
-            "_flag_printed": lambda **k: None,
+            "_flag_printed": lambda **k: generated.update(flagged=True),
             "_deduct_stock_for_order": lambda *a: "",
             "_email_order_received": lambda *a: "",
             "_clear_draft": lambda: None,
@@ -718,8 +724,11 @@ def _steps(app, gui, root):
 
     def _generate_finished():
         deadline = time.monotonic() + 60
+        # Finished means the print thread has flagged the order printed - the
+        # last thing it does - so nothing of it is still running when the
+        # stand-ins are put back.
         while time.monotonic() < deadline and not (
-                "done" in generated and len(generated.get("printed", [])) >= 2):
+                "done" in generated and generated.get("flagged")):
             root.update()
             time.sleep(0.05)
         for k, v in generated.get("was", {}).items():
@@ -1440,6 +1449,13 @@ def run_all() -> int:
 
 
 if __name__ == "__main__":
+    # A Windows console is cp1252, which has no box-drawing characters: the
+    # report of a failure must never be the thing that fails.
+    for _stream in (sys.stdout, sys.stderr):
+        try:
+            _stream.reconfigure(errors="replace")
+        except (AttributeError, ValueError):
+            pass
     arg = sys.argv[1] if len(sys.argv) > 1 else ""
     if arg in ROLES:
         sys.exit(run(arg))
