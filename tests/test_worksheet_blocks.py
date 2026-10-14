@@ -147,17 +147,46 @@ def test_flat_and_pleated_pages_have_the_calculator_and_flyscreens_do_not():
     assert "WRAPPING INSTRUCTIONS" in _flat(pages[2])
 
 
-def test_the_calculator_uses_the_shared_profiles():
-    pages = _render(_items())
+def test_the_calculator_says_how_to_make_the_frame():
+    """The box under Wrapping Instructions says what to mark the filter as -
+    U, Sideways U or G - and nothing about weights, which stay on screen."""
+    items = _items()
+    pages = _render(items)
     first, second = _flat(pages[0]), _flat(pages[1])
-    assert "2 x 585 x 1062 mm (TAF-WS-V85-100 v1)" in first
-    assert "Media G4 (0.300 kg/m2): 1 x 645 x 1102 mm" in first
-    # A flat panel's wire has no rule set: said, not guessed.
-    assert "Wire wire not chosen" in second or "no verified" in second
-    assert "Media WASHABLE (0.240 kg/m2): 1 x 500 x 600 mm" in second
-    # Incomplete is said as incomplete, not printed as a filter weight.
-    assert "not the filter weight" in first
-    assert "Complete weight" not in first
+    for page, item in ((first, items[0]), (second, items[1])):
+        want = wb.frame_lines(item)[0][0]
+        assert want.startswith("MARK AS ")
+        assert want in page
+        assert "kg/m2" not in page and "Complete weight" not in page
+        assert "not the filter weight" not in page
+
+
+def test_each_way_names_the_row_of_marks_the_sheet_prints_for_it():
+    """MARK AS U means the top row, Sideways U the FLIPPED row and G the
+    REVERSED row - checked against the marks the sheet really prints."""
+    import pdf_generator as pg
+    from taf_order_app import cutting
+    printed = pg._markings(295, 310)
+    rows = {"u": printed["fwd"][:5], "sideways_u": printed["flp"][:5],
+            "g": printed["rev"][:5]}
+    for method, row_name in wb.MARK_ROWS.items():
+        assert list(rows[method]) == cutting.layout(295, 310, method)["marks"]
+        assert row_name == {"u": "top row of marks",
+                            "sideways_u": "FLIPPED marks",
+                            "g": "REVERSED marks"}[method]
+    one = wb.frame_lines({"Short": 295, "Long": 310, "Quantity": 1})
+    assert one == [("MARK AS U - use the top row of marks", True)]
+
+
+def test_a_customers_way_is_followed_and_a_trimmed_lip_is_said():
+    lines = wb.frame_lines({"Short": 300, "Long": 300, "Quantity": 4},
+                           prefer="u")
+    assert lines[0][0] == "MARK AS U - use the top row of marks"
+    assert ("The customer asks for this way.", False) in lines
+    two = wb.frame_lines({"Short": 295, "Long": 310, "Quantity": 2})
+    assert two[0][0] == "MARK AS G - use the REVERSED marks"
+    assert two[1][0].startswith("Lip 18mm instead of 20mm")
+    assert wb.frame_lines({"Short": 0, "Long": 310, "Quantity": 2}) == []
 
 
 def test_brace_req_is_answered():

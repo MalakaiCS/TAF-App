@@ -613,6 +613,71 @@ def _steps(app, gui, root):
             raise AssertionError(f"no label PDF was made ({path})")
     add("delivery labels for an order", _delivery_labels)
 
+    generated: dict = {}
+
+    def _generate_prints_the_labels():
+        """Generate Output makes the delivery labels with the worksheets and
+        sends both to the printer - the worksheet first, then the labels."""
+        from taf_order_app import order_packing
+        sheet = Path(tempfile.mkdtemp()) / "sheet.pdf"
+        sheet.write_bytes(b"%PDF-1.4\n%%EOF\n")
+        items = [dict(i) for i in ORDERS[0]["items"]]
+        for it in items:
+            it["Packing"] = order_packing.set_manual(it, [int(it["Quantity"])])
+        app.items = items
+        printed = generated.setdefault("printed", [])
+        stubs = {
+            "_validate_header": lambda: True,
+            "_collect_header": lambda: dict(ORDERS[0]["header"]),
+            "_print_file": lambda path: printed.append(path) or "",
+            "_flag_printed": lambda **k: None,
+            "_deduct_stock_for_order": lambda *a: "",
+            "_email_order_received": lambda *a: "",
+            "_clear_draft": lambda: None,
+        }
+        generated["was"] = {k: getattr(app, k) for k in stubs}
+        for k, v in stubs.items():
+            setattr(app, k, v)
+        generated["svc"] = (app.service.create_order,
+                            app.service.save_order_json)
+        app.service.create_order = lambda *a, **k: {"output_path": str(sheet)}
+        app.service.save_order_json = lambda *a, **k: str(sheet) + ".json"
+        generated["sheet"] = str(sheet)
+        # A finished order makes the lists reload; later steps want them as
+        # they were.
+        generated["state"] = (list(getattr(app, "_all_orders_data", []) or []),
+                              dict(app._tab_loaded), list(app.items))
+        app._generate(on_done=lambda ok: generated.update(done=ok),
+                      quiet=True)
+    add("generate output: start", _generate_prints_the_labels)
+
+    def _generate_finished():
+        deadline = time.monotonic() + 60
+        while time.monotonic() < deadline and not (
+                "done" in generated and len(generated.get("printed", [])) >= 2):
+            root.update()
+            time.sleep(0.05)
+        for k, v in generated.get("was", {}).items():
+            setattr(app, k, v)
+        if "svc" in generated:
+            app.service.create_order, app.service.save_order_json = \
+                generated["svc"]
+        if "state" in generated:
+            orders, loaded, items = generated["state"]
+            app._all_orders_data = orders
+            app._tab_loaded.clear()
+            app._tab_loaded.update(loaded)
+            app.items = items
+        printed = generated.get("printed", [])
+        if not generated.get("done"):
+            raise AssertionError(f"the order did not finish ({generated})")
+        if len(printed) != 2 or printed[0] != generated["sheet"] or \
+                "delivery_labels_" not in Path(printed[1]).name or \
+                not Path(printed[1]).exists():
+            raise AssertionError(f"expected the worksheet then the labels "
+                                 f"to print, got {printed}")
+    add("generate output: worksheets and labels printed", _generate_finished)
+
     def _account():
         # A menu, so nothing new is packed — this checks it builds at all.
         app._account_menu()

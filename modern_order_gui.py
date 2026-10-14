@@ -2511,17 +2511,20 @@ class _ProgressDialog(tk.Toplevel):
         "filter":  ["Validating order…",
                     "Building filter worksheets…",
                     "Exporting to PDF…",
+                    "Making delivery labels…",
                     "Saving order…",
                     "Done!"],
         "bags":    ["Validating order…",
                     "Building bag / roll docket…",
                     "Exporting to PDF…",
+                    "Making delivery labels…",
                     "Saving order…",
                     "Done!"],
         "mixed":   ["Validating order…",
                     "Building worksheets & docket in parallel…",
                     "Exporting PDFs…",
                     "Merging PDFs…",
+                    "Making delivery labels…",
                     "Saving order…",
                     "Done!"],
     }
@@ -5395,42 +5398,46 @@ def _line_size(item: dict) -> str:
     return " × ".join(parts) if parts else "—"
 
 
-def print_delivery_labels(parent, order: dict, items: list,
-                          only_wrap_ids=None, settings=None) -> "str | None":
-    """Make the delivery labels for one saved order and open them.
+def make_delivery_labels(order: dict, items: list, settings=None,
+                         customer=None, only_wrap_ids=None,
+                         lookup_customer=True):
+    """The delivery labels PDF for one order, with no windows.
 
-    The base address is read once, here, for the whole request. Returns the
-    PDF's path, or None after telling the person why it could not be made.
+    Returns (path, problems): the PDF's path, or None with the reasons it
+    could not be made. Safe off the main thread, which is how Generate Output
+    makes them alongside the worksheets. The base address is read once, here,
+    for the whole request.
     """
     header = dict(order.get("header") or {})
-    try:
-        s = settings if settings is not None else _calc_settings.load(force=True)
-    except Exception:
-        s = _calc_settings.cached()
-    base = _calc_settings.base_address(s)
-    customer = _db.customer_for_order(
-        order.get("customer_name") or header.get("Customer Name", ""),
-        order.get("customer_id") or "") if _db.is_ready() else None
+    if settings is None:
+        try:
+            settings = _calc_settings.load(force=True)
+        except Exception:
+            settings = _calc_settings.cached()
+    base = _calc_settings.base_address(settings)
+    if customer is None and lookup_customer and _db.is_ready():
+        try:
+            customer = _db.customer_for_order(
+                order.get("customer_name") or header.get("Customer Name", ""),
+                order.get("customer_id") or "")
+        except Exception:
+            customer = None
     record = {"order_number": order.get("order_number")
               or header.get("Order Number", ""),
               "customer_name": order.get("customer_name")
               or header.get("Customer Name", ""),
               "header": header, "items": items}
     try:
-        labels = _delivery_labels.build_for_order(record, customer, s, base,
-                                         only_wrap_ids=only_wrap_ids)
+        labels = _delivery_labels.build_for_order(record, customer, settings,
+                                                  base,
+                                                  only_wrap_ids=only_wrap_ids)
     except _delivery_labels.LabelError as exc:
-        fix = "\n".join(f"  • {p}" for p in exc.problems[:12])
-        messagebox.showwarning(
-            "Delivery labels",
-            "These labels can't be printed yet:\n\n" + fix +
-            ("\n\nAddress problems are fixed on the customer's account; "
-             "packing problems under Packing and weights."
-             if customer else
-             "\n\nNo customer account matches this order's customer name, "
-             "so there is no delivery address. Link it to a customer first."),
-            parent=parent)
-        return None
+        problems = list(exc.problems)
+        if not customer:
+            problems.append("No customer account matches this order's "
+                            "customer name, so there is no delivery address. "
+                            "Link it to a customer first.")
+        return None, problems
     safe = re.sub(r"[^A-Za-z0-9_-]+", "_",
                   str(record["order_number"] or "order")).strip("_") or "order"
     ORDERS_DIR.mkdir(parents=True, exist_ok=True)
@@ -5439,17 +5446,36 @@ def print_delivery_labels(parent, order: dict, items: list,
     try:
         _delivery_labels.render_pdf(labels, str(path))
     except Exception as exc:
-        messagebox.showerror("Delivery labels",
-                             f"Could not make the labels:\n{exc}", parent=parent)
-        return None
+        return None, [f"Could not make the labels: {exc}"]
     try:
         _db.log_action("delivery_labels_printed",
                        f"O/N: {record['order_number']} | "
                        f"{len(labels)} label{'s' if len(labels) != 1 else ''}")
     except Exception:
         pass
-    _open_path(str(path))
-    return str(path)
+    return str(path), []
+
+
+def print_delivery_labels(parent, order: dict, items: list,
+                          only_wrap_ids=None, settings=None) -> "str | None":
+    """Make the delivery labels for one saved order and open them.
+
+    Returns the PDF's path, or None after telling the person why it could
+    not be made.
+    """
+    path, problems = make_delivery_labels(order, items, settings,
+                                          only_wrap_ids=only_wrap_ids)
+    if not path:
+        fix = "\n".join(f"  • {p}" for p in problems[:12])
+        messagebox.showwarning(
+            "Delivery labels",
+            "These labels can't be printed yet:\n\n" + fix +
+            "\n\nAddress problems are fixed on the customer's account; "
+            "packing problems under Packing and weights.",
+            parent=parent)
+        return None
+    _open_path(path)
+    return path
 
 
 class PackingDialog(tk.Toplevel):
@@ -5561,7 +5587,7 @@ class PackingDialog(tk.Toplevel):
                  pady=px(5)).pack(side="left")
         flat_btn(r4, "Use the suggested plan", self._use_proposal,
                  bg=CNE, pady=px(5)).pack(side="left", padx=(px(8), 0))
-        flat_btn(r4, "Filter calculator…", self._open_calculator,
+        flat_btn(r4, "Weight calculator…", self._open_calculator,
                  bg=CNE, pady=px(5)).pack(side="left", padx=(px(8), 0))
         self.issues = tk.Label(mid, text="", bg=CCA, fg=CRD, font=F_SM,
                                justify="left", anchor="w", wraplength=px(980))
@@ -5800,7 +5826,7 @@ class PackingDialog(tk.Toplevel):
             return
         item = self.items[idx]
         if not item.get("Filter Type"):
-            messagebox.showinfo("Filter calculator",
+            messagebox.showinfo("Weight calculator",
                                 "The calculator is for filter lines.",
                                 parent=self)
             return
@@ -5812,7 +5838,7 @@ class PackingDialog(tk.Toplevel):
                         str(self.order_id), item.get(_db.LINE_ID) or "",
                         {"Calculator": inputs or None})
                 except Exception as exc:
-                    messagebox.showerror("Filter calculator", str(exc),
+                    messagebox.showerror("Weight calculator", str(exc),
                                          parent=self)
                     return
             else:
@@ -5870,7 +5896,7 @@ class FilterCalculatorDialog(tk.Toplevel):
     def __init__(self, master, item: dict, settings: dict, on_save=None,
                  editable: bool = True):
         super().__init__(master)
-        self.title("Filter calculator")
+        self.title("Weight calculator")
         self.transient(master)
         self.grab_set()
         self.configure(bg=CBG)
@@ -5883,7 +5909,7 @@ class FilterCalculatorDialog(tk.Toplevel):
 
         top = tk.Frame(self, bg=CA, padx=px(16), pady=px(10))
         top.pack(fill="x")
-        tk.Label(top, text=f"Filter calculator — {item.get('Quantity','')} x "
+        tk.Label(top, text=f"Weight calculator — {item.get('Quantity','')} x "
                            f"{item.get('Filter Type','')} {_line_size(item)} "
                            f"{item.get('Media Type','')}",
                  bg=CA, fg="white", font=(FAM, 12, "bold")).pack(anchor="w")
@@ -6029,7 +6055,7 @@ class FilterCalculatorDialog(tk.Toplevel):
         try:
             inputs = self._inputs()
         except ValueError as exc:
-            messagebox.showwarning("Filter calculator", str(exc), parent=self)
+            messagebox.showwarning("Weight calculator", str(exc), parent=self)
             return
         if self.on_save:
             self.on_save(inputs)
@@ -6068,11 +6094,8 @@ class WeightsSettingsDialog(tk.Toplevel):
         self._company(nb)
         self._materials(nb)
         self._packing_tab(nb)
+        self._frames_tab(nb)
         for section, title, hint in (
-                ("brace_profiles", "Braces",
-                 'Per filter type: {"Flat Panel": {"kg_each_including_fixings":'
-                 ' 0.35, "count": null}}. Count is needed for V-form and '
-                 'flyscreen; flat panels take theirs from the rule.'),
                 ("steel", "Steel",
                  '{"density_kg_m3": ..., "basis": "...", "material": '
                  '"galvanised steel stock"} - the confirmed density of the '
@@ -6080,10 +6103,6 @@ class WeightsSettingsDialog(tk.Toplevel):
                 ("wire_rules", "Wire choice",
                  'Which wire each non-V-form filter is made with, e.g. '
                  '{"Flat Panel": "SMALL_WIRE"}. V-forms go by depth.'),
-                ("component_profiles", "Frames",
-                 'Verified weights for parts: [{"name": "filter_frame", "id": '
-                 '"...", "version": 1, "verified": true, "constructions": '
-                 '["V-form"], "method": "per_perimeter_m", "kg_per_m": ...}]'),
                 ("cut_profiles", "Cut profiles",
                  'Confirmed cut profiles that replace or add to the '
                  'worksheet formulas (see the README).'),
@@ -6342,6 +6361,179 @@ class WeightsSettingsDialog(tk.Toplevel):
                      pady=px(5)).pack(side="left", padx=(px(8), 0))
             flat_btn(bar, "Save packing settings", _save, bg=CGR,
                      pady=px(5)).pack(side="left", padx=(px(8), 0))
+
+    # What the frames table writes: one profile for the steel channel, one
+    # for the flyscreen frame, kept alongside any other part profiles.
+    CHANNEL_ID = "TAF-CHANNEL"
+    FLYSCREEN_FRAME_ID = "TAF-FLYSCREEN-FRAME"
+    BRACED = ("Flat Panel", "V-form", "Flyscreen")
+
+    def _frames_tab(self, nb):
+        f = self._page(nb, "Frames and braces")
+        profiles = [dict(p) for p in (self.s.get("component_profiles") or [])]
+        channel = next((p for p in profiles
+                        if p.get("id") == self.CHANNEL_ID), None) or {}
+        fly = next((p for p in profiles
+                    if p.get("id") == self.FLYSCREEN_FRAME_ID), None) or {}
+        rates = {str(k): v for k, v in
+                 (channel.get("kg_per_m_by_depth") or {}).items()}
+
+        tk.Label(f, text="Steel channel - weigh one metre of each thickness",
+                 bg=CCA, fg=CTX, font=F_BOLD).grid(row=0, column=0,
+                                                   columnspan=4, sticky="w")
+        tk.Label(f, text="A frame's channel is worked out from its size: "
+                         "every side 2mm under, plus the two 20mm lips of a "
+                         "U and its cap (a G is 20mm less, so this never "
+                         "comes out light).", bg=CCA, fg=CMU, font=F_SM,
+                 wraplength=px(820), justify="left"
+                 ).grid(row=1, column=0, columnspan=4, sticky="w")
+        lb = tk.Listbox(f, height=7, font=F_BODY, bg=CFD, relief="flat",
+                        highlightthickness=0)
+        lb.grid(row=2, column=0, columnspan=4, sticky="ew", pady=(px(4), 0))
+        f.columnconfigure(3, weight=1)
+
+        def _key(k):
+            try:
+                return float(k)
+            except ValueError:
+                return 0.0
+
+        def _fill():
+            lb.delete(0, "end")
+            for depth in sorted(rates, key=_key):
+                lb.insert("end", f"  {depth} mm channel  ->  "
+                                 f"{rates[depth]:g} kg per metre")
+            if not rates:
+                lb.insert("end", "  Nothing entered yet - frame weights "
+                                 "stay unknown until it is.")
+        _fill()
+
+        def _add():
+            text = simpledialog.askstring(
+                "Channel weight", "Channel thickness in mm, and what one "
+                "metre of it weighs in kg - e.g. 25 = 0.62", parent=self)
+            if not text:
+                return
+            m = re.match(r"^\s*(\d+(?:\.\d+)?)\s*(?:mm)?\s*=\s*"
+                         r"(\d*\.?\d+)\s*(?:kg)?\s*$", text)
+            if not m or float(m.group(1)) <= 0 or float(m.group(2)) <= 0:
+                messagebox.showwarning("Channel weight", "Write it like "
+                                       "25 = 0.62", parent=self)
+                return
+            rates[f"{float(m.group(1)):g}"] = float(m.group(2))
+            _fill()
+
+        def _remove():
+            sel = lb.curselection()
+            ordered = sorted(rates, key=_key)
+            if sel and sel[0] < len(ordered):
+                rates.pop(ordered[sel[0]], None)
+                _fill()
+
+        fly_var = tk.StringVar(value=str(fly.get("kg_per_m") or ""))
+        tk.Label(f, text="Flyscreen frame, kg per metre (round the outside)",
+                 bg=CCA, fg=CTX, font=F_BOLD).grid(row=4, column=0,
+                                                   columnspan=2, sticky="w",
+                                                   pady=(px(14), 0))
+        fly_entry = field_entry(f, textvariable=fly_var, width=10)
+        fly_entry.grid(row=4, column=2, sticky="w", pady=(px(14), 0))
+
+        braces = {k: dict(v) for k, v in
+                  (self.s.get("brace_profiles") or {}).items()}
+        tk.Label(f, text="Braces - weight of one brace with its fixings, kg",
+                 bg=CCA, fg=CTX, font=F_BOLD).grid(row=5, column=0,
+                                                   columnspan=4, sticky="w",
+                                                   pady=(px(14), 0))
+        brace_vars = {}
+        for r, name in enumerate(self.BRACED, 6):
+            prof = braces.get(name) or {}
+            kg = tk.StringVar(value=str(prof.get("kg_each_including_fixings")
+                                        or ""))
+            count = tk.StringVar(value=str(prof.get("count") or ""))
+            brace_vars[name] = (kg, count)
+            tk.Label(f, text=name, bg=CCA, fg=CMU, font=F_SM
+                     ).grid(row=r, column=0, sticky="w")
+            e1 = field_entry(f, textvariable=kg, width=10)
+            e1.grid(row=r, column=1, sticky="w", pady=px(2))
+            if name == "Flat Panel":
+                tk.Label(f, text="how many: from the bracing rule", bg=CCA,
+                         fg=CMU, font=F_SM).grid(row=r, column=2,
+                                                 columnspan=2, sticky="w")
+            else:
+                tk.Label(f, text="how many when one is needed", bg=CCA,
+                         fg=CMU, font=F_SM).grid(row=r, column=2, sticky="e")
+                e2 = field_entry(f, textvariable=count, width=6)
+                e2.grid(row=r, column=3, sticky="w", padx=(px(6), 0))
+                if not self.editable:
+                    e2.config(state="disabled")
+            if not self.editable:
+                e1.config(state="disabled")
+        if not self.editable:
+            fly_entry.config(state="disabled")
+            return
+
+        def _num(text, what, whole=False):
+            text = str(text or "").strip()
+            if not text:
+                return None
+            value = float(text)
+            if value <= 0 or (whole and value != int(value)):
+                raise ValueError(what)
+            return int(value) if whole else value
+
+        def _save():
+            try:
+                fly_kg = _num(fly_var.get(), "flyscreen frame")
+                new_braces = dict(braces)
+                for name, (kg, count) in brace_vars.items():
+                    each = _num(kg.get(), name + " brace")
+                    n = None if name == "Flat Panel" else \
+                        _num(count.get(), name + " brace count", whole=True)
+                    if each is None and n is None:
+                        new_braces.pop(name, None)
+                        continue
+                    new_braces[name] = dict(
+                        new_braces.get(name) or {},
+                        kg_each_including_fixings=each, count=n,
+                        set_by=_who_now(), set_at=_calc_settings.now_iso())
+            except ValueError as exc:
+                messagebox.showwarning("Frames and braces", f"{exc}: numbers "
+                                       "above zero (a count is a whole "
+                                       "number).", parent=self)
+                return
+            others = [p for p in profiles if p.get("id") not in
+                      (self.CHANNEL_ID, self.FLYSCREEN_FRAME_ID)]
+            if rates:
+                others.append({
+                    "name": "filter_frame", "id": self.CHANNEL_ID,
+                    "version": int(channel.get("version") or 0) + 1,
+                    "verified": True,
+                    "constructions": ["Flat Panel", "Header", "V-form"],
+                    "method": "channel_per_m",
+                    "kg_per_m_by_depth": dict(rates),
+                    "side_allowance_mm": 2, "lip_mm": 20, "lips": 2,
+                    "basis": "weighed metre of channel",
+                    "set_by": _who_now(), "set_at": _calc_settings.now_iso()})
+            if fly_kg is not None:
+                others.append({
+                    "name": "flyscreen_frame", "id": self.FLYSCREEN_FRAME_ID,
+                    "version": int(fly.get("version") or 0) + 1,
+                    "verified": True, "constructions": ["Flyscreen"],
+                    "method": "per_perimeter_m", "kg_per_m": fly_kg,
+                    "basis": "weighed metre of flyscreen frame",
+                    "set_by": _who_now(), "set_at": _calc_settings.now_iso()})
+            if self._store("component_profiles", others, quiet=True):
+                self._store("brace_profiles", new_braces)
+
+        bar = tk.Frame(f, bg=CCA)
+        bar.grid(row=3, column=0, columnspan=4, sticky="w", pady=(px(6), 0))
+        flat_btn(bar, "Add a thickness…", _add, bg=CNE,
+                 pady=px(5)).pack(side="left")
+        flat_btn(bar, "Remove selected", _remove, bg=CNE,
+                 pady=px(5)).pack(side="left", padx=(px(8), 0))
+        flat_btn(f, "Save frames and braces", _save, bg=CGR, pady=px(5)
+                 ).grid(row=9, column=0, columnspan=4, sticky="w",
+                        pady=(px(12), 0))
 
     def _json_tab(self, nb, section, title, hint):
         f = self._page(nb, title)
@@ -19331,6 +19523,25 @@ class ModernOrderApp(tk.Frame):
             else:
                 opened = ""
 
+            # ── Delivery labels ──────────────────────────────────────────
+            # One sheet per wrap, printed with the worksheets so the bundles
+            # are labelled from the same packing plan the sheets print. A
+            # label that cannot be made yet (no delivery address, say) never
+            # stops the order - it is said in the Done message instead.
+            labels_pdf, label_problems = None, []
+            prog.advance("Making delivery labels…")
+            try:
+                # One read of the settings for the whole request: every label
+                # carries the same base address.
+                try:
+                    label_settings = _calc_settings.load(force=True)
+                except Exception:
+                    label_settings = _calc_settings.cached()
+                labels_pdf, label_problems = make_delivery_labels(
+                    {"header": header}, list(_printing), label_settings)
+            except Exception as exc:
+                label_problems = [str(exc)]
+
             # ── Save JSON + Database ───────────────────────────────────────
             prog.advance("Saving order…")
             json_path     = None
@@ -19372,9 +19583,11 @@ class ModernOrderApp(tk.Frame):
 
             # ── Hand results back to the main thread ──────────────────────
             prog.after(0, lambda: _finish(opened, json_path, errors,
-                                          real_pdfs, pdf_paths, new_order_id))
+                                          real_pdfs, pdf_paths, new_order_id,
+                                          labels_pdf, label_problems))
 
-        def _finish(opened, json_path, errors, real_pdfs, pdf_paths, new_order_id=None):
+        def _finish(opened, json_path, errors, real_pdfs, pdf_paths,
+                    new_order_id=None, labels_pdf=None, label_problems=()):
             prog.close()
 
             # Collect the PDF(s) to send to the printer. We no longer open the
@@ -19388,6 +19601,8 @@ class ModernOrderApp(tk.Frame):
                 to_print = [real_pdfs[0]]
             elif pdf_paths:
                 to_print = [p for p in pdf_paths if os.path.exists(p)]
+            if labels_pdf and os.path.exists(labels_pdf):
+                to_print.append(labels_pdf)
 
             if errors:
                 messagebox.showerror("Errors", "\n\n".join(errors))
@@ -19408,6 +19623,15 @@ class ModernOrderApp(tk.Frame):
                 email_note = getattr(self, "_last_email_note", "")
                 if email_note:
                     msg += (("\n\n" if msg else "") + f"Email:\n  {email_note}")
+                if labels_pdf:
+                    msg += (("\n\n" if msg else "")
+                            + f"Delivery labels:\n  {labels_pdf}")
+                elif label_problems:
+                    msg += (("\n\n" if msg else "")
+                            + "Delivery labels were not printed:\n"
+                            + "\n".join(f"  • {p}" for p in label_problems[:5])
+                            + "\n  Fix that, then print them from View Order "
+                              "> Actions > Delivery labels.")
 
                 # Send to the printer on a background thread so the UI stays
                 # responsive while the job spools (printing can take seconds).

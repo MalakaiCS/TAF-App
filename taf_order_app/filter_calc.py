@@ -83,7 +83,7 @@ def _ws_v(pid: str, low: float, high: float, short_add: float,
         "length": {"from": "long", "multiply": multiply, "round": "nearest"},
         "pieces_per_filter": 2,
         "rotation_allowed": True,
-        "installed": None,
+        "installed": "full_blank",
     }
     media = {
         "id": pid + "-MEDIA", "version": 1, "kind": "media", "verified": True,
@@ -92,7 +92,7 @@ def _ws_v(pid: str, low: float, high: float, short_add: float,
         "method": "from_wire_blank", "wire_profile": pid,
         "width_add": 60, "length_add": 40,
         "pieces_per_filter": 1,
-        "installed": None,
+        "installed": "full_blank",
     }
     return [wire, media]
 
@@ -105,7 +105,7 @@ BUILTIN_PROFILES: List[Dict[str, Any]] = [
         "method": "linear",
         "width": {"from": "short", "add": -10},
         "length": {"from": "long", "add": -10},
-        "pieces_per_filter": 2, "rotation_allowed": True, "installed": None,
+        "pieces_per_filter": 2, "rotation_allowed": True, "installed": "full_blank",
     },
     {
         "id": "TAF-WS-FLAT-MEDIA", "version": 1, "kind": "media",
@@ -113,7 +113,7 @@ BUILTIN_PROFILES: List[Dict[str, Any]] = [
         "basis": "taf_worksheet_formula", "source": _WS_SOURCE,
         "method": "linear", "flat": True,
         "width": {"from": "short"}, "length": {"from": "long"},
-        "pieces_per_filter": 1, "installed": None,
+        "pieces_per_filter": 1, "installed": "full_blank",
     },
     *_ws_v("TAF-WS-V30-60", 30, 60, -15, 1.36),
     *_ws_v("TAF-WS-V65-80", 65, 80, -10, 1.55),
@@ -126,7 +126,7 @@ BUILTIN_PROFILES: List[Dict[str, Any]] = [
         "method": "linear", "flat": True,
         "width": {"from": "short", "add": 20},
         "length": {"from": "long", "add": 20},
-        "pieces_per_filter": 1, "installed": None,
+        "pieces_per_filter": 1, "installed": "full_blank",
     },
 ]
 
@@ -826,6 +826,35 @@ def _sum_media(out: Dict[str, Any], qty: int) -> None:
         out["installed_media_weight_kg_order"] = sum(known_inst) * qty
 
 
+def channel_length_mm(dims: Dict[str, float],
+                      profile: Optional[Dict[str, Any]] = None) -> float:
+    """Channel in one frame: every side cut 2mm under its size, plus the two
+    20mm lips of a U with its cap (cutting.py). A G is one lip, 20mm less;
+    the U is used so the weight never comes out light."""
+    p = profile or {}
+    allow = finite(p.get("side_allowance_mm"))
+    allow = 2.0 if allow is None else allow
+    lip = finite(p.get("lip_mm"))
+    lip = 20.0 if lip is None else lip
+    lips = positive_int(p.get("lips")) or 2
+    return (2 * (dims["width"] - allow) + 2 * (dims["height"] - allow)
+            + lips * lip)
+
+
+def _depth_key(depth: Any) -> str:
+    d = finite(depth)
+    return "" if d is None else f"{d:g}"
+
+
+def _channel_kg(p: Dict[str, Any], dims: Dict[str, float]) -> Optional[float]:
+    """kg per metre of this depth's channel x the channel in one frame."""
+    rates = p.get("kg_per_m_by_depth") or {}
+    rate = positive(rates.get(_depth_key(dims.get("depth"))))
+    if rate is None:
+        return None
+    return rate * channel_length_mm(dims, p) / 1000.0
+
+
 def _profile_component(name: str, construction: str,
                        profiles: Iterable[Dict[str, Any]],
                        dims: Dict[str, float]
@@ -839,6 +868,8 @@ def _profile_component(name: str, construction: str,
         method = p.get("method")
         if method == "measured_each":
             kg = positive(p.get("kg_each"))
+        elif method == "channel_per_m" and dims:
+            kg = _channel_kg(p, dims)
         elif method == "per_perimeter_m" and dims:
             rate = positive(p.get("kg_per_m"))
             kg = None if rate is None else \
@@ -854,6 +885,15 @@ def _profile_component(name: str, construction: str,
                                  "profile_version": p.get("version"),
                                  "basis": p.get("basis")}
     return None, "unknown", {}
+
+
+def _frame_missing(name: str, dims: Dict[str, float]) -> str:
+    if name == "filter_frame" and dims.get("depth") is not None:
+        return (f"filter frame: kg per metre of {_depth_key(dims['depth'])}mm "
+                "channel")
+    if name == "flyscreen_frame":
+        return "flyscreen frame: kg per metre of flyscreen frame"
+    return f"{name.replace('_', ' ')}: a verified weight profile"
 
 
 def _components(request, out, s, construction, required, dims, qty) -> None:
@@ -874,8 +914,7 @@ def _components(request, out, s, construction, required, dims, qty) -> None:
             kg, status, extra = _profile_component(
                 name, construction, s.get("component_profiles"), dims)
             if kg is None:
-                missing.append(f"{name.replace('_', ' ')}: a verified weight "
-                               "profile")
+                missing.append(_frame_missing(name, dims))
             comps.append(_component(name, True, status, kg, **extra))
 
     if "braces" in required:

@@ -255,6 +255,7 @@
     match: { width_mm: 412, height_mm: 412, depth_mm: 90 }, max_per_wrap: 5,
     source: "supplied: 412 x 412 x 90 filters are wrapped five at most"
   }];
+  var DEFAULT_WIRE_RULES = { "Flat Panel": "LARGE_WIRE", "Header": "LARGE_WIRE" };
   var SECTIONS = ["materials", "steel", "cut_profiles", "component_profiles",
     "brace_profiles", "mounting_frame_profiles", "wire_rules",
     "required_components", "packaging", "handling_profiles", "max_bundle_kg",
@@ -266,7 +267,7 @@
       steel: { density_kg_m3: null, basis: null,
                material: "galvanised steel stock", version: null },
       cut_profiles: [], component_profiles: [], brace_profiles: {},
-      mounting_frame_profiles: [], wire_rules: {},
+      mounting_frame_profiles: [], wire_rules: clone(DEFAULT_WIRE_RULES),
       required_components: clone(DEFAULT_REQUIRED_COMPONENTS),
       packaging: { confirmed: false },
       handling_profiles: clone(DEFAULT_HANDLING_PROFILES),
@@ -511,12 +512,12 @@
         basis: "taf_worksheet_formula", source: WS_SOURCE, method: "linear",
         across_pleats: "long", width: { from: "short", add: shortAdd },
         length: { from: "long", multiply: mult, round: "nearest" },
-        pieces_per_filter: 2, rotation_allowed: true, installed: null },
+        pieces_per_filter: 2, rotation_allowed: true, installed: "full_blank" },
       { id: pid + "-MEDIA", version: 1, kind: "media", verified: true,
         constructions: ["V-form"], depth_min_mm: low, depth_max_mm: high,
         basis: "taf_worksheet_formula", source: WS_SOURCE,
         method: "from_wire_blank", wire_profile: pid, width_add: 60,
-        length_add: 40, pieces_per_filter: 1, installed: null }
+        length_add: 40, pieces_per_filter: 1, installed: "full_blank" }
     ];
   }
   var BUILTIN_PROFILES = [
@@ -524,12 +525,12 @@
       constructions: ["Flat Panel", "Header"], basis: "taf_worksheet_formula",
       source: WS_SOURCE, method: "linear", width: { from: "short", add: -10 },
       length: { from: "long", add: -10 }, pieces_per_filter: 2,
-      rotation_allowed: true, installed: null },
+      rotation_allowed: true, installed: "full_blank" },
     { id: "TAF-WS-FLAT-MEDIA", version: 1, kind: "media", verified: true,
       constructions: ["Flat Panel", "Header"], basis: "taf_worksheet_formula",
       source: WS_SOURCE, method: "linear", flat: true,
       width: { from: "short" }, length: { from: "long" },
-      pieces_per_filter: 1, installed: null }
+      pieces_per_filter: 1, installed: "full_blank" }
   ].concat(wsV("TAF-WS-V30-60", 30, 60, -15, 1.36),
            wsV("TAF-WS-V65-80", 65, 80, -10, 1.55),
            wsV("TAF-WS-V85-100", 85, 100, -10, 1.785),
@@ -539,7 +540,7 @@
               source: "TAF production worksheet (pdf_generator._draw_fs)",
               method: "linear", flat: true, width: { from: "short", add: 20 },
               length: { from: "long", add: 20 }, pieces_per_filter: 1,
-              installed: null }]);
+              installed: "full_blank" }]);
 
   function allProfiles(s) { return (s.cut_profiles || []).concat(BUILTIN_PROFILES); }
   function findProfile(profiles, pid, version) {
@@ -1006,6 +1007,31 @@
     }
   }
 
+  function channelLengthMm(dims, profile) {
+    var p = profile || {};
+    var allow = finite(p.side_allowance_mm); if (allow === null) { allow = 2; }
+    var lip = finite(p.lip_mm); if (lip === null) { lip = 20; }
+    var lips = positiveInt(p.lips) || 2;
+    return 2 * (dims.width - allow) + 2 * (dims.height - allow) + lips * lip;
+  }
+  function depthKey(depth) {
+    var d = finite(depth);
+    return d === null ? "" : String(d);
+  }
+  function channelKg(p, dims) {
+    var rates = p.kg_per_m_by_depth || {};
+    var rate = positive(rates[depthKey(dims.depth)]);
+    if (rate === null) { return null; }
+    return rate * channelLengthMm(dims, p) / 1000;
+  }
+  function frameMissing(name, dims) {
+    if (name === "filter_frame" && dims.depth !== undefined && dims.depth !== null) {
+      return "filter frame: kg per metre of " + depthKey(dims.depth) + "mm channel";
+    }
+    if (name === "flyscreen_frame") { return "flyscreen frame: kg per metre of flyscreen frame"; }
+    return name.replace(/_/g, " ") + ": a verified weight profile";
+  }
+
   function profileComponent(name, construction, profiles, dims, hasDims) {
     var list = profiles || [];
     for (var i = 0; i < list.length; i++) {
@@ -1014,6 +1040,7 @@
       if ((p.constructions || [construction]).indexOf(construction) === -1) { continue; }
       var kg = null;
       if (p.method === "measured_each") { kg = positive(p.kg_each); }
+      else if (p.method === "channel_per_m" && hasDims) { kg = channelKg(p, dims); }
       else if (p.method === "per_perimeter_m" && hasDims) {
         var r = positive(p.kg_per_m);
         kg = r === null ? null : r * 2 * (dims.width + dims.height) / 1000;
@@ -1048,7 +1075,7 @@
     ["filter_frame", "flyscreen_frame", "flyscreen_part"].forEach(function (name) {
       if (required.indexOf(name) === -1) { return; }
       var r = profileComponent(name, construction, s.component_profiles, dims, hasDims);
-      if (r[0] === null) { missing.push(name.replace(/_/g, " ") + ": a verified weight profile"); }
+      if (r[0] === null) { missing.push(frameMissing(name, dims)); }
       comps.push(comp(name, true, r[1], r[0], r[2]));
     });
     if (required.indexOf("braces") !== -1) {

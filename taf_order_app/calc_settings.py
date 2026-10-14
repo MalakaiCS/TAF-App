@@ -57,6 +57,10 @@ DEFAULT_REQUIRED_COMPONENTS = {
     "Stepped Filter": ["wire", "media", "filter_frame", "flyscreen_part"],
 }
 
+# Which wire a filter other than a V-form is made with (V-forms go by depth).
+# Supplied: flat panels take the large wire. A header panel is a flat panel.
+DEFAULT_WIRE_RULES = {"Flat Panel": "LARGE_WIRE", "Header": "LARGE_WIRE"}
+
 DEFAULT_HANDLING_PROFILES = [{
     "id": "HANDLING-412x412x90",
     "version": 1,
@@ -83,7 +87,7 @@ def defaults() -> Dict[str, Any]:
         "component_profiles": [],
         "brace_profiles": {},
         "mounting_frame_profiles": [],
-        "wire_rules": {},
+        "wire_rules": copy.deepcopy(DEFAULT_WIRE_RULES),
         "required_components": copy.deepcopy(DEFAULT_REQUIRED_COMPONENTS),
         "packaging": {"confirmed": False},
         "handling_profiles": copy.deepcopy(DEFAULT_HANDLING_PROFILES),

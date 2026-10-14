@@ -8,9 +8,10 @@ Notes field, which keeps exactly what somebody typed there.
                             print from - so the sheet, the bundles and the
                             labels cannot disagree.
     FILTER CALCULATOR       Flat Panel and Pleated Panel (V-form) pages.
-                            Cut sizes, weights and bracing from the shared
-                            calculator, with what is complete, what is only a
-                            subtotal and what is still missing said plainly.
+                            Which way to make the frame - U, Sideways U or
+                            G - from the filter calculator (cutting.py), and
+                            which row of marks on the sheet that is. Weights
+                            stay on screen; they are not the floor's question.
 
 These functions only work out the words. pdf_generator draws them.
 """
@@ -20,6 +21,7 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from . import bracing as _bracing
 from . import calc_settings as _settings
+from . import cutting as _cutting
 from . import filter_calc as _calc
 from . import order_packing as _op
 from .numbers import kg_text
@@ -165,6 +167,51 @@ def calculator_lines(ctx: Dict[str, Any], qty: Any = None) -> List[Line]:
             more = len(missing) - len(shown)
             out.append(("Weight incomplete - needs: " + "; ".join(shown)
                         + (f"; +{more} more" if more > 0 else ""), True))
+    return out
+
+
+# Which row of marks on the sheet each way of making the frame is. The
+# worksheet prints all three: the top row is a U, FLIPPED a Sideways U and
+# REVERSED a G (cutting.py reproduces those marks exactly).
+MARK_ROWS = {"u": "top row of marks", "sideways_u": "FLIPPED marks",
+             "g": "REVERSED marks"}
+
+
+def frame_lines(item: Dict[str, Any], prefer: str = "",
+                workshop: Optional[Dict[str, float]] = None) -> List[Line]:
+    """What to mark this filter as: U, Sideways U or G, and the lip when it
+    has to be trimmed to fit one more on a length."""
+    try:
+        short = float(item.get("Short") or 0)
+        long_ = float(item.get("Long") or 0)
+        qty = max(1, int(float(item.get("Quantity") or 1)))
+    except (TypeError, ValueError):
+        return []
+    if short <= 0 or long_ <= 0:
+        return []
+    try:
+        answer = _cutting.best(short, long_, qty, workshop, None, prefer or "")
+    except ValueError:
+        return []
+    if not answer.get("ok"):
+        return [("CHECK: " + str(answer.get("why") or "cannot be made from "
+                                 "one length"), True)]
+    won = answer["best"]
+    text = f"MARK AS {won['name'].upper()}"
+    row = MARK_ROWS.get(won["method"])
+    if row:
+        text += f" - use the {row}"
+    out: List[Line] = [(text, True)]
+    if won["shortened"] and qty > 1:
+        full = won["frames_per_stick"] * len(
+            [b for b in won["frame_sticks"] if len(b["pieces"])
+             == won["frames_per_stick"]])
+        out.append((f"Lip {won['lip']:g}mm instead of "
+                    f"{won['full']['lip']:g}mm on the full lengths "
+                    f"({full} of {qty}) - fits {won['frames_per_stick']} "
+                    "a length", True))
+    if answer.get("forced"):
+        out.append(("The customer asks for this way.", False))
     return out
 
 

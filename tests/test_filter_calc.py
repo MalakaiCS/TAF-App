@@ -325,10 +325,12 @@ def test_a_depth_the_worksheet_has_no_rule_for():
 
 
 def test_wire_and_media_calculate_independently():
-    # No wire rule for a flat panel, but its media still works out.
+    # With no wire rule for a flat panel, its media still works out.
+    s = cs.defaults()
+    s["wire_rules"] = {}
     r = fc.calculate({"filter_type": "Flat Panel", "width_mm": 500,
                       "height_mm": 600, "nominal_depth_mm": 25,
-                      "media_code": "G4"})
+                      "media_code": "G4"}, s)
     assert r["wire"]["code"] is None
     assert close(r["media_blank_weight_kg_per_filter"], 0.3 * 0.3)
     # And media alone, for a V-form whose media comes off the wire blank.
@@ -665,3 +667,78 @@ def test_the_database_seed_matches_the_supplied_numbers():
     handling = _re.search(r"\('handling_profiles', '(\[.*?\])'\)", seed,
                           _re.S).group(1)
     assert json.loads(handling) == cs.DEFAULT_HANDLING_PROFILES
+
+
+# ── Whole filter weights from what TAF supplied ─────────────────────────────
+
+def _with_channel(rates, **extra):
+    s = cs.defaults()
+    s["component_profiles"] = [dict({
+        "name": "filter_frame", "id": "TAF-CHANNEL", "version": 1,
+        "verified": True, "constructions": ["Flat Panel", "Header", "V-form"],
+        "method": "channel_per_m", "kg_per_m_by_depth": rates}, **extra)]
+    return s
+
+
+def test_flat_panels_take_the_large_wire():
+    r = fc.calculate_item({"Filter Type": "Flat Panel", "Short": 500,
+                           "Long": 600, "Channel": 25, "Quantity": 1,
+                           "Media Type": "F5"}, cs.defaults())
+    assert r["wire"]["code"] == "LARGE_WIRE"
+    assert not r["wire"]["overridden"]
+    # The worksheet's cut: two pieces of (500-10) x (600-10).
+    p = r["wire"]["pieces"][0]
+    assert (p["cut_width_mm"], p["cut_length_mm"], p["pieces_per_filter"]) \
+        == (490, 590, 2)
+
+
+def test_the_worksheet_cuts_stay_in_the_filter():
+    r = fc.calculate_item({"Filter Type": "Flat Panel", "Short": 500,
+                           "Long": 600, "Channel": 25, "Quantity": 1,
+                           "Media Type": "F5"}, cs.defaults())
+    assert close(r["installed_wire_weight_kg_per_filter"],
+                 r["wire_blank_weight_kg_per_filter"])
+    assert close(r["installed_media_weight_kg_per_filter"],
+                 r["media_blank_weight_kg_per_filter"])
+
+
+def test_the_frame_comes_from_kg_per_metre_of_channel():
+    dims = {"width": 500.0, "height": 600.0, "depth": 25.0}
+    # 2 x 498 + 2 x 598 + two 20mm lips = 2232mm.
+    assert fc.channel_length_mm(dims) == 2232
+    s = _with_channel({"25": 0.5})
+    r = fc.calculate_item({"Filter Type": "Flat Panel", "Short": 500,
+                           "Long": 600, "Channel": 25, "Quantity": 10,
+                           "Media Type": "F5"}, s)
+    frame = [c for c in r["components"] if c["name"] == "filter_frame"][0]
+    assert close(frame["installed_kg_per_filter"], 0.5 * 2.232)
+    wire = 2 * 0.49 * 0.59 * 24.87 / 36
+    media = 0.5 * 0.6 * 0.35
+    assert r["weight_complete"]
+    assert close(r["complete_filter_weight_kg_per_filter"],
+                 wire + media + 0.5 * 2.232)
+    assert close(r["complete_filter_weight_kg_order"],
+                 10 * (wire + media + 0.5 * 2.232))
+
+
+def test_a_thickness_with_no_channel_weight_says_which():
+    s = _with_channel({"25": 0.5})
+    r = fc.calculate_item({"Filter Type": "V-form", "Short": 595,
+                           "Long": 595, "Channel": 50, "Quantity": 1,
+                           "Media Type": "G4"}, s)
+    assert r["complete_filter_weight_kg_per_filter"] is None
+    assert "filter frame: kg per metre of 50mm channel" in r["missing"]
+
+
+def test_a_needed_brace_without_a_weight_keeps_it_incomplete():
+    s = _with_channel({"25": 0.5})
+    item = {"Filter Type": "Flat Panel", "Short": 800, "Long": 800,
+            "Channel": 25, "Quantity": 1, "Media Type": "F5"}
+    r = fc.calculate_item(item, s)
+    assert r["complete_filter_weight_kg_per_filter"] is None
+    assert any("brace weight" in m for m in r["missing"])
+    s["brace_profiles"] = {"Flat Panel": {"kg_each_including_fixings": 0.3}}
+    r2 = fc.calculate_item(item, s)
+    assert r2["weight_complete"]
+    braces = [c for c in r2["components"] if c["name"] == "braces"][0]
+    assert close(braces["installed_kg_per_filter"], 0.3)

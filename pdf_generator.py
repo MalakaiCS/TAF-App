@@ -207,9 +207,10 @@ def _block(c, x, top, w, title, lines, floor, size=7.5):
     return bottom
 
 
-def _under_notes(c, x, top, w, ctx, calculator):
-    """Wrapping Instructions, then (Flat and Pleated Panel pages) the
-    calculator, each in its own box below the Notes line."""
+def _under_notes(c, x, top, w, ctx, calculator, item=None, prefer=""):
+    """Wrapping Instructions, then (Flat and Pleated Panel pages) the filter
+    calculator - which way to make the frame - each in its own box below the
+    Notes line."""
     if ctx is None:
         return
     try:
@@ -220,9 +221,15 @@ def _under_notes(c, x, top, w, ctx, calculator):
     try:
         bottom = _block(c, x, top, w, "WRAPPING INSTRUCTIONS",
                         wb.wrapping_lines(ctx), floor)
-        if calculator:
-            _block(c, x, bottom - 4, w, "FILTER CALCULATOR",
-                   wb.calculator_lines(ctx), floor)
+        if calculator and item is not None:
+            try:
+                from taf_order_app import features as _features
+                workshop = _features.workshop()
+            except Exception:
+                workshop = None
+            lines = wb.frame_lines(item, prefer, workshop)
+            if lines:
+                _block(c, x, bottom - 4, w, "FILTER CALCULATOR", lines, floor)
     except Exception:
         pass                       # never lose a worksheet over its extras
 
@@ -464,7 +471,8 @@ def _draw_vorf(c, header, item, page_num, total_pages, d_ord, d_due,
     # ── Under Notes: wrapping, then the calculator ────────────────────────
     _under_notes(c, cx('G'), yb(18) - 3,
                  cw('G','H','I','J','K','L','M','N','O','P','Q'), ctx,
-                 calculator=not use_sv)
+                 calculator=can_mark, item=item,
+                 prefer=header.get("_frame_prefer", ""))
 
     # ── Bottom table rows 24-26 (B-F) — exact borders ─────────────────────
     # Row 24: single cell B-F
@@ -579,12 +587,28 @@ def _draw_fs(c, header, item, page_num, total_pages, d_ord, d_due,
 
 # ── Main entry point ──────────────────────────────────────────────────────────
 
+def _frame_preference(header) -> str:
+    """The way this customer has asked for their frames made, if the company
+    has that switched on - '' for whichever is cheapest."""
+    if header.get("_frame_prefer") is not None:
+        return str(header.get("_frame_prefer") or "")
+    try:
+        from taf_order_app import features as _features
+        from taf_order_app import db as _db
+        if not (_features.is_on("frame_preference") and _db.is_ready()):
+            return ""
+        return _db.frame_preference(header.get("Customer Name", "")) or ""
+    except Exception:
+        return ""
+
+
 def generate_pdf(header_data, items, output_path, page_start=1, grand_total=None):
     d_ord, d_due = _fmt_dates(header_data.get("Date Ordered",""),
                               header_data.get("Date Due",""))
     total_pages  = grand_total if grand_total is not None else len(items)
     page_counter = page_start
     c = rl_canvas.Canvas(output_path, pagesize=landscape(A4))
+    header_data = dict(header_data, _frame_prefer=_frame_preference(header_data))
     # Packing plans, wrap codes and calculations for the whole order at once,
     # so a sheet's wrap codes are the ones on the delivery labels.
     try:

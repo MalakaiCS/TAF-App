@@ -85,6 +85,22 @@ COMPLETE = _settings(
     packaging={"confirmed": True, "base_kg": 0.2, "per_filter_kg": 0.01},
     shipping_rounding="up_0.1")
 
+# What the Settings window writes for frames: channel by thickness, a
+# flyscreen frame by the metre and braces by weight each.
+CHANNEL = _settings(
+    component_profiles=[
+        {"name": "filter_frame", "id": "TAF-CHANNEL", "version": 2,
+         "verified": True, "constructions": ["Flat Panel", "Header", "V-form"],
+         "method": "channel_per_m",
+         "kg_per_m_by_depth": {"25": 0.62, "90": 1.1, "12.5": 0.4},
+         "side_allowance_mm": 2, "lips": 2},
+        {"name": "flyscreen_frame", "id": "TAF-FLYSCREEN-FRAME",
+         "version": 1, "verified": True, "constructions": ["Flyscreen"],
+         "method": "per_perimeter_m", "kg_per_m": 0.21}],
+    brace_profiles={"Flat Panel": {"kg_each_including_fixings": 0.3},
+                    "V-form": {"kg_each_including_fixings": 0.4, "count": 1}},
+    packaging={"confirmed": True, "base_kg": 0.1})
+
 P = lambda w=600, l=1000, n=1, **k: dict(  # noqa: E731
     {"cut_width_mm": w, "cut_length_mm": l, "pieces_per_filter": n}, **k)
 
@@ -147,6 +163,19 @@ CALCULATE = (
        ({"filter_type": "V-form", "width_mm": 595, "height_mm": 595,
          "nominal_depth_mm": 50, "pleat_insert": True, "media_code": "G4"},
         COMPLETE)]
+    + [({"filter_type": t, "width_mm": w, "height_mm": h,
+         "nominal_depth_mm": d, "media_code": "F5", "order_quantity": 7},
+        CHANNEL)
+       for t, w, h, d in (("Flat Panel", 500, 600, 25),
+                          ("Flat Panel", 800, 800, 25),
+                          ("Flat Panel", 500, 600, 12.5),
+                          ("Header", 610, 610, 25),
+                          ("V-form", 595, 595, 90),
+                          ("V-form", 1301, 701, 90),
+                          ("V-form", 595, 595, 50),
+                          ("Flyscreen", 400, 900, 9))]
+    + [({"filter_type": "Flat Panel", "width_mm": 500, "height_mm": 600,
+         "nominal_depth_mm": 25, "media_code": "WASH"}, None)]
 )
 
 

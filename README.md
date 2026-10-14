@@ -70,8 +70,11 @@ log, stock management and a customer database.
   wrap's weight and its wrap page: `1 of 2`, `2 of 2` for a one-line order;
   `1A/2`, `1B/2`, `2/2` across several lines (after Z comes AA). The order
   number appears once, as Order Number; Job Number shows N/A when there is
-  no job. Previous Orders → View Order → Actions → Delivery labels, or the
-  Delivery tab's Run ▾ menu for a whole run.
+  no job. They print with the worksheets when you press Generate Output;
+  reprint from Previous Orders → View Order → Actions → Delivery labels, or
+  the Delivery tab's Run ▾ menu for a whole run. If a label can't be made
+  yet (no customer account with a delivery address, say), the order still
+  goes through and the Done message says why.
 - **Packing by weight** — every wrapped bundle is 10 kg at most, wrapping
   included, and a size can carry a handling limit (412 × 412 × 90: five a
   wrap). Lines are planned automatically, or the office sets the plan
@@ -84,9 +87,12 @@ log, stock management and a customer database.
 - **Wrapping Instructions and Filter Calculator on the worksheet** — two
   boxes under Notes: how to wrap each line, e.g. `(Wrap 5 Filters x 2 + Wrap
   2 Filters x 1)`, with the label codes; and, on Flat Panel and Pleated
-  Panel (V-form) sheets, the cut sizes, blank weights, bracing and what is
-  still unknown. Notes keeps exactly what was typed. BRACE REQ? now shows the
-  answer.
+  Panel (V-form) sheets, what to mark the filter as — `MARK AS U`, `MARK AS
+  SIDEWAYS U` or `MARK AS G` — with the row of marks on the sheet that is
+  (top row, FLIPPED or REVERSED) and the lip when it is trimmed to fit one
+  more on a length. It is the filter calculator's answer, and it follows a
+  customer's frame preference when that is switched on. Notes keeps exactly
+  what was typed. BRACE REQ? now shows the answer.
 - **Bracing notices** — worked out as a line is typed (desktop and web) and
   printed on the worksheet. Flat panels: both sides over 700 mm, one brace;
   long side over 1300 mm, two in Cross Format. V-forms: long over 1300 and
@@ -722,7 +728,11 @@ and packing…** (managers change these; everyone sees them):
 - **Packing** — the wrapping's own weight (until it is confirmed, label
   weights stay blank to be written in), whether calculated label weights are
   rounded up to 0.1 kg, and handling limits by size.
-- **Braces, Steel, Wire choice, Frames, Cut profiles, Mounting frames** —
+- **Frames and braces** — what one metre of each thickness of steel
+  channel weighs (e.g. `25 = 0.62`), the flyscreen frame per metre, and one
+  brace with its fixings. A frame's channel is worked out from its size:
+  every side 2 mm under, plus the two 20 mm lips of a U and its cap.
+- **Steel, Wire choice, Cut profiles, Mounting frames** —
   verified numbers only. Every change is a new version kept in
   `calc_settings_history`, and every calculation says which versions it used.
 
@@ -736,28 +746,26 @@ read from these same profiles; their printed values are unchanged. The
 existing mounting-frame sizes (610 × 610 and every compressor-pack frame) are
 listed for profiles to be entered against.
 
-**What still has to be entered before a complete filter weight exists.**
-Nothing below has been supplied, so none of it is guessed — each shows as
-"needs" in the calculator, and label weights stay blank until it is known or a
-wrap is weighed:
+Flat panels and headers take the large wire (V-forms go by depth: 30–60
+small, 65–110 large, 115+ small), and the wire and media the worksheet cuts
+stay in the filter whole.
 
-1. Whether each blank stays whole in the finished filter (or the area kept),
-   per profile — the calculator's "kept in the filter".
-2. Filter-frame channel weight (kg per metre of perimeter, or per frame), and
-   the flyscreen's aluminium frame.
-3. Brace weight with its fixings; brace count for V-forms and flyscreens.
-4. Steel stock density, and mounting-frame profiles (strip width before
-   folding, side lengths, corners, holes, hardware) — 2.0 mm throughout.
-5. The wrapping's weight.
-6. Which wire flat panels and headers use (V-forms go by depth: 30–60 small,
-   65–110 large, 115+ small).
-7. Cut rules for V-form depths the worksheet has none for (under 30, 61–64,
+**What has to be entered before a complete filter weight exists** — each
+shows as "needs" in the weight calculator, and label weights stay blank until
+it is known or a wrap is weighed:
+
+1. Steel channel kg per metre, for each thickness made (Frames and braces).
+2. The flyscreen frame per metre, for flyscreens.
+3. Brace weight with its fixings, for filters that need a brace; how many
+   for V-forms and flyscreens.
+4. The wrapping's weight (Packing; tick Confirmed — 0 is allowed).
+5. Steel stock density and mounting-frame profiles, only for lines that
+   include a mounting frame.
+6. Cut rules for V-form depths the worksheet has none for (under 30, 61–64,
    81–84 and over 100 mm), and for stepped filters' flyscreen part.
-8. Media roll widths and lengths, if roll-fit checks are wanted (weights do
-   not need them).
 
 Measured cut pieces and measured wrap weights can be entered at any time
-(View Order → Actions → Packing and weights → Filter calculator / Record
+(View Order → Actions → Packing and weights → Weight calculator / Record
 weight) and are used exactly as entered.
 
 **For other programs**: `supabase functions deploy filter-calculator`, then
