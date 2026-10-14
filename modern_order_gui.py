@@ -6263,7 +6263,7 @@ class WeightsSettingsDialog(tk.Toplevel):
         rounding = tk.StringVar(value=self.s.get("shipping_rounding") or "none")
         tk.Label(f, text="What the wrapping itself weighs", bg=CCA, fg=CTX,
                  font=F_BOLD).grid(row=0, column=0, columnspan=4, sticky="w")
-        tk.Checkbutton(f, text="Confirmed (until it is, weights stay blank)",
+        tk.Checkbutton(f, text="Count the wrapping at these weights (untick to leave label weights blank)",
                        variable=confirmed, bg=CCA, fg=CTX, font=F_BODY,
                        activebackground=CCA, selectcolor=CBG
                        ).grid(row=1, column=0, columnspan=4, sticky="w")

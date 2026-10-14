@@ -97,7 +97,7 @@ def evaluate_line(item: Dict[str, Any], settings: Dict[str, Any],
     else:
         try:
             prop = _pk.propose(qty, unit, packaging, hmax, staff_max, groups,
-                               max_kg)
+                               max_kg, settings.get("default_max_per_wrap"))
         except _pk.PackingError as exc:
             out.update(status="invalid_plan", issues=[str(exc)])
             return out

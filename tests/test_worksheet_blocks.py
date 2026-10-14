@@ -228,9 +228,17 @@ def test_a_mixed_order_prints_codes_numbered_across_the_whole_order():
     assert op.strip_codes(stamped)[0].get("_wrap_codes") is None
 
 
-def test_an_unplanned_line_says_so():
+def test_a_line_nobody_planned_is_planned_automatically():
     items = _items()
     items[1].pop("Packing")
     items[1]["Quantity"] = 12
     pages = _render(items)
-    assert "SET BEFORE PACKING" in _flat(pages[1])
+    assert "SET BEFORE PACKING" not in _flat(pages[1])
+    assert "Automatic - " in _flat(pages[1])
+    assert "(Wrap 12 Filters x 1)" in _flat(pages[1])
+
+
+def test_a_line_with_no_quantity_says_so():
+    ctx = wb.order_context([{"Short": 500, "Long": 600, "Channel": 25,
+                             "Filter Type": "Flat Panel"}], cs.defaults())
+    assert wb.wrapping_lines(ctx[0])[0][0].startswith("SET BEFORE PACKING")

@@ -249,11 +249,19 @@ def _wrap_rows(quantities: Sequence[int], group: Optional[str], unit_kg,
     return rows
 
 
+# Filters per wrap when nothing else sets it: no weight to work from and no
+# handling limit for the size. Settings can change it.
+FALLBACK_MAX_PER_WRAP = 5
+
+
 def propose(quantity: Any, unit_kg: Optional[float] = None,
             packaging: Any = None, handling_max: Any = None,
             staff_max: Any = None, groups: Optional[Sequence[Dict]] = None,
-            max_kg: float = MAX_BUNDLE_KG) -> Dict[str, Any]:
-    """The automatic plan for a line."""
+            max_kg: float = MAX_BUNDLE_KG,
+            fallback_max: Any = None) -> Dict[str, Any]:
+    """The automatic plan for a line. Always a plan: a line with no weight
+    and no handling limit is wrapped `fallback_max` at a time (five unless
+    set), and flagged for its wraps to be weighed."""
     q = positive_int(quantity)
     if q is None:
         raise PackingError("The quantity has to be a whole number of 1 or more.")
@@ -286,14 +294,8 @@ def propose(quantity: Any, unit_kg: Optional[float] = None,
             if c is not None]
     weight_known = limits["weight"] is not None
     if not caps:
-        if q == 1:
-            caps = [1]
-        else:
-            out["status"] = "needs_packing_input"
-            out["issues"].append(
-                "No weight and no handling limit for this size - set the "
-                "filters per wrap, or weigh one, before it can be planned.")
-            return out
+        caps = [1 if q == 1 else
+                (positive_int(fallback_max) or FALLBACK_MAX_PER_WRAP)]
     cap = min(caps)
     out["capacity"] = cap
     for g in group_list:

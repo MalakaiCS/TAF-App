@@ -240,7 +240,8 @@ def build(order: Dict[str, Any], base_address: str,
                                     s.get("handling_profiles"))
             prop = _pk.propose(it["quantity"], unit, packaging,
                                hp.get("max_per_wrap") if hp else None,
-                               None, None, max_kg)
+                               None, None, max_kg,
+                               s.get("default_max_per_wrap"))
             if not prop["wraps"]:
                 problems.append(f"line {i}: " + "; ".join(prop["issues"]))
                 per_line.append([])

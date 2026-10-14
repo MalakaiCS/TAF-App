@@ -170,6 +170,7 @@ def test_a_remainder_is_weighed_as_itself():
 
 def test_unknown_weights_print_a_writing_space():
     s = cs.defaults()
+    s["packaging"] = {"confirmed": False}
     o = order()
     o["items"][0]["complete_filter_weight_kg_per_filter"] = 1.0
     labs = dl.build(o, BASE, s)             # wrapping not confirmed
@@ -186,11 +187,17 @@ def test_zero_wrapping_only_when_confirmed():
     assert pk.packaging_kg({"confirmed": False, "base_kg": 0}, 3) is None
     assert pk.packaging_kg(None, 3) is None
     assert pk.packaging_kg({"confirmed": True, "base_kg": 0}, 3) == 0
+    s = cs.defaults()
+    s["packaging"] = {"confirmed": False}
     o = order()
     o["items"][0].update(complete_filter_weight_kg_per_filter=1.0,
                          packaging_weights_kg=[0, None])
-    labs = dl.build(o, BASE)
+    labs = dl.build(o, BASE, s)
     assert labs[0]["weight_kg"] == "5.000" and labs[1]["weight_kg"] == ""
+    # By default the wrapping counts as 0 kg until it is weighed, so every
+    # wrap with a known filter weight gets a weight on its label.
+    labs = dl.build(o, BASE)
+    assert labs[0]["weight_kg"] == "5.000" and labs[1]["weight_kg"] == "5.000"
 
 
 def test_weight_arrays_must_line_up():
@@ -314,7 +321,9 @@ def test_the_sixty_filter_example():
             "Long": 412, "Channel": 90, "Media Type": "G4"}
     ev = op.evaluate_line(item, s)
     assert [w["quantity"] for w in ev["plan"]["wraps"]] == [5] * 12
-    assert ev["status"] == "needs_weight_check"        # nothing weighed yet
+    # Weighed from the supplied rates: well under 10 kg, so the handling
+    # limit of five decides.
+    assert ev["status"] == "ok" and ev["unit_kg"] * 5 < 10
     out = op.order_wraps([dict(item, Packing=ev["plan"])], s)
     codes = [w["code"] for w in out["lines"][0]["wraps"]]
     assert codes == [f"{i} of 12" for i in range(1, 13)]
@@ -336,8 +345,13 @@ def test_unknown_weight_needs_a_check_and_nothing_known_needs_input():
     assert p["status"] == "needs_weight_check" and not p["compliant"]
     assert [w["quantity"] for w in p["wraps"]] == [5, 5, 5, 5]
     assert all(w["raw_kg"] is None for w in p["wraps"])
+    # Nothing known at all: still planned, five a wrap unless set, and the
+    # wraps flagged for weighing - never left waiting for somebody.
     none = pk.propose(20, None, None)
-    assert none["status"] == "needs_packing_input" and none["wraps"] == []
+    assert none["status"] == "needs_weight_check"
+    assert [w["quantity"] for w in none["wraps"]] == [5, 5, 5, 5]
+    four = pk.propose(9, None, None, fallback_max=4)
+    assert [w["quantity"] for w in four["wraps"]] == [4, 4, 1]
     one = pk.propose(1, None, None)
     assert [w["quantity"] for w in one["wraps"]] == [1]
 

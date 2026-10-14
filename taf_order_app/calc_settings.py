@@ -50,12 +50,33 @@ MAX_BUNDLE_KG = 10.0
 # complete weight can be given. A pleat insert has no frame and a header has
 # no wire or media of its own; those are handled where the line says so.
 DEFAULT_REQUIRED_COMPONENTS = {
-    "Flat Panel":     ["wire", "media", "filter_frame", "braces"],
-    "Header":         ["wire", "media", "filter_frame", "braces"],
-    "V-form":         ["wire", "media", "filter_frame", "braces"],
-    "Flyscreen":      ["media", "flyscreen_frame", "braces"],
-    "Stepped Filter": ["wire", "media", "filter_frame", "flyscreen_part"],
+    "Flat Panel":     ["wire", "media"],
+    "Header":         ["wire", "media"],
+    "V-form":         ["wire", "media"],
+    "Flyscreen":      ["media"],
+    "Stepped Filter": ["wire", "media"],
 }
+
+# Parts added to the weight once somebody has entered what they weigh, and
+# left out until then: a filter weighs its wire and media from the supplied
+# rates without anybody having to enter anything first.
+DEFAULT_COUNTED_IF_KNOWN = {
+    "Flat Panel":     ["filter_frame", "braces"],
+    "Header":         ["filter_frame", "braces"],
+    "V-form":         ["filter_frame", "braces"],
+    "Flyscreen":      ["flyscreen_frame", "braces"],
+    "Stepped Filter": ["filter_frame", "flyscreen_part"],
+}
+
+# The wrapping's own weight until it is weighed: counted as nothing, so a
+# wrap's weight is its filters'.
+DEFAULT_PACKAGING = {"confirmed": True, "base_kg": 0.0,
+                     "basis": "default - wrapping counted as 0 kg until "
+                              "it is weighed"}
+
+# Filters per wrap for a line whose weight cannot be worked out (a bag, a
+# catalogue item) and whose size has no handling limit.
+DEFAULT_MAX_PER_WRAP = 5
 
 # Which wire a filter other than a V-form is made with (V-forms go by depth).
 # Supplied: flat panels take the large wire. A header panel is a flat panel.
@@ -89,7 +110,9 @@ def defaults() -> Dict[str, Any]:
         "mounting_frame_profiles": [],
         "wire_rules": copy.deepcopy(DEFAULT_WIRE_RULES),
         "required_components": copy.deepcopy(DEFAULT_REQUIRED_COMPONENTS),
-        "packaging": {"confirmed": False},
+        "counted_if_known": copy.deepcopy(DEFAULT_COUNTED_IF_KNOWN),
+        "packaging": copy.deepcopy(DEFAULT_PACKAGING),
+        "default_max_per_wrap": DEFAULT_MAX_PER_WRAP,
         "handling_profiles": copy.deepcopy(DEFAULT_HANDLING_PROFILES),
         "max_bundle_kg": MAX_BUNDLE_KG,
         "shipping_rounding": "none",

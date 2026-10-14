@@ -276,10 +276,9 @@ def replace_black_with_measurement(settings: Dict[str, Any], stock_weight_kg,
 
 
 # ── Which wire a filter takes ───────────────────────────────────────────────
-# V-form by nominal depth, before any cage clearance. Inclusive bands; the
-# gaps between them (61-64, 111-114) and anything under 30 are deliberately
-# not covered - a depth nobody has given a rule for is a question, not a
-# chance to pick the nearest.
+# V-form by nominal depth, before any cage clearance. Inclusive bands, as
+# supplied. A depth between them (61-64, 111-114) or under 30 takes the
+# nearest band's wire, so every V-form gets one without anybody choosing.
 V_FORM_WIRE_BANDS = (
     (30.0, 60.0, "SMALL_WIRE"),
     (65.0, 110.0, "LARGE_WIRE"),
@@ -318,9 +317,12 @@ def select_wire(construction: str, nominal_depth_mm: Any,
                 out.update(code=code,
                            reason=f"V-form at {depth:g}mm deep takes {code}")
                 return out
-        out.update(status="needs_wire_rule",
-                   reason=(f"no wire rule covers a {depth:g}mm V-form - choose "
-                           "the wire for this line"))
+        # Between bands: the nearest one (the first, on a tie).
+        best = min(V_FORM_WIRE_BANDS,
+                   key=lambda b: b[0] - depth if depth < b[0] else depth - b[1])
+        out.update(code=best[2],
+                   reason=(f"V-form at {depth:g}mm deep takes {best[2]}, "
+                           "from the nearest depth rule"))
         return out
     configured = (rules or {}).get(construction)
     if configured:

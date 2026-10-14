@@ -131,8 +131,20 @@ def run_checks(port: int) -> None:
     check("a saved order line is calculated with the worksheet's rules",
           code == 200 and piece.get("cut_width_mm") == 585 and
           piece.get("cut_length_mm") == 1062, json.dumps(piece))
+    res = out["result"]
+    check("and weighed from the supplied rates with nothing entered",
+          res["weight_complete"] and abs(
+              res["complete_filter_weight_kg_per_filter"]
+              - res["installed_wire_weight_kg_per_filter"]
+              - res["installed_media_weight_kg_per_filter"]) < 1e-9,
+          json.dumps(res.get("missing")))
+    code, out = call(port, {"action": "calculate", "item": {
+        "Filter Type": "V-form", "Short": 595, "Long": 595, "Channel": 90,
+        "Quantity": 4}})
     check("and an incomplete weight is null, never zero",
-          out["result"]["complete_filter_weight_kg_per_filter"] is None)
+          out["result"]["complete_filter_weight_kg_per_filter"] is None and
+          "which media this filter is made of" in out["result"]["missing"],
+          json.dumps(out["result"].get("missing")))
     code, out = call(port, {"action": "calculate", "request": {
         "filter_type": "V-form", "width_mm": -1, "height_mm": 500}})
     check("bad input is answered 422 with the reason",

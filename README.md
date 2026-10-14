@@ -746,23 +746,22 @@ read from these same profiles; their printed values are unchanged. The
 existing mounting-frame sizes (610 × 610 and every compressor-pack frame) are
 listed for profiles to be entered against.
 
-Flat panels and headers take the large wire (V-forms go by depth: 30–60
-small, 65–110 large, 115+ small), and the wire and media the worksheet cuts
-stay in the filter whole.
+**Nothing has to be entered first.** Every filter is weighed from what TAF
+supplied: the wire and media rates, the worksheet's own wire and media cuts
+(which stay in the filter whole), large wire for flat panels and headers, and
+V-forms by depth (30–60 small, 65–110 large, 115+ small; a depth between the
+bands, or past the worksheet's, takes the nearest band's wire and cut). The
+wrapping counts as 0 kg until it is weighed. So every line is packed by weight
+(10 kg a wrap) and the handling limits, and every label prints with its weight.
 
-**What has to be entered before a complete filter weight exists** — each
-shows as "needs" in the weight calculator, and label weights stay blank until
-it is known or a wrap is weighed:
+A line that cannot be weighed at all — a bag, a catalogue item — is wrapped
+five at a time and its labels leave the weight to write in.
 
-1. Steel channel kg per metre, for each thickness made (Frames and braces).
-2. The flyscreen frame per metre, for flyscreens.
-3. Brace weight with its fixings, for filters that need a brace; how many
-   for V-forms and flyscreens.
-4. The wrapping's weight (Packing; tick Confirmed — 0 is allowed).
-5. Steel stock density and mounting-frame profiles, only for lines that
-   include a mounting frame.
-6. Cut rules for V-form depths the worksheet has none for (under 30, 61–64,
-   81–84 and over 100 mm), and for stepped filters' flyscreen part.
+Anything entered later is added in, never needed first: the steel channel's kg
+per metre and brace weights (Frames and braces), the flyscreen frame, the
+wrapping's weight (Packing), mounting-frame profiles. A manager who would
+rather hold weights back until the frame is entered can make it required in
+`required_components`.
 
 Measured cut pieces and measured wrap weights can be entered at any time
 (View Order → Actions → Packing and weights → Weight calculator / Record

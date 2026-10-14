@@ -134,7 +134,8 @@ Deno.serve(async (req: Request) => {
                         body.max_per_wrap ?? null, body.groups ?? null, max)
           : C.propose(body.quantity, body.unit_kg ?? null, settings.packaging,
                       handling ? handling.max_per_wrap : null,
-                      body.max_per_wrap ?? null, body.groups ?? null, max);
+                      body.max_per_wrap ?? null, body.groups ?? null, max,
+                      settings.default_max_per_wrap);
         return json({ ...meta, handling_profile: handling, result });
       }
       case "labels": {

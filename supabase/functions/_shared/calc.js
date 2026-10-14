@@ -222,8 +222,14 @@
           return out;
         }
       }
-      out.status = "needs_wire_rule";
-      out.reason = "no wire rule covers a " + d + "mm V-form - choose the wire for this line";
+      var best = null, bestOff = null;
+      for (var j = 0; j < V_FORM_WIRE_BANDS.length; j++) {
+        var c = V_FORM_WIRE_BANDS[j];
+        var off = d < c[0] ? c[0] - d : d - c[1];
+        if (bestOff === null || off < bestOff) { best = c; bestOff = off; }
+      }
+      out.code = best[2];
+      out.reason = "V-form at " + d + "mm deep takes " + best[2] + ", from the nearest depth rule";
       return out;
     }
     var configured = (rules || {})[construction];
@@ -244,12 +250,22 @@
                   phone: "07 3800 3448" };
   var MAX_BUNDLE_KG = 10.0;
   var DEFAULT_REQUIRED_COMPONENTS = {
-    "Flat Panel":     ["wire", "media", "filter_frame", "braces"],
-    "Header":         ["wire", "media", "filter_frame", "braces"],
-    "V-form":         ["wire", "media", "filter_frame", "braces"],
-    "Flyscreen":      ["media", "flyscreen_frame", "braces"],
-    "Stepped Filter": ["wire", "media", "filter_frame", "flyscreen_part"]
+    "Flat Panel":     ["wire", "media"],
+    "Header":         ["wire", "media"],
+    "V-form":         ["wire", "media"],
+    "Flyscreen":      ["media"],
+    "Stepped Filter": ["wire", "media"]
   };
+  var DEFAULT_COUNTED_IF_KNOWN = {
+    "Flat Panel":     ["filter_frame", "braces"],
+    "Header":         ["filter_frame", "braces"],
+    "V-form":         ["filter_frame", "braces"],
+    "Flyscreen":      ["flyscreen_frame", "braces"],
+    "Stepped Filter": ["filter_frame", "flyscreen_part"]
+  };
+  var DEFAULT_PACKAGING = { confirmed: true, base_kg: 0,
+    basis: "default - wrapping counted as 0 kg until it is weighed" };
+  var DEFAULT_MAX_PER_WRAP = 5;
   var DEFAULT_HANDLING_PROFILES = [{
     id: "HANDLING-412x412x90", version: 1, verified: true,
     match: { width_mm: 412, height_mm: 412, depth_mm: 90 }, max_per_wrap: 5,
@@ -269,7 +285,9 @@
       cut_profiles: [], component_profiles: [], brace_profiles: {},
       mounting_frame_profiles: [], wire_rules: clone(DEFAULT_WIRE_RULES),
       required_components: clone(DEFAULT_REQUIRED_COMPONENTS),
-      packaging: { confirmed: false },
+      counted_if_known: clone(DEFAULT_COUNTED_IF_KNOWN),
+      packaging: clone(DEFAULT_PACKAGING),
+      default_max_per_wrap: DEFAULT_MAX_PER_WRAP,
       handling_profiles: clone(DEFAULT_HANDLING_PROFILES),
       max_bundle_kg: MAX_BUNDLE_KG, shipping_rounding: "none",
       company: { base_address: BASE_ADDRESS_DEFAULT }, versions: {}
@@ -557,6 +575,7 @@
     return best;
   }
   function matchProfile(profiles, kind, construction, depth) {
+    var nearest = null, gap = null;
     for (var i = 0; i < profiles.length; i++) {
       var p = profiles[i];
       if (p.kind !== kind || !p.verified) { continue; }
@@ -564,12 +583,17 @@
       var lo = finite(p.depth_min_mm), hi = finite(p.depth_max_mm);
       if (lo !== null || hi !== null) {
         if (depth === null || depth === undefined) { continue; }
-        if (lo !== null && depth < lo) { continue; }
-        if (hi !== null && depth > hi) { continue; }
+        var off = 0;
+        if (lo !== null && depth < lo) { off = lo - depth; }
+        else if (hi !== null && depth > hi) { off = depth - hi; }
+        if (off > 0) {
+          if (gap === null || off < gap) { nearest = p; gap = off; }
+          continue;
+        }
       }
       return p;
     }
-    return null;
+    return nearest;
   }
   function roundBy(v, how) {
     if (how === "nearest") { return pyRound(v); }
@@ -1072,12 +1096,28 @@
       var km = out.installed_media_weight_kg_per_filter;
       comps.push(comp("media", required.indexOf("media") !== -1, km !== null ? "known" : "unknown", km));
     }
-    ["filter_frame", "flyscreen_frame", "flyscreen_part"].forEach(function (name) {
-      if (required.indexOf(name) === -1) { return; }
-      var r = profileComponent(name, construction, s.component_profiles, dims, hasDims);
-      if (r[0] === null) { missing.push(frameMissing(name, dims)); }
-      comps.push(comp(name, true, r[1], r[0], r[2]));
+    var optional = (((s.counted_if_known || {})[construction]) || []).filter(function (c) {
+      return required.indexOf(c) === -1 && !(req.pleat_insert && c === "filter_frame");
     });
+    ["filter_frame", "flyscreen_frame", "flyscreen_part"].forEach(function (name) {
+      if (required.indexOf(name) !== -1) {
+        var r = profileComponent(name, construction, s.component_profiles, dims, hasDims);
+        if (r[0] === null) { missing.push(frameMissing(name, dims)); }
+        comps.push(comp(name, true, r[1], r[0], r[2]));
+      } else if (optional.indexOf(name) !== -1) {
+        var o = profileComponent(name, construction, s.component_profiles, dims, hasDims);
+        if (o[0] !== null) { comps.push(comp(name, false, o[1], o[0], o[2])); }
+      }
+    });
+    if (optional.indexOf("braces") !== -1) {
+      var ob = out.bracing || {};
+      var oprof = (s.brace_profiles || {})[construction] || {};
+      var oeach = positive(oprof.kg_each_including_fixings), ocount = ob.count;
+      if (ob.status === "ok" && ob.required && oeach !== null && ocount) {
+        comps.push(comp("braces", false, "known", oeach * ocount, { count: ocount,
+          kg_each: oeach, profile_version: oprof.version === undefined ? null : oprof.version }));
+      }
+    }
     if (required.indexOf("braces") !== -1) {
       var b = out.bracing;
       if (!b || b.status !== "ok") {
@@ -1297,7 +1337,8 @@
     if (t !== quantity) { throw new PackingError("The areas add up to " + t + " filters but the line is for " + quantity + "."); }
     return out;
   }
-  function propose(quantity, unit, packaging, handlingMax, staffMax, groups, maxKg) {
+  var FALLBACK_MAX_PER_WRAP = 5;
+  function propose(quantity, unit, packaging, handlingMax, staffMax, groups, maxKg, fallbackMax) {
     var max = maxKg === undefined ? MAX_BUNDLE_KG : maxKg;
     var q = positiveInt(quantity);
     if (q === null) { throw new PackingError("The quantity has to be a whole number of 1 or more."); }
@@ -1321,12 +1362,7 @@
     var caps = [limits.weight, limits.handling, limits.staff].filter(function (c) { return c !== null; });
     var weightKnown = limits.weight !== null;
     if (!caps.length) {
-      if (q === 1) { caps = [1]; }
-      else {
-        out.status = "needs_packing_input";
-        out.issues.push("No weight and no handling limit for this size - set the filters per wrap, or weigh one, before it can be planned.");
-        return out;
-      }
+      caps = [q === 1 ? 1 : (positiveInt(fallbackMax) || FALLBACK_MAX_PER_WRAP)];
     }
     var cap = Math.min.apply(null, caps);
     out.capacity = cap;
@@ -1534,7 +1570,8 @@
       var qs = it._resolved;
       if (qs === null || qs === undefined) {
         var hp = handlingLimit(it.width_mm, it.height_mm, it.depth_mm, "", s.handling_profiles);
-        var prop = propose(it.quantity, unit, packaging, hp ? hp.max_per_wrap : null, null, null, max);
+        var prop = propose(it.quantity, unit, packaging, hp ? hp.max_per_wrap : null, null, null, max,
+                           s.default_max_per_wrap);
         if (!prop.wraps.length) { problems.push("line " + (idx + 1) + ": " + prop.issues.join("; ")); perLine.push([]); return; }
         qs = prop.wraps.map(function (w) { return w.quantity; });
       }

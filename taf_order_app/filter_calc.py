@@ -165,7 +165,10 @@ def match_profile(profiles: Iterable[Dict[str, Any]], kind: str,
                   ) -> Optional[Dict[str, Any]]:
     """The first verified profile of this kind for this filter and depth.
     Staff-entered profiles come first, so a confirmed profile replaces the
-    worksheet formula for the depths it covers."""
+    worksheet formula for the depths it covers. A depth no profile covers
+    takes the nearest depth band's profile (the first, on a tie), so every
+    depth has a cut."""
+    nearest, gap = None, None
     for p in profiles:
         if p.get("kind") != kind or not p.get("verified"):
             continue
@@ -175,12 +178,17 @@ def match_profile(profiles: Iterable[Dict[str, Any]], kind: str,
         if low is not None or high is not None:
             if depth is None:
                 continue
+            off = 0.0
             if low is not None and depth < low:
-                continue
-            if high is not None and depth > high:
+                off = low - depth
+            elif high is not None and depth > high:
+                off = depth - high
+            if off > 0:
+                if gap is None or off < gap:
+                    nearest, gap = p, off
                 continue
         return p
-    return None
+    return nearest
 
 
 # ── Dimensions from a profile ───────────────────────────────────────────────
@@ -909,6 +917,10 @@ def _components(request, out, s, construction, required, dims, qty) -> None:
         comps.append(_component("media", "media" in required,
                                 "known" if kg is not None else "unknown", kg))
 
+    optional = [c for c in ((s.get("counted_if_known") or {}).get(construction)
+                            or []) if c not in required]
+    if request.get("pleat_insert"):
+        optional = [c for c in optional if c != "filter_frame"]
     for name in ("filter_frame", "flyscreen_frame", "flyscreen_part"):
         if name in required:
             kg, status, extra = _profile_component(
@@ -916,6 +928,24 @@ def _components(request, out, s, construction, required, dims, qty) -> None:
             if kg is None:
                 missing.append(_frame_missing(name, dims))
             comps.append(_component(name, True, status, kg, **extra))
+        elif name in optional:
+            kg, status, extra = _profile_component(
+                name, construction, s.get("component_profiles"), dims)
+            if kg is not None:
+                comps.append(_component(name, False, status, kg, **extra))
+
+    if "braces" in optional:
+        # Counted when one is needed and its weight is known; otherwise left
+        # out rather than holding up the weight.
+        b = out.get("bracing") or {}
+        prof = (s.get("brace_profiles") or {}).get(construction) or {}
+        each = positive(prof.get("kg_each_including_fixings"))
+        count = b.get("count")
+        if b.get("status") == "ok" and b.get("required") and each is not None \
+                and count:
+            comps.append(_component(
+                "braces", False, "known", each * count, count=count,
+                kg_each=each, profile_version=prof.get("version")))
 
     if "braces" in required:
         b = out.get("bracing")
