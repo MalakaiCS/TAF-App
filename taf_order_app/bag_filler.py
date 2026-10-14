@@ -13,7 +13,11 @@ Data model for a single bag line-item (dict keys):
   on_wire       : bool
   gelled        : bool
   special_size  : bool
-  header        : bool  – a flat panel header sits on top (adds H to the code)
+  header        : bool  – the bag hangs from a header (adds H to the code);
+                          made on the filter worksheet, see bag_headers
+  header_width, header_height, header_depth : int – the header's size when
+                          it was set on the line (else bag - 15, 25 deep)
+  pockets       : int   – Custom Bag Filter only: pockets in each frame
   label_suffix  : str   – "LONG" | "SHORT" | ""
   efficiency    : str   – MPHE only: "60-65%" etc.
   roll_width    : str   – e.g. "2100mm"   (Media Roll only)
@@ -117,6 +121,7 @@ BAG_PRODUCT_TYPES = [
     "MPHE 8-Pocket",
     "MPHE 4-Pocket",
     "HEPA",
+    "Custom Bag Filter",
     "Mounting Frame",
     "Media Roll",
     "Cut Pads",
@@ -130,9 +135,10 @@ ROLL_LENGTHS     = ["8m", "20m", "40m"]
 MPHE_EFFICIENCIES = ["", "60-65%", "80-85%", "90-95%"]
 
 # product types that are "bag" filters (need W/H/D + media)
-_BAG_TYPES  = {"3-Peak", "2-Wedge", "4-Point", "MPHE 8-Pocket", "MPHE 4-Pocket", "HEPA"}
+_BAG_TYPES  = {"3-Peak", "2-Wedge", "4-Point", "MPHE 8-Pocket", "MPHE 4-Pocket", "HEPA",
+               "Custom Bag Filter"}
 # types that use bag media dropdown
-_MEDIA_TYPES_BAG  = {"3-Peak", "2-Wedge", "4-Point", "HEPA"}
+_MEDIA_TYPES_BAG  = {"3-Peak", "2-Wedge", "4-Point", "HEPA", "Custom Bag Filter"}
 _MEDIA_TYPES_MPHE = {"MPHE 8-Pocket", "MPHE 4-Pocket"}
 
 # Standard size presets: {product_type: [(label, width, height, depth|None), ...]}
@@ -172,6 +178,10 @@ STANDARD_SIZES: Dict[str, list] = {
     "HEPA": [
         ("Full  610×610×69",             610, 610,  69),
         ("Full  610×610×292",            610, 610, 292),
+        ("Custom",                       None, None, None),
+    ],
+    # Ordered by its header size, pockets and pocket depth: no standard ones.
+    "Custom Bag Filter": [
         ("Custom",                       None, None, None),
     ],
     "Mounting Frame": [
@@ -230,6 +240,12 @@ def generate_part_number(item: dict) -> str:
         dims = _d3()
         return f"GSHEP99-{dims}" if dims else ""
 
+    if pt == "Custom Bag Filter":
+        dims = _d3()
+        pockets = int(item.get("pockets") or 0)
+        pk = f"-{pockets}P" if pockets else ""
+        return f"CBF{media}-{dims}{pk}{bag_sfx}{spec_sfx}" if dims else ""
+
     if pt == "Mounting Frame":
         dims = _d2()
         return f"TAFGSMF-{dims}" if dims else ""
@@ -280,6 +296,8 @@ def build_label_line(item: dict) -> str:
         pockets = "8-Pocket" if "8" in pt else "4-Pocket"
         eff_str = f" {eff}" if eff else ""
         name = f"{half_pfx}{pockets} {media}{eff_str}"
+    elif pt == "Custom Bag Filter":
+        name = f"Custom Bag Filter {media}"
     elif pt == "Mounting Frame":
         return f"{qty} x Gal Steel Mounting Frame"
     elif pt == "Media Roll":
@@ -310,6 +328,18 @@ def build_dims_line(item: dict) -> str:
     h = item.get("height") or 0
     d = item.get("depth")  or 0
 
+    if pt == "Custom Bag Filter":
+        # As the order reads: "855mm x 570mm x 5 Pockets, 480mm pocket depth"
+        if not (w and h):
+            return ""
+        pockets = int(item.get("pockets") or 0)
+        text = f"{int(w)}mm x {int(h)}mm"
+        if pockets:
+            text += f" x {pockets} Pockets"
+        if d:
+            text += f", {int(d)}mm pocket depth"
+        return text
+
     if pt == "Mounting Frame" or not d:
         return f"{int(w)}mm x {int(h)}mm" if (w and h) else ""
 
@@ -331,6 +361,10 @@ def item_summary_short(item: dict) -> str:
         return f"{item.get('roll_width','')} × {item.get('roll_length','')}"
     if pt == "Mounting Frame":
         return f"{w}×{h}" if (w and h) else ""
+    if pt == "Custom Bag Filter":
+        pockets = int(item.get("pockets") or 0)
+        base = f"{w}×{h}×{d}" if (w and h and d) else (f"{w}×{h}" if w and h else "")
+        return f"{base} {pockets}P" if (base and pockets) else base
     return f"{w}×{h}×{d}" if (w and h and d) else ""
 
 
@@ -899,16 +933,13 @@ def _build_bag_options(item: dict) -> str:
     if item.get("gelled"):       opts.append("Gelled")
     if item.get("special_size"): opts.append("Special Size")
     if item.get("header"):
-        # A header is a flat panel made to sit on the bag, so the docket has
-        # to say which panel to cut, not just that there is one.
+        # The header is made on the filter worksheet; the docket says what
+        # size, so the bag and its header are made to match.
         try:
-            from .part_numbers import header_panel_for_bag
-            panel = header_panel_for_bag(item.get("width"), item.get("height"),
-                                         half_size=bool(item.get("half_size")))
+            from .bag_headers import header_text
+            opts.append(header_text(item) or "Header")
         except Exception:
-            panel = None
-        opts.append(f"Header ({panel[0]}×{panel[1]}×{panel[2]}mm panel)"
-                    if panel else "Header")
+            opts.append("Header")
     ls = (item.get("label_suffix") or "").strip()
     if ls:                       opts.append(ls)
     return "  ·  ".join(opts)

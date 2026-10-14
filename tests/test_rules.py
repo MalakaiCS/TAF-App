@@ -135,10 +135,11 @@ def test_media_defaults_and_unknown_grades():
 
 
 def test_header_panel_sizes_for_a_bag():
-    assert pn.header_panel_for_bag(595, 595) == (610, 610, 25)
-    assert pn.header_panel_for_bag(610, 610) == (630, 630, 25)
-    assert pn.header_panel_for_bag(595, 595, half_size=True) == (610, 305, 25)
-    assert pn.header_panel_for_bag(500, 500) is None   # invent nothing
+    # The header is 15 smaller than the bag each way, 25 deep.
+    assert pn.header_panel_for_bag(610, 610) == (595, 595, 25)
+    assert pn.header_panel_for_bag(595, 595) == (580, 580, 25)
+    assert pn.header_panel_for_bag(305, 610) == (290, 595, 25)
+    assert pn.header_panel_for_bag(0, 610) is None     # no size yet
 
 
 # ── Prices ──────────────────────────────────────────────────────────────────

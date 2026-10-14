@@ -368,7 +368,11 @@ def _draw_vorf(c, header, item, page_num, total_pages, d_ord, d_due,
     cust = (header.get("Customer Name","") or "").upper()
     ord_n = header.get("Order Number","") or ""
     attn  = (header.get("Attention","") or "").upper()
-    label = f"F{channel}" if ftype == "flat panel" else f"V{channel}"
+    bag_hdr = bool(item.get("Bag Header"))
+    if bag_hdr:
+        label = f"H{channel}"
+    else:
+        label = f"F{channel}" if ftype == "flat panel" else f"V{channel}"
     item_xtra  = (item.get("item_notes") or "")
     notes      = (item.get("Notes") or "")
     hdr_notes  = (header.get("Notes") or "")
@@ -418,7 +422,14 @@ def _draw_vorf(c, header, item, page_num, total_pages, d_ord, d_due,
 
     # Wire Cut/Qty & Media Cut/Qty — required for pleat inserts too,
     # so shown whenever NOT a stock item and NOT header-only.
-    if not use_sv and not is_hdr:
+    if bag_hdr:
+        # A bag's header: the wire it takes (header - 15, on a wire header
+        # only) and no media - the bag is the media.
+        for col, val in [("N", item.get("Header Wire Cut") or "-"),
+                         ("O", item.get("Header Wire Qty") or "-"),
+                         ("P", "-"), ("Q", "-")]:
+            _txt(c, cx(col), ry(6), cw(col), rh(6), val, size=9, align="center", valign="top", offset=2)
+    elif not use_sv and not is_hdr:
         wm = _wire_media(short, long_, channel, label, int(qty))
         for col, val in [("N",wm["wc"]),("O",wm["wq"]),("P",wm["mc"]),("Q",wm["mq"])]:
             _txt(c, cx(col), ry(6), cw(col), rh(6), val, size=9, align="center", valign="top", offset=2)

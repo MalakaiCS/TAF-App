@@ -38,11 +38,16 @@ def order_context(items: Sequence[Dict[str, Any]],
     the codes on the labels.
     """
     s = settings if settings is not None else _settings.cached()
+    # A bag's header page is packed with its bag: no wraps or codes of its
+    # own, and it must not shift the codes of the lines that do have them.
+    packed = [i for i in items if not i.get("Bag Header")]
     try:
-        wraps = _op.order_wraps(items, s)
-        lines = wraps["lines"]
+        wraps = _op.order_wraps(packed, s)
+        found = iter(wraps["lines"])
     except Exception:
-        lines = [{"eval": None, "wraps": []} for _ in items]
+        found = iter([{"eval": None, "wraps": []} for _ in packed])
+    lines = [{"eval": None, "wraps": [], "packed_with_bag": True}
+             if i.get("Bag Header") else next(found) for i in items]
     out = []
     for item, line in zip(items, lines):
         # Codes worked out across the whole order (order_packing.stamp_codes)
@@ -58,11 +63,15 @@ def order_context(items: Sequence[Dict[str, Any]],
             except Exception:
                 calc = None
         out.append({"eval": line.get("eval"), "wraps": line.get("wraps") or [],
-                    "calc": calc})
+                    "calc": calc,
+                    "packed_with_bag": bool(line.get("packed_with_bag"))})
     return out
 
 
 def wrapping_lines(ctx: Dict[str, Any]) -> List[Line]:
+    if ctx.get("packed_with_bag"):
+        return [("Fitted to its bag and packed with it - no wrap or label "
+                 "of its own.", False)]
     ev = ctx.get("eval") or {}
     plan = ev.get("plan") or {}
     wraps = ctx.get("wraps") or []

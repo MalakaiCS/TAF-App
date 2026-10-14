@@ -52,5 +52,8 @@ def validate_items(items: Iterable[dict], extra_media_types: list = None,
             raise ValueError(f"Line item {idx}: 'Filter Type' is invalid.")
 
         mt = (item.get("Media Type") or "").strip()
+        # A bag's header page has no media of its own: the bag is the media.
+        if item.get("Bag Header") and not mt:
+            continue
         if mt not in valid_media:
             raise ValueError(f"Line item {idx}: 'Media Type' is invalid.")

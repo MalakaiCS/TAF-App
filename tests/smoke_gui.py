@@ -662,8 +662,10 @@ def _steps(app, gui, root):
                     saved[0][1]["delivery_postcode"] != "2486" or \
                     saved[0][1]["billing_city"] != "Tweed Heads":
                 raise AssertionError(f"saved {saved}")
-            if app.hvars["Location"].get() != "Tweed Heads, NSW":
-                raise AssertionError("Location was not filled in")
+            # The Location is the account's region - never the suburb.
+            if app.hvars["Location"].get() != "Local":
+                raise AssertionError(
+                    f"Location {app.hvars['Location'].get()!r}, not Local")
             app._pick_customer(dict(CUSTOMERS[1]))
             if _dialogs():
                 raise AssertionError("asked twice for the same customer")
@@ -683,6 +685,185 @@ def _steps(app, gui, root):
             app._close_ac_popup()
     add("order form: Add Address for a customer without one",
         _add_address_on_the_order_form)
+
+    def _customer_must_be_an_account():
+        """The list under Customer Name: Create first, then the accounts
+        that match; Enter picks the first; a name that is no account is
+        refused at Generate; an account with no Location is asked for one."""
+        records = [dict(c) for c in CUSTOMERS] + [
+            {"id": "c3", "name": "Access Towing", "region": "Logan",
+             "contact_person": "Acme Contact", "email": "ac@tow.example",
+             "delivery_address1": "2 Tow St", "delivery_city": "Logan",
+             "delivery_state": "QLD", "delivery_postcode": "4114"},
+            {"id": "c4", "name": "No Region Co", "region": "Hillcrest, QLD",
+             "delivery_address1": "3 Rd", "delivery_city": "Hillcrest",
+             "delivery_state": "QLD", "delivery_postcode": "4118"}]
+        saved = []
+        gui._db.update_customer = lambda cid, data: saved.append((cid, data))
+        was_records = app._customer_records
+        app._customer_records = records
+        app._address_asked = set()
+        ent = app._customer_entry
+        try:
+            app._show_tab("new_order")
+            root.update()
+            # The list only opens while the box has the focus; a display
+            # with no window manager hands focus out unreliably, so say so.
+            root.focus_get = lambda: ent
+            app.hvars["Customer Name"].set("")
+            app.hvars["Location"].set("")
+            ent.insert(0, "ac")
+            deadline = time.monotonic() + 3
+            while not app._ac_popup and time.monotonic() < deadline:
+                root.update()
+                time.sleep(0.02)
+            if not app._ac_popup:
+                raise AssertionError("no list under Customer Name")
+            # Create row + Access Towing (name) + c3 matched by contact too
+            if len(app._ac_rows) != 2:
+                raise AssertionError(f"{len(app._ac_rows)} rows listed")
+            app._ac_key("Return")              # the first account
+            root.update()
+            if app.hvars["Customer Name"].get() != "Access Towing" or \
+                    app._selected_customer_id != "c3" or \
+                    app.hvars["Location"].get() != "Logan":
+                raise AssertionError(
+                    f"picked {app.hvars['Customer Name'].get()!r} "
+                    f"{app._selected_customer_id!r} "
+                    f"{app.hvars['Location'].get()!r}")
+            if app._ac_popup:
+                raise AssertionError("the list stayed open after a pick")
+            # Typing over it unlinks; a made-up name is refused.
+            app.hvars["Customer Name"].set("Somebody New")
+            if app._selected_customer_id:
+                raise AssertionError("still linked after typing over it")
+            asked = []
+            app._ask_to_create = lambda t: asked.append(t)
+            app.hvars["Order Number"].set("PO-1")
+            app.hvars["Date Ordered"].set("14/10/26")
+            if app._validate_header():
+                raise AssertionError("a name that is no account passed")
+            deadline = time.monotonic() + 2
+            while not asked and time.monotonic() < deadline:
+                root.update()
+                time.sleep(0.02)
+            if asked != ["Somebody New"]:
+                raise AssertionError(f"not offered to create it: {asked}")
+            # Typed out in full, in any case: linked, and passes.
+            app.hvars["Customer Name"].set("bells creek")
+            if app._selected_customer_id != "c1" or \
+                    app.hvars["Location"].get() != "Sunshine Coast":
+                raise AssertionError("a typed account name was not linked")
+            if not app._validate_header():
+                raise AssertionError("an account's name was refused")
+            # An account with no Location is asked for one.
+            app._pick_customer(dict(records[3]))
+            deadline = time.monotonic() + 5
+            found = []
+            while not found and time.monotonic() < deadline:
+                root.update()
+                found = [w for w in root.winfo_children()
+                         if isinstance(w, gui.AddAddressDialog)
+                         and w.winfo_exists()]
+                time.sleep(0.02)
+            if not found:
+                raise AssertionError("not asked for a Location")
+            dlg = found[0]
+            if dlg.title() != 'Choose Location for "No Region Co"' or \
+                    "delivery_address1" in dlg.vars:
+                raise AssertionError(f"asked {dlg.title()!r} {list(dlg.vars)}")
+            dlg._save()
+            if saved:
+                raise AssertionError("saved with no Location chosen")
+            dlg.vars["region"].set("Ipswich")
+            dlg._save()
+            if saved != [("c4", {"region": "Ipswich"})] or \
+                    app.hvars["Location"].get() != "Ipswich":
+                raise AssertionError(f"saved {saved}, Location "
+                                     f"{app.hvars['Location'].get()!r}")
+        finally:
+            del gui._db.update_customer
+            root.__dict__.pop("focus_get", None)
+            app.__dict__.pop("_ask_to_create", None)
+            app._customer_records = was_records
+            app._close_ac_popup()
+            for k in ("Customer Name", "Order Number", "Date Ordered",
+                      "Location"):
+                app.hvars[k].set("")
+            app._clear_all_field_errors()
+    add("order form: the customer is always an account",
+        _customer_must_be_an_account)
+
+    def _bag_header_in_the_dialog():
+        """Header on a bag: follows the bag (bag - 15) until edited, then
+        keeps its own size; a Custom Bag Filter starts at the size ordered
+        and asks for its pockets."""
+        dlg = gui.BagLineItemDialog(root, title="Bag")
+        try:
+            root.update()
+            dlg.var_pt.set("3-Peak")
+            dlg._on_type_change()
+            dlg.var_w.set("610"); dlg.var_h.set("610"); dlg.var_d.set("570")
+            dlg.var_bhdr.set(True); dlg.var_wire.set(True)
+            dlg._option_changed()
+            root.update()
+            if not dlg.hdr_frame.winfo_ismapped():
+                raise AssertionError("no Header section with Header ticked")
+            if (dlg.var_hw.get(), dlg.var_hh.get(), dlg.var_hd.get()) != \
+                    ("595", "595", "25"):
+                raise AssertionError("header did not follow the bag: "
+                                     f"{dlg.var_hw.get()}x{dlg.var_hh.get()}")
+            if "580 × 580" not in dlg.lbl_hdr_info.cget("text"):
+                raise AssertionError(dlg.lbl_hdr_info.cget("text"))
+            dlg.var_hw.set("597")              # nudged by hand
+            dlg.var_w.set("612")               # the bag changes afterwards
+            if dlg.var_hw.get() != "597" or dlg.var_hh.get() != "595":
+                raise AssertionError("a hand-set header was overwritten")
+            dlg.var_qty.set("4")
+            dlg._save()
+            res = dlg.result
+            if not res or (res["header_width"], res["header_height"],
+                           res["width"], res["header_custom"]) != \
+                    (597, 595, 612, True):
+                raise AssertionError(f"saved {res}")
+        finally:
+            if dlg.winfo_exists():
+                dlg.destroy()
+        dlg = gui.BagLineItemDialog(root, title="Bag")
+        try:
+            dlg.var_pt.set("Custom Bag Filter")
+            dlg._on_type_change()
+            root.update()
+            if not dlg.var_bhdr.get() or \
+                    not dlg._dim_labels["Pockets"].winfo_ismapped():
+                raise AssertionError("custom bag: no header or no pockets")
+            dlg.var_w.set("855"); dlg.var_h.set("570"); dlg.var_d.set("480")
+            dlg.var_wire.set(True); dlg._option_changed()
+            if (dlg.var_hw.get(), dlg.var_hh.get()) != ("855", "570"):
+                raise AssertionError("custom header is not the size ordered")
+            dlg.var_hd.set("20")
+            dlg.var_qty.set("2")
+            was = gui.messagebox.showerror
+            said = []
+            gui.messagebox.showerror = lambda *a, **k: said.append(a)
+            try:
+                dlg._save()                    # no pockets yet
+            finally:
+                gui.messagebox.showerror = was
+            if dlg.result or not said:
+                raise AssertionError("saved without pockets")
+            dlg.var_pockets.set("5")
+            dlg._save()
+            res = dlg.result
+            if not res or res["pockets"] != 5 or \
+                    (res["header_width"], res["header_height"],
+                     res["header_depth"]) != (855, 570, 20):
+                raise AssertionError(f"saved {res}")
+        finally:
+            if dlg.winfo_exists():
+                dlg.destroy()
+    add("bag dialog: header sizes and Custom Bag Filter",
+        _bag_header_in_the_dialog)
 
     def _closed_before_its_list_arrives():
         """A list window worked out on another thread, closed before the

@@ -19,6 +19,21 @@ log, stock management and a customer database.
   bag filters and mounting frames — its bags come out as bag lines, halved
   for a REP/FIL order like the panels), duplicate-order warning, live
   worksheet + order-PDF generation.
+- **Every order is for a customer account** — typing in Customer Name lists
+  the accounts it could mean (initials badge, the typed part in bold, short
+  name, contact and email underneath), with **+ Create "…" as a new
+  customer** at the top. Generate refuses a name that is no account and
+  offers to make it. Each account is given its **Location** — Local, North,
+  Logan, Gold Coast, Sunshine Coast, Ipswich, Freight or Pick Up — and that
+  is what goes in the order's Location; the delivery address is only for the
+  labels. An account with no Location is asked for one when it is picked.
+- **Bag headers** — tick Header on any bag filter and the header gets its
+  own page on the filter worksheet: 15 mm smaller than the bag each way and
+  25 deep (a 610 × 610 bag takes a 595 × 595 header), with a wire cut 15 mm
+  smaller again on a wire header (bag On Wire): 580 × 580. The header's size
+  can be edited on the line without touching the bag. **Custom Bag Filter**
+  is ordered by its header size, pockets and pocket depth — 855 × 570 × 5
+  pockets, 480 deep, framed 20 mm: an 855 × 570 × 20 header, wire 840 × 555.
 - **Our own order numbers** — a customer with no purchase order number gets
   one of ours: `TAF-ON-0001` and up, from a shared counter, with nothing to do
   with invoice numbering. The **TAF #** button is next to Order Number on New

@@ -49,6 +49,8 @@ from taf_order_app import calc_settings as _calc_settings
 from taf_order_app import cchannel as _cchannel
 from taf_order_app import pallet_labels as _pallets
 from taf_order_app import customer_merge as _merge
+from taf_order_app import customer_picker as _picker
+from taf_order_app import bag_headers as _bag_headers
 from taf_order_app import delivery_labels as _delivery_labels
 from taf_order_app import filter_calc as _filter_calc
 from taf_order_app import mounting_frames as _mounting_frames
@@ -990,6 +992,15 @@ def _guarded_bind(self, sequence=None, func=None, add=None):
 tk.Misc.bind = _guarded_bind
 
 
+def _all_children(widget) -> list:
+    """Every widget inside `widget`, at any depth."""
+    out = []
+    for child in widget.winfo_children():
+        out.append(child)
+        out.extend(_all_children(child))
+    return out
+
+
 def _install_dropdown_rules(root) -> None:
     """Class-wide: a pick starts the guard, and the mouse wheel no longer
     changes a dropdown's value as the page scrolls past it (on Windows it
@@ -1732,7 +1743,9 @@ def _preset_bag_text(bag: dict) -> str:
                     if bag.get(k))
     return " ".join(p for p in (str(bag.get("product_type") or "Bag"),
                                 f"{dims}mm" if dims else "",
-                                str(bag.get("media") or "")) if p)
+                                str(bag.get("media") or ""),
+                                f"+ {_bag_headers.header_text(bag)}"
+                                if bag.get("header") else "") if p)
 
 
 class _PresetRowDialog(tk.Toplevel):
@@ -3121,7 +3134,8 @@ class LineItemDialog(tk.Toplevel):
 # ═══════════════════════════════════════════════════════════════════════════
 
 # Product type groups
-_BAG_TYPES   = {"3-Peak", "2-Wedge", "4-Point", "MPHE 8-Pocket", "MPHE 4-Pocket", "HEPA"}
+_BAG_TYPES   = {"3-Peak", "2-Wedge", "4-Point", "MPHE 8-Pocket", "MPHE 4-Pocket", "HEPA",
+                "Custom Bag Filter"}
 _FRAME_TYPES = {"Mounting Frame"}
 _ROLL_TYPES  = {"Media Roll"}
 _PAD_TYPES   = {"Cut Pads", "Other"}
@@ -3463,10 +3477,13 @@ class BagLineItemDialog(tk.Toplevel):
         self.var_h = tk.StringVar(value=str(d.get("height", "") or ""))
         self.var_d = tk.StringVar(value=str(d.get("depth",  "") or ""))
 
+        self.var_pockets = tk.StringVar(value=str(d.get("pockets", "") or ""))
+
         self._dim_labels = {}
         for col, (lbl, var) in enumerate([("Width", self.var_w),
                                            ("Height", self.var_h),
-                                           ("Depth", self.var_d)]):
+                                           ("Depth", self.var_d),
+                                           ("Pockets", self.var_pockets)]):
             sub = tk.Frame(self.dims_frame, bg=CBG)
             sub.grid(row=0, column=col, padx=(0, 20), sticky="w")
             l = tk.Label(sub, text=lbl, bg=CBG, fg=CTX, font=F_BODY)
@@ -3474,7 +3491,13 @@ class BagLineItemDialog(tk.Toplevel):
             self._dim_labels[lbl] = l
             e = field_entry(sub, textvariable=var, width=9)
             e.pack()
-            var.trace_add("write", lambda *_: self._auto_pn())
+            var.trace_add("write", lambda *_: (self._auto_pn(),
+                                               self._header_follow()))
+        self._custom_hint = tk.Label(
+            self.dims_frame, bg=CBG, fg=CMU, font=F_SM, justify="left",
+            wraplength=px(480),
+            text="As ordered: the header size, the pockets in each frame "
+                 "and the pocket depth.")
 
         # ── Roll dimensions (Media Roll only) ─────────────────────────────
         self.roll_frame = tk.LabelFrame(body, text=" Roll Dimensions ",
@@ -3544,12 +3567,13 @@ class BagLineItemDialog(tk.Toplevel):
             tk.Checkbutton(self.opts_frame, text=lbl_t, variable=var,
                            bg=CBG, fg=CTX, font=F_BODY,
                            activebackground=CBG, selectcolor=CCA, cursor="hand2",
-                           command=self._auto_pn
+                           command=self._option_changed
                            ).grid(row=row, column=col, sticky="w", padx=(0, 24), pady=(0, 4))
 
-        # Label suffix  (Long / Short / empty)
+        # Label suffix  (Long / Short / empty) - its own row, under the
+        # Header and Half Size boxes rather than on top of them.
         ls_col = tk.Frame(self.opts_frame, bg=CBG)
-        ls_col.grid(row=1, column=0, columnspan=3, sticky="w", pady=(6, 0))
+        ls_col.grid(row=2, column=0, columnspan=3, sticky="w", pady=(6, 0))
         tk.Label(ls_col, text="Label suffix:", bg=CBG, fg=CTX, font=F_BODY).pack(side="left", padx=(0, 8))
         self.var_lsuffix = tk.StringVar(value=d.get("label_suffix", ""))
         for txt in ("", "LONG", "SHORT"):
@@ -3559,6 +3583,35 @@ class BagLineItemDialog(tk.Toplevel):
                            ).pack(side="left", padx=(0, 12))
 
         self.opts_frame.pack(fill="x", pady=(0, 8))
+
+        # ── Header (any bag filter with Header ticked) ─────────────────────
+        # Made on the filter worksheet. It follows the bag (bag - 15 each
+        # way, 25 deep) until somebody changes it here - then it keeps the
+        # size it was given, so the header can be nudged without touching
+        # the bag.
+        self.hdr_frame = tk.LabelFrame(body, text=" Header (mm) ",
+                                       bg=CBG, fg=CA, font=F_BOLD,
+                                       bd=1, relief="groove", padx=12, pady=8)
+        self.var_hw = tk.StringVar(value=str(d.get("header_width", "") or ""))
+        self.var_hh = tk.StringVar(value=str(d.get("header_height", "") or ""))
+        self.var_hd = tk.StringVar(value=str(d.get("header_depth", "") or ""))
+        self._hdr_custom = bool(d.get("header_custom"))
+        self._hdr_updating = False
+        for col, (lbl, var) in enumerate([("Width", self.var_hw),
+                                           ("Height", self.var_hh),
+                                           ("Depth", self.var_hd)]):
+            sub = tk.Frame(self.hdr_frame, bg=CBG)
+            sub.grid(row=0, column=col, padx=(0, 20), sticky="w")
+            tk.Label(sub, text=lbl, bg=CBG, fg=CTX, font=F_BODY).pack(anchor="w")
+            field_entry(sub, textvariable=var, width=9).pack()
+            var.trace_add("write", lambda *_: self._header_edited())
+        flat_btn(self.hdr_frame, "↺ Match the bag", self._header_reset,
+                 bg=CNE, pady=4, padx=8, font=F_SM).grid(
+            row=0, column=3, sticky="sw", pady=(0, 2))
+        self.lbl_hdr_info = tk.Label(self.hdr_frame, text="", bg=CBG, fg=CMU,
+                                     font=F_SM, justify="left", anchor="w")
+        self.lbl_hdr_info.grid(row=1, column=0, columnspan=4, sticky="w",
+                               pady=(6, 0))
 
         # ── Description (Cut Pads / Other) ─────────────────────────────────
         self.desc_frame = tk.LabelFrame(body, text=" Description ",
@@ -3604,6 +3657,14 @@ class BagLineItemDialog(tk.Toplevel):
         # ── Initialise dynamic state ───────────────────────────────────────
         self._on_type_change(restore=d)
         # If editing, set preset to "Custom" (dimensions already filled)
+
+        # Wide enough for the four size boxes of a Custom Bag Filter and tall
+        # enough for the header section, without running off the screen.
+        self._canvas = canvas
+        self.update_idletasks()
+        canvas.configure(
+            width=max(px(560), body.winfo_reqwidth()),
+            height=min(px(680), self.winfo_screenheight() - px(220)))
 
     # ── Dynamic visibility helpers ─────────────────────────────────────────
 
@@ -3692,8 +3753,98 @@ class BagLineItemDialog(tk.Toplevel):
         else:
             self.desc_frame.pack_forget()
 
+        # A Custom Bag Filter: pockets, and the depth is the pockets' depth.
+        # It is ordered framed, so the header starts ticked.
+        is_custom = pt == _bag_headers.CUSTOM_BAG
+        pk_sub = self._dim_labels["Pockets"].master
+        if is_custom:
+            pk_sub.grid(row=0, column=3, padx=(0, 20), sticky="w")
+            self._custom_hint.grid(row=1, column=0, columnspan=4, sticky="w",
+                                   pady=(6, 0))
+            self._dim_labels["Depth"].config(text="Pocket depth")
+            if not restore:
+                self.var_bhdr.set(True)
+        else:
+            pk_sub.grid_remove()
+            self._custom_hint.grid_forget()
+            self._dim_labels["Depth"].config(text="Depth")
+
         self._pn_override = False
         self._auto_pn()
+        if not restore:
+            self._hdr_custom = False
+        self._header_follow()
+        self._sync_header_section()
+
+    # ── Header ─────────────────────────────────────────────────────────────
+
+    def _option_changed(self):
+        self._auto_pn()
+        self._header_follow()
+        self._sync_header_section()
+
+    def _header_follow(self):
+        """Put the worked-out header in, unless it has been set by hand."""
+        if getattr(self, "_hdr_custom", True) or not hasattr(self, "var_hw"):
+            self._header_info()
+            return
+        size = _bag_headers.default_header(
+            self.var_pt.get(), self.var_w.get(), self.var_h.get(),
+            self.var_hd.get() or None)
+        self._hdr_updating = True
+        try:
+            if size:
+                self.var_hw.set(str(size[0]))
+                self.var_hh.set(str(size[1]))
+                self.var_hd.set(str(size[2]))
+            else:
+                self.var_hw.set("")
+                self.var_hh.set("")
+                if not self.var_hd.get().strip():
+                    self.var_hd.set(str(_bag_headers.HEADER_DEPTH))
+        finally:
+            self._hdr_updating = False
+        self._header_info()
+
+    def _header_edited(self):
+        if self._hdr_updating:
+            return
+        self._hdr_custom = True
+        self._header_info()
+
+    def _header_reset(self):
+        self._hdr_custom = False
+        self.var_hd.set(str(_bag_headers.HEADER_DEPTH))
+        self._header_follow()
+
+    def _header_info(self):
+        if not hasattr(self, "lbl_hdr_info"):
+            return
+        w, h = _safe_int(self.var_hw.get()), _safe_int(self.var_hh.get())
+        d = _safe_int(self.var_hd.get())
+        if not (w > 0 and h > 0 and d > 0):
+            text = "Enter the bag size, or the header's own size."
+        else:
+            if self.var_wire.get():
+                ww, wh = _bag_headers.wire_size((w, h, d))
+                text = f"Wire header: wire cut {ww} × {wh} (header − 15)."
+            else:
+                text = "No wire - tick On Wire for a wire header filter."
+            text += ("  Set by hand - the bag can change without it."
+                     if self._hdr_custom else
+                     "  Follows the bag (bag − 15)."
+                     if self.var_pt.get() != _bag_headers.CUSTOM_BAG else
+                     "  The size ordered.")
+            text += "\nPrinted on its own worksheet page with the order's filters."
+        self.lbl_hdr_info.config(text=text)
+
+    def _sync_header_section(self):
+        show = (self.var_pt.get() in _BAG_TYPES and bool(self.var_bhdr.get()))
+        if show:
+            self.hdr_frame.pack(fill="x", pady=(0, 8), after=self.opts_frame)
+        else:
+            self.hdr_frame.pack_forget()
+        self._header_info()
 
     def _hide_depth(self):
         """Hide the depth field for Mounting Frame."""
@@ -3731,7 +3882,22 @@ class BagLineItemDialog(tk.Toplevel):
             "width":  _safe_int(self.var_w.get()),
             "height": _safe_int(self.var_h.get()),
             "depth":  _safe_int(self.var_d.get()),
+            "pockets": (_safe_int(self.var_pockets.get())
+                        if self.var_pt.get() == _bag_headers.CUSTOM_BAG
+                        else 0),
         }
+
+    def _header_fields(self) -> dict:
+        """The header as kept on the line: its size, and whether that was
+        set by hand. Nothing when there is no header."""
+        if not (self.var_bhdr.get() and self.var_pt.get() in _BAG_TYPES):
+            return {"header_width": 0, "header_height": 0, "header_depth": 0,
+                    "header_custom": False}
+        return {"header_width":  _safe_int(self.var_hw.get()),
+                "header_height": _safe_int(self.var_hh.get()),
+                "header_depth":  _safe_int(self.var_hd.get())
+                or _bag_headers.HEADER_DEPTH,
+                "header_custom": bool(self._hdr_custom)}
 
     def _auto_pn(self):
         """Regenerate P/N from current values unless user has overridden it."""
@@ -3782,8 +3948,22 @@ class BagLineItemDialog(tk.Toplevel):
                 messagebox.showerror("Invalid", "Width and Height are required.", parent=self)
                 return
             if pt not in ("HEPA", "Mounting Frame") and not item["depth"]:
-                messagebox.showerror("Invalid", "Depth is required.", parent=self)
+                messagebox.showerror(
+                    "Invalid", "Pocket depth is required."
+                    if pt == _bag_headers.CUSTOM_BAG else "Depth is required.",
+                    parent=self)
                 return
+            if pt == _bag_headers.CUSTOM_BAG and item["pockets"] < 1:
+                messagebox.showerror("Invalid",
+                                     "How many pockets in each frame?",
+                                     parent=self)
+                return
+        item.update(self._header_fields())
+        if item["header"] and pt in _BAG_TYPES and not (
+                item["header_width"] > 0 and item["header_height"] > 0):
+            messagebox.showerror("Invalid", "The header needs a width and "
+                                 "height.", parent=self)
+            return
 
         self.result = item
         self.destroy()
@@ -7051,10 +7231,21 @@ def customer_needs_address(cust) -> bool:
     return any(not str(cust.get(k) or "").strip() for k in ADDRESS_FIELDS)
 
 
+def customer_needs_region(cust) -> bool:
+    """True when an account has not been given its Location - which run its
+    orders go on (Local, North, Logan ...). Only the named regions count: an
+    old free-typed suburb is not one."""
+    if not cust or not cust.get("id"):
+        return False
+    return str(cust.get("region") or "").strip() not in _pn.REGION_NAMES
+
+
 class AddAddressDialog(tk.Toplevel):
     """Add Address for "Customer" - the delivery address a customer account
     is missing, asked for on the order form as the customer is chosen, so
-    the delivery labels have somewhere to send the order.
+    the delivery labels have somewhere to send the order. An account with
+    no Location yet is asked for that in the same window ("Choose Location
+    for ..." when the address is already there).
 
     Saves to the customer's account. `on_saved(record)` gets the account as
     it now is.
@@ -7064,8 +7255,12 @@ class AddAddressDialog(tk.Toplevel):
         super().__init__(master)
         self.cust = dict(cust)
         self.on_saved = on_saved
+        self.need_address = customer_needs_address(cust)
+        self.need_region = customer_needs_region(cust)
         name = cust.get("name") or "this customer"
-        self.title(f'Add Address for "{name}"')
+        heading = (f'Add Address for "{name}"' if self.need_address
+                   else f'Choose Location for "{name}"')
+        self.title(heading)
         self.transient(master)
         self.grab_set()
         self.configure(bg=CBG)
@@ -7074,11 +7269,17 @@ class AddAddressDialog(tk.Toplevel):
 
         top = tk.Frame(self, bg=CA, padx=px(16), pady=px(10))
         top.pack(fill="x")
-        tk.Label(top, text=f'Add Address for "{name}"', bg=CA, fg="white",
+        tk.Label(top, text=heading, bg=CA, fg="white",
                  font=(FAM, 13, "bold")).pack(anchor="w")
-        tk.Label(top, text="This customer has no delivery address yet. It "
-                           "goes on their delivery labels and is saved to "
-                           "their account.", bg=CA, fg="white", font=F_SM,
+        said = []
+        if self.need_address:
+            said.append("This customer has no delivery address yet. It goes "
+                        "on their delivery labels.")
+        if self.need_region:
+            said.append("Their Location - which run their orders go on - "
+                        "has not been chosen yet.")
+        said.append("Saved to their account.")
+        tk.Label(top, text=" ".join(said), bg=CA, fg="white", font=F_SM,
                  wraplength=px(420), justify="left").pack(anchor="w")
 
         # The buttons are packed before the fields so they always get their
@@ -7086,8 +7287,8 @@ class AddAddressDialog(tk.Toplevel):
         # the Save button.
         foot = tk.Frame(self, bg=CBG, padx=px(18), pady=px(10))
         foot.pack(fill="x", side="bottom")
-        flat_btn(foot, "Save address", self._save, bg=CGR,
-                 pady=px(6)).pack(side="right")
+        flat_btn(foot, "Save address" if self.need_address else "Save",
+                 self._save, bg=CGR, pady=px(6)).pack(side="right")
         flat_btn(foot, "Not now", self.destroy, bg=CNE,
                  pady=px(6)).pack(side="right", padx=(0, px(8)))
 
@@ -7095,22 +7296,42 @@ class AddAddressDialog(tk.Toplevel):
         body.pack(fill="both", expand=True)
         body.columnconfigure(1, weight=1)
         self.vars = {}
-        rows = (("delivery_address1", "Street address *"),
-                ("delivery_address2", "Address line 2"),
-                ("delivery_city", "Suburb *"),
-                ("delivery_state", "State *"),
-                ("delivery_postcode", "Postcode *"))
+        rows = []
+        if self.need_address:
+            rows += [("delivery_address1", "Street address *"),
+                     ("delivery_address2", "Address line 2"),
+                     ("delivery_city", "Suburb *"),
+                     ("delivery_state", "State *"),
+                     ("delivery_postcode", "Postcode *")]
+        if self.need_region:
+            rows.append(("region", "Location *"))
         first = None
-        for r, (key, label) in enumerate(rows):
+        r = 0
+        for key, label in rows:
             tk.Label(body, text=label, bg=CBG, fg=CTX, font=F_BODY,
                      anchor="w").grid(row=r, column=0, sticky="w",
                                       pady=px(3), padx=(0, px(10)))
-            var = tk.StringVar(value=str(cust.get(key) or ""))
+            start = str(cust.get(key) or "")
+            if key == "region" and start not in _pn.REGION_NAMES:
+                start = ""
+            var = tk.StringVar(value=start)
             self.vars[key] = var
-            if key == "delivery_state":
+            if key in ("delivery_state", "region"):
                 w = ttk.Combobox(body, textvariable=var, state="readonly",
-                                 values=list(_db.AU_STATES), width=10)
+                                 values=list(_db.AU_STATES)
+                                 if key == "delivery_state"
+                                 else list(_pn.REGION_NAMES),
+                                 width=10 if key == "delivery_state" else 18)
                 w.grid(row=r, column=1, sticky="w", pady=px(3))
+                if key == "region":
+                    hint = tk.Label(body, text="", bg=CBG, fg=CMU, font=F_SM,
+                                    anchor="w")
+                    r += 1
+                    hint.grid(row=r, column=1, sticky="w")
+                    var.trace_add("write", lambda *_a, v=var, h=hint: h.config(
+                        text=_pn.REGIONS.get(v.get(), "")))
+                    if first is None:
+                        first = w
             else:
                 w = field_entry(body, textvariable=var,
                                 width=10 if key == "delivery_postcode" else 40)
@@ -7118,9 +7339,10 @@ class AddAddressDialog(tk.Toplevel):
                        "delivery_postcode" else "ew", pady=px(3))
                 if first is None:
                     first = w
+            r += 1
         self.err = tk.Label(body, text="", bg=CBG, fg=CRD, font=F_SM,
                             anchor="w")
-        self.err.grid(row=len(rows), column=0, columnspan=2, sticky="w",
+        self.err.grid(row=r, column=0, columnspan=2, sticky="w",
                       pady=(px(6), 0))
 
         self.bind("<Return>", lambda _e: self._save())
@@ -7136,13 +7358,16 @@ class AddAddressDialog(tk.Toplevel):
     def problems(self) -> list:
         v = self.values()
         out = []
-        for key, label in (("delivery_address1", "street address"),
-                           ("delivery_city", "suburb"),
-                           ("delivery_state", "state")):
-            if not v[key]:
-                out.append(label)
-        if not re.fullmatch(r"\d{4}", v["delivery_postcode"]):
-            out.append("a four-digit postcode")
+        if self.need_address:
+            for key, label in (("delivery_address1", "street address"),
+                               ("delivery_city", "suburb"),
+                               ("delivery_state", "state")):
+                if not v[key]:
+                    out.append(label)
+            if not re.fullmatch(r"\d{4}", v["delivery_postcode"]):
+                out.append("a four-digit postcode")
+        if self.need_region and v.get("region") not in _pn.REGION_NAMES:
+            out.append("their Location")
         return out
 
     def _save(self):
@@ -7153,7 +7378,7 @@ class AddAddressDialog(tk.Toplevel):
         data = self.values()
         # An account whose billing follows its delivery address keeps doing
         # so; a separate billing address is left alone.
-        if self.cust.get("billing_same", True):
+        if self.need_address and self.cust.get("billing_same", True):
             for part in ("address1", "address2", "city", "state", "postcode"):
                 data[f"billing_{part}"] = data[f"delivery_{part}"]
         try:
@@ -7162,8 +7387,11 @@ class AddAddressDialog(tk.Toplevel):
             self.err.config(text=f"Not saved: {exc}")
             return
         try:
+            what = " and ".join(
+                w for w, on in (("Delivery address", self.need_address),
+                                ("Location", self.need_region)) if on)
             _db.log_action("customer_updated",
-                           f"Delivery address added for "
+                           f"{what} added for "
                            f"{self.cust.get('name', '')} from the order form")
         except Exception:
             pass
@@ -7863,6 +8091,7 @@ class ModernOrderApp(tk.Frame):
         self._draft_save_id        = None   # debounce handle for auto-save
         self._tooltip_win          = None   # hover tooltip window ref
         self._selected_customer_id = ""    # customer_id of currently-picked customer
+        self._selected_customer_name = ""  # the name it was linked under
         self._customer_records: list = []  # full customer dicts for autocomplete
         self._inactive_banner      = None  # inactive-customer banner widget
 
@@ -8875,6 +9104,8 @@ class ModernOrderApp(tk.Frame):
         self._known_customers: list = []
         self._ac_popup: "tk.Toplevel | None" = None
         self.hvars["Customer Name"].trace_add(
+            "write", lambda *_: self._customer_name_changed())
+        self.hvars["Customer Name"].trace_add(
             "write", lambda *_: self.master.after(50, self._customer_autocomplete)
         )
 
@@ -8938,6 +9169,17 @@ class ModernOrderApp(tk.Frame):
                 _Tooltip(self._taf_on_btn,
                          "No purchase order number? Give this order one of "
                          "ours — TAF-ON-0001 and up.")
+            elif key == "Location":
+                # Which run the order goes on. It comes from the customer's
+                # account; picking here is for the odd order that differs,
+                # a pick-up say.
+                e = ttk.Combobox(card_body, textvariable=self.hvars[key],
+                                 state="readonly",
+                                 values=list(_pn.REGION_NAMES))
+                e.grid(row=row, column=1, sticky="we", pady=4)
+                self._hentries[key] = e
+                _Tooltip(e, "\n".join(f"{n}: {d}"
+                                      for n, d in _pn.REGIONS.items()))
             else:
                 e = field_entry(card_body, textvariable=self.hvars[key])
                 e.grid(row=row, column=1, sticky="we", pady=4)
@@ -8949,6 +9191,11 @@ class ModernOrderApp(tk.Frame):
                     # a click on the suggestions list is handled first.
                     e.bind("<FocusOut>", lambda _e: self.master.after(
                         200, self._customer_left), add="+")
+                    e.bind("<Escape>", lambda _e: self._close_ac_popup(),
+                           add="+")
+                    for _k in ("Down", "Up", "Return"):
+                        e.bind(f"<{_k}>", lambda _e, k=_k: self._ac_key(k),
+                               add="+")
 
         # Clear individual field error as user types + trigger draft save
         for req_key in REQUIRED:
@@ -12623,15 +12870,24 @@ class ModernOrderApp(tk.Frame):
 
         # Delivery region and job-number wording — both go onto every order
         # imported for this branch.
-        v_region = tk.StringVar(value=g.get("region", ""))
-        tk.Label(body, text="Region", bg=CBG, fg=CTX, font=F_BODY,
+        _start_region = str(g.get("region") or "").strip()
+        v_region = tk.StringVar(
+            value=_start_region if _start_region in _pn.REGION_NAMES else "")
+        tk.Label(body, text="Location *", bg=CBG, fg=CTX, font=F_BODY,
                  anchor="w").grid(row=_row, column=0, sticky="w", pady=4)
         _rg = ttk.Combobox(body, textvariable=v_region, state="readonly",
-                           values=[""] + list(_pn.REGION_NAMES))
+                           values=list(_pn.REGION_NAMES))
         _rg.grid(row=_row, column=1, sticky="ew", pady=4)
-        tk.Label(body, text="Used as Location on their orders.",
-                 bg=CBG, fg=CMU, font=(FAM, 7)).grid(
-            row=_row, column=2, sticky="w", padx=6)
+        _rg_hint = tk.Label(body, text="", bg=CBG, fg=CMU, font=(FAM, 7),
+                            wraplength=170, justify="left")
+        _rg_hint.grid(row=_row, column=2, sticky="w", padx=6)
+
+        def _region_hint(*_a):
+            _rg_hint.config(text=_pn.REGIONS.get(
+                v_region.get(),
+                "Which run their orders go on. Put on every order of theirs."))
+        v_region.trace_add("write", _region_hint)
+        _region_hint()
         _row += 1
 
         v_joblbl = tk.StringVar(value=g.get("job_number_label", ""))
@@ -12790,6 +13046,14 @@ class ModernOrderApp(tk.Frame):
             if not name:
                 err_lbl.config(text="Customer name is required.")
                 return
+            if v_region.get().strip() not in _pn.REGION_NAMES:
+                err_lbl.config(text="Choose their Location - Local, North, "
+                                    "Logan ... - it goes on their orders.")
+                try:
+                    _rg.focus_set()
+                except Exception:
+                    pass
+                return
             err_lbl.config(text="Saving…")
             dlg.update_idletasks()
 
@@ -12930,6 +13194,7 @@ class ModernOrderApp(tk.Frame):
         self._priority_var.set(False) if hasattr(self, "_priority_var") else None
         self._clear_all_field_errors()
         self._selected_customer_id = ""
+        self._selected_customer_name = ""
         self.items = []
         self._refresh_items_tree()
         self._clear_draft()
@@ -18421,11 +18686,15 @@ class ModernOrderApp(tk.Frame):
             if not self.hvars[key].get().strip():
                 self._mark_field_error(key)
                 errors.append(f"  ⚠  {msg}")
+        not_account = self._customer_problem()
+        if not_account:
+            self._mark_field_error("Customer Name")
+            errors.insert(0, f"  ⚠  {not_account}.")
+            typed = self.hvars["Customer Name"].get().strip()
+            self.master.after(100, lambda t=typed: self._ask_to_create(t))
 
         if errors:
             self._validation_banner_lbl.config(text="\n".join(errors))
-            self._validation_banner.pack(fill="x", pady=(4, 0), before=self.master)
-            # Pack it above the priority row by re-inserting before pri_row sibling
             try:
                 self._validation_banner.pack_forget()
                 self._validation_banner.pack(fill="x", pady=(4, 0))
@@ -18445,6 +18714,14 @@ class ModernOrderApp(tk.Frame):
                         pass
                     break
         return not errors
+
+    def _ask_to_create(self, typed: str) -> None:
+        if messagebox.askyesno(
+                "No customer account",
+                f'There is no customer account called "{typed}".\n\n'
+                "Every order is for a customer account. Make one now?",
+                parent=self.master):
+            self._offer_new_customer(typed)
 
     def _mark_field_error(self, key: str):
         """Highlight an entry and its label in red."""
@@ -18504,27 +18781,79 @@ class ModernOrderApp(tk.Frame):
 
     def _pick_customer(self, cust: dict):
         """Apply a selected customer record to the New Order form."""
-        self.hvars["Customer Name"].set(cust.get("name", ""))
+        name = cust.get("name", "")
+        # Linked before the name goes in, so the name changing does not read
+        # as somebody typing over the account.
+        self._link_customer(cust, name)
+        self.hvars["Customer Name"].set(name)
         # Auto-fill Attention with contact person if blank
         if not self.hvars["Attention"].get().strip():
             self.hvars["Attention"].set(cust.get("contact_person", ""))
-        # Auto-fill Location with delivery city / state if blank
-        if not self.hvars["Location"].get().strip():
-            city  = cust.get("delivery_city", "")
-            state = cust.get("delivery_state", "")
-            loc   = ", ".join(p for p in [city, state] if p)
-            if loc:
-                self.hvars["Location"].set(loc)
-        # Store the customer_id for order linking
-        self._selected_customer_id = cust.get("id", "")
         self._close_ac_popup()
         self.master.after(150, lambda c=cust: self._ask_for_address(c))
 
+    def _link_customer(self, cust: dict, shown: str) -> None:
+        """This order is for that account: remember which, and put the
+        account's Location on the order. The Location is the account's -
+        Local, North, Logan ... - never worked out from the address."""
+        self._selected_customer_id = cust.get("id", "") or ""
+        self._selected_customer_name = (shown or "").strip()
+        region = str(cust.get("region") or "").strip()
+        if region in _pn.REGION_NAMES:
+            self.hvars["Location"].set(region)
+
+    def _customer_name_changed(self) -> None:
+        """Typing over the name unlinks the account; typing an account's
+        name or short name in full links it again."""
+        typed = self.hvars["Customer Name"].get().strip()
+        linked = getattr(self, "_selected_customer_name", "") or ""
+        if self._selected_customer_id and typed.upper() == linked.upper():
+            return
+        self._selected_customer_id = ""
+        self._selected_customer_name = ""
+        rec = _picker.find_exact(getattr(self, "_customer_records", None),
+                                 typed)
+        if rec and rec.get("id"):
+            self._link_customer(rec, typed)
+
+    def _customer_problem(self):
+        """Why the order's customer will not do, or None. An order is for a
+        customer account; a name that is not one is refused, so the account
+        gets made instead. Not checked when the accounts could not be
+        loaded - offline, every name would be refused."""
+        typed = self.hvars["Customer Name"].get().strip()
+        if not typed or self._selected_customer_id:
+            return None
+        records = getattr(self, "_customer_records", None) or []
+        if not (_db.is_ready() and any(r.get("id") for r in records)):
+            return None
+        self._customer_name_changed()
+        if self._selected_customer_id:
+            return None
+        return (f'"{typed}" is not a customer account - pick one from the '
+                f'list, or create it')
+
+    def _offer_new_customer(self, typed: str) -> None:
+        """No account by that name: make one, with the name already in, and
+        put it on the order once it is saved."""
+        def _saved(rec):
+            records = getattr(self, "_customer_records", None)
+            if isinstance(records, list):
+                records.append(dict(rec))
+            try:
+                self._load_known_customers()
+            except Exception:
+                pass
+            self._pick_customer(rec)
+        self._close_ac_popup()
+        self._open_customer_dialog(edit=False, prefill={"name": typed},
+                                   on_saved=_saved)
+
     def _ask_for_address(self, cust) -> None:
         """Add Address for "Customer", when the account has no delivery
-        address. Asked once per customer per session: "Not now" means not
-        now, not every time the field is touched."""
-        if not customer_needs_address(cust):
+        address - or no Location. Asked once per customer per session: "Not
+        now" means not now, not every time the field is touched."""
+        if not (customer_needs_address(cust) or customer_needs_region(cust)):
             return
         asked = self.__dict__.setdefault("_address_asked", set())
         if cust.get("id") in asked:
@@ -18535,97 +18864,234 @@ class ModernOrderApp(tk.Frame):
             for rec in getattr(self, "_customer_records", None) or []:
                 if rec.get("id") == record.get("id"):
                     rec.update(record)
-            if not self.hvars["Location"].get().strip():
-                loc = ", ".join(p for p in (record.get("delivery_city", ""),
-                                            record.get("delivery_state", ""))
-                                if p)
-                if loc:
-                    self.hvars["Location"].set(loc)
-            self.status_var.set(f"Delivery address saved for "
-                                f"{record.get('name', '')}.")
+            if record.get("id") == self._selected_customer_id:
+                region = str(record.get("region") or "").strip()
+                if region in _pn.REGION_NAMES:
+                    self.hvars["Location"].set(region)
+            self.status_var.set(f"Saved to {record.get('name', '')}'s "
+                                f"account.")
         AddAddressDialog(self.master, cust, on_saved=_saved)
 
     def _customer_left(self, _event=None) -> None:
         """The customer was typed rather than picked: if it is exactly an
-        account's name, check that account has an address."""
-        typed = self.hvars["Customer Name"].get().strip().upper()
+        account's name, link it and check that account has an address."""
+        if self._ac_popup and self._pointer_in_ac_popup():
+            return
+        self._close_ac_popup()
+        typed = self.hvars["Customer Name"].get().strip()
         if not typed:
             return
+        self._customer_name_changed()
+        if not self._selected_customer_id:
+            return
         for rec in getattr(self, "_customer_records", None) or []:
-            if typed in (str(rec.get("name") or "").strip().upper(),
-                         str(rec.get("short_name") or "").strip().upper()):
+            if rec.get("id") == self._selected_customer_id:
                 self._ask_for_address(rec)
                 return
 
+    # ── The customer list under Customer Name ─────────────────────────────
+
     def _customer_autocomplete(self):
-        """Show a dropdown of matching customer records below the entry."""
+        """List the accounts the typed name could mean, under the entry:
+        "Create ... as a new customer" first, then each match with its
+        initials badge, the typed part in bold and a grey line beneath."""
         typed = self.hvars["Customer Name"].get().strip()
         self._close_ac_popup()
-        if len(typed) < 2:
-            return
-
-        typed_up = typed.upper()
-        # Search full customer records first; fall back to name-only list
-        records  = self._customer_records or []
-        if records:
-            matches = [c for c in records if typed_up in (c.get("name") or "").upper()
-                       or typed_up in (c.get("abn") or "").upper()
-                       or typed_up in (c.get("contact_person") or "").upper()]
-        else:
-            matches = [{"name": n} for n in self._known_customers
-                       if typed_up in n.upper()]
-
-        if not matches:
-            return
-        # Don't show popup if the only match is an exact match already filled
-        if (len(matches) == 1
-                and matches[0].get("name", "").upper() == typed_up):
-            return
-
         ent = getattr(self, "_customer_entry", None)
-        if not ent:
+        if not typed or not ent:
+            return
+        # Only while somebody is typing in the box - not when an order is
+        # loaded into the form, and not once the name is an account's.
+        try:
+            if self.master.focus_get() is not ent:
+                return
+        except Exception:
+            return
+        if self._selected_customer_id:
+            return
+
+        records = self._customer_records or [
+            {"name": n} for n in self._known_customers]
+        matches = _picker.matches(records, typed)
+        can_create = _db.is_ready()
+        if not matches and not can_create:
             return
 
         ent.update_idletasks()
         x = ent.winfo_rootx()
-        y = ent.winfo_rooty() + ent.winfo_height()
-        w = max(ent.winfo_width(), 320)
+        y = ent.winfo_rooty() + ent.winfo_height() + 2
+        w = max(ent.winfo_width(), px(380))
 
         popup = tk.Toplevel(self.master)
         popup.overrideredirect(True)
         popup.configure(bg=CSP)
-        row_h  = 28
-        popup.geometry(f"{w}x{min(len(matches), 7) * row_h + 2}+{x}+{y}")
-        popup.lift()
         self._ac_popup = popup
+        self._ac_rows = []          # (frame, action) in list order
+        self._ac_index = -1
 
-        lb = tk.Listbox(
-            popup, font=F_BODY, bg=CCA, fg=CTX,
-            selectbackground=CA, selectforeground="white",
-            relief="flat", bd=0, highlightthickness=0,
-            activestyle="none", height=min(len(matches), 7),
-        )
-        lb.pack(fill="both", expand=True, padx=1, pady=1)
+        hover_bg = "#E8F4FC"
+        outer = tk.Frame(popup, bg=CCA)
+        outer.pack(fill="both", expand=True, padx=1, pady=1)
 
-        for c in matches:
-            name  = c.get("name", "")
-            city  = c.get("delivery_city", "")
-            state = c.get("delivery_state", "")
-            loc   = ", ".join(p for p in [city, state] if p)
-            label = f"{name}  ·  {loc}" if loc else name
-            lb.insert("end", f"  {label}")
+        def _row_frame(parent):
+            f = tk.Frame(parent, bg=CCA, cursor="hand2")
+            f.pack(fill="x")
+            return f
 
-        def _pick(evt=None):
-            sel = lb.curselection()
-            if sel:
-                self._pick_customer(matches[sel[0]])
-            self._close_ac_popup()
+        def _clickable(frame, action):
+            idx = len(self._ac_rows)
+            self._ac_rows.append((frame, action))
 
-        lb.bind("<ButtonRelease-1>", _pick)
-        lb.bind("<Return>",          _pick)
-        ent.bind("<Escape>",   lambda e: self._close_ac_popup(), add="+")
-        ent.bind("<FocusOut>", lambda e: self.master.after(150, self._close_ac_popup), add="+")
-        popup.bind("<FocusOut>", lambda e: self.master.after(150, self._close_ac_popup))
+            def _go(_e=None, a=action):
+                _note_pick()
+                a()
+                return "break"
+            for wdg in [frame] + _all_children(frame):
+                _unguarded_bind(wdg, "<ButtonPress-1>", _go)
+                _unguarded_bind(wdg, "<Enter>",
+                                lambda _e, i=idx: self._ac_highlight(i))
+
+        if can_create:
+            crow = _row_frame(outer)
+            tk.Label(crow, text=_picker.create_label(typed), bg=CCA, fg=CA,
+                     font=F_BOLD, anchor="w", padx=px(10),
+                     pady=px(8)).pack(fill="x")
+            _clickable(crow, lambda t=typed: self._offer_new_customer(t))
+            tk.Frame(outer, bg=CBR, height=1).pack(fill="x")
+
+        # The matches scroll; the Create row stays put above them.
+        row_h = px(46)
+        shown = min(len(matches), 6)
+        if matches:
+            box = tk.Frame(outer, bg=CCA)
+            box.pack(fill="both", expand=True)
+            cv = tk.Canvas(box, bg=CCA, highlightthickness=0, bd=0,
+                           height=shown * row_h)
+            inner = tk.Frame(cv, bg=CCA)
+            win = cv.create_window((0, 0), window=inner, anchor="nw")
+            inner.bind("<Configure>", lambda _e: cv.configure(
+                scrollregion=cv.bbox("all")))
+            cv.bind("<Configure>", lambda e: cv.itemconfig(win, width=e.width))
+            if len(matches) > shown:
+                sb = ttk.Scrollbar(box, orient="vertical", command=cv.yview)
+                cv.configure(yscrollcommand=sb.set)
+                sb.pack(side="right", fill="y")
+
+                def _wheel(e):
+                    step = -1 if (getattr(e, "num", 0) == 4
+                                  or getattr(e, "delta", 0) > 0) else 1
+                    cv.yview_scroll(step, "units")
+                    return "break"
+                for seq in ("<MouseWheel>", "<Button-4>", "<Button-5>"):
+                    popup.bind(seq, _wheel)
+                    cv.bind(seq, _wheel)
+                    inner.bind(seq, _wheel)
+                self._ac_wheel = _wheel
+            cv.pack(side="left", fill="both", expand=True)
+            self._ac_canvas = cv
+
+            bold_sm = (FAM, 8, "bold")
+            for rec in matches:
+                name = str(rec.get("name") or "")
+                row = _row_frame(inner)
+                row.configure(height=row_h)
+                badge = tk.Canvas(row, width=px(34), height=px(34), bg=CCA,
+                                  highlightthickness=0, bd=0)
+                badge.pack(side="left", padx=(px(10), px(8)), pady=px(6))
+                d = px(32)
+                badge.create_oval(1, 1, d, d, fill=_picker.badge_colour(name),
+                                  outline="")
+                badge.create_text(d // 2 + 1, d // 2 + 1,
+                                  text=_picker.initials(name), fill="white",
+                                  font=(FAM, 8, "bold"))
+                text = tk.Frame(row, bg=CCA)
+                text.pack(side="left", fill="x", expand=True, pady=px(4))
+                line1 = tk.Frame(text, bg=CCA)
+                line1.pack(anchor="w")
+                for piece, bold in _picker.segments(name, typed):
+                    tk.Label(line1, text=piece, bg=CCA, fg=CTX, bd=0, padx=0,
+                             font=F_BOLD if bold else F_BODY).pack(side="left")
+                sub = _picker.subtitle(rec)
+                if sub:
+                    line2 = tk.Frame(text, bg=CCA)
+                    line2.pack(anchor="w")
+                    for piece, bold in _picker.segments(sub, typed):
+                        tk.Label(line2, text=piece, bg=CCA, fg=CMU, bd=0,
+                                 padx=0, font=bold_sm if bold else F_SM
+                                 ).pack(side="left")
+                if getattr(self, "_ac_wheel", None):
+                    for wdg in [row] + _all_children(row):
+                        for seq in ("<MouseWheel>", "<Button-4>",
+                                    "<Button-5>"):
+                            wdg.bind(seq, self._ac_wheel)
+                _clickable(row, lambda c=rec: self._pick_customer(c))
+
+        self._ac_hover_bg = hover_bg
+        popup.update_idletasks()
+        h = outer.winfo_reqheight() + 2
+        popup.geometry(f"{w}x{h}+{x}+{y}")
+        popup.lift()
+        # The first account is what Enter picks; nothing is, when there are
+        # none - Enter never makes an account by accident.
+        if matches:
+            self._ac_highlight(1 if can_create else 0)
+
+    def _ac_highlight(self, idx: int) -> None:
+        rows = getattr(self, "_ac_rows", None) or []
+        if not self._ac_popup or not rows:
+            return
+        idx = max(0, min(idx, len(rows) - 1))
+        for i, (frame, _a) in enumerate(rows):
+            bg = self._ac_hover_bg if i == idx else CCA
+            for wdg in [frame] + _all_children(frame):
+                try:
+                    wdg.configure(bg=bg)
+                except Exception:
+                    pass
+        self._ac_index = idx
+        # Keep it in view while arrowing down a long list.
+        cv = getattr(self, "_ac_canvas", None)
+        frame = rows[idx][0]
+        if cv is not None and frame.master is not None \
+                and frame.master.master is cv:
+            try:
+                top = frame.winfo_y()
+                bottom = top + frame.winfo_height()
+                total = max(1, frame.master.winfo_height())
+                view0, view1 = cv.yview()
+                if top < view0 * total:
+                    cv.yview_moveto(top / total)
+                elif bottom > view1 * total:
+                    cv.yview_moveto((bottom - cv.winfo_height()) / total)
+            except Exception:
+                pass
+
+    def _ac_key(self, key: str):
+        """Up, Down and Enter in the Customer Name box drive the list."""
+        if not self._ac_popup:
+            return None
+        rows = getattr(self, "_ac_rows", None) or []
+        if key == "Down":
+            self._ac_highlight(self._ac_index + 1)
+        elif key == "Up":
+            self._ac_highlight(self._ac_index - 1)
+        elif key == "Return":
+            if 0 <= self._ac_index < len(rows):
+                _note_pick()
+                rows[self._ac_index][1]()
+        return "break"
+
+    def _pointer_in_ac_popup(self) -> bool:
+        try:
+            px_, py_ = self.master.winfo_pointerxy()
+            w = self.master.winfo_containing(px_, py_)
+        except Exception:
+            return False
+        while w is not None:
+            if w is self._ac_popup:
+                return True
+            w = getattr(w, "master", None)
+        return False
 
     def _close_ac_popup(self):
         if self._ac_popup:
@@ -18634,6 +19100,10 @@ class ModernOrderApp(tk.Frame):
             except Exception:
                 pass
             self._ac_popup = None
+        self._ac_rows = []
+        self._ac_index = -1
+        self._ac_canvas = None
+        self._ac_wheel = None
 
     # ── Draft auto-save ───────────────────────────────────────────────────
 
@@ -18989,6 +19459,7 @@ class ModernOrderApp(tk.Frame):
             self._priority_var.set(False)
         self._clear_all_field_errors()
         self._selected_customer_id = ""
+        self._selected_customer_name = ""
         self.items = []
         self._refresh_items_tree()
         self._clear_draft()
@@ -19148,13 +19619,13 @@ class ModernOrderApp(tk.Frame):
                 tag      = "bag_e" if i % 2 == 0 else "bag_o"
                 sqm      = "—"
                 partno   = item.get("part_number", "") or "—"
-                # A header is a flat panel made to sit on the bag; show what
-                # it is so the floor knows what to cut.
-                _hp = _pn.header_panel_item(item)
-                if _hp:
-                    _pn.apply_derived_fields(_hp, self._media_codes)
-                    notes = (f"[HEADER {_hp['Short']}×{_hp['Long']}×{_hp['Channel']} "
-                             f"{_hp.get('Part Number','')}] " + notes)[:180]
+                # The bag's header is made on its own worksheet page; show
+                # its size (and wire) so it can be checked here.
+                _ht = _bag_headers.header_text(item)
+                if _ht:
+                    notes = (f"[{_ht.upper()}"
+                             f"{' - SET BY HAND' if item.get('header_custom') else ''}] "
+                             + notes)[:180]
             else:
                 qty   = item.get("Quantity", "")
                 pt    = item.get("Filter Type", "")
@@ -20526,15 +20997,18 @@ class ModernOrderApp(tk.Frame):
         _printing = _order_packing.stamp_codes(self.items,
                                                _calc_settings.cached())
 
-        filter_items = [i for i in _printing if i.get("item_kind", "filter") != "bag"]
-        bag_items    = [i for i in _printing if i.get("item_kind") == "bag"]
-        total        = len(self.items)
+        # A bag with a header gets a header page on the filter worksheet,
+        # after the filters and before the bag docket.
+        filter_items, bag_items, total = _bag_headers.worksheet_split(_printing)
         n_filter     = len(filter_items)
         bag_start    = n_filter + 1
 
         has_filter = bool(filter_items)
         has_bag    = bool(bag_items)
-        if has_filter and has_bag:
+        if has_bag and not any(not _bag_headers.is_header_line(i)
+                               for i in filter_items):
+            order_type = "bags"
+        elif has_filter and has_bag:
             order_type = "mixed"
         elif has_bag:
             order_type = "bags"
@@ -21599,15 +22073,18 @@ class ModernOrderApp(tk.Frame):
             if "item_kind" not in it:
                 it["item_kind"] = "bag" if "product_type" in it else "filter"
 
-        filter_items = [i for i in items if i.get("item_kind", "filter") != "bag"]
-        bag_items    = [i for i in items if i.get("item_kind") == "bag"]
-        total        = len(items)
+        # A bag with a header gets a header page on the filter worksheet,
+        # after the filters and before the bag docket.
+        filter_items, bag_items, total = _bag_headers.worksheet_split(items)
         n_filter     = len(filter_items)
         bag_start    = n_filter + 1
 
         has_filter = bool(filter_items)
         has_bag    = bool(bag_items)
-        if has_filter and has_bag:
+        if has_bag and not any(not _bag_headers.is_header_line(i)
+                               for i in filter_items):
+            order_type = "bags"
+        elif has_filter and has_bag:
             order_type = "mixed"
         elif has_bag:
             order_type = "bags"
@@ -22378,15 +22855,18 @@ class ModernOrderApp(tk.Frame):
             if "item_kind" not in it:
                 it["item_kind"] = "bag" if "product_type" in it else "filter"
 
-        filter_items = [i for i in items if i.get("item_kind", "filter") != "bag"]
-        bag_items    = [i for i in items if i.get("item_kind") == "bag"]
-        total        = len(items)
+        # A bag with a header gets a header page on the filter worksheet,
+        # after the filters and before the bag docket.
+        filter_items, bag_items, total = _bag_headers.worksheet_split(items)
         n_filter     = len(filter_items)
         bag_start    = n_filter + 1
         has_filter   = bool(filter_items)
         has_bag      = bool(bag_items)
 
-        if has_filter and has_bag:
+        if has_bag and not any(not _bag_headers.is_header_line(i)
+                               for i in filter_items):
+            order_type = "bags"
+        elif has_filter and has_bag:
             order_type = "mixed"
         elif has_bag:
             order_type = "bags"

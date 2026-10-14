@@ -45,12 +45,9 @@ FIXED_STEM_MEDIA_SUFFIX = {
     ("flyscreen", "EMESH"): "-M",
 }
 
-# A header is a standard flat panel made to sit on top of a bag filter. The
-# panel is larger than the bag face it covers:
-HEADER_PANEL_FOR_BAG = {
-    (595, 595): (610, 610),
-    (610, 610): (630, 630),
-}
+# A header is the frame a bag filter hangs from: 15 mm smaller than the bag
+# each way and 25 mm deep (a 610 x 610 bag takes a 595 x 595 x 25 header).
+# The rule lives in bag_headers, with the wire it takes.
 HEADER_PANEL_THICKNESS = 25
 
 # Thicknesses flat panels are normally made in. Anything else still produces a
@@ -377,38 +374,26 @@ def part_number(item: Dict[str, Any],
 
 
 def header_panel_for_bag(width, height, half_size: bool = False):
-    """The flat panel a bag filter's header is made from.
+    """The header a bag filter of this face size takes: 15 mm smaller each
+    way, 25 mm deep. A 610 x 610 bag takes 595 x 595 x 25.
 
-    A 595 x 595 bag takes a 610 x 610 x 25 panel, a 610 x 610 bag takes
-    630 x 630 x 25. A half-size bag takes half that panel.
-
-    Returns (width, height, thickness) or None when the bag face isn't one of
-    the sizes we have a header for — better to say nothing than to invent a
-    size for something that gets cut.
+    `half_size` is kept for old callers; a half-size bag is entered at its
+    own size (305 x 610), so it changes nothing. Returns (width, height,
+    thickness), or None when the bag has no size yet.
     """
-    try:
-        w, h = int(width or 0), int(height or 0)
-    except (TypeError, ValueError):
-        return None
-    panel = HEADER_PANEL_FOR_BAG.get((w, h)) or HEADER_PANEL_FOR_BAG.get((h, w))
-    if not panel:
-        return None
-    pw, ph = panel
-    if half_size:
-        ph = int(round(ph / 2))
-    return (pw, ph, HEADER_PANEL_THICKNESS)
+    from .bag_headers import default_header
+    return default_header("", width, height)
 
 
 def header_panel_item(bag: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-    """The flat-panel line a bag's header corresponds to, or None.
+    """The framed line a bag's header corresponds to, or None.
 
     Used to show what the header is and to give it its own part number; the
-    bag itself keeps its own code with the H suffix.
+    bag itself keeps its own code with the H suffix. The size is the line's
+    header - edited on the line or worked out from the bag.
     """
-    if not bag.get("header"):
-        return None
-    size = header_panel_for_bag(bag.get("width"), bag.get("height"),
-                                half_size=bool(bag.get("half_size")))
+    from .bag_headers import header_size
+    size = header_size(bag)
     if not size:
         return None
     w, h, t = size
