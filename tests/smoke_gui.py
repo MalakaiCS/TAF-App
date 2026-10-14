@@ -684,6 +684,34 @@ def _steps(app, gui, root):
     add("order form: Add Address for a customer without one",
         _add_address_on_the_order_form)
 
+    def _closed_before_its_list_arrives():
+        """A list window worked out on another thread, closed before the
+        answer comes back. On a slow Windows build machine this happened by
+        itself, and filling the vanished list was a Tk error."""
+        import threading as _th
+        go = _th.Event()
+
+        def _slow_build():
+            go.wait(5)
+            return ([(("a", "b"), None, None)], "done")
+        before = len(FAILURES)
+        app._table_window("Closed early", "", [("a", "A", 80, "w"),
+                                               ("b", "B", 80, "w")],
+                          _slow_build)
+        root.update()
+        for w in root.winfo_children():
+            if isinstance(w, gui.tk.Toplevel) and w.title() == "Closed early":
+                w.destroy()
+        go.set()
+        deadline = time.monotonic() + 1.0
+        while time.monotonic() < deadline:
+            root.update()
+            time.sleep(0.02)
+        if len(FAILURES) != before:
+            raise AssertionError("filling a closed window raised")
+    add("list window closed before its list arrives",
+        _closed_before_its_list_arrives)
+
     generated: dict = {}
 
     def _generate_prints_the_labels():

@@ -15308,6 +15308,10 @@ class ModernOrderApp(tk.Frame):
         foot_lbl.pack(anchor="w", padx=px(16), pady=(px(8), 0))
 
         def _fill(result):
+            # The answer is worked out on another thread; whoever asked may
+            # have closed the window before it came back.
+            if not _alive():
+                return
             rows, footer = result
             for iid in tree.get_children():
                 tree.delete(iid)
@@ -15317,11 +15321,17 @@ class ModernOrderApp(tk.Frame):
                             values=values)
             foot_lbl.config(text=footer)
 
+        def _alive() -> bool:
+            try:
+                return bool(tree.winfo_exists())
+            except tk.TclError:
+                return False
+
         def _work():
             try:
                 result = build()
             except Exception as exc:
-                self.master.after(0, lambda e=exc: foot_lbl.config(
+                self.master.after(0, lambda e=exc: _alive() and foot_lbl.config(
                     text=f"Could not work that out: {e}"))
                 return
             self.master.after(0, lambda r=result: _fill(r))
