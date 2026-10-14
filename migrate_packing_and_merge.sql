@@ -41,7 +41,7 @@ CREATE TABLE IF NOT EXISTS public.calc_settings (
                    'brace_profiles', 'mounting_frame_profiles', 'wire_rules',
                    'required_components', 'packaging', 'handling_profiles',
                    'max_bundle_kg', 'shipping_rounding', 'company',
-                   'c_channel')),
+                   'c_channel', 'delivery_labels')),
     value      jsonb       NOT NULL,
     version    integer     NOT NULL DEFAULT 1,
     updated_at timestamptz NOT NULL DEFAULT now(),

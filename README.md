@@ -15,7 +15,9 @@ log, stock management and a customer database.
 ## Features
 
 - **New Order** — filter & bag/roll line items, dedicated compressor-filter
-  presets (add / edit / remove your own), duplicate-order warning, live
+  presets (add / edit / remove your own; a preset can hold panel filters,
+  bag filters and mounting frames — its bags come out as bag lines, halved
+  for a REP/FIL order like the panels), duplicate-order warning, live
   worksheet + order-PDF generation.
 - **Our own order numbers** — a customer with no purchase order number gets
   one of ours: `TAF-ON-0001` and up, from a shared counter, with nothing to do
@@ -74,7 +76,15 @@ log, stock management and a customer database.
   reprint from Previous Orders → View Order → Actions → Delivery labels, or
   the Delivery tab's Run ▾ menu for a whole run. If a label can't be made
   yet (no customer account with a delivery address, say), the order still
-  goes through and the Done message says why.
+  goes through and the Done message says why. Switch them off for everyone
+  (Settings → Weights, packing and delivery labels) or for one customer
+  (Customers → Customer ▾ → Turn delivery labels off, or the tick in their
+  account); labels asked for from View Order still print. Needs step 35.
+- **Pallet labels** — for an order going out on pallets: say how many
+  pallets and how many of each line go on each (or spread them evenly), and
+  each pallet gets an A4 sheet: `Pallet 1 of 3`, the filters on it, the
+  customer, delivery address, order and job number. View Order → Actions →
+  Pallet labels…, or the Delivery tab's Run ▾ menu.
 - **Packing by weight** — every wrapped bundle is 10 kg at most, wrapping
   included, and a size can carry a handling limit (412 × 412 × 90: five a
   wrap). Lines are planned automatically, or the office sets the plan
@@ -351,6 +361,7 @@ just run it — nothing is lost and nothing is duplicated.
 | 32 | `migrate_supply_requests.sql` | Asking for supplies, and the bell that tells managers (needs step 16 first) | recommended |
 | 33 | `migrate_packing_and_merge.sql` | Weights, packing, delivery labels and merging customers (needs step 16 first) | recommended |
 | 34 | `migrate_c_channel.sql` | C-channel weights: material, centre widths and measured weights saved with the other settings (needs step 33) | recommended |
+| 35 | `migrate_label_switches.sql` | Switching delivery labels off for a customer, or for everyone (needs step 33) | recommended |
 
 **Step 16 is the one that matters most.** Every policy in the older scripts is
 `TO authenticated USING (true)` — meaning *anyone Supabase counts as signed

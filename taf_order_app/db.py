@@ -1288,6 +1288,34 @@ def update_customer(customer_id: str, data: dict) -> None:
     get_client().table("customers").update(data).eq("id", customer_id).execute()
 
 
+# ── Delivery labels, customer by customer (step 35) ─────────────────────────
+
+_LABEL_SWITCH: dict = {}
+
+
+def customers_have_label_switch() -> bool:
+    """Whether customers.delivery_labels exists yet (step 35). Asked once:
+    saving a customer with a column the database lacks would fail outright."""
+    if "ok" not in _LABEL_SWITCH:
+        try:
+            get_client().table("customers").select("delivery_labels") \
+                .limit(1).execute()
+            _LABEL_SWITCH["ok"] = True
+        except Exception:
+            _LABEL_SWITCH["ok"] = False
+    return _LABEL_SWITCH["ok"]
+
+
+def customer_wants_labels(customer: "dict | None") -> bool:
+    """On unless the customer's account says off. No account, no column:
+    on, as it always was."""
+    return bool((customer or {}).get("delivery_labels", True) is not False)
+
+
+def set_customer_labels(customer_id: str, on: bool) -> None:
+    update_customer(customer_id, {"delivery_labels": bool(on)})
+
+
 def delete_customer(customer_id: str) -> None:
     get_client().table("customers").delete().eq("id", customer_id).execute()
 

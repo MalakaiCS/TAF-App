@@ -25,4 +25,5 @@ ALTER TABLE public.calc_settings
         'materials', 'steel', 'cut_profiles', 'component_profiles',
         'brace_profiles', 'mounting_frame_profiles', 'wire_rules',
         'required_components', 'packaging', 'handling_profiles',
-        'max_bundle_kg', 'shipping_rounding', 'company', 'c_channel'));
+        'max_bundle_kg', 'shipping_rounding', 'company', 'c_channel',
+        'delivery_labels'));

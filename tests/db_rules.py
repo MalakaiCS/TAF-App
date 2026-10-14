@@ -483,6 +483,25 @@ def run_merge_checks(pg: Postgres) -> None:
                  "calc_settings WHERE key = 'c_channel';")
     check("re-running step 34 keeps what was saved", ok and kept == "3",
           kept or err)
+    ok, out, err = as_in(pg, "f", SARAH, "SELECT set_calc_setting("
+                         "'delivery_labels', '{\"enabled\": false}');")
+    check("a manager can switch delivery labels off for everyone",
+          ok and out == "1", out or err)
+    ok, _o, err = as_in(pg, "f", DAVE, "SELECT set_calc_setting("
+                        "'delivery_labels', '{\"enabled\": true}');")
+    check("and somebody on the floor cannot switch them back", not ok, err)
+    default = q(pg, "SELECT bool_and(delivery_labels) FROM customers;")
+    check("every customer starts with delivery labels on",
+          default in ("t", ""), default)
+    for name in ("migrate_label_switches.sql", "migrate_c_channel.sql",
+                 "migrate_label_switches.sql"):
+        ok, _o, err = pg.psql((ROOT / name).read_text(encoding="utf-8"), "f")
+        if not ok:
+            break
+    still = q(pg, "SELECT value ->> 'enabled' FROM calc_settings "
+                  "WHERE key = 'delivery_labels';")
+    check("steps 34 and 35 re-run in any order without losing the switch",
+          ok and still == "false", still or err)
     hist = q(pg, "SELECT string_agg(version || ':' || changed_by || ':' || "
                  "(value ->> 'base_address'), '|' ORDER BY version) FROM "
                  "calc_settings_history WHERE key = 'company';")

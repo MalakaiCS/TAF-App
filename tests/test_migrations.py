@@ -54,6 +54,7 @@ ORDER = [
     "migrate_supply_requests.sql",
     "migrate_packing_and_merge.sql",
     "migrate_c_channel.sql",
+    "migrate_label_switches.sql",
 ]
 
 

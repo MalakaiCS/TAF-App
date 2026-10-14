@@ -137,7 +137,12 @@ WITH checks(step, file, purpose, needed, present) AS (VALUES
   (34, 'migrate_c_channel.sql', 'C-channel weights: material, centre widths and measured weights', 'recommended',
       EXISTS (SELECT 1 FROM pg_constraint
                WHERE conname = 'calc_settings_key_check'
-                 AND pg_get_constraintdef(oid) LIKE '%c_channel%'))
+                 AND pg_get_constraintdef(oid) LIKE '%c_channel%')),
+
+  (35, 'migrate_label_switches.sql', 'Switching delivery labels off, for a customer or for everyone', 'recommended',
+      EXISTS (SELECT 1 FROM information_schema.columns
+               WHERE table_schema='public' AND table_name='customers'
+                 AND column_name='delivery_labels'))
 )
 SELECT step,
        CASE WHEN present THEN 'already done' ELSE 'RUN THIS' END AS status,

@@ -47,6 +47,7 @@ from taf_order_app import supplies as _supplies
 from taf_order_app import bracing as _bracing
 from taf_order_app import calc_settings as _calc_settings
 from taf_order_app import cchannel as _cchannel
+from taf_order_app import pallet_labels as _pallets
 from taf_order_app import customer_merge as _merge
 from taf_order_app import delivery_labels as _delivery_labels
 from taf_order_app import filter_calc as _filter_calc
@@ -941,6 +942,66 @@ def _type_badge(label):
     return _badge_image(label, bg, fg)
 
 
+# ── Clicks that arrive straight after a dropdown pick ───────────────────────
+# On Windows, picking from a ttk dropdown (or a menu) can leave the click
+# behind: the list closes and the same click lands on whatever was under it -
+# a row that opens an order, a tab, a button. So for a moment after a pick,
+# a click on anything that is not itself a dropdown, list or text box is
+# ignored. It is not a double-click filter: ordinary clicks are untouched;
+# only the one that rides in on a pick is dropped.
+import time as _time
+
+CLICK_GUARD_SECONDS = 0.4
+_CLICK_GUARD = {"until": 0.0}
+_GUARDED_SEQUENCES = {"<Button-1>", "<ButtonPress-1>", "<ButtonRelease-1>",
+                      "<Double-1>", "<Double-Button-1>"}
+# The widgets a pick happens in, or that take text: never guarded.
+_PICK_CLASSES = {"TCombobox", "Listbox", "ComboboxListbox", "Entry",
+                 "TEntry", "Text", "Menu", "Scrollbar", "TScrollbar"}
+
+
+def _note_pick(_event=None) -> None:
+    _CLICK_GUARD["until"] = _time.monotonic() + CLICK_GUARD_SECONDS
+
+
+def _just_picked() -> bool:
+    return _time.monotonic() < _CLICK_GUARD["until"]
+
+
+_unguarded_bind = tk.Misc.bind
+
+
+def _guarded_bind(self, sequence=None, func=None, add=None):
+    if callable(func) and sequence in _GUARDED_SEQUENCES:
+        try:
+            cls = self.winfo_class()
+        except Exception:
+            cls = ""
+        if cls not in _PICK_CLASSES:
+            inner = func
+
+            def func(event, _inner=inner):
+                if _just_picked():
+                    return "break"
+                return _inner(event)
+    return _unguarded_bind(self, sequence, func, add)
+
+
+tk.Misc.bind = _guarded_bind
+
+
+def _install_dropdown_rules(root) -> None:
+    """Class-wide: a pick starts the guard, and the mouse wheel no longer
+    changes a dropdown's value as the page scrolls past it (on Windows it
+    did, silently)."""
+    root.bind_class("TCombobox", "<<ComboboxSelected>>", _note_pick, add="+")
+    root.bind_class("ComboboxListbox", "<ButtonRelease-1>", _note_pick,
+                    add="+")
+    root.bind_class("Listbox", "<ButtonRelease-1>", _note_pick, add="+")
+    for seq in ("<MouseWheel>", "<Button-4>", "<Button-5>"):
+        root.bind_class("TCombobox", seq, lambda _e: None)
+
+
 class PillButton(tk.Canvas):
     """Rounded (pill) button drawn on a Canvas, with hover + a config() shim
     so existing callers that do .config(text=/bg=/state=) keep working."""
@@ -968,7 +1029,13 @@ class PillButton(tk.Canvas):
         self._draw(bg)
         self.bind("<Enter>", lambda e: self._state == "normal" and self._draw(self._hover))
         self.bind("<Leave>", lambda e: self._state == "normal" and self._draw(self._bg))
-        self.bind("<Button-1>", self._on_click)
+        # Like a real button: it acts when the click is let go over it, not
+        # the moment it is pressed. Pressed-and-acted left the release to
+        # land on whatever the press had just opened.
+        self._pressed = False
+        self._last_fired = 0.0
+        self.bind("<ButtonPress-1>", self._on_press)
+        self.bind("<ButtonRelease-1>", self._on_release)
         super().configure(cursor="hand2")
 
     def _draw(self, fill):
@@ -982,8 +1049,26 @@ class PillButton(tk.Canvas):
         self.create_text(self._cw // 2, self._ch // 2 + 1, text=self._text,
                          fill=txt, font=self._fontobj)
 
-    def _on_click(self, e):
+    def _on_press(self, _e=None):
+        self._pressed = True
+
+    def _on_release(self, e=None):
+        pressed, self._pressed = self._pressed, False
+        if not pressed:
+            return
+        if e is not None and not (0 <= e.x < self.winfo_width()
+                                  and 0 <= e.y < self.winfo_height()):
+            return                       # pressed, then slid off: no
+        self._on_click(e)
+
+    def _on_click(self, e=None):
+        # A second click inside the double-click time is the same request
+        # made twice, not a second request: one window, not two.
+        now = _time.monotonic()
+        if now - self._last_fired < CLICK_GUARD_SECONDS:
+            return
         if self._state == "normal" and self._cmd:
+            self._last_fired = now
             self._cmd()
 
     def configure(self, **kw):
@@ -1153,7 +1238,9 @@ def menu_btn(parent, text, items, bg=None, fg="white", pady=6,
                 menu.add_separator()
                 continue
             label, command = entry
-            menu.add_command(label=f"  {label}  ", command=command,
+            picked = (lambda c=command: (_note_pick(), c())) if command \
+                else None
+            menu.add_command(label=f"  {label}  ", command=picked,
                              state="normal" if command else "disabled")
         try:
             menu.tk_popup(btn.winfo_rootx(),
@@ -1628,6 +1715,26 @@ class CalendarPicker(tk.Toplevel):
 # Compressor Filter Preset Dialog
 # ═══════════════════════════════════════════════════════════════════════════
 
+def _preset_bag_qty(bag: dict, is_rep: bool, sets: int) -> int:
+    """A preset bag's quantity for an order: halved for a replacement
+    (REP/FIL) order like the panels, never below one, times the sets."""
+    try:
+        qty = max(1, int(bag.get("quantity") or 1))
+    except (TypeError, ValueError):
+        qty = 1
+    if is_rep:
+        qty = max(1, qty // 2)
+    return qty * max(1, int(sets))
+
+
+def _preset_bag_text(bag: dict) -> str:
+    dims = "x".join(str(bag.get(k)) for k in ("width", "height", "depth")
+                    if bag.get(k))
+    return " ".join(p for p in (str(bag.get("product_type") or "Bag"),
+                                f"{dims}mm" if dims else "",
+                                str(bag.get("media") or "")) if p)
+
+
 class _PresetRowDialog(tk.Toplevel):
     """Small modal for one preset row (a mounting frame or a filter).
 
@@ -1718,13 +1825,14 @@ class _GDModelEditor(tk.Toplevel):
         pack = pack or {}
         self._frames  = [dict(f) for f in pack.get("frames", [])]
         self._filters = [dict(f) for f in pack.get("filters", [])]
+        self._bags    = [dict(b) for b in pack.get("bags", [])]
 
         hdr = tk.Frame(self, bg=CA, padx=16, pady=10)
         hdr.pack(fill="x", side="top")
         tk.Label(hdr, text=("Edit Model" if name else "Add Model"),
                  bg=CA, fg="white", font=(FAM, 11, "bold")).pack(anchor="w")
         tk.Label(hdr, text="Mounting frames become a note on the worksheet; "
-                           "filters become the actual line items.",
+                           "panel and bag filters become the line items.",
                  bg=CA, fg="#A9CCE3", font=F_SM).pack(anchor="w")
 
         foot = tk.Frame(self, bg=CBG, padx=16, pady=10)
@@ -1753,23 +1861,26 @@ class _GDModelEditor(tk.Toplevel):
             ("Qty", "Short", "Long", "Channel", "Media", "Type", "Label"),
             self._filters, self.FILTER_FIELDS)
 
+        self._bags_tree = self._build_bag_section(body)
+
         self._refresh_tree(self._frames_tree,  self._frames,
                            ("qty", "short", "long", "label"))
         self._refresh_tree(self._filters_tree, self._filters,
                            ("qty", "short", "long", "channel", "media",
                             "filter_type", "label"))
+        self._refresh_bags()
 
         self.update_idletasks()
-        W, H = 620, 600
+        W, H = 680, 830
         self.geometry(f"{W}x{H}+{master.winfo_rootx()+40}+{max(0, master.winfo_rooty()-20)}")
 
     def _build_section(self, parent, title, columns, rows_ref, fields):
         tk.Label(parent, text=title, bg=CBG, fg=CA,
                  font=F_SEC, anchor="w").pack(anchor="w", pady=(6, 4))
         wrap = tk.Frame(parent, bg=CCA, highlightbackground=CSP, highlightthickness=1)
-        wrap.pack(fill="both", expand=True)
+        wrap.pack(fill="x")
         tree = ttk.Treeview(wrap, columns=columns, show="headings",
-                            style="TAF.Treeview", height=5)
+                            style="TAF.Treeview", height=3)
         for c in columns:
             tree.heading(c, text=c)
             tree.column(c, width=px(90), anchor="center",
@@ -1786,6 +1897,78 @@ class _GDModelEditor(tk.Toplevel):
         flat_btn(bar, "Remove", lambda: self._row_remove(tree, rows_ref, keys),
                  bg=CRD, pady=4, padx=8, font=F_SM).pack(side="left")
         return tree
+
+    # ── Bag filters: the same window the order form uses for a bag line ──
+    BAG_COLS = ("Qty", "Type", "Width", "Height", "Depth", "Media", "P/N")
+
+    def _build_bag_section(self, parent):
+        tk.Label(parent, text="Bag filters", bg=CBG, fg=CA,
+                 font=F_SEC, anchor="w").pack(anchor="w", pady=(6, 4))
+        wrap = tk.Frame(parent, bg=CCA, highlightbackground=CSP,
+                        highlightthickness=1)
+        wrap.pack(fill="x")
+        tree = ttk.Treeview(wrap, columns=self.BAG_COLS, show="headings",
+                            style="TAF.Treeview", height=3)
+        for c in self.BAG_COLS:
+            tree.heading(c, text=c)
+            tree.column(c, width=px(80), anchor="center",
+                        stretch=(c == "Type"))
+        tree.pack(fill="both", expand=True, padx=1, pady=1)
+        bar = tk.Frame(parent, bg=CBG)
+        bar.pack(anchor="w", pady=(4, 2))
+        flat_btn(bar, "+ Add bag", self._bag_add, bg=CA, pady=4, padx=8,
+                 font=F_SM).pack(side="left", padx=(0, 4))
+        flat_btn(bar, "Edit", self._bag_edit, bg=CNE, pady=4, padx=8,
+                 font=F_SM).pack(side="left", padx=(0, 4))
+        flat_btn(bar, "Remove", self._bag_remove, bg=CRD, pady=4, padx=8,
+                 font=F_SM).pack(side="left")
+        return tree
+
+    def _refresh_bags(self):
+        tree = self._bags_tree
+        for iid in tree.get_children():
+            tree.delete(iid)
+        for i, b in enumerate(self._bags):
+            tree.insert("", "end", iid=str(i), values=(
+                b.get("quantity", ""), b.get("product_type", ""),
+                b.get("width") or "", b.get("height") or "",
+                b.get("depth") or "", b.get("media", ""),
+                b.get("part_number", "")))
+
+    def _bag_dialog(self, title, initial=None):
+        dlg = BagLineItemDialog(self, title=title, initial=initial)
+        self.wait_window(dlg)
+        try:
+            self.grab_set()   # child dialog took the grab — take it back
+        except Exception:
+            pass
+        return dlg.result
+
+    def _bag_add(self):
+        res = self._bag_dialog("Add Bag Filter to Preset")
+        if res:
+            self._bags.append(res)
+            self._refresh_bags()
+
+    def _bag_edit(self):
+        sel = self._bags_tree.selection()
+        if not sel:
+            messagebox.showinfo("Edit Bag", "Select a bag first.", parent=self)
+            return
+        idx = int(sel[0])
+        res = self._bag_dialog("Edit Bag Filter", self._bags[idx])
+        if res:
+            self._bags[idx] = res
+            self._refresh_bags()
+
+    def _bag_remove(self):
+        sel = self._bags_tree.selection()
+        if not sel:
+            messagebox.showinfo("Remove Bag", "Select a bag first.",
+                                parent=self)
+            return
+        self._bags.pop(int(sel[0]))
+        self._refresh_bags()
 
     def _refresh_tree(self, tree, rows, keys):
         for iid in tree.get_children():
@@ -1838,11 +2021,15 @@ class _GDModelEditor(tk.Toplevel):
             messagebox.showwarning("Name Required",
                                    "Enter a model name.", parent=self)
             return
-        if not self._filters:
+        if not self._filters and not self._bags:
             messagebox.showwarning("No Filters",
-                                   "Add at least one filter row.", parent=self)
+                                   "Add at least one panel or bag filter.",
+                                   parent=self)
             return
-        self.result = (name, {"frames": self._frames, "filters": self._filters})
+        pack = {"frames": self._frames, "filters": self._filters}
+        if self._bags:
+            pack["bags"] = self._bags
+        self.result = (name, pack)
         self.destroy()
 
 
@@ -2127,6 +2314,9 @@ class CompressorFilterDialog(tk.Toplevel):
             lines.append(f"  {fl.get('filter_type', 'V-form')}  "
                          f"{fl['short']}x{fl['long']}x{fl['channel']}mm  "
                          f"{fl.get('media', 'G4')}  x{qty}{lbl}")
+        for b in pack.get("bags", []):
+            lines.append(f"  {_preset_bag_text(b)}  "
+                         f"x{_preset_bag_qty(b, is_rep, sets)}")
         self._gd_txt.config(state="normal")
         self._gd_txt.delete("1.0", "end")
         self._gd_txt.insert("end", "\n".join(lines) or "(no items)")
@@ -2440,6 +2630,15 @@ class CompressorFilterDialog(tk.Toplevel):
                 "item_job":   job,        # per-item: goes on this page's JOB: field
                 "item_notes": item_notes, # per-item: goes on this page's NOTES: field
             })
+
+        # Bag filters come out as bag lines, exactly as the order form makes
+        # them, on the same replacement rule as the panels: half for REP/FIL.
+        for b in pack.get("bags", []):
+            bag = json.loads(json.dumps(b))
+            bag["quantity"] = _preset_bag_qty(b, is_rep, sets)
+            bag["item_kind"] = "bag"
+            bag["item_job"] = job
+            items.append(bag)
 
         # notes="" so the compressor frame info does NOT go into the global
         # order header (it lives on each item's own page instead).
@@ -7126,6 +7325,204 @@ class CChannelTableDialog(tk.Toplevel):
         self.note.config(text=f"Saved {path}")
 
 
+class PalletLabelsDialog(tk.Toplevel):
+    """Pallet labels for one order: how many pallets, and how many of each
+    line go on each. One sheet per pallet - see taf_order_app/pallet_labels.
+    """
+
+    MAX_PALLETS = 40
+
+    def __init__(self, master, order: dict, items: list, customer=None):
+        super().__init__(master)
+        self.title("Pallet labels")
+        self.transient(master)
+        self.grab_set()
+        self.configure(bg=CBG)
+        self.order = order
+        self.items = list(items)
+        self.customer = customer
+        self.cells: list = []
+        _centre_on_parent(self, master, px(980), px(620))
+        self.bind("<Escape>", lambda _e: self.destroy())
+
+        top = tk.Frame(self, bg=CA, padx=px(16), pady=px(10))
+        top.pack(fill="x")
+        tk.Label(top, text="Pallet labels", bg=CA, fg="white",
+                 font=(FAM, 13, "bold")).pack(anchor="w")
+        who = (customer or {}).get("name") or order.get("customer_name", "")
+        tk.Label(top, text=f"O/N {order.get('order_number', '')}  ·  {who}"
+                           "  ·  one sheet per pallet",
+                 bg=CA, fg="white", font=F_SM).pack(anchor="w")
+
+        foot = tk.Frame(self, bg=CBG, padx=px(14), pady=px(10))
+        foot.pack(fill="x", side="bottom")
+        flat_btn(foot, "Close", self.destroy, bg=CNE,
+                 pady=px(6)).pack(side="right")
+        flat_btn(foot, "Print pallet labels", self._print, bg=CGR,
+                 pady=px(6)).pack(side="right", padx=(0, px(8)))
+        self.note = tk.Label(foot, text="", bg=CBG, fg=CMU, font=F_SM,
+                             justify="left", wraplength=px(560))
+        self.note.pack(side="left")
+
+        bar = tk.Frame(self, bg=CBG, padx=px(14), pady=px(8))
+        bar.pack(fill="x")
+        tk.Label(bar, text="How many pallets", bg=CBG, fg=CTX,
+                 font=F_BOLD).pack(side="left")
+        self.count = tk.StringVar(value="1")
+        tk.Spinbox(bar, from_=1, to=self.MAX_PALLETS, width=4,
+                   textvariable=self.count, font=F_BODY,
+                   command=self._rebuild).pack(side="left", padx=(px(6),
+                                                                   px(14)))
+        self.count.trace_add("write", lambda *_: self.after(10, self._rebuild))
+        for text, fn in (("Spread evenly", self._spread),
+                         ("Each line on its own pallet", self._one_each),
+                         ("All on pallet 1", self._all_first)):
+            flat_btn(bar, text, fn, bg=CNE, pady=px(4),
+                     font=F_SM).pack(side="left", padx=(0, px(6)))
+
+        wrap = tk.Frame(self, bg=CCA, highlightbackground=CBR,
+                        highlightthickness=1)
+        wrap.pack(fill="both", expand=True, padx=px(14))
+        canvas = tk.Canvas(wrap, bg=CCA, highlightthickness=0)
+        xs = ttk.Scrollbar(wrap, orient="horizontal", command=canvas.xview)
+        ys = ttk.Scrollbar(wrap, orient="vertical", command=canvas.yview)
+        canvas.configure(xscrollcommand=xs.set, yscrollcommand=ys.set)
+        xs.pack(side="bottom", fill="x")
+        ys.pack(side="right", fill="y")
+        canvas.pack(fill="both", expand=True)
+        self.grid_frame = tk.Frame(canvas, bg=CCA, padx=px(8), pady=px(6))
+        canvas.create_window((0, 0), window=self.grid_frame, anchor="nw")
+        self.grid_frame.bind("<Configure>", lambda _e: canvas.configure(
+            scrollregion=canvas.bbox("all")))
+        self._shown = 0
+        self._rebuild()
+        self._all_first()
+
+    def _n(self) -> int:
+        try:
+            return max(1, min(self.MAX_PALLETS, int(self.count.get())))
+        except (TypeError, ValueError):
+            return 1
+
+    def _rebuild(self):
+        n = self._n()
+        if n == self._shown and self.cells:
+            return
+        old = [[v.get() for v in row] for row in self.cells]
+        for w in self.grid_frame.winfo_children():
+            w.destroy()
+        heads = ["Line", "Ordered"] + [f"Pallet {j + 1}" for j in range(n)] \
+            + ["Not on a pallet"]
+        for col, text in enumerate(heads):
+            tk.Label(self.grid_frame, text=text, bg=CCA, fg=CMU, font=F_SM,
+                     anchor="w").grid(row=0, column=col, sticky="w",
+                                      padx=px(4), pady=(0, px(4)))
+        self.cells, self.left = [], []
+        for i, item in enumerate(self.items):
+            tk.Label(self.grid_frame, text=_pallets.line_text(item),
+                     bg=CCA, fg=CTX, font=F_BODY, anchor="w",
+                     width=34).grid(row=i + 1, column=0, sticky="w",
+                                    padx=px(4), pady=px(1))
+            tk.Label(self.grid_frame, text=str(_pallets.ordered(item)),
+                     bg=CCA, fg=CTX, font=F_BODY).grid(row=i + 1, column=1,
+                                                       padx=px(4))
+            row = []
+            for j in range(n):
+                prev = old[i][j] if i < len(old) and j < len(old[i]) else ""
+                var = tk.StringVar(value=prev)
+                var.trace_add("write", lambda *_: self._update_left())
+                field_entry(self.grid_frame, textvariable=var, width=5
+                            ).grid(row=i + 1, column=2 + j, padx=px(3),
+                                   pady=px(1))
+                row.append(var)
+            self.cells.append(row)
+            lab = tk.Label(self.grid_frame, text="", bg=CCA, fg=CMU,
+                           font=F_SM)
+            lab.grid(row=i + 1, column=2 + n, padx=px(6), sticky="w")
+            self.left.append(lab)
+        self._shown = n
+        self._update_left()
+
+    def _grid(self):
+        return [[v.get().strip() for v in row] for row in self.cells]
+
+    def _update_left(self):
+        for item, row, lab in zip(self.items, self.cells,
+                                  getattr(self, "left", [])):
+            total = 0
+            for v in row:
+                try:
+                    total += int(v.get() or 0)
+                except ValueError:
+                    pass
+            left = _pallets.ordered(item) - total
+            lab.config(text=("all on" if left == 0 else
+                             f"{left} left" if left > 0 else
+                             f"{-left} too many"),
+                       fg=CGR if left == 0 else CRD if left < 0 else CMU)
+
+    def _fill(self, rows):
+        for vars_, values in zip(self.cells, rows):
+            for v, q in zip(vars_, values):
+                v.set(str(q) if q else "")
+
+    def _spread(self):
+        n = self._n()
+        self._fill([_pallets.spread(_pallets.ordered(it), n)
+                    for it in self.items])
+
+    def _one_each(self):
+        n = self._n()
+        rows = []
+        for i, it in enumerate(self.items):
+            row = [0] * n
+            row[i % n] = _pallets.ordered(it)
+            rows.append(row)
+        self._fill(rows)
+
+    def _all_first(self):
+        n = self._n()
+        self._fill([[_pallets.ordered(it)] + [0] * (n - 1)
+                    for it in self.items])
+
+    def _print(self):
+        try:
+            labels, warnings = _pallets.build(self.order, self.items,
+                                              self.customer, self._n(),
+                                              self._grid())
+        except _pallets.PalletError as exc:
+            messagebox.showwarning("Pallet labels",
+                                   "Not printed yet:\n\n" + "\n".join(
+                                       f"  • {p}" for p in exc.problems),
+                                   parent=self)
+            return
+        if warnings and not messagebox.askyesno(
+                "Pallet labels", "\n".join(warnings) + "\n\nPrint anyway?",
+                parent=self):
+            return
+        safe = re.sub(r"[^A-Za-z0-9_-]+", "_", str(
+            self.order.get("order_number") or "order")).strip("_") or "order"
+        ORDERS_DIR.mkdir(parents=True, exist_ok=True)
+        stamp = _dt_module.datetime.now().strftime("%Y%m%d-%H%M%S")
+        path = ORDERS_DIR / f"pallet_labels_{safe}_{stamp}.pdf"
+        try:
+            _pallets.render_pdf(labels, str(path))
+        except Exception as exc:
+            messagebox.showerror("Pallet labels", f"Could not make them:\n"
+                                 f"{exc}", parent=self)
+            return
+        try:
+            _db.log_action("pallet_labels_printed",
+                           f"O/N: {self.order.get('order_number', '')} | "
+                           f"{len(labels)} pallet"
+                           f"{'s' if len(labels) != 1 else ''}")
+        except Exception:
+            pass
+        self.note.config(text=f"Saved {path.name}")
+        self.last_path = str(path)
+        _open_path(str(path))
+
+
 class MergeCustomersDialog(tk.Toplevel):
     """Fold accounts that are the same company into one.
 
@@ -7439,6 +7836,7 @@ class ModernOrderApp(tk.Frame):
     def __init__(self, master):
         super().__init__(master, bg=CBG)
         self.master = master
+        _install_dropdown_rules(master)
         # Anchor order storage to APP_DIR (never cwd — see OrderService).
         # This also aligns saved order JSONs with ORDERS_DIR, where the
         # Previous Orders local scan looks for them.
@@ -9001,6 +9399,7 @@ class ModernOrderApp(tk.Frame):
                  bg=CA, pady=7).pack(side="left", padx=(0, 8))
         menu_btn(bot, "Run  ▾", [
             ("Print delivery labels",     self._print_delivery_labels_run),
+            ("Pallet labels for an order…", self._pallet_labels_from_run),
             None,
             ("View what's on this order", self._view_delivery_items),
             ("Freight / delay…",          self._edit_delivery_freight),
@@ -9168,6 +9567,15 @@ class ModernOrderApp(tk.Frame):
             self.master.after(0, _done)
 
         threading.Thread(target=_work, daemon=True).start()
+
+    def _pallet_labels_from_run(self):
+        """Pallet labels for the order picked in the run."""
+        picked = self._selected_delivery_orders()
+        if len(picked) != 1:
+            messagebox.showinfo("Pallet labels",
+                                "Select the one order going on pallets.")
+            return
+        self._pallet_labels_for_order(picked[0])
 
     def _print_delivery_labels_run(self):
         """A label for every wrap: the selected orders, or the whole run.
@@ -11914,12 +12322,20 @@ class ModernOrderApp(tk.Frame):
                  bg=CA, pady=7).pack(side="left", padx=(0, 8))
         flat_btn(bot, "＋  New Order", self._new_order_for_customer,
                  variant="secondary", pady=7).pack(side="left", padx=(0, 8))
-        menu_btn(bot, "Customer  ▾", [
-            ("View their orders",     self._view_customer_orders),
-            ("Their portal link…",    self._customer_portal_link),
-            None,
-            ("Delete this customer…", self._delete_customer),
-        ], variant="secondary", pady=7).pack(side="left")
+        def _customer_actions():
+            cust = self._get_selected_customer()
+            on = _db.customer_wants_labels(cust)
+            return [
+                ("View their orders",     self._view_customer_orders),
+                ("Their portal link…",    self._customer_portal_link),
+                (("Turn delivery labels off" if on else
+                  "Turn delivery labels on"), self._toggle_customer_labels),
+                None,
+                ("Delete this customer…", self._delete_customer),
+            ]
+
+        menu_btn(bot, "Customer  ▾", _customer_actions,
+                 variant="secondary", pady=7).pack(side="left")
 
         self._customers_data: list = []
 
@@ -12340,6 +12756,15 @@ class ModernOrderApp(tk.Frame):
                        selectcolor=CCA, activebackground=CBG).grid(
             row=_row, column=1, sticky="w", pady=4)
         _row += 1
+        v_labels = tk.BooleanVar(value=_db.customer_wants_labels(g))
+        tk.Label(body, text="Delivery labels", bg=CBG, fg=CTX,
+                 font=F_BODY, width=18, anchor="w").grid(
+            row=_row, column=0, sticky="w", pady=4)
+        tk.Checkbutton(body, text="Print delivery labels with their orders",
+                       variable=v_labels, bg=CBG, fg=CTX, font=F_BODY,
+                       selectcolor=CCA, activebackground=CBG).grid(
+            row=_row, column=1, sticky="w", pady=4)
+        _row += 1
 
         # ── Notes ─────────────────────────────────────────────────────────
         _sec("Notes")
@@ -12397,6 +12822,9 @@ class ModernOrderApp(tk.Frame):
                 "payment_terms":    v_terms.get(),
                 "currency":         v_curr.get(),
                 "is_active":        v_act.get(),
+                **({"delivery_labels": bool(v_labels.get())}
+                   if _db.is_ready() and _db.customers_have_label_switch()
+                   else {}),
                 "notes":            txt_notes.get("1.0", "end").strip(),
             }
             if is_new:
@@ -12429,6 +12857,13 @@ class ModernOrderApp(tk.Frame):
                     action = "customer_updated"
                 _db.log_action(action, f"Customer: {name}  ABN: {v_abn.get().strip()}")
                 self.status_var.set(f"{'Created' if is_new else 'Updated'}: {name}")
+                if "delivery_labels" not in data and not v_labels.get():
+                    messagebox.showinfo(
+                        "Delivery labels",
+                        "Saved - but turning delivery labels off for a "
+                        "customer needs migrate_label_switches.sql (step 35) "
+                        "run in Supabase first. Until then their labels "
+                        "still print.", parent=self.master)
                 dlg.destroy()
                 try:
                     self._refresh_customers_list()
@@ -12442,6 +12877,35 @@ class ModernOrderApp(tk.Frame):
         flat_btn(foot, "Cancel",        dlg.destroy, bg=CNE, pady=6).pack(side="right", padx=(8, 0))
         flat_btn(foot, "Save Customer", _save,       bg=CGR, pady=6).pack(side="right")
         dlg.bind("<Escape>", lambda e: dlg.destroy())
+
+    def _toggle_customer_labels(self):
+        """Delivery labels on or off for the selected customer."""
+        cust = self._get_selected_customer()
+        if not cust:
+            messagebox.showinfo("Delivery labels", "Select a customer first.")
+            return
+        if not (_db.is_ready() and _db.customers_have_label_switch()):
+            messagebox.showinfo(
+                "Delivery labels",
+                "This needs migrate_label_switches.sql (step 35) run in "
+                "Supabase first.")
+            return
+        on = not _db.customer_wants_labels(cust)
+        try:
+            _db.set_customer_labels(cust["id"], on)
+            _db.log_action("customer_updated",
+                           f"Delivery labels {'on' if on else 'off'} for "
+                           f"{cust.get('name', '')}")
+        except Exception as exc:
+            messagebox.showerror("Delivery labels", f"Not saved:\n{exc}")
+            return
+        cust["delivery_labels"] = on
+        self.status_var.set(f"Delivery labels {'on' if on else 'off'} for "
+                            f"{cust.get('name', '')}.")
+        try:
+            self._refresh_customers_list()
+        except Exception:
+            pass
 
     def _view_customer_orders(self):
         """Switch to Previous Orders tab pre-filtered to the selected customer."""
@@ -17522,6 +17986,40 @@ class ModernOrderApp(tk.Frame):
         flat_btn(card, "Open weights and packing…", self._open_weights_settings,
                  bg=CNE, pady=5, padx=10,
                  font=F_BODY).pack(anchor="w")
+        self._labels_on_var = tk.BooleanVar(
+            value=_calc_settings.labels_enabled())
+        can = _db.is_ready() and _db.can_manage_prices()
+        tk.Checkbutton(card, text="Print delivery labels with Generate "
+                                  "Output (for everyone)",
+                       variable=self._labels_on_var,
+                       command=self._toggle_labels_globally, bg=CCA, fg=CTX,
+                       font=F_BODY, activebackground=CCA, selectcolor=CBG,
+                       state="normal" if can else "disabled"
+                       ).pack(anchor="w", pady=(px(8), 0))
+        tk.Label(card, text="Off: no delivery labels print with orders. "
+                            "A customer can be switched off on their own "
+                            "(Customers → Customer ▾). Labels asked for "
+                            "from View Order still print.",
+                 bg=CCA, fg=CMU, font=F_SM, justify="left", anchor="w",
+                 wraplength=px(620)).pack(anchor="w")
+
+    def _toggle_labels_globally(self):
+        on = bool(self._labels_on_var.get())
+        try:
+            _calc_settings.save("delivery_labels", {"enabled": on})
+            _calc_settings.load(force=True)
+            _db.log_action("calc_setting_changed",
+                           f"delivery labels {'on' if on else 'off'} for "
+                           "everyone")
+        except Exception as exc:
+            self._labels_on_var.set(not on)
+            messagebox.showerror(
+                "Delivery labels",
+                f"Not saved:\n{exc}\n\nThis needs "
+                "migrate_label_switches.sql (step 35) run in Supabase.")
+            return
+        self.status_var.set("Delivery labels "
+                            + ("on" if on else "off") + " for everyone.")
 
     def _open_weights_settings(self):
         dlg = WeightsSettingsDialog(
@@ -20153,7 +20651,7 @@ class ModernOrderApp(tk.Frame):
             # are labelled from the same packing plan the sheets print. A
             # label that cannot be made yet (no delivery address, say) never
             # stops the order - it is said in the Done message instead.
-            labels_pdf, label_problems = None, []
+            labels_pdf, label_problems, labels_off = None, [], ""
             prog.advance("Making delivery labels…")
             try:
                 # One read of the settings for the whole request: every label
@@ -20162,8 +20660,23 @@ class ModernOrderApp(tk.Frame):
                     label_settings = _calc_settings.load(force=True)
                 except Exception:
                     label_settings = _calc_settings.cached()
-                labels_pdf, label_problems = make_delivery_labels(
-                    {"header": header}, list(_printing), label_settings)
+                customer = None
+                if _db.is_ready():
+                    try:
+                        customer = _db.customer_for_order(
+                            header.get("Customer Name", ""),
+                            header.get("customer_id") or "")
+                    except Exception:
+                        customer = None
+                if not _calc_settings.labels_enabled(label_settings):
+                    labels_off = "switched off for everyone (Settings)"
+                elif not _db.customer_wants_labels(customer):
+                    labels_off = (f"switched off for "
+                                  f"{(customer or {}).get('name', '')}")
+                else:
+                    labels_pdf, label_problems = make_delivery_labels(
+                        {"header": header}, list(_printing), label_settings,
+                        customer=customer)
             except Exception as exc:
                 label_problems = [str(exc)]
 
@@ -20209,10 +20722,12 @@ class ModernOrderApp(tk.Frame):
             # ── Hand results back to the main thread ──────────────────────
             prog.after(0, lambda: _finish(opened, json_path, errors,
                                           real_pdfs, pdf_paths, new_order_id,
-                                          labels_pdf, label_problems))
+                                          labels_pdf, label_problems,
+                                          labels_off))
 
         def _finish(opened, json_path, errors, real_pdfs, pdf_paths,
-                    new_order_id=None, labels_pdf=None, label_problems=()):
+                    new_order_id=None, labels_pdf=None, label_problems=(),
+                    labels_off=""):
             prog.close()
 
             # Collect the PDF(s) to send to the printer. We no longer open the
@@ -20248,7 +20763,10 @@ class ModernOrderApp(tk.Frame):
                 email_note = getattr(self, "_last_email_note", "")
                 if email_note:
                     msg += (("\n\n" if msg else "") + f"Email:\n  {email_note}")
-                if labels_pdf:
+                if labels_off:
+                    msg += (("\n\n" if msg else "")
+                            + f"Delivery labels: {labels_off}.")
+                elif labels_pdf:
                     msg += (("\n\n" if msg else "")
                             + f"Delivery labels:\n  {labels_pdf}")
                 elif label_problems:
@@ -22121,6 +22639,7 @@ class ModernOrderApp(tk.Frame):
         actions += [
             ("Packing and weights…",   _act(lambda r=row: self._packing_for_order(r))),
             ("Delivery labels…",       _act(lambda r=row: self._labels_for_order(r))),
+            ("Pallet labels…",         _act(lambda r=row: self._pallet_labels_for_order(r))),
             None,
         ]
         menu_btn(foot, "Actions  ▾", actions + [
@@ -22191,6 +22710,29 @@ class ModernOrderApp(tk.Frame):
             "order_number": row.get("order_no", ""),
             "customer_name": row.get("customer", ""),
             "header": header}, items)
+
+    def _pallet_labels_for_order(self, row):
+        """Pallet labels for one order: how many pallets, what is on each."""
+        header, items = self._order_header_items(row, "Pallet labels")
+        if items is None:
+            return
+        if not items:
+            messagebox.showinfo("Pallet labels", "This order has no lines.")
+            return
+        customer = None
+        if _db.is_ready():
+            try:
+                customer = _db.customer_for_order(
+                    row.get("customer", "") or header.get("Customer Name", ""),
+                    header.get("customer_id") or "")
+            except Exception:
+                customer = None
+        dlg = PalletLabelsDialog(self.master, {
+            "order_number": row.get("order_no", "")
+            or header.get("Order Number", ""),
+            "customer_name": row.get("customer", ""), "header": header},
+            items, customer)
+        self.master.wait_window(dlg)
 
     def _reread_order(self, row) -> dict:
         """Fetch one order again so the window can show what an action did."""

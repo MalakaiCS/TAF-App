@@ -236,7 +236,7 @@ PERMISSIONS = ("can_manage_stock_alerts", "can_manage_prices",
 # what the screen really does — line_progress stubbed to an empty tuple made
 # "3 of 8 made" unpack a pair from nothing.
 PURE = ("line_progress", "with_line_ids", "item_signature",
-        "progress_cell", "as_date", "add_months")
+        "progress_cell", "as_date", "add_months", "customer_wants_labels")
 
 ROLES = ("manager", "employee")
 
@@ -756,73 +756,250 @@ def _steps(app, gui, root):
             dlg.destroy()
     add("C-channel weight table", _c_channel_table)
 
-    generated: dict = {}
+    def _dropdown_rules():
+        """A pick from a dropdown does not also click what is behind it; a
+        pill button acts once, on release; the mouse wheel leaves a
+        dropdown's value alone."""
+        import tkinter as tk
+        from tkinter import ttk
+        top = tk.Toplevel(root)
+        try:
+            opened = []
+            tree = ttk.Treeview(top)
+            tree.pack()
+            tree.bind("<Double-1>", lambda _e: opened.append("row"))
+            combo = ttk.Combobox(top, values=["A", "B", "C"], state="readonly")
+            combo.pack()
+            combo.set("B")
+            top.update()
+            def _double():
+                for _ in range(2):
+                    tree.event_generate("<ButtonPress-1>", x=5, y=5)
+                    tree.event_generate("<ButtonRelease-1>", x=5, y=5)
+                top.update()
+            combo.event_generate("<<ComboboxSelected>>")
+            _double()
+            if opened:
+                raise AssertionError("a pick also opened the row behind it")
+            time.sleep(gui.CLICK_GUARD_SECONDS + 0.05)
+            _double()
+            if not opened:
+                raise AssertionError("an ordinary double-click was blocked")
+            for seq, extra in (("<MouseWheel>", {"delta": -120}),
+                               ("<Button-4>", {}), ("<Button-5>", {})):
+                try:
+                    combo.event_generate(seq, x=3, y=3, **extra)
+                except tk.TclError:
+                    pass
+            top.update()
+            if combo.get() != "B":
+                raise AssertionError("the mouse wheel changed a dropdown")
+            fired = []
+            btn = gui.flat_btn(top, "Go", lambda: fired.append(1))
+            btn.pack()
+            top.update()
+            btn.event_generate("<ButtonPress-1>", x=3, y=3)
+            if fired:
+                raise AssertionError("a pill acted on the press")
+            btn.event_generate("<ButtonRelease-1>", x=3, y=3)
+            btn.event_generate("<ButtonPress-1>", x=3, y=3)
+            btn.event_generate("<ButtonRelease-1>", x=3, y=3)
+            if fired != [1]:
+                raise AssertionError(f"a double click acted {len(fired)} times")
+            btn.event_generate("<ButtonRelease-1>", x=3, y=3)
+            if fired != [1]:
+                raise AssertionError("a release with no press acted")
+        finally:
+            top.destroy()
+    add("dropdowns: no click-through, one action per click",
+        _dropdown_rules)
 
-    def _generate_prints_the_labels():
-        """Generate Output makes the delivery labels with the worksheets and
-        sends both to the printer - the worksheet first, then the labels."""
-        from taf_order_app import order_packing
-        sheet = Path(tempfile.mkdtemp()) / "sheet.pdf"
-        sheet.write_bytes(b"%PDF-1.4\n%%EOF\n")
+    def _pallet_labels():
+        """Pick an order, say two pallets, spread the lines, print: two
+        sheets, every line on a pallet."""
         items = [dict(i) for i in ORDERS[0]["items"]]
-        for it in items:
-            it["Packing"] = order_packing.set_manual(it, [int(it["Quantity"])])
-        app.items = items
-        printed = generated.setdefault("printed", [])
-        stubs = {
-            "_validate_header": lambda: True,
-            "_collect_header": lambda: dict(ORDERS[0]["header"]),
-            "_print_file": lambda path: printed.append(path) or "",
-            "_flag_printed": lambda **k: generated.update(flagged=True),
-            "_deduct_stock_for_order": lambda *a: "",
-            "_email_order_received": lambda *a: "",
-            "_clear_draft": lambda: None,
-        }
-        generated["was"] = {k: getattr(app, k) for k in stubs}
-        for k, v in stubs.items():
-            setattr(app, k, v)
-        generated["svc"] = (app.service.create_order,
-                            app.service.save_order_json)
-        app.service.create_order = lambda *a, **k: {"output_path": str(sheet)}
-        app.service.save_order_json = lambda *a, **k: str(sheet) + ".json"
-        generated["sheet"] = str(sheet)
-        # A finished order makes the lists reload; later steps want them as
-        # they were.
-        generated["state"] = (list(getattr(app, "_all_orders_data", []) or []),
-                              dict(app._tab_loaded), list(app.items))
-        app._generate(on_done=lambda ok: generated.update(done=ok),
-                      quiet=True)
-    add("generate output: start", _generate_prints_the_labels)
-
-    def _generate_finished():
-        deadline = time.monotonic() + 60
-        # Finished means the print thread has flagged the order printed - the
-        # last thing it does - so nothing of it is still running when the
-        # stand-ins are put back.
-        while time.monotonic() < deadline and not (
-                "done" in generated and generated.get("flagged")):
+        opened = []
+        was = gui._open_path
+        gui._open_path = lambda path: opened.append(path)
+        dlg = gui.PalletLabelsDialog(root, {"order_number": "PO-8842",
+                                            "header": dict(ORDERS[0]["header"])},
+                                     items, dict(CUSTOMERS[0]))
+        try:
             root.update()
-            time.sleep(0.05)
-        for k, v in generated.get("was", {}).items():
-            setattr(app, k, v)
-        if "svc" in generated:
-            app.service.create_order, app.service.save_order_json = \
-                generated["svc"]
-        if "state" in generated:
-            orders, loaded, items = generated["state"]
-            app._all_orders_data = orders
-            app._tab_loaded.clear()
-            app._tab_loaded.update(loaded)
+            dlg.count.set("2")
+            root.update()
+            dlg._rebuild()
+            dlg._spread()
+            root.update()
+            if len(dlg.cells) != len(items) or \
+                    any(len(r) != 2 for r in dlg.cells):
+                raise AssertionError("the grid is not lines x 2 pallets")
+            totals = [sum(int(v.get() or 0) for v in r) for r in dlg.cells]
+            want = [gui._pallets.ordered(i) for i in items]
+            if totals != want:
+                raise AssertionError(f"spread gave {totals}, not {want}")
+            dlg._print()
+            if len(opened) != 1 or not Path(opened[0]).exists():
+                raise AssertionError("no pallet label PDF was made")
+        finally:
+            gui._open_path = was
+            dlg.destroy()
+    add("pallet labels for an order", _pallet_labels)
+
+    def _preset_with_bags():
+        """A dedicated filter preset with bag filters: the bags come out as
+        bag lines, times the sets, halved for a replacement order."""
+        pack = {"frames": [{"qty": 1, "short": 455, "long": 510}],
+                "filters": [{"qty": 2, "short": 440, "long": 495,
+                             "channel": 95}],
+                "bags": [{"product_type": "Bag Filter", "media": "F7",
+                          "width": 592, "height": 592, "depth": 600,
+                          "quantity": 4, "part_number": "BAG-TEST"}]}
+        gui.DEDICATED_FILTER_PACKS["SMOKE-BAGS"] = pack
+        try:
+            ed = gui._GDModelEditor(root, name="SMOKE-BAGS", pack=pack)
+            root.update()
+            if len(ed._bags_tree.get_children()) != 1:
+                raise AssertionError("the preset's bag is not listed")
+            ed.destroy()
+            for kind, sets, want in (("housing", 3, 12), ("rep", 3, 6)):
+                dlg = gui.CompressorFilterDialog(root)
+                root.update()
+                dlg._gd_model.set("SMOKE-BAGS")
+                dlg._gd_order_type.set(kind)
+                dlg._gd_qty.set(str(sets))
+                dlg._confirm_gd()
+                bags = [i for i in dlg.result["items"]
+                        if i.get("item_kind") == "bag"]
+                if len(bags) != 1 or bags[0]["quantity"] != want or \
+                        bags[0]["part_number"] != "BAG-TEST":
+                    raise AssertionError(f"{kind}: {bags}")
+                if pack["bags"][0]["quantity"] != 4:
+                    raise AssertionError("the preset itself was changed")
+        finally:
+            gui.DEDICATED_FILTER_PACKS.pop("SMOKE-BAGS", None)
+    add("dedicated presets with bag filters", _preset_with_bags)
+
+    def _customer_label_switch():
+        """The Customer menu turns a customer's labels off and on."""
+        saved = []
+        gui._db.customers_have_label_switch = lambda: True
+        gui._db.set_customer_labels = lambda cid, on: saved.append((cid, on))
+        cust = dict(CUSTOMERS[0])
+        was = app._get_selected_customer
+        app._get_selected_customer = lambda: cust
+        try:
+            app._toggle_customer_labels()
+            app._toggle_customer_labels()
+            if saved != [("c1", False), ("c1", True)]:
+                raise AssertionError(f"saved {saved}")
+        finally:
+            app._get_selected_customer = was
+            del gui._db.customers_have_label_switch
+            del gui._db.set_customer_labels
+    add("customers: delivery labels off and on", _customer_label_switch)
+
+    def _generate_case(name, expect_labels, patch=None):
+        """Generate Output with the printer stood in for. With labels on,
+        the worksheet prints and then the labels; switched off - for
+        everyone, or for this customer - the worksheet alone."""
+        generated: dict = {}
+
+        def _start():
+            from taf_order_app import order_packing
+            sheet = Path(tempfile.mkdtemp()) / "sheet.pdf"
+            sheet.write_bytes(b"%PDF-1.4\n%%EOF\n")
+            items = [dict(i) for i in ORDERS[0]["items"]]
+            for it in items:
+                it["Packing"] = order_packing.set_manual(
+                    it, [int(it["Quantity"])])
+            printed = generated.setdefault("printed", [])
+            stubs = {
+                "_validate_header": lambda: True,
+                "_collect_header": lambda: dict(ORDERS[0]["header"]),
+                "_print_file": lambda path: printed.append(path) or "",
+                "_flag_printed": lambda **k: generated.update(flagged=True),
+                "_deduct_stock_for_order": lambda *a: "",
+                "_email_order_received": lambda *a: "",
+                "_clear_draft": lambda: None,
+            }
+            # A finished order makes the lists reload; later steps want them
+            # as they were.
+            generated["state"] = (list(getattr(app, "_all_orders_data", [])
+                                       or []),
+                                  dict(app._tab_loaded), list(app.items))
             app.items = items
-        printed = generated.get("printed", [])
-        if not generated.get("done"):
-            raise AssertionError(f"the order did not finish ({generated})")
-        if len(printed) != 2 or printed[0] != generated["sheet"] or \
-                "delivery_labels_" not in Path(printed[1]).name or \
-                not Path(printed[1]).exists():
-            raise AssertionError(f"expected the worksheet then the labels "
-                                 f"to print, got {printed}")
-    add("generate output: worksheets and labels printed", _generate_finished)
+            generated["was"] = {k: getattr(app, k) for k in stubs}
+            for k, v in stubs.items():
+                setattr(app, k, v)
+            generated["svc"] = (app.service.create_order,
+                                app.service.save_order_json)
+            app.service.create_order = lambda *a, **k: {
+                "output_path": str(sheet)}
+            app.service.save_order_json = lambda *a, **k: str(sheet) + ".json"
+            generated["sheet"] = str(sheet)
+            generated["undo"] = patch() if patch else None
+            app._generate(on_done=lambda ok: generated.update(done=ok),
+                          quiet=True)
+
+        def _finished():
+            deadline = time.monotonic() + 60
+            # Finished means the print thread has flagged the order printed
+            # - the last thing it does - so nothing of it is still running
+            # when the stand-ins are put back.
+            while time.monotonic() < deadline and not (
+                    "done" in generated and generated.get("flagged")):
+                root.update()
+                time.sleep(0.05)
+            if generated.get("undo"):
+                generated["undo"]()
+            for k, v in generated.get("was", {}).items():
+                setattr(app, k, v)
+            if "svc" in generated:
+                app.service.create_order, app.service.save_order_json = \
+                    generated["svc"]
+            if "state" in generated:
+                orders, loaded, items = generated["state"]
+                app._all_orders_data = orders
+                app._tab_loaded.clear()
+                app._tab_loaded.update(loaded)
+                app.items = items
+            printed = generated.get("printed", [])
+            if not generated.get("done"):
+                raise AssertionError(f"the order did not finish ({generated})")
+            if not printed or printed[0] != generated["sheet"]:
+                raise AssertionError(f"the worksheet did not print: {printed}")
+            if expect_labels:
+                if len(printed) != 2 or \
+                        "delivery_labels_" not in Path(printed[1]).name or \
+                        not Path(printed[1]).exists():
+                    raise AssertionError(f"expected the worksheet then the "
+                                         f"labels to print, got {printed}")
+            elif len(printed) != 1:
+                raise AssertionError(f"labels printed although switched "
+                                     f"off: {printed}")
+        add(f"generate output ({name}): start", _start)
+        add(f"generate output ({name}): what printed", _finished)
+
+    _generate_case("labels on", True)
+
+    def _everyone_off():
+        from taf_order_app import calc_settings as cs
+        was = cs.load
+
+        def _off(force=False):
+            out = was(force)
+            out["delivery_labels"] = {"enabled": False}
+            return out
+        cs.load = _off
+        return lambda: setattr(cs, "load", was)
+    _generate_case("labels off for everyone", False, _everyone_off)
+
+    def _customer_off():
+        gui._db.customer_for_order = lambda *a, **k: dict(
+            CUSTOMERS[0], delivery_labels=False)
+        return lambda: delattr(gui._db, "customer_for_order")
+    _generate_case("labels off for this customer", False, _customer_off)
 
     def _account():
         # A menu, so nothing new is packed — this checks it builds at all.

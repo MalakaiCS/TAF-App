@@ -97,6 +97,7 @@ SECTIONS = (
     "brace_profiles", "mounting_frame_profiles", "wire_rules",
     "required_components", "packaging", "handling_profiles",
     "max_bundle_kg", "shipping_rounding", "company", "c_channel",
+    "delivery_labels",
 )
 
 
@@ -121,6 +122,9 @@ def defaults() -> Dict[str, Any]:
         "shipping_rounding": "up_0.1",
         "company": {"base_address": BASE_ADDRESS_DEFAULT},
         "c_channel": _cch.default_settings(),
+        # The switch for everyone: off, Generate Output prints no delivery
+        # labels. Labels asked for by hand still print.
+        "delivery_labels": {"enabled": True},
         "versions": {},
     }
 
@@ -186,6 +190,11 @@ def load(force: bool = False) -> Dict[str, Any]:
     _cache.clear()
     _cache.update(merge(stored))
     return copy.deepcopy(_cache)
+
+
+def labels_enabled(settings: Optional[Dict[str, Any]] = None) -> bool:
+    s = settings if settings is not None else cached()
+    return bool((s.get("delivery_labels") or {}).get("enabled", True))
 
 
 def cached() -> Dict[str, Any]:
