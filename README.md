@@ -31,7 +31,8 @@ log, stock management and a customer database.
   own page on the filter worksheet: 15 mm smaller than the bag each way and
   25 deep (a 610 × 610 bag takes a 595 × 595 header), with a wire cut 15 mm
   smaller again on a wire header (bag On Wire): 580 × 580. The header's size
-  can be edited on the line without touching the bag. **Custom Bag Filter**
+  and the wire's can each be edited on the line without touching the bag,
+  and every bag on wire shows its wire size on the bag worksheet. **Custom Bag Filter**
   is ordered by its header size, pockets and pocket depth — 855 × 570 × 5
   pockets, 480 deep, framed 20 mm: an 855 × 570 × 20 header, wire 840 × 555.
 - **Our own order numbers** — a customer with no purchase order number gets

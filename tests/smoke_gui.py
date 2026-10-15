@@ -824,18 +824,28 @@ def _steps(app, gui, root):
                     ("595", "595", "25"):
                 raise AssertionError("header did not follow the bag: "
                                      f"{dlg.var_hw.get()}x{dlg.var_hh.get()}")
-            if "580 × 580" not in dlg.lbl_hdr_info.cget("text"):
-                raise AssertionError(dlg.lbl_hdr_info.cget("text"))
+            if not dlg.wire_frame.winfo_ismapped() or \
+                    (dlg.var_ww.get(), dlg.var_wh.get()) != ("580", "580"):
+                raise AssertionError("no wire section, or not header - 15: "
+                                     f"{dlg.var_ww.get()}x{dlg.var_wh.get()}")
             dlg.var_hw.set("597")              # nudged by hand
+            if dlg.var_ww.get() != "582":
+                raise AssertionError("the wire did not follow the header")
             dlg.var_w.set("612")               # the bag changes afterwards
             if dlg.var_hw.get() != "597" or dlg.var_hh.get() != "595":
                 raise AssertionError("a hand-set header was overwritten")
+            dlg.var_wh.set("578")              # the wire nudged by hand
+            dlg.var_hh.set("596")
+            if dlg.var_wh.get() != "578":
+                raise AssertionError("a hand-set wire was overwritten")
             dlg.var_qty.set("4")
             dlg._save()
             res = dlg.result
             if not res or (res["header_width"], res["header_height"],
-                           res["width"], res["header_custom"]) != \
-                    (597, 595, 612, True):
+                           res["width"], res["header_custom"],
+                           res["wire_width"], res["wire_height"],
+                           res["wire_custom"]) != \
+                    (597, 596, 612, True, 582, 578, True):
                 raise AssertionError(f"saved {res}")
         finally:
             if dlg.winfo_exists():

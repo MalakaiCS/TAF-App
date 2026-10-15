@@ -862,15 +862,15 @@ def _generate_bag_pdf_reportlab(header: dict, items: list, pdf_path: str,
             stock_num  = item_start + i
             label      = build_label_line(item)
             dims       = build_dims_line(item)
-            if item.get("header"):
-                # The header is made on the filter worksheet; this says what
-                # size, so the bag is made to match it.
+            if item.get("header") or item.get("on_wire"):
+                # The header (made on the filter worksheet) and the wire:
+                # their sizes, so the bag is made to match them.
                 try:
-                    from .bag_headers import header_text
-                    hdr = header_text(item)
+                    from .bag_headers import extras_text
+                    extra = extras_text(item)
                 except Exception:
-                    hdr = "Header"
-                dims = "   ·   ".join(p for p in (dims, hdr) if p)
+                    extra = "Header" if item.get("header") else ""
+                dims = "   ·   ".join(p for p in (dims, extra) if p)
             pn         = (item.get("part_number") or "").strip()
             item_notes = (item.get("notes") or "").strip()
 
@@ -972,13 +972,17 @@ def _build_bag_options(item: dict) -> str:
     if item.get("half_size"):    opts.append("Half Size")
     if item.get("gelled"):       opts.append("Gelled")
     if item.get("special_size"): opts.append("Special Size")
-    if item.get("header"):
+    if item.get("header") or item.get("on_wire"):
         # The header is made on the filter worksheet; the docket says what
-        # size, so the bag and its header are made to match.
+        # size it and the wire are, so the bag is made to match.
         try:
-            from .bag_headers import header_text
-            opts.append(header_text(item) or "Header")
+            from .bag_headers import extras_text
+            extra = extras_text(item)
         except Exception:
+            extra = ""
+        if extra:
+            opts.append(extra)
+        elif item.get("header"):
             opts.append("Header")
     ls = (item.get("label_suffix") or "").strip()
     if ls:                       opts.append(ls)

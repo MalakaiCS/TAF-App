@@ -117,3 +117,16 @@ def test_the_bag_sheet_shows_the_due_date_big_at_the_foot():
     data = path.read_bytes()
     pages = len(re.findall(rb"/Type /Page(?!s)", data))
     assert pages == 2, pages                   # the band on every page
+
+
+def test_a_bag_on_wire_shows_its_wire_and_it_can_be_changed():
+    assert bh.bag_wire(BAG) == (580, 580)
+    assert bh.extras_text(BAG) == "Header 595x595x25mm, wire 580x580"
+    no_header = dict(BAG, header=False)
+    assert bh.extras_text(no_header) == "Wire 580x580"   # bag - 30
+    assert bh.bag_wire(dict(BAG, on_wire=False)) is None
+    nudged = dict(BAG, wire_width=578, wire_height=579, wire_custom=True)
+    assert bh.bag_wire(nudged) == (578, 579)
+    assert bh.header_size(nudged) == (595, 595, 25)      # header untouched
+    assert bh.header_line(nudged)["Header Wire Cut"] == "578*579"
+    assert "Wire 580x580" in bf._build_bag_options(no_header)

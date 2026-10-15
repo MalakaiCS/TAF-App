@@ -1745,8 +1745,9 @@ def _preset_bag_text(bag: dict) -> str:
     return " ".join(p for p in (str(bag.get("product_type") or "Bag"),
                                 f"{dims}mm" if dims else "",
                                 str(bag.get("media") or ""),
-                                f"+ {_bag_headers.header_text(bag)}"
-                                if bag.get("header") else "") if p)
+                                f"+ {_bag_headers.extras_text(bag)}"
+                                if _bag_headers.extras_text(bag) else "")
+                       if p)
 
 
 class _PresetRowDialog(tk.Toplevel):
@@ -3614,6 +3615,31 @@ class BagLineItemDialog(tk.Toplevel):
         self.lbl_hdr_info.grid(row=1, column=0, columnspan=4, sticky="w",
                                pady=(6, 0))
 
+        # ── Wire (any bag filter On Wire) ──────────────────────────────────
+        # The header less 15 each way, until somebody changes it here.
+        self.wire_frame = tk.LabelFrame(body, text=" Wire (mm) ",
+                                        bg=CBG, fg=CA, font=F_BOLD,
+                                        bd=1, relief="groove", padx=12, pady=8)
+        self.var_ww = tk.StringVar(value=str(d.get("wire_width", "") or ""))
+        self.var_wh = tk.StringVar(value=str(d.get("wire_height", "") or ""))
+        self._wire_custom = bool(d.get("wire_custom"))
+        self._wire_updating = False
+        for col, (lbl, var) in enumerate([("Width", self.var_ww),
+                                           ("Height", self.var_wh)]):
+            sub = tk.Frame(self.wire_frame, bg=CBG)
+            sub.grid(row=0, column=col, padx=(0, 20), sticky="w")
+            tk.Label(sub, text=lbl, bg=CBG, fg=CTX, font=F_BODY).pack(anchor="w")
+            field_entry(sub, textvariable=var, width=9).pack()
+            var.trace_add("write", lambda *_: self._wire_edited())
+        flat_btn(self.wire_frame, "↺ Match the header", self._wire_reset,
+                 bg=CNE, pady=4, padx=8, font=F_SM).grid(
+            row=0, column=2, sticky="sw", pady=(0, 2))
+        self.lbl_wire_info = tk.Label(self.wire_frame, text="", bg=CBG,
+                                      fg=CMU, font=F_SM, justify="left",
+                                      anchor="w")
+        self.lbl_wire_info.grid(row=1, column=0, columnspan=3, sticky="w",
+                                pady=(6, 0))
+
         # ── Description (Cut Pads / Other) ─────────────────────────────────
         self.desc_frame = tk.LabelFrame(body, text=" Description ",
                                         bg=CBG, fg=CA, font=F_BOLD,
@@ -3772,6 +3798,7 @@ class BagLineItemDialog(tk.Toplevel):
         self._auto_pn()
         if not restore:
             self._hdr_custom = False
+            self._wire_custom = False
         self._header_follow()
         self._sync_header_section()
 
@@ -3786,6 +3813,7 @@ class BagLineItemDialog(tk.Toplevel):
         """Put the worked-out header in, unless it has been set by hand."""
         if getattr(self, "_hdr_custom", True) or not hasattr(self, "var_hw"):
             self._header_info()
+            self._wire_follow()
             return
         size = _bag_headers.default_header(
             self.var_pt.get(), self.var_w.get(), self.var_h.get(),
@@ -3804,12 +3832,66 @@ class BagLineItemDialog(tk.Toplevel):
         finally:
             self._hdr_updating = False
         self._header_info()
+        self._wire_follow()
 
     def _header_edited(self):
         if self._hdr_updating:
             return
         self._hdr_custom = True
         self._header_info()
+        self._wire_follow()
+
+    # ── Wire ───────────────────────────────────────────────────────────────
+
+    def _wire_default(self):
+        """The header less 15 each way: the header on the form, or the one
+        the bag would have."""
+        if self.var_bhdr.get():
+            w, h = _safe_int(self.var_hw.get()), _safe_int(self.var_hh.get())
+            size = (w, h, 1) if w > 0 and h > 0 else None
+        else:
+            size = _bag_headers.default_header(
+                self.var_pt.get(), self.var_w.get(), self.var_h.get())
+        return _bag_headers.wire_size(size) if size else None
+
+    def _wire_follow(self):
+        if not hasattr(self, "var_ww"):
+            return
+        if not self._wire_custom:
+            size = self._wire_default()
+            self._wire_updating = True
+            try:
+                self.var_ww.set(str(size[0]) if size else "")
+                self.var_wh.set(str(size[1]) if size else "")
+            finally:
+                self._wire_updating = False
+        self._wire_info()
+
+    def _wire_edited(self):
+        if self._wire_updating:
+            return
+        self._wire_custom = True
+        self._wire_info()
+
+    def _wire_reset(self):
+        self._wire_custom = False
+        self._wire_follow()
+
+    def _wire_info(self):
+        if not hasattr(self, "lbl_wire_info"):
+            return
+        w, h = _safe_int(self.var_ww.get()), _safe_int(self.var_wh.get())
+        if not (w > 0 and h > 0):
+            text = "Enter the bag size, or the wire's own size."
+        elif self._wire_custom:
+            text = "Set by hand - the bag and header can change without it."
+        else:
+            text = ("Follows the header (header − 15)."
+                    if self.var_bhdr.get() else
+                    "Follows the bag (bag − 30, as for a header − 15).")
+        if self.var_bhdr.get():
+            text += "  Cut on the header's worksheet page."
+        self.lbl_wire_info.config(text=text)
 
     def _header_reset(self):
         self._hdr_custom = False
@@ -3825,8 +3907,7 @@ class BagLineItemDialog(tk.Toplevel):
             text = "Enter the bag size, or the header's own size."
         else:
             if self.var_wire.get():
-                ww, wh = _bag_headers.wire_size((w, h, d))
-                text = f"Wire header: wire cut {ww} × {wh} (header − 15)."
+                text = "Wire header: the wire size is under Wire, below."
             else:
                 text = "No wire - tick On Wire for a wire header filter."
             text += ("  Set by hand - the bag can change without it."
@@ -3838,12 +3919,20 @@ class BagLineItemDialog(tk.Toplevel):
         self.lbl_hdr_info.config(text=text)
 
     def _sync_header_section(self):
-        show = (self.var_pt.get() in _BAG_TYPES and bool(self.var_bhdr.get()))
+        is_bag = self.var_pt.get() in _BAG_TYPES
+        show = is_bag and bool(self.var_bhdr.get())
         if show:
             self.hdr_frame.pack(fill="x", pady=(0, 8), after=self.opts_frame)
         else:
             self.hdr_frame.pack_forget()
+        if is_bag and self.var_wire.get():
+            self.wire_frame.pack(fill="x", pady=(0, 8),
+                                 after=self.hdr_frame if show
+                                 else self.opts_frame)
+        else:
+            self.wire_frame.pack_forget()
         self._header_info()
+        self._wire_follow()
 
     def _hide_depth(self):
         """Hide the depth field for Mounting Frame."""
@@ -3887,16 +3976,23 @@ class BagLineItemDialog(tk.Toplevel):
         }
 
     def _header_fields(self) -> dict:
-        """The header as kept on the line: its size, and whether that was
-        set by hand. Nothing when there is no header."""
-        if not (self.var_bhdr.get() and self.var_pt.get() in _BAG_TYPES):
-            return {"header_width": 0, "header_height": 0, "header_depth": 0,
-                    "header_custom": False}
-        return {"header_width":  _safe_int(self.var_hw.get()),
-                "header_height": _safe_int(self.var_hh.get()),
-                "header_depth":  _safe_int(self.var_hd.get())
-                or _bag_headers.HEADER_DEPTH,
-                "header_custom": bool(self._hdr_custom)}
+        """The header and wire as kept on the line: their sizes, and whether
+        each was set by hand. Nothing for what the bag does not have."""
+        is_bag = self.var_pt.get() in _BAG_TYPES
+        out = {"header_width": 0, "header_height": 0, "header_depth": 0,
+               "header_custom": False,
+               "wire_width": 0, "wire_height": 0, "wire_custom": False}
+        if self.var_bhdr.get() and is_bag:
+            out.update({"header_width":  _safe_int(self.var_hw.get()),
+                        "header_height": _safe_int(self.var_hh.get()),
+                        "header_depth":  _safe_int(self.var_hd.get())
+                        or _bag_headers.HEADER_DEPTH,
+                        "header_custom": bool(self._hdr_custom)})
+        if self.var_wire.get() and is_bag:
+            out.update({"wire_width":  _safe_int(self.var_ww.get()),
+                        "wire_height": _safe_int(self.var_wh.get()),
+                        "wire_custom": bool(self._wire_custom)})
+        return out
 
     def _auto_pn(self):
         """Regenerate P/N from current values unless user has overridden it."""
@@ -3961,6 +4057,11 @@ class BagLineItemDialog(tk.Toplevel):
         if item["header"] and pt in _BAG_TYPES and not (
                 item["header_width"] > 0 and item["header_height"] > 0):
             messagebox.showerror("Invalid", "The header needs a width and "
+                                 "height.", parent=self)
+            return
+        if item["on_wire"] and pt in _BAG_TYPES and not (
+                item["wire_width"] > 0 and item["wire_height"] > 0):
+            messagebox.showerror("Invalid", "The wire needs a width and "
                                  "height.", parent=self)
             return
 
@@ -19852,10 +19953,12 @@ class ModernOrderApp(tk.Frame):
                 partno   = item.get("part_number", "") or "—"
                 # The bag's header is made on its own worksheet page; show
                 # its size (and wire) so it can be checked here.
-                _ht = _bag_headers.header_text(item)
+                _ht = _bag_headers.extras_text(item)
                 if _ht:
+                    _hand = item.get("header_custom") or \
+                        item.get("wire_custom")
                     notes = (f"[{_ht.upper()}"
-                             f"{' - SET BY HAND' if item.get('header_custom') else ''}] "
+                             f"{' - SET BY HAND' if _hand else ''}] "
                              + notes)[:180]
             else:
                 qty   = item.get("Quantity", "")

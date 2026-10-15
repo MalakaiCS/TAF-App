@@ -13,8 +13,9 @@ The sizes, as the workshop makes them:
   * wire = header - 15 each way, and only on a wire header (the bag is on
     wire). 595 x 595 takes 580 x 580; 855 x 570 takes 840 x 555.
 
-The header is always editable on the line: the office can nudge it a few
-millimetres without touching the bag, and the edited size is what is kept.
+The header and the wire are both editable on the line: the office can nudge
+either a few millimetres without touching the bag, and the edited size is
+what is kept.
 
 Nothing here touches Tk or the database.
 """
@@ -79,6 +80,39 @@ def has_wire(bag: Dict[str, Any]) -> bool:
     return bool(bag.get("on_wire"))
 
 
+def default_wire(bag: Dict[str, Any]) -> Optional[Tuple[int, int]]:
+    """The wire the workshop cuts for a bag on wire: its header less 15
+    each way - the header it has, or the one it would have."""
+    size = header_size(bag) if bag.get("header") else default_header(
+        bag.get("product_type", ""), bag.get("width"), bag.get("height"))
+    return wire_size(size) if size else None
+
+
+def bag_wire(bag: Dict[str, Any]) -> Optional[Tuple[int, int]]:
+    """(width, height) of a bag's wire, or None when it is not on wire. A
+    size set on the line wins over the worked-out one."""
+    if not has_wire(bag):
+        return None
+    w, h = _int(bag.get("wire_width")), _int(bag.get("wire_height"))
+    if w > 0 and h > 0:
+        return (w, h)
+    return default_wire(bag)
+
+
+def wire_text(bag: Dict[str, Any]) -> str:
+    """"Wire 580x580" for a bag on wire; "" otherwise."""
+    size = bag_wire(bag)
+    return f"Wire {size[0]}x{size[1]}" if size else ""
+
+
+def extras_text(bag: Dict[str, Any]) -> str:
+    """Header and wire, for a bag line: "Header 595x595x25mm, wire 580x580",
+    or just "Wire 580x580" for a bag on wire with no header."""
+    if bag.get("header"):
+        return header_text(bag)
+    return wire_text(bag)
+
+
 def is_edited(bag: Dict[str, Any]) -> bool:
     """True when the line's header is not the worked-out size."""
     size = header_size(bag)
@@ -97,9 +131,9 @@ def header_text(bag: Dict[str, Any]) -> str:
     if size is None:
         return "Header" if bag.get("header") else ""
     text = f"Header {size[0]}x{size[1]}x{size[2]}mm"
-    if has_wire(bag):
-        ww, wh = wire_size(size)
-        text += f", wire {ww}x{wh}"
+    wire = bag_wire(bag)
+    if wire:
+        text += f", wire {wire[0]}x{wire[1]}"
     return text
 
 
@@ -139,8 +173,9 @@ def header_line(bag: Dict[str, Any], page: int = 0) -> Optional[Dict[str, Any]]:
         "Notes":        (f"HEADER FOR {bag_words(bag).upper()}"
                          + (f" (PAGE {page})" if page else "")),
     }
-    if has_wire(bag):
-        ww, wh = wire_size(size)
+    wire = bag_wire(bag)
+    if wire:
+        ww, wh = wire
         line["Header Wire Cut"] = f"{min(ww, wh)}*{max(ww, wh)}"
         line["Header Wire Qty"] = qty
     else:
