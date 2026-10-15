@@ -103,8 +103,8 @@ log, stock management and a customer database.
   how much channel the order takes per depth, and where two pages' frames
   fit on one length it says so: "cut G 1312 from one end, then page 2's
   G 1112 from the other end". The New Order screen shows the total too.
-- **Due date on the bag worksheet** — big and bold in a black band at the
-  foot of every bag page.
+- **Due date on the bag worksheet** — large and bold at the foot of every
+  bag page.
 - **Pallet labels** — for an order going out on pallets: say how many
   pallets and how many of each line go on each (or spread them evenly), and
   each pallet gets an A4 sheet: `Pallet 1 of 3`, the filters on it, the

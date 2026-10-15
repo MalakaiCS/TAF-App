@@ -766,10 +766,10 @@ def _generate_bag_pdf_reportlab(header: dict, items: list, pdf_path: str,
             c.setLineWidth(lw)
             c.line(MARGIN, y, MARGIN + C_W, y)
 
-        # The due date, big and bold at the foot of every page, and the
+        # The due date, large and bold at the foot of every page, and the
         # notes above it. Lines stop above both.
-        DUE_H  = 58
-        FOOT_H = DUE_H + 26
+        DUE_H  = 34
+        FOOT_H = DUE_H + 22
 
         def _new_page(y, need=80):
             if y - need < MARGIN + FOOT_H:
@@ -838,18 +838,14 @@ def _generate_bag_pdf_reportlab(header: dict, items: list, pdf_path: str,
             _hrule(fy, lw=0.5, col=K30)
             if notes:
                 _txt(MARGIN, fy - 11, f"NOTES: {notes}"[:150], size=8, col=K70)
-            # A black band with the date in white: seen from across the room.
-            c.setFillColor(K100)
-            c.rect(MARGIN, MARGIN, C_W, DUE_H, fill=1, stroke=0)
-            _txt(MARGIN + 14, MARGIN + DUE_H / 2 - 6, "DUE", size=18,
-                 bold=True, col=WHITE)
+            # Big enough to be noticed: plain black type, no box.
             due = due_text(d_due)
-            size = 34
-            while size > 16 and c.stringWidth(due, "Helvetica-Bold",
-                                              size) > C_W - 110:
+            size = 24
+            while size > 14 and c.stringWidth(f"DUE  {due}", "Helvetica-Bold",
+                                              size) > C_W:
                 size -= 1
-            _txt(MARGIN + C_W - 14, MARGIN + DUE_H / 2 - size * 0.35, due,
-                 size=size, bold=True, col=WHITE, align="right")
+            _txt(MARGIN, MARGIN + 8, f"DUE  {due}", size=size, bold=True,
+                 col=K100)
 
         # ── First page header ────────────────────────────────────────────────
         y = _draw_page_header()
