@@ -51,6 +51,7 @@ from taf_order_app import pallet_labels as _pallets
 from taf_order_app import customer_merge as _merge
 from taf_order_app import customer_picker as _picker
 from taf_order_app import bag_headers as _bag_headers
+from taf_order_app import order_channel as _order_channel
 from taf_order_app import delivery_labels as _delivery_labels
 from taf_order_app import filter_calc as _filter_calc
 from taf_order_app import mounting_frames as _mounting_frames
@@ -5816,6 +5817,10 @@ def make_delivery_labels(order: dict, items: list, settings=None,
                             "customer name, so there is no delivery address. "
                             "Link it to a customer first.")
         return None, problems
+    if not labels:
+        # Nothing but bag filters: they get no labels, and that is not a
+        # problem to report.
+        return None, []
     safe = re.sub(r"[^A-Za-z0-9_-]+", "_",
                   str(record["order_number"] or "order")).strip("_") or "order"
     ORDERS_DIR.mkdir(parents=True, exist_ok=True)
@@ -5843,6 +5848,11 @@ def print_delivery_labels(parent, order: dict, items: list,
     """
     path, problems = make_delivery_labels(order, items, settings,
                                           only_wrap_ids=only_wrap_ids)
+    if not path and not problems:
+        messagebox.showinfo("Delivery labels",
+                            "Nothing to label: bag filters get no delivery "
+                            "labels.", parent=parent)
+        return None
     if not path:
         fix = "\n".join(f"  • {p}" for p in problems[:12])
         messagebox.showwarning(
@@ -10028,7 +10038,10 @@ class ModernOrderApp(tk.Frame):
                 if not items:
                     problems.append(f"{name}: no lines")
                     continue
-                if any(not it.get("Packing") for it in items):
+                if all(_delivery_labels.is_bag_filter(it) for it in items):
+                    continue                  # bag filters get no labels
+                if any(not it.get("Packing") for it in items
+                       if not _delivery_labels.is_bag_filter(it)):
                     problems.append(f"{name}: packing not saved yet")
                     continue
                 customer = _db.customer_for_order(order.get("customer", ""))
@@ -19873,7 +19886,20 @@ class ModernOrderApp(tk.Frame):
                 text=("" if _kb else kind_lbl), image=(_kb or ""),
                 values=(qty, pt, size, sqm, media, partno, opt_str, notes))
         n = len(self.items)
-        self._items_card.set_header_right(f"{n} item{'s' if n != 1 else ''}")
+        right = f"{n} item{'s' if n != 1 else ''}"
+        # The channel the whole order takes, pages sharing lengths where
+        # they can - the same sum the worksheets print.
+        try:
+            sheet = _bag_headers.worksheet_split(self.items)[0]
+            plan = _order_channel.order_plan(
+                [dict(it, page=i + 1) for i, it in enumerate(sheet)],
+                _features.workshop())
+            channel = _order_channel.short_text(plan)
+            if channel:
+                right += f"  ·  {channel} lengths"
+        except Exception:
+            pass
+        self._items_card.set_header_right(right)
         self._schedule_draft_save()
 
     def _collect_header(self) -> dict:
@@ -21365,6 +21391,9 @@ class ModernOrderApp(tk.Frame):
                 elif not _db.customer_wants_labels(customer):
                     labels_off = (f"switched off for "
                                   f"{(customer or {}).get('name', '')}")
+                elif all(_delivery_labels.is_bag_filter(it)
+                         for it in _printing):
+                    labels_off = "none for bag filters"
                 else:
                     labels_pdf, label_problems = make_delivery_labels(
                         {"header": header}, list(_printing), label_settings,

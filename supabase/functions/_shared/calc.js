@@ -1585,13 +1585,18 @@
     }
     return out;
   }
-  function buildLabels(order, base, settings) {
+  // skipLines (1-based): lines that get no labels (bag filters). They still
+  // count in the numbering, so line 3 of 4 is "3/4" either way.
+  function buildLabels(order, base, settings, skipLines) {
+    var skip = {};
+    (skipLines || []).forEach(function (n) { skip[n] = true; });
     var clean = validateLabels(order);
     var s = settings || settingsDefaults();
     var packaging = s.packaging, policy = s.shipping_rounding || "none";
     var max = Number(s.max_bundle_kg) || MAX_BUNDLE_KG;
     var problems = [], perLine = [];
     clean.items.forEach(function (it, idx) {
+      if (skip[idx + 1]) { perLine.push(null); return; }
       var unit = finite(it.complete_filter_weight_kg_per_filter);
       var qs = it._resolved;
       if (qs === null || qs === undefined) {
@@ -1613,11 +1618,11 @@
       }));
     });
     if (problems.length) { throw new LabelError(problems); }
-    var codes = wrapCodes(perLine.map(function (w) { return w.length; }));
+    var codes = wrapCodes(perLine.map(function (w) { return w === null ? 1 : w.length; }));
     var addr = [clean.address_line_1].concat(clean.address_line_2 ? [clean.address_line_2] : []);
     var labels = [];
     clean.items.forEach(function (it, i) {
-      perLine[i].forEach(function (wrap, j) {
+      (perLine[i] || []).forEach(function (wrap, j) {
         labels.push({ company: COMPANY.name, abn: COMPANY.abn, phone: COMPANY.phone,
           from_address: base, customer_name: clean.customer_name,
           address_lines: addr, locality: clean.suburb + "  " + clean.state + "  " + clean.postcode,

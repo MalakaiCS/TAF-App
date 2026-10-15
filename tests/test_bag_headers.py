@@ -105,3 +105,15 @@ def test_custom_bag_filter_on_the_docket():
     assert bf.generate_part_number(CUSTOM) == "CBFF7-855570480-5PWH"
     assert "Header 855x570x20mm, wire 840x555" in bf._build_bag_options(CUSTOM)
     assert bf.item_summary_short(CUSTOM) == "855×570×480 5P"
+
+
+def test_the_bag_sheet_shows_the_due_date_big_at_the_foot():
+    assert bf.due_text("16/10/26") == "FRI 16 OCT 2026"
+    assert bf.due_text("ASAP") == "ASAP" and bf.due_text("") == "NOT GIVEN"
+    path = Path(tempfile.mkdtemp()) / "bags.pdf"
+    assert bf._generate_bag_pdf_reportlab(
+        {"Customer Name": "Bells Creek", "Order Number": "PO-1",
+         "Date Due": "16/10/26"}, [BAG] * 20, str(path))
+    data = path.read_bytes()
+    pages = len(re.findall(rb"/Type /Page(?!s)", data))
+    assert pages == 2, pages                   # the band on every page

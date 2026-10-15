@@ -228,13 +228,30 @@ def size_text(w: Optional[float], h: Optional[float],
     return " × ".join(f"{p:g}" for p in parts) + " mm"
 
 
+# Lines on the bag docket that are not bag filters: these still get labels.
+NOT_BAG_FILTERS = ("Mounting Frame", "Media Roll", "Cut Pads", "Other")
+
+
+def is_bag_filter(item: Dict[str, Any]) -> bool:
+    """A bag filter line. Bags get no delivery labels: how they will be
+    wrapped is not known until they are, so a label would be a guess."""
+    return str(item.get("item_kind") or "") == "bag" and \
+        str(item.get("product_type") or "") not in NOT_BAG_FILTERS
+
+
 def build(order: Dict[str, Any], base_address: str,
-          settings: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
+          settings: Optional[Dict[str, Any]] = None,
+          skip_lines: Optional[Sequence[int]] = None) -> List[Dict[str, Any]]:
     """Every label for one order, in order. Raises LabelError.
 
     base_address is passed in, read once by whoever is printing, so every
     label in this request carries the same From line.
+
+    `skip_lines` (1-based) are lines that get no labels - bag filters. They
+    still count in the numbering, so the panel on line 3 of 4 is "3/4"
+    whether or not line 2 is a bag.
     """
+    skip = set(skip_lines or ())
     clean = validate(order)
     s = settings if settings is not None else _settings.defaults()
     packaging = s.get("packaging")
@@ -243,6 +260,9 @@ def build(order: Dict[str, Any], base_address: str,
     problems: List[str] = []
     per_line: List[List[Dict[str, Any]]] = []
     for i, it in enumerate(clean["items"], start=1):
+        if i in skip:
+            per_line.append(None)
+            continue
         unit = finite(it.get("complete_filter_weight_kg_per_filter"))
         quantities = it.get("_resolved")
         if quantities is None:
@@ -275,14 +295,14 @@ def build(order: Dict[str, Any], base_address: str,
     if problems:
         raise LabelError(problems)
 
-    codes = _pk.wrap_codes([len(w) for w in per_line])
+    codes = _pk.wrap_codes([1 if w is None else len(w) for w in per_line])
     address_lines = [clean["address_line_1"]]
     if clean.get("address_line_2"):
         address_lines.append(clean["address_line_2"])
     labels = []
     for i, (it, wraps, line_codes) in enumerate(
             zip(clean["items"], per_line, codes), start=1):
-        for wrap, code in zip(wraps, line_codes):
+        for wrap, code in zip(wraps or [], line_codes):
             labels.append({
                 "company": _settings.COMPANY["name"],
                 "abn": _settings.COMPANY["abn"],
@@ -386,12 +406,15 @@ def build_for_order(order: Dict[str, Any], customer: Optional[Dict[str, Any]],
                     only_wrap_ids: Optional[Sequence[str]] = None
                     ) -> List[Dict[str, Any]]:
     """Labels for a saved order; optionally just some wraps, for a reprint.
+    Bag filter lines get none (see is_bag_filter).
 
     The whole order is numbered first and the chosen wraps picked out after,
     so a reprint carries the code the wrap was first printed with.
     """
+    skip = [i for i, it in enumerate(order.get("items") or [], start=1)
+            if is_bag_filter(it)]
     labels = build(order_contract(order, customer, settings), base_address,
-                   settings)
+                   settings, skip)
     if only_wrap_ids:
         wanted = set(only_wrap_ids)
         labels = [l for l in labels if l.get("wrap_id") in wanted]

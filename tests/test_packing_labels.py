@@ -610,3 +610,27 @@ def test_every_quantity_gets_labels_with_nothing_entered():
             assert sum(l["wrap_quantity"] for l in mine) == q, (q, line)
             assert all(l["weight_kg"] and l["weight_raw_kg"] <= 10
                        for l in mine), (q, line)
+
+
+def test_bag_filters_get_no_labels_but_keep_the_numbering():
+    """Bags are wrapped however they go, so they get no delivery labels. On
+    an order with panels too, the panels keep their numbers: the panel on
+    line 3 of 3 is still 3/3 with a bag on line 2."""
+    s = cs.defaults()
+    cust = {"name": "X", "delivery_address1": "1 St", "delivery_city": "Y",
+            "delivery_state": "QLD", "delivery_postcode": "4000"}
+    panel = {"Filter Type": "Flat Panel", "Short": 595, "Long": 595,
+             "Channel": 25, "Quantity": 1, "Media Type": "F5"}
+    bag = {"item_kind": "bag", "product_type": "3-Peak", "width": 610,
+           "height": 610, "depth": 570, "media": "F7", "quantity": 6}
+    frame = {"item_kind": "bag", "product_type": "Mounting Frame",
+             "width": 610, "height": 610, "quantity": 2}
+    labs = dl.build_for_order({"order_number": "1", "header": {},
+                               "items": [panel, bag, dict(panel)]},
+                              cust, s, "Base")
+    assert [(l["line"], l["wrap_page"]) for l in labs] == [(1, "1/3"),
+                                                            (3, "3/3")]
+    assert dl.build_for_order({"order_number": "1", "header": {},
+                               "items": [bag]}, cust, s, "Base") == []
+    assert dl.is_bag_filter(bag) and not dl.is_bag_filter(frame) \
+        and not dl.is_bag_filter(panel)

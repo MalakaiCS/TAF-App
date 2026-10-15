@@ -227,7 +227,8 @@ def _under_notes(c, x, top, w, ctx, calculator, item=None, prefer=""):
                 workshop = _features.workshop()
             except Exception:
                 workshop = None
-            lines = wb.frame_lines(item, prefer, workshop)
+            lines = wb.frame_lines(item, prefer, workshop) + \
+                list(ctx.get("channel_lines") or [])
             if lines:
                 _block(c, x, bottom - 4, w, "FILTER CALCULATOR", lines, floor)
     except Exception:
@@ -627,10 +628,32 @@ def generate_pdf(header_data, items, output_path, page_start=1, grand_total=None
         contexts = _wb.order_context(items)
     except Exception:
         _wb, contexts = None, [None] * len(items)
+    # The channel for the whole order, and which pages share a length: on
+    # every page's FILTER CALCULATOR.
+    channel_plan = None
+    try:
+        from taf_order_app import order_channel as _oc
+        try:
+            from taf_order_app import features as _features
+            workshop = _features.workshop()
+        except Exception:
+            workshop = None
+        channel_plan = _oc.order_plan(
+            [dict(it, page=page_start + i) for i, it in enumerate(items)],
+            workshop, header_data.get("_frame_prefer", ""))
+    except Exception:
+        channel_plan = None
 
     for i, item in enumerate(items):
         ftype = (item.get("Filter Type") or "").lower()
         ctx = contexts[i] if i < len(contexts) else None
+        if ctx is not None and channel_plan is not None:
+            try:
+                ctx = dict(ctx, channel_lines=_oc.page_lines(
+                    channel_plan, page_counter)
+                    if _oc.framed(item) else [])
+            except Exception:
+                pass
         if ftype == "stepped filter":
             _draw_fs(c, header_data, item, page_counter, total_pages, d_ord, d_due,
                      ctx)

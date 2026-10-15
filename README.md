@@ -95,6 +95,15 @@ log, stock management and a customer database.
   (Settings → Weights, packing and delivery labels) or for one customer
   (Customers → Customer ▾ → Turn delivery labels off, or the tick in their
   account); labels asked for from View Order still print. Needs step 35.
+- **Bag filters get no delivery labels** — how a bag is wrapped is not known
+  until it is. On an order with panels too, the panels keep their numbers
+  (the panel on line 3 of 3 is still 3/3).
+- **Channel for the whole order** — each worksheet's FILTER CALCULATOR says
+  how much channel the order takes per depth, and where two pages' frames
+  fit on one length it says so: "cut G 1312 from one end, then page 2's
+  G 1112 from the other end". The New Order screen shows the total too.
+- **Due date on the bag worksheet** — big and bold in a black band at the
+  foot of every bag page.
 - **Pallet labels** — for an order going out on pallets: say how many
   pallets and how many of each line go on each (or spread them evenly), and
   each pallet gets an A4 sheet: `Pallet 1 of 3`, the filters on it, the

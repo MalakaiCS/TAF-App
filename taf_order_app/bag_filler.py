@@ -697,6 +697,22 @@ def generate_bag_docket(header: dict, items: List[dict], out_path: str,
     return out_path
 
 
+def due_text(value) -> str:
+    """The due date as the floor reads it: "FRI 16 OCT 2026", "ASAP", or
+    "NOT GIVEN"."""
+    import datetime as _dt
+    text = str(value or "").strip()
+    if not text:
+        return "NOT GIVEN"
+    for fmt in ("%d/%m/%y", "%d/%m/%Y", "%Y-%m-%d", "%d-%m-%y", "%d-%m-%Y"):
+        try:
+            day = _dt.datetime.strptime(text, fmt).date()
+        except ValueError:
+            continue
+        return day.strftime("%a %d %b %Y").upper()
+    return text.upper()
+
+
 def _generate_bag_pdf_reportlab(header: dict, items: list, pdf_path: str,
                                  item_start: int = 1,
                                  grand_total: int = None) -> bool:
@@ -750,8 +766,13 @@ def _generate_bag_pdf_reportlab(header: dict, items: list, pdf_path: str,
             c.setLineWidth(lw)
             c.line(MARGIN, y, MARGIN + C_W, y)
 
+        # The due date, big and bold at the foot of every page, and the
+        # notes above it. Lines stop above both.
+        DUE_H  = 58
+        FOOT_H = DUE_H + 26
+
         def _new_page(y, need=80):
-            if y < MARGIN + need:
+            if y - need < MARGIN + FOOT_H:
                 _draw_footer(y)
                 c.showPage()
                 return _draw_page_header()
@@ -813,12 +834,22 @@ def _generate_bag_pdf_reportlab(header: dict, items: list, pdf_path: str,
             return y - 18
 
         def _draw_footer(y):
-            fy = MARGIN + 20
+            fy = MARGIN + DUE_H + 18
             _hrule(fy, lw=0.5, col=K30)
-            parts = []
-            if notes: parts.append(f"NOTES: {notes}")
-            if parts:
-                _txt(MARGIN, fy - 10, "   ".join(parts), size=8, col=K70)
+            if notes:
+                _txt(MARGIN, fy - 11, f"NOTES: {notes}"[:150], size=8, col=K70)
+            # A black band with the date in white: seen from across the room.
+            c.setFillColor(K100)
+            c.rect(MARGIN, MARGIN, C_W, DUE_H, fill=1, stroke=0)
+            _txt(MARGIN + 14, MARGIN + DUE_H / 2 - 6, "DUE", size=18,
+                 bold=True, col=WHITE)
+            due = due_text(d_due)
+            size = 34
+            while size > 16 and c.stringWidth(due, "Helvetica-Bold",
+                                              size) > C_W - 110:
+                size -= 1
+            _txt(MARGIN + C_W - 14, MARGIN + DUE_H / 2 - size * 0.35, due,
+                 size=size, bold=True, col=WHITE, align="right")
 
         # ── First page header ────────────────────────────────────────────────
         y = _draw_page_header()
@@ -831,6 +862,15 @@ def _generate_bag_pdf_reportlab(header: dict, items: list, pdf_path: str,
             stock_num  = item_start + i
             label      = build_label_line(item)
             dims       = build_dims_line(item)
+            if item.get("header"):
+                # The header is made on the filter worksheet; this says what
+                # size, so the bag is made to match it.
+                try:
+                    from .bag_headers import header_text
+                    hdr = header_text(item)
+                except Exception:
+                    hdr = "Header"
+                dims = "   ·   ".join(p for p in (dims, hdr) if p)
             pn         = (item.get("part_number") or "").strip()
             item_notes = (item.get("notes") or "").strip()
 
