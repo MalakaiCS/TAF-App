@@ -3,8 +3,29 @@ import subprocess
 import platform
 import atexit
 import threading as _threading
-from openpyxl import load_workbook, Workbook
-from openpyxl.styles import Font, Alignment, PatternFill, Border
+# openpyxl is only needed by the old Excel template path, and loading it
+# took the biggest single share of the app's start-up. It is loaded the
+# first time one of these is actually called.
+
+
+def load_workbook(*args, **kwargs):
+    from openpyxl import load_workbook as _load
+    return _load(*args, **kwargs)
+
+
+def Font(*args, **kwargs):
+    from openpyxl.styles import Font as _Font
+    return _Font(*args, **kwargs)
+
+
+def Alignment(*args, **kwargs):
+    from openpyxl.styles import Alignment as _Alignment
+    return _Alignment(*args, **kwargs)
+
+
+def Border(*args, **kwargs):
+    from openpyxl.styles import Border as _Border
+    return _Border(*args, **kwargs)
 from datetime import datetime, timedelta
 
 # ── Persistent Excel COM cache ────────────────────────────────────────────────
@@ -175,7 +196,8 @@ def _export_pdf_libreoffice(xlsx_path: str, pdf_path: str) -> bool:
         result = subprocess.run(
             [soffice, "--headless", "--norestore", "--convert-to", "pdf",
              "--outdir", out_dir, xlsx_path],
-            capture_output=True, timeout=180)
+            capture_output=True, timeout=180,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
     except Exception:
         return False
     if result.returncode != 0:

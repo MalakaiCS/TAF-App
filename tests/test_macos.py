@@ -215,12 +215,14 @@ def test_the_printing_helper_is_not_bundled_into_a_mac_app():
     assert "WINDOWS and" in block
 
 
-def test_upx_is_off_on_a_mac():
-    """It rewrites the binaries, which breaks the ad-hoc signature every
-    arm64 executable has to carry, and the app is then killed on launch
-    rather than warned about."""
-    assert "upx=True" not in SPEC, "UPX is unconditional again"
-    assert SPEC.count("upx=WINDOWS") == 2
+def test_upx_is_off():
+    """On a Mac it rewrites the binaries, which breaks the ad-hoc signature
+    every arm64 executable has to carry, and the app is then killed on
+    launch rather than warned about. On Windows every packed DLL is unpacked
+    again at each launch and antivirus looks harder at it: slower to start
+    for a smaller download nobody needed. Off everywhere."""
+    assert "upx=True" not in SPEC and "upx=WINDOWS" not in SPEC
+    assert SPEC.count("upx=False") == 2
 
 
 def test_there_is_something_to_drag_to_applications():

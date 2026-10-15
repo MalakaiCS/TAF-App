@@ -18,11 +18,47 @@ def init(anon_key: str) -> None:
     _client = create_client(SUPABASE_URL, anon_key)
 
 
+# Loading the database library and making the client is most of a second.
+# Started on a thread as the app opens, it is done while the sign-in screen
+# is drawn and the email typed; anything that needs it first waits for it.
+_init_thread = None
+
+
+def init_async(anon_key: str) -> None:
+    global _init_thread
+    import threading
+
+    def _work():
+        try:
+            init(anon_key)
+        except Exception:
+            pass                       # is_ready() stays False: said there
+    _init_thread = threading.Thread(target=_work, daemon=True,
+                                    name="db-init")
+    _init_thread.start()
+
+
+def _wait_for_init(timeout: float = 30.0) -> None:
+    t = _init_thread
+    if t is not None and t.is_alive():
+        import threading
+        if threading.current_thread() is not t:
+            t.join(timeout)
+
+
+def is_starting() -> bool:
+    """True while the client is still being made in the background."""
+    t = _init_thread
+    return t is not None and t.is_alive()
+
+
 def is_ready() -> bool:
+    _wait_for_init()
     return _client is not None
 
 
 def get_client():
+    _wait_for_init()
     if _client is None:
         raise RuntimeError("Database not initialised — configure the API key first.")
     return _client
@@ -835,19 +871,64 @@ def can_manage_catalog() -> bool:
 
 # ── Audit Log ─────────────────────────────────────────────────────────────────
 
-def log_action(action: str, details: str = "") -> None:
-    """Write one row to audit_log. Silently swallowed on any error."""
+# The audit log is written by one background thread, in order. Each entry
+# was a round trip to the database on whatever thread asked - nearly always
+# the window's, which paused after almost every action for as long as the
+# internet took. Who did it is taken when it happens, not when it is sent.
+_audit_queue = None
+_audit_thread = None
+
+
+def _audit_writer() -> None:
+    while True:
+        row = _audit_queue.get()
+        try:
+            if row is not None:
+                get_client().table("audit_log").insert(row).execute()
+        except Exception:
+            pass                       # never a reason for anything to fail
+        finally:
+            _audit_queue.task_done()
+
+
+def log_action(action: str, details: str = "", wait: bool = False) -> None:
+    """Write one row to audit_log, in the background. Silently swallowed on
+    any error. `wait` writes it before returning (tests, or just before the
+    app closes)."""
+    global _audit_queue, _audit_thread
     if not (is_ready() and _current_user):
         return
-    try:
-        get_client().table("audit_log").insert({
-            "user_id":  str(_current_user.id),
-            "username": current_username(),
-            "action":   action,
-            "details":  details,
-        }).execute()
-    except Exception:
-        pass
+    row = {
+        "user_id":  str(_current_user.id),
+        "username": current_username(),
+        "action":   action,
+        "details":  details,
+    }
+    if wait:
+        try:
+            get_client().table("audit_log").insert(row).execute()
+        except Exception:
+            pass
+        return
+    import queue
+    import threading
+    if _audit_thread is None or not _audit_thread.is_alive():
+        _audit_queue = _audit_queue or queue.Queue()
+        _audit_thread = threading.Thread(target=_audit_writer, daemon=True,
+                                         name="audit-log")
+        _audit_thread.start()
+    _audit_queue.put(row)
+
+
+def flush_audit_log(timeout: float = 5.0) -> None:
+    """Give what is queued a moment to be written - when the app closes."""
+    import time
+    q = _audit_queue
+    if q is None:
+        return
+    end = time.monotonic() + timeout
+    while q.unfinished_tasks and time.monotonic() < end:
+        time.sleep(0.05)
 
 
 def get_audit_log(limit: int = 500) -> list:

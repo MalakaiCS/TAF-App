@@ -442,6 +442,13 @@ def run(role: str = "manager") -> int:
 
 
 def _steps(app, gui, root):
+    def _settle(seconds=0.4):
+        """Let debounced work (a search box waits for typing to pause) run."""
+        end = time.monotonic() + seconds
+        while time.monotonic() < end:
+            root.update()
+            time.sleep(0.02)
+
     """Everything the smoke test does, in order, one event-loop tick apart."""
     import tkinter as tk
 
@@ -864,6 +871,63 @@ def _steps(app, gui, root):
             del gui._db.merge_order_header
     add("printing: a bad date is fixed before anything prints",
         _bad_dates_are_caught_before_printing)
+
+    def _background_threads_never_touch_the_window():
+        """A background thread's .after() and StringVar.set() are run by the
+        window's own thread, not from the background one - Tk on Windows can
+        crash when touched from another thread."""
+        import threading as _th
+        ran_on = []
+        var = gui.tk.StringVar(master=root)
+
+        def _worker():
+            root.after(0, lambda: ran_on.append(_th.current_thread()))
+            var.set("from a thread")
+        t = _th.Thread(target=_worker)
+        t.start()
+        t.join(5)
+        _settle(0.3)
+        if ran_on != [_th.main_thread()] or var.get() != "from a thread":
+            raise AssertionError(f"ran on {ran_on}, var {var.get()!r}")
+    add("threads: background work is handed to the window's thread",
+        _background_threads_never_touch_the_window)
+
+    def _deleting_an_order():
+        """Delete from Previous Orders: the order leaves the list at once,
+        without the list being emptied and reloaded, and nothing errors."""
+        app._show_tab("prev_orders")
+        _settle(0.5)
+        tree = app.orders_tree
+        kids = tree.get_children()
+        if not kids:
+            raise AssertionError("no orders listed to delete")
+        tree.selection_set(kids[0])
+        target = app._get_selected_order()
+        deleted = []
+        gui._db.delete_order = lambda oid: deleted.append(oid)
+        gui._db.can_delete_order = lambda row: True
+        was_ask = gui.messagebox.askyesno
+        gui.messagebox.askyesno = lambda *a, **k: True
+        before = len(app._all_orders_data)
+        try:
+            app._delete_prev_order()
+            deadline = time.monotonic() + 3
+            while time.monotonic() < deadline and \
+                    len(app._all_orders_data) == before:
+                root.update()
+                time.sleep(0.02)
+        finally:
+            gui.messagebox.askyesno = was_ask
+            del gui._db.delete_order
+            del gui._db.can_delete_order
+        if deleted != [target.get("db_id")]:
+            raise AssertionError(f"deleted {deleted}")
+        if len(app._all_orders_data) != before - 1 or any(
+                r is target for r in app._all_orders_data):
+            raise AssertionError("the order is still in the list")
+        app._refresh_orders_list()          # put the stand-in orders back
+        _settle(0.5)
+    add("previous orders: deleting an order", _deleting_an_order)
 
     def _bag_header_in_the_dialog():
         """Header on a bag: follows the bag (bag - 15) until edited, then
@@ -1559,13 +1623,13 @@ def _steps(app, gui, root):
         # Filter it off screen and back.
         key = app._order_key(shown[0])
         app.search_var.set("zzz no order is called this")
-        root.update()
+        _settle()                      # the search waits for typing to pause
         if key not in app._ticked:
             raise AssertionError("the tick was lost when the row was filtered out")
         if "not shown" not in app._tick_lbl.cget("text"):
             raise AssertionError("it did not say the ticked order is out of view")
         app.search_var.set("")
-        root.update()
+        _settle()
         back = [i for i in tree.get_children()
                 if tree.set(i, "pick") == gui.TICK_FULL]
         if len(back) != 1:

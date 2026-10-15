@@ -4,11 +4,6 @@ import datetime as _dt_module
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog, simpledialog
 
-try:
-    from tkcalendar import DateEntry as _DateEntry
-    _HAS_TKCALENDAR = True
-except ImportError:
-    _HAS_TKCALENDAR = False
 from pathlib import Path
 import json
 import platform
@@ -20,6 +15,7 @@ import re
 import threading
 from concurrent.futures import ThreadPoolExecutor
 
+from taf_order_app import quiet as _quiet          # noqa: F401  first: no console windows
 from taf_order_app import OrderService
 from taf_order_app.validation import (VALID_FILTER_TYPES, VALID_MEDIA_TYPES,
                                       parse_date, header_problems)
@@ -764,24 +760,6 @@ def _persist_catalog_key(key: str, value, parent=None, quiet: bool = False) -> b
         return False
 
 
-# ── COM pre-warm ─────────────────────────────────────────────────────────────
-# Called once on a background thread right after the window opens.
-# By the time the user fills in the form and clicks Generate, Excel and Word
-# are already running hidden → first order is as fast as subsequent ones.
-
-def _prewarm_com():
-    try:
-        from template_filler import prewarm_excel
-        prewarm_excel()
-    except Exception:
-        pass
-    try:
-        from taf_order_app.bag_filler import prewarm_word
-        prewarm_word()
-    except Exception:
-        pass
-
-
 # ── Utility helpers ───────────────────────────────────────────────────────────
 
 def _dk(hex_color: str, n: int = 22) -> str:
@@ -1000,6 +978,105 @@ def _all_children(widget) -> list:
         out.append(child)
         out.extend(_all_children(child))
     return out
+
+
+# ── The window is only ever touched from its own thread ───────────────────
+# Database calls, printing and the like run on background threads, and hand
+# their results back with .after(...) or by setting a StringVar. Tk is not
+# safe to call from another thread: on Windows a call that lands while the
+# window is in a menu or a dialog can hang it or take the whole program down
+# (an order deleted, then the app gone). So a call from a background thread
+# is queued, and the window's own thread runs it a few milliseconds later.
+
+import queue as _queue_mod
+
+_MAIN_THREAD = threading.main_thread()
+_UI_CALLS: "_queue_mod.SimpleQueue" = _queue_mod.SimpleQueue()
+_tk_after = tk.Misc.after
+_tk_after_idle = tk.Misc.after_idle
+_tk_var_set = tk.Variable.set
+
+
+def _off_main_thread() -> bool:
+    return threading.current_thread() is not _MAIN_THREAD
+
+
+def _for_a_live_window(widget, func):
+    """A background result for a window that has since been closed is
+    dropped, not reported as an error: whoever closed it no longer wants
+    it."""
+    def run(*args):
+        try:
+            return func(*args)
+        except tk.TclError as exc:
+            # "invalid command name" is Tk saying the widget it was handed
+            # has been destroyed - the window this result was for is gone.
+            if "invalid command name" in str(exc):
+                return None
+            try:
+                alive = bool(widget.winfo_exists())
+            except Exception:
+                alive = False
+            if alive:
+                raise
+    return run
+
+
+def _after_any_thread(self, ms, func=None, *args):
+    if func is not None and _off_main_thread():
+        _UI_CALLS.put(lambda: _tk_after(self, ms,
+                                        _for_a_live_window(self, func), *args))
+        return "after#queued"
+    return _tk_after(self, ms, func, *args)
+
+
+def _after_idle_any_thread(self, func, *args):
+    if _off_main_thread():
+        _UI_CALLS.put(lambda: _tk_after_idle(
+            self, _for_a_live_window(self, func), *args))
+        return "after#queued"
+    return _tk_after_idle(self, func, *args)
+
+
+def _var_set_any_thread(self, value):
+    if _off_main_thread():
+        _UI_CALLS.put(lambda: _tk_var_set(self, value))
+        return None
+    return _tk_var_set(self, value)
+
+
+tk.Misc.after = _after_any_thread
+tk.Misc.after_idle = _after_idle_any_thread
+tk.Variable.set = _var_set_any_thread
+
+
+def _install_ui_pump(root) -> None:
+    """Run what background threads queued, on the window's thread. Once per
+    Tk root; it stops by itself when the root is destroyed."""
+    if getattr(root, "_ui_pump_on", False):
+        return
+    root._ui_pump_on = True
+
+    def _pump():
+        for _ in range(500):            # never starve the window
+            try:
+                call = _UI_CALLS.get_nowait()
+            except _queue_mod.Empty:
+                break
+            try:
+                call()
+            except tk.TclError:
+                pass                    # its window was closed meanwhile
+            except Exception:
+                try:
+                    root.report_callback_exception(*sys.exc_info())
+                except Exception:
+                    pass
+        try:
+            _tk_after(root, 15, _pump)
+        except tk.TclError:
+            root._ui_pump_on = False    # the root is gone
+    _tk_after(root, 15, _pump)
 
 
 def _install_dropdown_rules(root) -> None:
@@ -1223,6 +1300,13 @@ def flat_btn(parent, text, command, bg=CA, fg="white",
                       font=font, h=px(pady * 2 + 24), padx=px(padx))
 
 
+def _destroy_quietly(widget) -> None:
+    try:
+        widget.destroy()
+    except Exception:
+        pass
+
+
 def menu_btn(parent, text, items, bg=None, fg="white", pady=6,
              padx=14, variant=None):
     """A button that drops a menu, for the actions that don't earn a place.
@@ -1250,7 +1334,12 @@ def menu_btn(parent, text, items, bg=None, fg="white", pady=6,
                 menu.add_separator()
                 continue
             label, command = entry
-            picked = (lambda c=command: (_note_pick(), c())) if command \
+            # Run once the menu has closed, not from inside it. On Windows a
+            # menu holds its own modal loop until it is gone; an action that
+            # opens a dialog or waits on the database from in there (Delete
+            # this order) could take the whole program down with it.
+            picked = (lambda c=command: (_note_pick(),
+                                         parent.after(1, c))) if command \
                 else None
             menu.add_command(label=f"  {label}  ", command=picked,
                              state="normal" if command else "disabled")
@@ -1259,6 +1348,9 @@ def menu_btn(parent, text, items, bg=None, fg="white", pady=6,
                           btn.winfo_rooty() + btn.winfo_height())
         finally:
             menu.grab_release()
+            # One menu a click, made fresh each time: without this every
+            # click left another behind.
+            parent.after(500, lambda m=menu: _destroy_quietly(m))
 
     # Read the slate default now rather than at import, so it still matches
     # the live palette after a switch to dark mode.
@@ -1288,6 +1380,30 @@ class _VariantMap(dict):
 _BUTTON_VARIANTS = _VariantMap()
 
 
+def _debounced(widget, ms: int, fn):
+    """`fn`, run once typing pauses for `ms` rather than on every key.
+
+    A search box filtered thousands of rows - or asked the database - once
+    per letter typed; a name was seven redraws, the last six wasted."""
+    pending = {"id": None}
+
+    def call(*_args):
+        if pending["id"] is not None:
+            try:
+                widget.after_cancel(pending["id"])
+            except Exception:
+                pass
+
+        def run():
+            pending["id"] = None
+            try:
+                fn()
+            except tk.TclError:
+                pass                  # its window was closed meanwhile
+        pending["id"] = widget.after(ms, run)
+    return call
+
+
 def attach_empty_state(tree, title, hint="", action=None, action_text=""):
     """Say what an empty table means, and what to do about it.
 
@@ -1309,26 +1425,37 @@ def attach_empty_state(tree, title, hint="", action=None, action_text=""):
         flat_btn(panel, action_text, action, bg=CA,
                  pady=px(6)).pack(pady=(px(12), 0))
 
+    pending = {"on": False}
+
     def _sync():
+        pending["on"] = False
         try:
-            if tree.get_children():
+            # Whether there is a first row - not the list of every row.
+            if tree.tk.call(tree._w, "children", "") :
                 panel.place_forget()
             else:
                 panel.place(relx=0.5, rely=0.42, anchor="center")
         except Exception:
             pass
 
+    def _later():
+        # Once for a whole batch of inserts. It was scheduled once per row,
+        # each listing every row: filling 3000 orders took a second here.
+        if not pending["on"]:
+            pending["on"] = True
+            tree.after_idle(_sync)
+
     for name in ("insert", "delete"):
         original = getattr(tree, name)
 
         def wrapped(*a, _orig=original, **kw):
             result = _orig(*a, **kw)
-            tree.after_idle(_sync)
+            _later()
             return result
 
         setattr(tree, name, wrapped)
 
-    tree.after_idle(_sync)
+    _later()
     tree._empty_state = panel      # keep a reference so it isn't collected
     return panel
 
@@ -1371,27 +1498,22 @@ def field_entry(parent, textvariable=None, width=None, **kw) -> tk.Entry:
 
 
 def _make_date_entry(parent, textvariable, **kw):
-    """Return a DateEntry calendar picker if tkcalendar is available, else a plain Entry."""
-    if _HAS_TKCALENDAR:
-        try:
-            de = _DateEntry(
-                parent,
-                textvariable=textvariable,
-                date_pattern="dd/mm/yy",
-                background=CCA, foreground=CTX,
-                selectbackground=CA, selectforeground="white",
-                normalforeground=CTX, weekendforeground=CTX,
-                borderwidth=1, relief="solid",
-                font=F_BODY,
-                width=10,
-                **kw,
-            )
-            return de
-        except Exception:
-            # babel locale-data missing or other tkcalendar init failure —
-            # fall back to a plain entry so the app still opens.
-            pass
-    return field_entry(parent, textvariable=textvariable, width=10)
+    """A date box with the app's own calendar button beside it.
+
+    It used tkcalendar's DateEntry, which loads Babel's locale data as it is
+    made: most of a second of every start, for two filter boxes.
+    """
+    wrap = tk.Frame(parent, bg=parent.cget("bg"))
+    e = field_entry(wrap, textvariable=textvariable, width=10)
+    e.pack(side="left")
+    btn = tk.Button(wrap, text="📅", bg=CA, fg="white", relief="flat", bd=0,
+                    font=(FAM, 9), padx=5, pady=1, cursor="hand2",
+                    activebackground=_dk(CA), activeforeground="white")
+    btn.config(command=lambda: CalendarPicker(parent.winfo_toplevel(),
+                                              textvariable, anchor=btn))
+    btn.pack(side="left", padx=(2, 0))
+    wrap.entry = e
+    return wrap
 
 
 # ── Sharpness on a modern screen ──────────────────────────────────────────
@@ -8423,12 +8545,18 @@ class MergeCustomersDialog(tk.Toplevel):
         self.destroy()
 
 
+# The pause between building one background tab and the next: room for the
+# window to answer a click or a key between them.
+PREBUILD_GAP_MS = 120
+
+
 class ModernOrderApp(tk.Frame):
 
     def __init__(self, master):
         super().__init__(master, bg=CBG)
         self.master = master
         _install_dropdown_rules(master)
+        _install_ui_pump(master.winfo_toplevel())
         # Anchor order storage to APP_DIR (never cwd — see OrderService).
         # This also aligns saved order JSONs with ORDERS_DIR, where the
         # Previous Orders local scan looks for them.
@@ -8486,7 +8614,10 @@ class ModernOrderApp(tk.Frame):
         except Exception:
             pass
 
-        threading.Thread(target=_prewarm_com, daemon=True).start()
+        # Excel and Word are no longer started here. Worksheets and bag
+        # sheets are drawn straight to PDF; Word is only a fallback, started
+        # if it is ever needed. Starting both hidden on every launch slowed
+        # the whole PC down for nothing.
         threading.Thread(target=self._bg_check_update, daemon=True).start()
 
     def _bg_check_update(self):
@@ -8693,6 +8824,7 @@ class ModernOrderApp(tk.Frame):
     def _sign_out(self):
         if not messagebox.askyesno("Sign Out", "Sign out and return to the login screen?"):
             return
+        _db.flush_audit_log(3)        # written while still signed in
         _db.sign_out()
         self.master.destroy()
         _start_app()
@@ -8834,9 +8966,11 @@ class ModernOrderApp(tk.Frame):
         # worth seeing, and it's the leftmost tab.
         self._show_tab("dashboard")
 
-        # Warm the remaining tabs one-per-idle-tick so later switches are
-        # instant, without delaying the first paint of the home screen.
-        self.master.after_idle(self._prebuild_next_tab)
+        # Warm the remaining tabs so later switches are instant - starting
+        # once the window is up and drawn, one tab at a time with a pause
+        # between, so a click in the first few seconds is answered at once
+        # instead of waiting for every screen to be built back to back.
+        self.master.after(800, self._prebuild_next_tab)
 
     def _ensure_tab_built(self, key: str):
         """Construct a tab's widgets on first access (lazy building)."""
@@ -8853,13 +8987,13 @@ class ModernOrderApp(tk.Frame):
         if active and active != key and active in self._tab_frames:
             self._tab_frames[active].tkraise()
 
-    def _prebuild_next_tab(self):
+    def _prebuild_next_tab(self):  # noqa: D401 - see PREBUILD_GAP_MS
         """Build one not-yet-built tab per idle tick, then reschedule."""
         builders = getattr(self, "_lazy_tab_builders", None)
         if not builders:
             return
         self._ensure_tab_built(next(iter(builders)))
-        self.master.after_idle(self._prebuild_next_tab)
+        self.master.after(PREBUILD_GAP_MS, self._prebuild_next_tab)
 
     # ── Header bar ────────────────────────────────────────────────────────
 
@@ -8869,40 +9003,75 @@ class ModernOrderApp(tk.Frame):
         Cropped to a square and masked to a circle here rather than asking
         whoever uploads it to crop it first — a photo straight off a phone is
         the wrong shape, and refusing it would just mean nobody bothers.
+
+        The initials are drawn at once and the photo put over them when it
+        arrives: downloading it on the window's own thread held the whole
+        app up for as long as the internet took, at every start.
         """
         size = px(size)
         c = tk.Canvas(parent, width=size, height=size, bg=CCA,
                       highlightthickness=0)
-        photo = self._avatar_image(url, size) if url else None
-        if photo is not None:
-            c.create_image(size // 2, size // 2, image=photo)
-            c._photo = photo          # Tk drops an image with no reference
-        else:
-            c.create_oval(1, 1, size - 1, size - 1, fill=CA, outline="")
-            c.create_text(size // 2, size // 2 + 1, text=initials, fill="white",
-                          font=(FAM, int(size * 0.36), "bold"))
+        c.create_oval(1, 1, size - 1, size - 1, fill=CA, outline="")
+        c.create_text(size // 2, size // 2 + 1, text=initials, fill="white",
+                      font=(FAM, int(size * 0.36), "bold"))
+        if url:
+            cache = self.__dict__.setdefault("_avatar_cache", {})
+            photo = cache.get((url, size))
+            if photo is not None:
+                self._show_avatar(c, photo, size)
+            else:
+                self._fetch_avatar(url, size, c)
         return c
 
-    def _avatar_image(self, url: str, size: int):
-        """Fetch, crop and round a profile picture. None if anything fails.
+    @staticmethod
+    def _show_avatar(canvas, photo, size) -> None:
+        try:
+            canvas.delete("all")
+            canvas.create_image(size // 2, size // 2, image=photo)
+            canvas._photo = photo        # Tk drops an image with no reference
+        except tk.TclError:
+            pass                         # the header was rebuilt meanwhile
 
-        Kept per URL and size: the header rebuilds on every sign-in and tab
-        change, and fetching the same photo each time would be a download for
-        no reason.
-        """
-        cache = getattr(self, "_avatar_cache", None)
-        if cache is None:
-            cache = self._avatar_cache = {}
-        key = (url, size)
-        if key in cache:
-            return cache[key]
-        image = None
+    def _fetch_avatar(self, url: str, size: int, canvas) -> None:
+        """Get the photo off the main thread - from disk if it has been
+        fetched before, else the internet - then show it."""
+        import hashlib
+        folder = APP_DIR / "cache"
+        disk = folder / f"avatar_{hashlib.sha1(url.encode()).hexdigest()}"
+
+        def _work():
+            raw = None
+            try:
+                if disk.exists():
+                    raw = disk.read_bytes()
+                else:
+                    import urllib.request
+                    with urllib.request.urlopen(url, timeout=6) as resp:
+                        raw = resp.read()
+                    try:
+                        folder.mkdir(parents=True, exist_ok=True)
+                        disk.write_bytes(raw)
+                    except Exception:
+                        pass
+            except Exception:
+                raw = None             # offline, or not reachable: initials
+            if raw:
+                self.master.after(0, lambda: _apply(raw))
+
+        def _apply(raw):
+            photo = self._avatar_image(raw, size)
+            self.__dict__.setdefault("_avatar_cache", {})[(url, size)] = photo
+            if photo is not None:
+                self._show_avatar(canvas, photo, size)
+
+        threading.Thread(target=_work, daemon=True).start()
+
+    @staticmethod
+    def _avatar_image(raw: bytes, size: int):
+        """Crop and round a profile picture. None if it is not an image."""
         try:
             from PIL import Image, ImageDraw, ImageTk
             import io
-            import urllib.request
-            with urllib.request.urlopen(url, timeout=6) as resp:
-                raw = resp.read()
             src = Image.open(io.BytesIO(raw)).convert("RGBA")
             # Square from the middle, then scale — never squash a face.
             edge = min(src.size)
@@ -8914,11 +9083,9 @@ class ModernOrderApp(tk.Frame):
             ImageDraw.Draw(mask).ellipse((0, 0, size * 4 - 1, size * 4 - 1),
                                          fill=255)
             src.putalpha(mask.resize((size, size), Image.LANCZOS))
-            image = ImageTk.PhotoImage(src)
+            return ImageTk.PhotoImage(src)
         except Exception:
-            image = None          # offline, no Pillow, or not an image
-        cache[key] = image
-        return image
+            return None
 
     def _account_menu(self):
         """The account, and the screens that keep the app running.
@@ -9072,7 +9239,11 @@ class ModernOrderApp(tk.Frame):
 
         # Horizontal logo
         self._logo_img = None
-        logo_path = RESOURCE_DIR / "TAF_logo_horizontal.png"
+        # A copy made at the size it is shown: decoding the 3508px print
+        # logo just to shrink it was over half a second of every start.
+        logo_path = RESOURCE_DIR / "TAF_logo_header.png"
+        if not logo_path.exists():
+            logo_path = RESOURCE_DIR / "TAF_logo_horizontal.png"
         if logo_path.exists():
             try:
                 raw = tk.PhotoImage(file=str(logo_path))
@@ -9742,7 +9913,8 @@ class ModernOrderApp(tk.Frame):
         tk.Label(srch, text="Search:", bg=CBG, fg=CTX,
                  font=F_BOLD).pack(side="left", padx=(0, 6))
         self.search_var = tk.StringVar()
-        self.search_var.trace_add("write", lambda *_: self._filter_orders_list())
+        self.search_var.trace_add("write", _debounced(
+            self.master, 180, self._filter_orders_list))
         se = field_entry(srch, textvariable=self.search_var, width=28)
         se.pack(side="left", padx=(0, 14))
 
@@ -11732,7 +11904,7 @@ class ModernOrderApp(tk.Frame):
                 self.status_var.set("No quotes saved yet.")
 
         status_var.trace_add("write", _reload)
-        search_var.trace_add("write", _reload)
+        search_var.trace_add("write", _debounced(dlg, 400, _reload))
 
         def _selected():
             sel = tree.selection()
@@ -12863,7 +13035,8 @@ class ModernOrderApp(tk.Frame):
         tk.Label(top, text="Search:", bg=CBG, fg=CTX,
                  font=F_BOLD).pack(side="left", padx=(0, 6))
         self._cust_search_var = tk.StringVar()
-        self._cust_search_var.trace_add("write", lambda *_: self._filter_customers_list())
+        self._cust_search_var.trace_add("write", _debounced(
+            self.master, 180, self._filter_customers_list))
         field_entry(top, textvariable=self._cust_search_var,
                     width=26).pack(side="left", padx=(0, 14))
 
@@ -13621,7 +13794,8 @@ class ModernOrderApp(tk.Frame):
         tk.Label(top, text="Search:", bg=CBG, fg=CTX,
                  font=F_BOLD).pack(side="left", padx=(0, 6))
         self._stock_search_var = tk.StringVar()
-        self._stock_search_var.trace_add("write", lambda *_: self._filter_stock_list())
+        self._stock_search_var.trace_add("write", _debounced(
+            self.master, 180, self._filter_stock_list))
         field_entry(top, textvariable=self._stock_search_var,
                     width=22).pack(side="left", padx=(0, 14))
 
@@ -15434,7 +15608,8 @@ class ModernOrderApp(tk.Frame):
                     out = _sp.run(
                         ["powershell", "-NoProfile", "-Command",
                          "Get-Printer | Select-Object -ExpandProperty Name"],
-                        capture_output=True, text=True, timeout=8
+                        capture_output=True, text=True, timeout=8,
+                        creationflags=0x08000000      # no command prompt
                     )
                     names = [p.strip() for p in out.stdout.splitlines() if p.strip()]
                 else:
@@ -15596,7 +15771,7 @@ class ModernOrderApp(tk.Frame):
             self._cp_status.set("New password must be at least 6 characters.")
             return
         self._cp_status.set("Changing…")
-        self.update()
+        self.update_idletasks()
         import queue as _q
         q = _q.Queue()
         def _work():
@@ -21872,7 +22047,10 @@ class ModernOrderApp(tk.Frame):
                         "notes_count":       len((r.get("header") or {}).get("order_notes") or []),
                     })
             except Exception as exc:
-                self.status_var.set(f"DB fetch error: {exc}")
+                # Said on the main thread (the dispatcher below), never from
+                # this one directly.
+                self.master.after(0, lambda e=str(exc): self.status_var.set(
+                    f"DB fetch error: {e}"))
 
         # ── Local orders (this machine only, fallback) ─────────────────────
         local = self._scan_local_orders()
@@ -22774,38 +22952,55 @@ class ModernOrderApp(tk.Frame):
 
         db_id = row.get("db_id")
         self.status_var.set("Deleting order…")
-        self.update()
+        what = f"Customer: {customer}  O/N: {order_no}"
 
         import queue as _q
         q = _q.Queue()
 
         def _work():
+            # The delete and its audit entry both off the main thread: the
+            # window never waits on the network.
             try:
                 _db.delete_order(db_id)
-                q.put(("ok", None))
             except Exception as exc:
                 q.put(("error", str(exc)))
+                return
+            q.put(("ok", None))
+            try:
+                _db.log_action("order_deleted", what)
+            except Exception:
+                pass
 
         def _poll():
             try:
-                while True:
-                    kind, data = q.get_nowait()
-                    if kind == "ok":
-                        self.status_var.set("Order deleted.")
-                        _db.log_action("order_deleted",
-                            f"Customer: {row.get('customer','')}  O/N: {row.get('order_no','')}")
-                        self._refresh_orders_list()
-                        return
-                    elif kind == "error":
-                        messagebox.showerror("Delete Failed", data)
-                        self.status_var.set("Delete failed.")
-                        return
+                kind, data = q.get_nowait()
             except _q.Empty:
-                pass
-            self.master.after(50, _poll)
+                self.master.after(50, _poll)
+                return
+            if kind == "ok":
+                # Gone from the list at once; the list is not reloaded from
+                # scratch for one order that is no longer in it.
+                self._forget_order_row(row)
+                self.status_var.set(f"Order {order_no} deleted.")
+            else:
+                messagebox.showerror("Delete Failed", data)
+                self.status_var.set("Delete failed.")
 
         threading.Thread(target=_work, daemon=True).start()
         self.master.after(50, _poll)
+
+    def _forget_order_row(self, row) -> None:
+        """Take one order out of Previous Orders without reloading the list."""
+        key = self._order_key(row)
+        self._all_orders_data = [r for r in (self._all_orders_data or [])
+                                 if r is not row and self._order_key(r) != key]
+        try:
+            self._ticked.discard(key)
+        except Exception:
+            pass
+        self._hide_order_tooltip()
+        self._filter_orders_list()
+        self._tab_loaded.pop("dashboard", None)
 
     def _archive_prev_order(self):
         row = self._get_selected_order()
@@ -22833,7 +23028,7 @@ class ModernOrderApp(tk.Frame):
 
         db_id = row.get("db_id")
         self.status_var.set("Archiving order…")
-        self.update()
+        what = f"Customer: {customer}  O/N: {order_no}"
 
         import queue as _q
         q = _q.Queue()
@@ -22841,27 +23036,27 @@ class ModernOrderApp(tk.Frame):
         def _work():
             try:
                 _db.archive_order(db_id)
-                q.put(("ok", None))
             except Exception as exc:
                 q.put(("error", str(exc)))
+                return
+            q.put(("ok", None))
+            try:
+                _db.log_action("order_archived", what)
+            except Exception:
+                pass
 
         def _poll():
             try:
-                while True:
-                    kind, data = q.get_nowait()
-                    if kind == "ok":
-                        self.status_var.set("Order archived.")
-                        _db.log_action("order_archived",
-                            f"Customer: {row.get('customer','')}  O/N: {row.get('order_no','')}")
-                        self._refresh_orders_list()
-                        return
-                    elif kind == "error":
-                        messagebox.showerror("Archive Failed", data)
-                        self.status_var.set("Archive failed.")
-                        return
+                kind, data = q.get_nowait()
             except _q.Empty:
-                pass
-            self.master.after(50, _poll)
+                self.master.after(50, _poll)
+                return
+            if kind == "ok":
+                self._forget_order_row(row)
+                self.status_var.set(f"Order {order_no} archived.")
+            else:
+                messagebox.showerror("Archive Failed", data)
+                self.status_var.set("Archive failed.")
 
         threading.Thread(target=_work, daemon=True).start()
         self.master.after(50, _poll)
@@ -24203,6 +24398,7 @@ def _start_app():
 
     _enable_hidpi()          # before the first window, or it has no effect
     root = tk.Tk()
+    _install_ui_pump(root)   # before any background thread hands work back
     root.withdraw()          # hide until login succeeds
     _apply_ui_scale(root)    # match Tk's point size to the actual screen
     # A fresh Tk root invalidates every previously-rendered PhotoImage (this
@@ -24271,13 +24467,11 @@ def _start_app():
     anon_key = settings.get("supabase_anon_key", "").strip()
 
     if anon_key:
-        try:
-            _db.init(anon_key)
-        except Exception:
-            pass
+        # On a thread: the sign-in screen is drawn while it connects.
+        _db.init_async(anon_key)
 
     # If not yet connected, prompt for API key
-    if not _db.is_ready():
+    if not anon_key and not _db.is_ready():
         from taf_order_app.login_window import ApiKeySetupDialog
         dlg = ApiKeySetupDialog(root)
         root.wait_window(dlg)
@@ -24286,8 +24480,16 @@ def _start_app():
             _save_settings(settings)
 
     # ── Check tables exist ────────────────────────────────────────────────
-    if _db.is_ready():
+    # Once. It was two round trips to the database before the sign-in
+    # screen appeared, on every start, for something set up a single time.
+    if not settings.get("db_tables_ok") and _db.is_ready():
         profiles_ok, orders_ok = _db.tables_exist()
+        if profiles_ok and orders_ok:
+            settings["db_tables_ok"] = True
+            try:
+                _save_settings(settings)
+            except Exception:
+                pass
         if not profiles_ok or not orders_ok:
             missing = []
             if not profiles_ok: missing.append("profiles")
@@ -24303,7 +24505,7 @@ def _start_app():
             _db.sign_out()
 
     # ── Login ─────────────────────────────────────────────────────────────
-    if _db.is_ready():
+    if _db.is_starting() or _db.is_ready():
         from taf_order_app.login_window import LoginWindow
         login = LoginWindow(root)
         root.wait_window(login)
@@ -24320,6 +24522,10 @@ def _start_app():
     root.deiconify()
     ModernOrderApp(root)
     root.mainloop()
+    try:
+        _db.flush_audit_log(3)      # what was done just before closing
+    except Exception:
+        pass
 
 
 def main():

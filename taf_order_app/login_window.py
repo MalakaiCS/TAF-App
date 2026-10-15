@@ -226,7 +226,11 @@ class LoginWindow(tk.Toplevel):
 
         # Logo (colour wordmark reads on the navy region near the top)
         try:
-            p = _resource("TAF_logo_horizontal.png")
+            # Made at the size it is shown, so the sign-in screen does not
+            # wait on decoding the 3508px print logo.
+            p = _resource("TAF_logo_login.png")
+            if not p.exists():
+                p = _resource("TAF_logo_horizontal.png")
             if p.exists():
                 raw = tk.PhotoImage(file=str(p))
                 f = max(1, raw.width() // 250)

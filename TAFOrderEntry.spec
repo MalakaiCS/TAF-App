@@ -8,13 +8,13 @@
 #
 import os
 import sys
-from PyInstaller.utils.hooks import collect_data_files
 
 WINDOWS = sys.platform == 'win32'
 MACOS   = sys.platform == 'darwin'
 
-# Collect all babel locale data files properly (1000+ .dat files + global.dat)
-babel_datas = collect_data_files('babel', include_py_files=False)
+# No Babel: its 1000+ locale files came in for tkcalendar's date picker,
+# which the app no longer uses (its own picker starts instantly). Fewer files
+# to install, and fewer for antivirus to look through on every launch.
 
 # SumatraPDF.exe lets us print PDFs without a PDF viewer. CI fetches it (from
 # the pinned pdf-to-printer npm package) before the build; if it's absent
@@ -47,12 +47,14 @@ a = Analysis(
         ('TAF_logo.ico',            '.'),
         ('TAF_logo.png',            '.'),
         ('TAF_logo_horizontal.png', '.'),
+        ('TAF_logo_header.png',     '.'),       # the logos at screen size
+        ('TAF_logo_login.png',      '.'),
         ('TAF_logo_circular.png',   '.'),
         ('Templates.xlsx',          '.'),
         ('settings.json',           '.'),
         ('fonts',                   'fonts'),   # bundled Public Sans .ttf files
         ('THIRD_PARTY_NOTICES.txt', '.'),       # SumatraPDF GPLv3 notice
-    ] + babel_datas + pdf_helper_datas,
+    ] + pdf_helper_datas,
     hiddenimports=[
         # supabase + deps
         'supabase',
@@ -84,6 +86,7 @@ a = Analysis(
         'taf_order_app.order_service',
         'taf_order_app.models',
         'taf_order_app.validation',
+        'taf_order_app.quiet',
         'taf_order_app.bag_filler',
         'taf_order_app.po_import',
         'taf_order_app.phone_page',
@@ -100,13 +103,6 @@ a = Analysis(
         # Phone-pairing QR code
         'qrcode',
         'qrcode.image.pil',
-        # Calendar picker
-        'tkcalendar',
-        'babel',
-        'babel.numbers',
-        'babel.dates',
-        'babel.core',
-        'babel.localedata',
         # PDF generation
         'reportlab',
         'reportlab.platypus',
@@ -143,7 +139,10 @@ a = Analysis(
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
-    excludes=[],
+    # Never used by the app; left out so the bundle is smaller and starts
+    # faster.
+    excludes=['tkcalendar', 'babel', 'matplotlib', 'pandas', 'IPython',
+              'pytest'],
     noarchive=False,
     optimize=0,
 )
@@ -158,10 +157,11 @@ exe = EXE(
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
-    # UPX is a Windows habit here and it is actively harmful on a Mac: it
-    # rewrites the binaries, which breaks the ad-hoc signature every
-    # arm64 executable must carry, and the app is then killed on launch.
-    upx=WINDOWS,
+    # No UPX anywhere. On a Mac it breaks the signature every arm64 program
+    # must carry; on Windows every compressed DLL is unpacked again at every
+    # launch, and antivirus looks harder at packed files - both slow start-up
+    # for a smaller download nobody needed.
+    upx=False,
     upx_exclude=[],
     console=False,
     disable_windowed_traceback=False,
@@ -177,7 +177,7 @@ coll = COLLECT(
     a.binaries,
     a.datas,
     strip=False,
-    upx=WINDOWS,
+    upx=False,
     upx_exclude=[],
     name='TAFOrderEntry',   # output folder: dist/TAFOrderEntry/
 )

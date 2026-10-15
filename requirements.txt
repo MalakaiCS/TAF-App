@@ -10,8 +10,6 @@ python-docx         # Word template handling
 # so asking for it unconditionally fails the install on a Mac before anything
 # is built. The marker is what lets one requirements file serve both.
 pywin32; sys_platform == "win32"
-tkcalendar          # date picker widgets
-babel               # locale data (tkcalendar dependency)
 Pillow              # type-badge rendering + image handling
 qrcode              # phone-pairing QR code (pure Python, renders via Pillow)
 

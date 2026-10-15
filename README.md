@@ -1102,3 +1102,18 @@ so what CI gates is the measured bar width the decoding established.
   and publishes the release. Requires the repo to be **public** (so the updater
   can read releases without a token) and the `SUPABASE_ANON_KEY` Actions secret.
 - **Fonts:** Public Sans is bundled under the SIL Open Font License.
+- **Start-up and speed:** the window is built in about a tenth of a second.
+  Nothing slow happens before it appears: the database connects in the
+  background while the sign-in screen is drawn, the one-off table check is
+  remembered once it passes, the logos are shipped at screen size, Excel and
+  Word are no longer started at boot, openpyxl and python-docx load on first
+  use, the other tabs are built one at a time after the window is up, and the
+  profile photo loads in the background (cached on disk). The audit log is
+  written by a background thread. Search boxes wait for typing to pause.
+  The build is not UPX-compressed.
+- **No command prompt windows:** every program the app starts on Windows
+  (PowerShell, schtasks, Word) runs hidden - `taf_order_app/quiet.py`.
+- **Threads:** background work hands results back with `.after()` or by
+  setting a Tk variable; either, called from a background thread, is queued
+  and run on the window's thread (`_install_ui_pump`), because Tk on Windows
+  can crash when touched from another thread.

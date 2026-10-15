@@ -101,15 +101,30 @@ def prewarm_word():
     """Call on a background thread at app startup to hide Word's first-launch cost."""
     _ensure_word_app()
 
-try:
-    from docx import Document
-    from docx.shared import Pt, Inches, Cm, RGBColor
-    from docx.enum.text import WD_ALIGN_PARAGRAPH
-    from docx.oxml.ns import qn
-    from docx.oxml import OxmlElement
+# python-docx is loaded the first time a docket is written, not when the app
+# starts: it was a noticeable share of start-up for something used once an
+# order. _docx() puts its names in this module's globals on first use.
+_DOCX_AVAILABLE = None
+
+
+def _docx() -> bool:
+    global _DOCX_AVAILABLE
+    if _DOCX_AVAILABLE is not None:
+        return _DOCX_AVAILABLE
+    try:
+        from docx import Document
+        from docx.shared import Pt, Inches, Cm, RGBColor
+        from docx.enum.text import WD_ALIGN_PARAGRAPH
+        from docx.oxml.ns import qn
+        from docx.oxml import OxmlElement
+    except ImportError:
+        _DOCX_AVAILABLE = False
+        return False
+    globals().update(Document=Document, Pt=Pt, Inches=Inches, Cm=Cm,
+                     RGBColor=RGBColor, WD_ALIGN_PARAGRAPH=WD_ALIGN_PARAGRAPH,
+                     qn=qn, OxmlElement=OxmlElement)
     _DOCX_AVAILABLE = True
-except ImportError:
-    _DOCX_AVAILABLE = False
+    return True
 
 
 # ── Catalogue constants ───────────────────────────────────────────────────────
@@ -410,7 +425,7 @@ def generate_bag_docket(header: dict, items: List[dict], out_path: str,
     item_start / grand_total set the stock-number range within the full order
     (e.g. item_start=3, grand_total=5 → items numbered 3/5, 4/5, 5/5).
     """
-    if not _DOCX_AVAILABLE:
+    if not _docx():
         raise RuntimeError(
             "python-docx is not installed.  "
             "Run:  pip install python-docx")
@@ -1019,7 +1034,7 @@ def generate_unified_docket(header: dict, items: List[dict], out_path: str) -> s
     Saves to out_path, attempts PDF export via PowerShell Word COM,
     opens the result, and returns the opened path.
     """
-    if not _DOCX_AVAILABLE:
+    if not _docx():
         raise RuntimeError(
             "python-docx is not installed.  Run:  pip install python-docx")
 
