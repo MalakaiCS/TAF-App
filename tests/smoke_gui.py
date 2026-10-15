@@ -805,6 +805,66 @@ def _steps(app, gui, root):
     add("order form: the customer is always an account",
         _customer_must_be_an_account)
 
+    def _bad_dates_are_caught_before_printing():
+        """A due date the worksheet would refuse is flagged on the form,
+        before anything prints; a saved order with one opens the fix window
+        and is not printed until it is right."""
+        app._customer_records = [dict(c) for c in CUSTOMERS]
+        try:
+            app.hvars["Customer Name"].set("Bells Creek")
+            app.hvars["Order Number"].set("PO-1")
+            app.hvars["Date Ordered"].set("14/10/26")
+            app.hvars["Location"].set("Local")
+            app.hvars["Date Due"].set("31/09/26")
+            if app._validate_header():
+                raise AssertionError("31/09/26 passed as a due date")
+            said = app._validation_banner_lbl.cget("text")
+            if '"31/09/26" is not a real date' not in said:
+                raise AssertionError(f"banner said {said!r}")
+            app.hvars["Date Due"].set("16/10/26")
+            if not app._validate_header():
+                raise AssertionError("a good date was refused")
+        finally:
+            for k in ("Customer Name", "Order Number", "Date Ordered",
+                      "Location"):
+                app.hvars[k].set("")
+            app.hvars["Date Due"].set("ASAP")
+            app._clear_all_field_errors()
+
+        saved = []
+        gui._db.merge_order_header = lambda oid, patch: saved.append(
+            (oid, patch))
+        row = {"source": "db", "db_id": "o9", "customer": "Bells Creek",
+               "order_no": "PO-9", "db_header": {}}
+        header = {"Customer Name": "Bells Creek", "Order Number": "PO-9",
+                  "Date Ordered": "14/10/26", "Date Due": "31/09/26",
+                  "Location": "Local"}
+        try:
+            def _answer():
+                found = [w for w in root.winfo_children()
+                         if isinstance(w, gui.FixOrderHeaderDialog)]
+                if not found:
+                    root.after(50, _answer)
+                    return
+                dlg = found[0]
+                dlg._save()                        # still wrong: stays open
+                if not dlg.winfo_exists() or "Still to fix" not in \
+                        dlg.err.cget("text"):
+                    raise AssertionError("saved a bad date")
+                dlg.vars["Date Due"].set("16/10/26")
+                dlg._save()
+            root.after(50, _answer)
+            fixed = app._header_ready_to_print(row, dict(header))
+            if not fixed or fixed["Date Due"] != "16/10/26" or \
+                    saved != [("o9", {"Date Due": "16/10/26"})]:
+                raise AssertionError(f"fixed {fixed}, saved {saved}")
+            if app._header_ready_to_print(row, fixed) is not fixed:
+                raise AssertionError("a good order was stopped")
+        finally:
+            del gui._db.merge_order_header
+    add("printing: a bad date is fixed before anything prints",
+        _bad_dates_are_caught_before_printing)
+
     def _bag_header_in_the_dialog():
         """Header on a bag: follows the bag (bag - 15) until edited, then
         keeps its own size; a Custom Bag Filter starts at the size ordered

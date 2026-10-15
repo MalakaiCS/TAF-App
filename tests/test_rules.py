@@ -448,3 +448,23 @@ def test_our_numbers_never_collide_with_a_part_number():
     # Both appear on a worksheet; neither format may be mistaken for the other.
     assert not pn.is_supplied_order_number("FPFG425-020")
     assert pn.canonical_filter_type("TAF-ON-0001") == ""
+
+
+def test_header_problems_name_what_to_fix_before_printing():
+    from taf_order_app.validation import header_problems, validate_header
+    good = {"Customer Name": "A", "Order Number": "1",
+            "Date Ordered": "14/10/26", "Location": "Local",
+            "Date Due": "ASAP"}
+    assert header_problems(good) == []
+    assert header_problems(dict(good, **{"Date Due": ""})) == []
+    bad = dict(good, **{"Date Due": "31/09/26", "Location": ""})
+    assert header_problems(bad) == [
+        ("Location", "Location is empty."),
+        ("Date Due", 'Date Due "31/09/26" is not a real date. Use dd/mm/yy, '
+                     "like 16/10/26, or ASAP.")]
+    try:
+        validate_header(dict(good, **{"Date Ordered": "14/13/26"}))
+    except ValueError as exc:
+        assert '"14/13/26" is not a real date' in str(exc)
+    else:
+        raise AssertionError("a bad Date Ordered passed")

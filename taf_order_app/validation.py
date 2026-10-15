@@ -17,18 +17,38 @@ def parse_date(date_str: str) -> Optional[datetime]:
             continue
     return None
 
-def validate_header(header: dict) -> None:
-    required = ["Customer Name", "Order Number", "Date Ordered", "Location"]
-    for k in required:
-        if not (header.get(k, "") or "").strip():
-            raise ValueError(f"Header field '{k}' is required.")
+# What the worksheet cannot be printed without. Location is on every sheet.
+HEADER_REQUIRED = ("Customer Name", "Order Number", "Date Ordered",
+                   "Location")
+DATE_HINT = "Use dd/mm/yy, like 16/10/26"
 
-    if not parse_date(header.get("Date Ordered", "")):
-        raise ValueError("Date Ordered must be a valid date (dd/mm/yy or dd-mm-yy).")
 
-    due = (header.get("Date Due", "") or "").strip()
+def header_problems(header: dict) -> list:
+    """Everything wrong with an order's header that would stop its
+    worksheets printing, as (field, message) - all of them, in words that
+    say what to change. Empty when it will print.
+
+    Checked before anything is printed, so a bad date is caught before the
+    delivery labels go out without their worksheets."""
+    out = []
+    for k in HEADER_REQUIRED:
+        if not str(header.get(k, "") or "").strip():
+            out.append((k, f"{k} is empty."))
+    ordered = str(header.get("Date Ordered", "") or "").strip()
+    if ordered and not parse_date(ordered):
+        out.append(("Date Ordered", f'Date Ordered "{ordered}" is not a '
+                                    f"real date. {DATE_HINT}."))
+    due = str(header.get("Date Due", "") or "").strip()
     if due and due.lower() != "asap" and not parse_date(due):
-        raise ValueError("Date Due must be a valid date, 'ASAP', or left empty.")
+        out.append(("Date Due", f'Date Due "{due}" is not a real date. '
+                                f"{DATE_HINT}, or ASAP."))
+    return out
+
+
+def validate_header(header: dict) -> None:
+    problems = header_problems(header)
+    if problems:
+        raise ValueError(problems[0][1])
 
 def validate_items(items: Iterable[dict], extra_media_types: list = None,
                    extra_filter_types: list = None) -> None:

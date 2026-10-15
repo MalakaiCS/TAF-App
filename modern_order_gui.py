@@ -22,7 +22,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 from taf_order_app import OrderService
 from taf_order_app.validation import (VALID_FILTER_TYPES, VALID_MEDIA_TYPES,
-                                      parse_date)
+                                      parse_date, header_problems)
 from taf_order_app import db as _db
 from taf_order_app import po_import as _po_import
 from taf_order_app import part_numbers as _pn
@@ -7349,6 +7349,92 @@ def customer_needs_region(cust) -> bool:
     return str(cust.get("region") or "").strip() not in _pn.REGION_NAMES
 
 
+class FixOrderHeaderDialog(tk.Toplevel):
+    """Before printing a saved order: what on it will stop the worksheets
+    printing - a date that is not a date, no Location - with a box to put
+    each right. Nothing is printed until it is, so no delivery labels or
+    half an order go out for a sheet that then fails.
+
+    result = the corrected header, or None when cancelled.
+    """
+
+    def __init__(self, master, header: dict, problems: list, title: str):
+        super().__init__(master)
+        self.title("Fix before printing")
+        self.transient(master)
+        self.grab_set()
+        self.configure(bg=CBG)
+        self.resizable(False, False)
+        self.header = dict(header)
+        self.result = None
+        self.bind("<Escape>", lambda _e: self.destroy())
+
+        top = tk.Frame(self, bg=CRD, padx=px(16), pady=px(10))
+        top.pack(fill="x")
+        tk.Label(top, text="Fix before printing", bg=CRD, fg="white",
+                 font=(FAM, 13, "bold")).pack(anchor="w")
+        tk.Label(top, text=f"{title}\nThe worksheets would be refused, so "
+                           "nothing has been printed yet.",
+                 bg=CRD, fg="white", font=F_SM, justify="left",
+                 wraplength=px(440)).pack(anchor="w")
+
+        foot = tk.Frame(self, bg=CBG, padx=px(18), pady=px(10))
+        foot.pack(fill="x", side="bottom")
+        flat_btn(foot, "Save and print", self._save, bg=CGR,
+                 pady=px(6)).pack(side="right")
+        flat_btn(foot, "Cancel", self.destroy, bg=CNE,
+                 pady=px(6)).pack(side="right", padx=(0, px(8)))
+
+        body = tk.Frame(self, bg=CBG, padx=px(18), pady=px(12))
+        body.pack(fill="both", expand=True)
+        self.vars = {}
+        first = None
+        for r, (key, msg) in enumerate(problems):
+            tk.Label(body, text=msg, bg=CBG, fg=CRD, font=F_SM,
+                     wraplength=px(440), justify="left", anchor="w").grid(
+                row=2 * r, column=0, columnspan=2, sticky="w",
+                pady=(px(6), 0))
+            tk.Label(body, text=key, bg=CBG, fg=CTX, font=F_BODY,
+                     anchor="w").grid(row=2 * r + 1, column=0, sticky="w",
+                                      padx=(0, px(10)))
+            var = tk.StringVar(value=str(header.get(key, "") or ""))
+            self.vars[key] = var
+            if key == "Location":
+                w = ttk.Combobox(body, textvariable=var, state="readonly",
+                                 values=list(_pn.REGION_NAMES), width=18)
+            else:
+                w = field_entry(body, textvariable=var, width=18)
+            w.grid(row=2 * r + 1, column=1, sticky="w", pady=px(2))
+            if first is None:
+                first = w
+        self.err = tk.Label(body, text="", bg=CBG, fg=CRD, font=F_SM,
+                            anchor="w", wraplength=px(440), justify="left")
+        self.err.grid(row=2 * len(problems), column=0, columnspan=2,
+                      sticky="w", pady=(px(8), 0))
+        self.bind("<Return>", lambda _e: self._save())
+        self.update_idletasks()
+        _centre_on_parent(self, master, max(px(500), self.winfo_reqwidth()),
+                          self.winfo_reqheight())
+        if first is not None:
+            self.after(50, first.focus_set)
+
+    def fixed(self) -> dict:
+        out = dict(self.header)
+        for key, var in self.vars.items():
+            out[key] = var.get().strip()
+        return out
+
+    def _save(self):
+        header = self.fixed()
+        left = header_problems(header)
+        if left:
+            self.err.config(text="Still to fix:\n" + "\n".join(
+                m for _k, m in left))
+            return
+        self.result = header
+        self.destroy()
+
+
 class AddAddressDialog(tk.Toplevel):
     """Add Address for "Customer" - the delivery address a customer account
     is missing, asked for on the order form as the customer is chosen, so
@@ -9475,7 +9561,7 @@ class ModernOrderApp(tk.Frame):
                                add="+")
 
         # Clear individual field error as user types + trigger draft save
-        for req_key in REQUIRED:
+        for req_key in list(REQUIRED) + ["Date Due", "Location"]:
             self.hvars[req_key].trace_add(
                 "write", lambda *_, k=req_key: self._clear_field_error(k))
         # Auto-save draft on any header field change
@@ -18968,6 +19054,17 @@ class ModernOrderApp(tk.Frame):
             if not self.hvars[key].get().strip():
                 self._mark_field_error(key)
                 errors.append(f"  ⚠  {msg}")
+        # A date the worksheet will refuse, or no Location: said here,
+        # before anything prints - not after the labels have gone out.
+        flagged = {k for k in self._REQUIRED_FIELDS
+                   if not self.hvars[k].get().strip()}
+        for key, msg in header_problems(
+                {k: v.get() for k, v in self.hvars.items()}):
+            if key in flagged:
+                continue
+            flagged.add(key)
+            self._mark_field_error(key)
+            errors.append(f"  ⚠  {msg}")
         not_account = self._customer_problem()
         if not_account:
             self._mark_field_error("Customer Name")
@@ -18988,8 +19085,9 @@ class ModernOrderApp(tk.Frame):
             except Exception:
                 pass
             # Focus the first bad field
-            for key in self._REQUIRED_FIELDS:
-                if not self.hvars[key].get().strip():
+            for key in list(self._REQUIRED_FIELDS) + ["Date Due",
+                                                      "Location"]:
+                if key in flagged:
                     try:
                         self._hentries[key].focus_set()
                     except Exception:
@@ -19005,11 +19103,19 @@ class ModernOrderApp(tk.Frame):
                 parent=self.master):
             self._offer_new_customer(typed)
 
+    # Checked as well as the required ones: a date that is not a date, and
+    # the Location every worksheet prints.
+    _CHECKED_FIELDS = ("Date Due", "Location")
+
     def _mark_field_error(self, key: str):
         """Highlight an entry and its label in red."""
         e = self._hentries.get(key)
         if e:
-            e.config(bg="#FDECEC", highlightbackground=CRD, highlightthickness=1)
+            try:
+                e.config(bg="#FDECEC", highlightbackground=CRD,
+                         highlightthickness=1)
+            except tk.TclError:
+                pass                  # a dropdown: its label says it
         lbl = self._hfield_labels.get(key)
         if lbl:
             lbl.config(fg=CRD, font=F_BOLD)
@@ -19018,7 +19124,11 @@ class ModernOrderApp(tk.Frame):
         """Remove red highlight from a single field (restore normal field style)."""
         e = self._hentries.get(key)
         if e:
-            e.config(bg=CFD, highlightbackground=CSP, highlightthickness=1)
+            try:
+                e.config(bg=CFD, highlightbackground=CSP,
+                         highlightthickness=1)
+            except tk.TclError:
+                pass
         lbl = self._hfield_labels.get(key)
         if lbl:
             lbl.config(fg=CTX, font=F_BODY)
@@ -19026,16 +19136,20 @@ class ModernOrderApp(tk.Frame):
         all_ok = all(
             self.hvars[k].get().strip()
             for k in self._REQUIRED_FIELDS
-        )
+        ) and not header_problems({k: v.get() for k, v in self.hvars.items()})
         if all_ok and hasattr(self, "_validation_banner"):
             self._validation_banner.pack_forget()
 
     def _clear_all_field_errors(self):
         """Remove all validation highlights."""
-        for key in self._REQUIRED_FIELDS:
+        for key in list(self._REQUIRED_FIELDS) + list(self._CHECKED_FIELDS):
             e = self._hentries.get(key)
             if e:
-                e.config(bg=CFD, highlightbackground=CSP, highlightthickness=1)
+                try:
+                    e.config(bg=CFD, highlightbackground=CSP,
+                             highlightthickness=1)
+                except tk.TclError:
+                    pass
             lbl = self._hfield_labels.get(key)
             if lbl:
                 lbl.config(fg=CTX, font=F_BODY)
@@ -21565,8 +21679,18 @@ class ModernOrderApp(tk.Frame):
                 to_print = [real_pdfs[0]]
             elif pdf_paths:
                 to_print = [p for p in pdf_paths if os.path.exists(p)]
-            if labels_pdf and os.path.exists(labels_pdf):
+            # Labels go out with their worksheets or not at all: labels for
+            # an order whose sheets failed are paper in the bin.
+            sheets_failed = any(str(e).startswith(("Filter worksheets",
+                                                   "Bag docket"))
+                                for e in errors)
+            if labels_pdf and os.path.exists(labels_pdf) and \
+                    not sheets_failed:
                 to_print.append(labels_pdf)
+            elif labels_pdf and sheets_failed:
+                errors.append("The delivery labels were not printed, "
+                              "because the worksheets were not. Print them "
+                              "from View Order once the worksheets are out.")
 
             if errors:
                 messagebox.showerror("Errors", "\n\n".join(errors))
@@ -22401,6 +22525,47 @@ class ModernOrderApp(tk.Frame):
         self._show_tab("new_order")
         self.status_var.set(f"Loaded from database: {row.get('customer', '')} / {row.get('order_no', '')}")
 
+    def _header_ready_to_print(self, row, header):
+        """The order's header, checked before anything is printed. A date
+        the worksheet would refuse, or no Location, is put right here first
+        - and saved to the order - so nothing goes to the printer only for
+        the worksheets to fail. None when it was not fixed."""
+        problems = header_problems(header)
+        if not problems:
+            return header
+        dlg = FixOrderHeaderDialog(
+            self.master, header, problems,
+            f"{row.get('customer', '')}  /  O/N {row.get('order_no', '')}")
+        self.master.wait_window(dlg)
+        if dlg.result is None:
+            self.status_var.set("Not printed - the order still needs fixing.")
+            return None
+        fixed = dlg.result
+        patch = {k: fixed[k] for k in dlg.vars}
+        try:
+            if row.get("source") == "db" and row.get("db_id"):
+                _db.merge_order_header(row["db_id"], patch)
+                if isinstance(row.get("db_header"), dict):
+                    row["db_header"].update(patch)
+            elif row.get("path"):
+                payload = json.loads(Path(row["path"]).read_text(
+                    encoding="utf-8"))
+                payload.setdefault("header", {}).update(patch)
+                Path(row["path"]).write_text(json.dumps(payload, indent=2),
+                                             encoding="utf-8")
+            for k, v in patch.items():
+                key = {"Date Due": "date_due", "Date Ordered": "date_ordered",
+                       "Location": "location"}.get(k)
+                if key:
+                    row[key] = v
+        except Exception as exc:
+            messagebox.showwarning(
+                "Fix before printing",
+                f"Printing with the corrected details, but they could not be "
+                f"saved to the order:\n{exc}\n\nChange them on the order "
+                "too, or this will be asked again next time.")
+        return fixed
+
     def _regen_prev_order(self):
         row = self._get_selected_order()
         if row is None:
@@ -22417,6 +22582,9 @@ class ModernOrderApp(tk.Frame):
             except Exception as exc:
                 messagebox.showerror("Error", f"Could not read order file:\n{exc}")
                 return
+        header = self._header_ready_to_print(row, dict(header))
+        if header is None:
+            return
 
         # Back-compat: tag items without item_kind
         for it in items:
@@ -23200,6 +23368,9 @@ class ModernOrderApp(tk.Frame):
             except Exception as exc:
                 messagebox.showerror("Error", f"Could not read order:\n{exc}")
                 return
+        header = self._header_ready_to_print(row, header)
+        if header is None:
+            return
 
         for it in items:
             if "item_kind" not in it:
