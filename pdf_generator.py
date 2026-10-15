@@ -227,7 +227,8 @@ def _under_notes(c, x, top, w, ctx, calculator, item=None, prefer=""):
                 workshop = _features.workshop()
             except Exception:
                 workshop = None
-            lines = wb.frame_lines(item, prefer, workshop) + \
+            lines = wb.frame_lines(item, prefer, workshop,
+                                   ctx.get("order_method") or "") + \
                 list(ctx.get("channel_lines") or [])
             if lines:
                 _block(c, x, bottom - 4, w, "FILTER CALCULATOR", lines, floor)
@@ -649,9 +650,12 @@ def generate_pdf(header_data, items, output_path, page_start=1, grand_total=None
         ctx = contexts[i] if i < len(contexts) else None
         if ctx is not None and channel_plan is not None:
             try:
+                framed = _oc.framed(item)
                 ctx = dict(ctx, channel_lines=_oc.page_lines(
-                    channel_plan, page_counter)
-                    if _oc.framed(item) else [])
+                    channel_plan, page_counter) if framed else [],
+                    order_method=(channel_plan.get("methods", {}).get(
+                        page_counter) or {}).get("method", "")
+                    if framed else "")
             except Exception:
                 pass
         if ftype == "stepped filter":

@@ -56,3 +56,38 @@ def test_what_is_not_framed_is_left_out():
     assert not oc.framed(dict(_line(1, 500, 500), **{"Use Stock V-form": 1}))
     assert not oc.framed({"item_kind": "bag", "product_type": "3-Peak"})
     assert oc.order_plan([])["depths"] == []
+
+
+def test_methods_are_chosen_for_the_whole_order():
+    """O/N 21692 (Batare): 2 x 525x790 and 2 x 525x815, 50mm. Each page on
+    its own ties U against Sideways U and picked U - 6 lengths, the U caps
+    (788, 813) too long to share. Made Sideways U both, the frames take 2
+    lengths a page and all four 523 caps go on one: 5, as marked up by
+    hand on the printed sheets."""
+    plan = oc.order_plan([_line(1, 525, 790, 2, 50, "V-form"),
+                          _line(2, 525, 815, 2, 50, "V-form")])
+    assert plan["depths"][0]["lengths"] == 5
+    assert {p: m["method"] for p, m in plan["methods"].items()} == \
+        {1: "sideways_u", 2: "sideways_u"}
+    one = [t for t, _bold in oc.page_lines(plan, 1)]
+    assert one[0] == "CHANNEL: 2 lengths of Sideways U 2139"
+    assert one[1] == ("SHARE A LENGTH: cut 2 x cap 523 from one end, then "
+                      "page 2's 2 x cap 523 from the other end")
+    from taf_order_app import worksheet_blocks as wb
+    mark = wb.frame_lines(_line(1, 525, 790, 2, 50, "V-form"), "", None,
+                          "sideways_u")
+    assert mark[0][0].startswith("MARK AS SIDEWAYS U - use the FLIPPED")
+    # A customer's asked-for way is kept, whatever it costs.
+    asked = oc.order_plan([_line(1, 525, 790, 2, 50, "V-form"),
+                           _line(2, 525, 815, 2, 50, "V-form")], prefer="u")
+    assert {m["method"] for m in asked["methods"].values()} == {"u"}
+
+
+def test_a_big_order_is_planned_quickly():
+    import time
+    lines = [_line(i, 300 + 17 * i, 500 + 23 * i, 1 + i % 4)
+             for i in range(1, 21)]
+    start = time.perf_counter()
+    plan = oc.order_plan(lines)
+    assert time.perf_counter() - start < 3.0
+    assert plan["depths"][0]["lengths"] <= plan["depths"][0]["alone"]

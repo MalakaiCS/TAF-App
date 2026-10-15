@@ -188,9 +188,14 @@ MARK_ROWS = {"u": "top row of marks", "sideways_u": "FLIPPED marks",
 
 
 def frame_lines(item: Dict[str, Any], prefer: str = "",
-                workshop: Optional[Dict[str, float]] = None) -> List[Line]:
+                workshop: Optional[Dict[str, float]] = None,
+                order_method: str = "") -> List[Line]:
     """What to mark this filter as: U, Sideways U or G, and the lip when it
-    has to be trimmed to fit one more on a length."""
+    has to be trimmed to fit one more on a length.
+
+    `order_method` is the way chosen for the whole order (order_channel),
+    which wins over what this page would pick on its own - the two can
+    differ when another page's offcuts or caps decide it."""
     try:
         short = float(item.get("Short") or 0)
         long_ = float(item.get("Long") or 0)
@@ -200,7 +205,8 @@ def frame_lines(item: Dict[str, Any], prefer: str = "",
     if short <= 0 or long_ <= 0:
         return []
     try:
-        answer = _cutting.best(short, long_, qty, workshop, None, prefer or "")
+        answer = _cutting.best(short, long_, qty, workshop, None,
+                               order_method or prefer or "")
     except ValueError:
         return []
     if not answer.get("ok"):
@@ -227,7 +233,11 @@ def frame_lines(item: Dict[str, Any], prefer: str = "",
                     f"{won['full']['lip']:g}mm on the full lengths "
                     f"({full} of {qty}) - fits {won['frames_per_stick']} "
                     "a length", True))
-    if answer.get("forced"):
+    if order_method and order_method != prefer:
+        if answer.get("forced"):
+            out.append(("Chosen for the whole order: it saves channel with "
+                        "the other pages (below).", False))
+    elif answer.get("forced"):
         out.append(("The customer asks for this way.", False))
     return out
 
