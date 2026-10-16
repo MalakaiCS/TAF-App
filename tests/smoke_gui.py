@@ -901,6 +901,40 @@ def _steps(app, gui, root):
     add("threads: background work is handed to the window's thread",
         _background_threads_never_touch_the_window)
 
+    def _tidied_up_on_the_window_thread():
+        """A StringVar tidied away on a background thread (Python's memory
+        clean-up runs wherever it runs) is deleted by the window's thread.
+        Deleting it from the background one waited on the window's thread
+        while that waited on the background one: the Windows build froze
+        there, Thread.start() against Variable.__del__."""
+        import threading as _th
+        var = gui.tk.StringVar(master=root, value="x")
+        unset_on = []
+        interp = var._tk
+        real = interp.globalunsetvar
+        name = str(var)
+
+        class _Spy:
+            def __getattr__(self, attr):
+                return getattr(interp, attr)
+
+            def globalunsetvar(self, *a):
+                unset_on.append(_th.current_thread())
+                return real(*a)
+        var._tk = _Spy()
+        t = _th.Thread(target=var.__del__)
+        t.start()
+        t.join(5)
+        if unset_on:
+            raise AssertionError("deleted from the background thread")
+        _settle(0.3)
+        if unset_on != [_th.main_thread()]:
+            raise AssertionError(f"deleted on {unset_on}")
+        if root.getboolean(root.tk.call("info", "exists", name)):
+            raise AssertionError("the Tcl variable is still there")
+    add("threads: Tk objects are tidied on the window's thread",
+        _tidied_up_on_the_window_thread)
+
     def _deleting_an_order():
         """Delete from Previous Orders: the order leaves the list at once,
         without the list being emptied and reloaded, and nothing errors."""

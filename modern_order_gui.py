@@ -1051,6 +1051,31 @@ tk.Misc.after_idle = _after_idle_any_thread
 tk.Variable.set = _var_set_any_thread
 
 
+# Python tidies away a StringVar, a PhotoImage or a Font when nothing uses
+# it any more, and that tidying asks Tk to delete its half. It happens on
+# whichever thread Python's memory clean-up runs on - often a background
+# thread just starting up. The background thread then waits for the window's
+# thread to do the deleting, while the window's thread is waiting for that
+# background thread to finish starting: neither ever moves again. (The
+# build machine caught it: Thread.start() on one side, Variable.__del__ on
+# the other.) So off the window's thread the deleting is queued for it.
+import tkinter.font as _tkfont
+
+
+def _deleted_on_the_window_thread(original):
+    def __del__(self):
+        if _off_main_thread():
+            _UI_CALLS.put(lambda: original(self))
+            return
+        original(self)
+    return __del__
+
+
+for _cls in (tk.Variable, tk.Image, _tkfont.Font):
+    if "__del__" in vars(_cls):
+        _cls.__del__ = _deleted_on_the_window_thread(vars(_cls)["__del__"])
+
+
 def _install_ui_pump(root) -> None:
     """Run what background threads queued, on the window's thread. Once per
     Tk root; it stops by itself when the root is destroyed."""
