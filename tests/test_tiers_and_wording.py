@@ -275,3 +275,33 @@ def test_xero_finds_a_customers_contact_only_when_one_name_matches():
     assert xero.best_contact(contacts, ["Bells"]) is None
     assert xero.best_contact(contacts + [{"id": "3", "name": "bells pty ltd"}],
                              ["Bells Pty Ltd"]) is None
+
+
+# ── The packing slip ─────────────────────────────────────────────────────────
+
+def test_the_packing_slip_is_the_invoice_without_prices_or_delivery():
+    from taf_order_app import packing_slip
+    built = xero.draft_from(
+        {"Customer Name": "BATARE", "Order Number": "PO-4471",
+         "Date Ordered": "16/10/26", "Delivery Fee": "25"},
+        [_vform(**{"Unit Price": 30.0, "Price Source": "manual"})], {}, {}, {})
+    slip = packing_slip.slip_from(
+        built["invoice"], "INV-0042",
+        {"legal_name": "Batare Pty Ltd", "delivery_address1": "9 New Road",
+         "delivery_city": "Logan", "delivery_state": "QLD",
+         "delivery_postcode": "4114"},
+        {"Customer Name": "BATARE"})
+    assert slip["invoice_number"] == "INV-0042" and slip["reference"] == "PO-4471"
+    assert slip["deliver_to"] == ["Batare Pty Ltd", "9 New Road", "Logan QLD 4114"]
+    assert [l["code"] for l in slip["lines"]] == ["PPFG445-030"]   # no DELIVERY
+    assert slip["lines"][0]["quantity"] == 4
+    assert slip["lines"][0]["description"].startswith("Galvanised Pleated")
+    assert "unit_amount" not in slip["lines"][0]
+
+
+def test_a_pick_up_gets_a_collection_slip_and_the_rest_a_delivery_slip():
+    from taf_order_app import dockets
+    assert dockets.handover([{"location": "Pick Up"}]) == dockets.COLLECTED
+    assert dockets.handover([{"location": "Logan"}]) == dockets.DELIVERED
+    assert dockets.handover([{"db_header": {"Location": "Pick Up"}}]) == \
+        dockets.COLLECTED
