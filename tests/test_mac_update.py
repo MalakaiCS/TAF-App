@@ -13,6 +13,11 @@ sys.path.insert(0, str(ROOT))
 
 from taf_order_app import updater as u                       # noqa: E402
 
+# The swap script is a Mac shell script and the paths are Mac paths: these
+# run on a Mac or Linux, and are skipped on the Windows build machine, where
+# there is no bash to run it with and "/Applications" is not a path.
+POSIX = sys.platform != "win32"
+
 # Stand-ins for the Mac-only tools, so the script runs on any build machine.
 STANDINS = (("/usr/bin/ditto", "cp -R"), ("/usr/bin/xattr", "true"),
             ("/usr/bin/hdiutil", "true"), ("/usr/bin/open", "echo OPENED"),
@@ -41,6 +46,8 @@ def _version(sp):
 
 
 def test_the_script_is_valid_shell_even_with_quotes_in_a_path():
+    if not POSIX:
+        return
     script = u.mac_swap_script(Path("/Applications/Kai's TAF.app"),
                                Path("/Applications/TAF Order Entry.app"),
                                Path("/tmp/v"), Path("/tmp/x.dmg"), 1,
@@ -51,6 +58,8 @@ def test_the_script_is_valid_shell_even_with_quotes_in_a_path():
 
 
 def test_the_new_version_replaces_the_old_and_reopens():
+    if not POSIX:
+        return
     sp = _sandbox()
     out = subprocess.run(["bash", str(sp / "s.sh")], timeout=30)
     assert out.returncode == 0 and _version(sp) == "new"
@@ -62,6 +71,8 @@ def test_the_new_version_replaces_the_old_and_reopens():
 
 
 def test_a_failed_copy_leaves_the_old_version_working():
+    if not POSIX:
+        return
     sp = _sandbox(ditto="false")
     out = subprocess.run(["bash", str(sp / "s.sh")], timeout=30)
     assert out.returncode == 1 and _version(sp) == "old"
@@ -72,6 +83,8 @@ def test_a_failed_copy_leaves_the_old_version_working():
 
 
 def test_it_waits_for_the_app_to_quit_first():
+    if not POSIX:
+        return
     import threading
     app = subprocess.Popen(["sleep", "2"])
     # Reaped as soon as it ends, as macOS does for a quitting app; an
@@ -84,6 +97,8 @@ def test_it_waits_for_the_app_to_quit_first():
 
 
 def test_where_the_new_version_goes():
+    if not POSIX:
+        return
     exe = "/Applications/TAF Order Entry.app/Contents/MacOS/TAFOrderEntry"
     bundle = u.current_bundle(exe)
     assert bundle == Path("/Applications/TAF Order Entry.app")
