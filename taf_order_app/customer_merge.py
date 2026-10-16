@@ -304,6 +304,31 @@ def undo(merge_id: str) -> Dict[str, Any]:
     return dict(data or {})
 
 
+def sync_order_names(customer_id: str) -> Optional[int]:
+    """Put an account's name on all its past orders and quotes - and on
+    those of every account merged into it (step 36). The number of orders
+    changed, or None when step 36 has not been run yet."""
+    from . import db as _db
+    try:
+        resp = _db.get_client().rpc("sync_customer_order_names",
+                                    {"p_id": customer_id}).execute()
+    except Exception as exc:
+        if "sync_customer_order_names" in str(exc):
+            return None
+        raise
+    data = resp.data
+    if isinstance(data, list):
+        data = data[0] if data else 0
+    try:
+        return int(data or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+STEP_36 = ("Run migrate_merge_names.sql (step 36) in Supabase so past "
+           "orders show the new name.")
+
+
 def recent_merges(limit: int = 20) -> List[Dict[str, Any]]:
     from . import db as _db
     resp = (_db.get_client().table("customer_merges")

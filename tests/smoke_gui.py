@@ -929,6 +929,38 @@ def _steps(app, gui, root):
         _settle(0.5)
     add("previous orders: deleting an order", _deleting_an_order)
 
+    def _customer_name_onto_orders():
+        """Customers > Customer > Put this name on their past orders: asks,
+        runs step 36's function for that account, and Previous Orders is
+        shown fresh."""
+        calls = []
+        was = gui._merge.sync_order_names
+        gui._merge.sync_order_names = lambda cid: calls.append(cid) or 4
+        was_ask = gui.messagebox.askyesno
+        gui.messagebox.askyesno = lambda *a, **k: True
+        refreshed = []
+        app._refresh_orders_list = lambda: refreshed.append(1)
+        try:
+            app._sync_customer_order_names(dict(CUSTOMERS[0]), ask=True)
+            deadline = time.monotonic() + 3
+            while time.monotonic() < deadline and not refreshed:
+                root.update()
+                time.sleep(0.02)
+            said = app.status_var.get()
+        finally:
+            gui._merge.sync_order_names = was
+            gui.messagebox.askyesno = was_ask
+            del app._refresh_orders_list       # the real one again
+            app._refresh_orders_list()         # and the stand-in orders back
+            _settle(0.6)
+            app._tab_loaded["prev_orders"] = time.monotonic()
+        if calls != ["c1"] or not refreshed:
+            raise AssertionError(f"synced {calls}, refreshed {refreshed}")
+        if "4 more past orders" not in said:
+            raise AssertionError(said)
+    add("customers: their new name onto past orders",
+        _customer_name_onto_orders)
+
     def _bag_header_in_the_dialog():
         """Header on a bag: follows the bag (bag - 15) until edited, then
         keeps its own size; a Custom Bag Filter starts at the size ordered

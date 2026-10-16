@@ -96,6 +96,12 @@ log, stock management and a customer database.
   (Settings → Weights, packing and delivery labels) or for one customer
   (Customers → Customer ▾ → Turn delivery labels off, or the tick in their
   account); labels asked for from View Order still print. Needs step 35.
+- **Merged or renamed customers on past orders** — after a merge, every
+  past order and quote of the account and of the accounts merged into it
+  shows the name it kept: in Previous Orders and inside the order, which
+  View Order and reprints read. Renaming a customer offers the same, and
+  Customers → Customer ▾ → Put this name on their past orders does it any
+  time. Needs step 36, which also puts right merges already made.
 - **Bag filters get no delivery labels** — how a bag is wrapped is not known
   until it is. On an order with panels too, the panels keep their numbers
   (the panel on line 3 of 3 is still 3/3).
@@ -389,6 +395,7 @@ just run it — nothing is lost and nothing is duplicated.
 | 33 | `migrate_packing_and_merge.sql` | Weights, packing, delivery labels and merging customers (needs step 16 first) | recommended |
 | 34 | `migrate_c_channel.sql` | C-channel weights: material, centre widths and measured weights saved with the other settings (needs step 33) | recommended |
 | 35 | `migrate_label_switches.sql` | Switching delivery labels off for a customer, or for everyone (needs step 33) | recommended |
+| 36 | `migrate_merge_names.sql` | A merged (or renamed) account's name follows onto its past orders and quotes - and fixes merges already made (needs step 33) | recommended |
 
 **Step 16 is the one that matters most.** Every policy in the older scripts is
 `TO authenticated USING (true)` — meaning *anyone Supabase counts as signed

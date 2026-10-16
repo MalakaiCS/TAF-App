@@ -8506,8 +8506,18 @@ class MergeCustomersDialog(tk.Toplevel):
                            f" | Merge {merge_id}")
         except Exception:
             pass
-        messagebox.showinfo("Merged", "Done. It can be undone from "
-                            "\"Undo a merge…\" if it was wrong.", parent=self)
+        # The account's name onto every past order and quote of it - in the
+        # list and inside the order, which View Order and reprints read.
+        try:
+            n = _merge.sync_order_names(survivor)
+            names = (_merge.STEP_36 if n is None else
+                     f"{n} past order{'s' if n != 1 else ''} now show "
+                     f"\"{chosen['name']}\".")
+        except Exception as exc:
+            names = f"Their past orders still show the old names: {exc}"
+        messagebox.showinfo("Merged", "Done. " + names + "\n\nIt can be "
+                            "undone from \"Undo a merge…\" if it was wrong.",
+                            parent=self)
         self.request_id = _merge.new_request_id()
         if self.on_done:
             self.on_done()
@@ -8538,6 +8548,15 @@ class MergeCustomersDialog(tk.Toplevel):
             messagebox.showerror("Undo", f"Not undone:\n{exc}", parent=self)
             return
         skipped = out.get("skipped") or []
+        # Each account back on its own orders, under its own name.
+        undone = merges[pick - 1]
+        for cid in [undone.get("survivor_id")] + list(
+                undone.get("merged_ids") or []):
+            if cid:
+                try:
+                    _merge.sync_order_names(cid)
+                except Exception:
+                    pass
         messagebox.showinfo("Undo", "Undone." + (
             f"\n\n{len(skipped)} record(s) had been changed since the merge "
             "and were left as they are now." if skipped else ""), parent=self)
@@ -13016,9 +13035,54 @@ class ModernOrderApp(tk.Frame):
     # ── Customers tab ─────────────────────────────────────────────────────
 
     def _merge_customers(self):
-        dlg = MergeCustomersDialog(self.master,
-                                   on_done=self._refresh_customers_list)
+        def _done():
+            self._refresh_customers_list()
+            self._orders_changed_elsewhere()
+        dlg = MergeCustomersDialog(self.master, on_done=_done)
         self.master.wait_window(dlg)
+
+    def _orders_changed_elsewhere(self) -> None:
+        """Orders were changed in the database by something other than
+        this screen (a merge, a rename): show them fresh, not as cached."""
+        self._all_orders_data = []
+        for tab in ("prev_orders", "dashboard", "delivery"):
+            self._tab_loaded.pop(tab, None)
+        if "prev_orders" in getattr(self, "_tab_frames", {}):
+            try:
+                self._refresh_orders_list()
+            except Exception:
+                pass
+
+    def _sync_customer_order_names(self, cust=None, ask=False) -> None:
+        """Put the customer's current name on all their past orders."""
+        cust = cust or self._get_selected_customer()
+        if not cust or not cust.get("id"):
+            messagebox.showinfo("Name on their orders",
+                                "Select a customer first.")
+            return
+        name = (cust.get("short_name") or "").strip() or cust.get("name", "")
+        if ask and not messagebox.askyesno(
+                "Name on their orders",
+                f"Show \"{name}\" on all of this customer's past orders and "
+                "quotes - in Previous Orders, View Order and reprints?"):
+            return
+        self.status_var.set("Updating the name on their orders…")
+
+        def _work():
+            try:
+                n = _merge.sync_order_names(cust["id"])
+                msg = (_merge.STEP_36 if n is None else
+                       f"\"{name}\" is now on {n} more past order"
+                       f"{'s' if n != 1 else ''}." if n else
+                       f"Their past orders already show \"{name}\".")
+            except Exception as exc:
+                msg = f"Could not update their orders: {exc}"
+
+            def _done():
+                self.status_var.set(msg)
+                self._orders_changed_elsewhere()
+            self.master.after(0, _done)
+        threading.Thread(target=_work, daemon=True).start()
 
     def _build_customers_tab(self):
         frm = tk.Frame(self.content, bg=CBG, padx=14, pady=12)
@@ -13119,6 +13183,8 @@ class ModernOrderApp(tk.Frame):
                 ("Their portal link…",    self._customer_portal_link),
                 (("Turn delivery labels off" if on else
                   "Turn delivery labels on"), self._toggle_customer_labels),
+                ("Put this name on their past orders…",
+                 lambda: self._sync_customer_order_names(ask=True)),
                 None,
                 ("Delete this customer…", self._delete_customer),
             ]
@@ -13661,6 +13727,14 @@ class ModernOrderApp(tk.Frame):
                     _db.update_customer(cust["id"], data)
                     saved  = {**cust, **data}
                     action = "customer_updated"
+                    # Renamed: offer to carry the new name onto their orders.
+                    def _shown(c):
+                        return ((c.get("short_name") or "").strip()
+                                or (c.get("name") or "").strip())
+                    if _shown(cust) != _shown(saved):
+                        self.master.after(300, lambda c=saved:
+                                          self._sync_customer_order_names(
+                                              c, ask=True))
                 _db.log_action(action, f"Customer: {name}  ABN: {v_abn.get().strip()}")
                 self.status_var.set(f"{'Created' if is_new else 'Updated'}: {name}")
                 if "delivery_labels" not in data and not v_labels.get():

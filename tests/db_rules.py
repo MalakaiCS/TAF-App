@@ -708,6 +708,69 @@ def run_merge_checks(pg: Postgres) -> None:
     check("records under a name two live accounts share are not moved",
           ok and rows["B-1"] == "Complete Air Supply Tweed/-", rows["B-1"])
 
+    print("\n── the name on their orders (step 36) ──")
+    q(pg, "INSERT INTO orders (id, user_id, customer_name, order_number, "
+          "header, items) VALUES (gen_random_uuid(), '" + DAVE + "', "
+          "'CAS TWEED HEADS', 'A-9', '{\"Customer Name\": \"CAS TWEED "
+          "HEADS\"}', '[]');")
+
+    def names():
+        return dict(r.split("=", 1) for r in q(pg,
+            "SELECT string_agg(order_number || '=' || customer_name || '|' "
+            "|| (header ->> 'Customer Name') || '|' || "
+            "COALESCE(customer_id::text, '-'), ',' ORDER BY order_number) "
+            "FROM orders;").split(","))
+    before = names()
+    ok, _o, err = as_in(pg, "f", DAVE,
+                        f"SELECT sync_customer_order_names('{A}');")
+    check("somebody on the floor cannot rename past orders",
+          not ok and "Only a manager" in err, err)
+    ok, _o, err = as_in(pg, "f", SARAH,
+                        f"SELECT _sync_customer_order_names('{A}');")
+    check("nor can anyone call the unchecked version", not ok, err)
+    ok, n, err = as_in(pg, "f", SARAH,
+                       f"SELECT sync_customer_order_names('{B}');")
+    now = names()
+    want = f"CAS Tweed|CAS Tweed|{A}"
+    check("given an account merged away, it follows to the one that stayed",
+          ok and int(n or 0) >= 3, n or err)
+    check("the account's orders take its name - in the list and inside the "
+          "order, which reprints read",
+          all(now[o] == want for o in ("A-1", "A-2", "A-3")), str(now))
+    check("an unlinked order under purchase-order wording it is known by "
+          "is linked and renamed", now["A-9"] == want, now["A-9"])
+    check("a name another live account uses, another branch and another "
+          "company are left alone",
+          now["B-1"] == before["B-1"] and now["B-2"] == before["B-2"] and
+          now["D-1"] == before["D-1"] and
+          now["C-1"] == before["C-1"] and now["E-1"] == before["E-1"],
+          str(now))
+    ok, n, err = as_in(pg, "f", SARAH,
+                       f"SELECT sync_customer_order_names('{A}');")
+    check("run again, there is nothing left to change", ok and n == "0",
+          n or err)
+    q(pg, f"UPDATE customers SET short_name = 'CAS - Tweed' WHERE id = '{A}';")
+    ok, n, err = as_in(pg, "f", SARAH,
+                       f"SELECT sync_customer_order_names('{A}');")
+    check("after a rename, its orders follow",
+          ok and names()["A-2"] == f"CAS - Tweed|CAS - Tweed|{A}",
+          names()["A-2"])
+    ok, _o, err = pg.psql((ROOT / "migrate_merge_names.sql").read_text(
+        encoding="utf-8"), "f")
+    check("step 36 runs again over merges already made, changing nothing "
+          "already right", ok and names() == dict(names()), err)
+    # An order an earlier merge moved to the account by id but whose name
+    # was never changed - the case this step is for.
+    q(pg, f"UPDATE orders SET customer_id = '{B}', customer_name = "
+          f"'Complete Air Supply Tweed', header = header || "
+          f"'{{\"Customer Name\": \"Complete Air Supply Tweed\"}}' "
+          f"WHERE order_number = 'A-3';")
+    ok, _o, err = pg.psql((ROOT / "migrate_merge_names.sql").read_text(
+        encoding="utf-8"), "f")
+    check("and puts right an old merge's order still showing the old name",
+          ok and names()["A-3"] == f"CAS - Tweed|CAS - Tweed|{A}",
+          names()["A-3"] + err)
+
 
 def _skip(why: str) -> int:
     """Skipping is fine on a laptop. In CI it is not: a workflow that goes

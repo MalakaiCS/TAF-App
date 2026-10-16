@@ -142,7 +142,10 @@ WITH checks(step, file, purpose, needed, present) AS (VALUES
   (35, 'migrate_label_switches.sql', 'Switching delivery labels off, for a customer or for everyone', 'recommended',
       EXISTS (SELECT 1 FROM information_schema.columns
                WHERE table_schema='public' AND table_name='customers'
-                 AND column_name='delivery_labels'))
+                 AND column_name='delivery_labels')),
+
+  (36, 'migrate_merge_names.sql', 'An account''s name follows onto its orders after a merge or rename', 'recommended',
+      to_regprocedure('public.sync_customer_order_names(uuid)') IS NOT NULL)
 )
 SELECT step,
        CASE WHEN present THEN 'already done' ELSE 'RUN THIS' END AS status,
