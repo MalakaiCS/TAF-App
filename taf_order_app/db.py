@@ -1437,6 +1437,21 @@ def customers_have_label_switch() -> bool:
     return _LABEL_SWITCH["ok"]
 
 
+_PRICE_TIERS: dict = {}
+
+
+def price_tiers_ready() -> bool:
+    """Whether migrate_price_tiers.sql (step 38) has been run. Asked once."""
+    if "ok" not in _PRICE_TIERS:
+        try:
+            get_client().table("customers").select("price_tier") \
+                .limit(1).execute()
+            _PRICE_TIERS["ok"] = True
+        except Exception:
+            _PRICE_TIERS["ok"] = False
+    return _PRICE_TIERS["ok"]
+
+
 def customer_wants_labels(customer: "dict | None") -> bool:
     """On unless the customer's account says off. No account, no column:
     on, as it always was."""
@@ -2068,17 +2083,11 @@ def count_prices() -> int:
         return 0
 
 
-def get_price_list() -> dict:
-    """Part number → unit price."""
-    out = {}
-    for row in get_price_rows():
-        part = (row.get("part_number") or "").strip().upper()
-        if part:
-            try:
-                out[part] = float(row.get("unit_price") or 0)
-            except (TypeError, ValueError):
-                continue
-    return out
+def get_price_list(tier: int = 1) -> dict:
+    """Part number → unit price, for a price tier (Tier 1 where a tier has
+    none)."""
+    from . import pricing as _pricing
+    return _pricing.prices_for_tier(get_price_rows(), tier)
 
 
 def get_cost_list() -> dict:
@@ -2127,6 +2136,13 @@ def upsert_prices(rows: list) -> int:
         # no cost column can never wipe costs somebody has already entered.
         if row.get("unit_cost") not in (None, "", 0, 0.0):
             entry["unit_cost"] = round(float(row["unit_cost"]), 4)
+        # Tier 2 and 3 likewise: only when the file or form has them. None
+        # (sent by the product form for a box left blank) clears one back to
+        # "the Tier 1 price".
+        for col in ("unit_price_2", "unit_price_3"):
+            if col in row and row[col] != "":
+                entry[col] = (None if row[col] is None
+                              else round(float(row[col]), 4))
         payload.append(entry)
     saved = 0
     for i in range(0, len(payload), 500):
@@ -2135,23 +2151,30 @@ def upsert_prices(rows: list) -> int:
             get_client().table("price_list").upsert(
                 chunk, on_conflict="part_number").execute()
         except Exception as exc:
-            if "unit_cost" not in str(exc):
+            missing = [col for col in ("unit_cost", "unit_price_2",
+                                       "unit_price_3") if col in str(exc)]
+            if not missing:
                 raise
-            # migrate_margin.sql not run yet — save the prices, which is what
-            # the app did before, rather than refusing the whole import.
+            # migrate_margin.sql (cost) or migrate_price_tiers.sql (tiers)
+            # not run yet — save the prices, which is what the app did
+            # before, rather than refusing the whole import.
+            drop = {"unit_cost", "unit_price_2", "unit_price_3"}
             get_client().table("price_list").upsert(
-                [{k: v for k, v in c.items() if k != "unit_cost"}
+                [{k: v for k, v in c.items() if k not in drop}
                  for c in chunk], on_conflict="part_number").execute()
         saved += len(chunk)
     return saved
 
 
 def set_price(part_number: str, unit_price: float, name: str = "",
-              description: str = "", unit_cost: float = 0.0) -> None:
-    """Add or correct one priced part number."""
+              description: str = "", unit_cost: float = 0.0,
+              tier_prices: "dict | None" = None) -> None:
+    """Add or correct one priced part number. `tier_prices` is
+    {"unit_price_2": x or None, "unit_price_3": ...} - None is "same as
+    Tier 1"."""
     upsert_prices([{"part_number": part_number, "unit_price": unit_price,
                     "name": name, "description": description,
-                    "unit_cost": unit_cost}])
+                    "unit_cost": unit_cost, **(tier_prices or {})}])
 
 
 def delete_price(part_number: str) -> None:
@@ -2174,7 +2197,9 @@ def get_price_rate_rows() -> list:
 
 
 def set_price_rate(filter_type: str, media_type: str, rate: float,
-                   cost: float = 0.0) -> None:
+                   cost: float = 0.0, rate_2=None, rate_3=None) -> None:
+    """One rate per m2. `rate_2` / `rate_3` are Tier 2 and 3; None is "same
+    as Tier 1"."""
     import datetime as _dt
     row = {
         "filter_type":     (filter_type or "").strip(),
@@ -2183,7 +2208,18 @@ def set_price_rate(filter_type: str, media_type: str, rate: float,
         "updated_by_name": current_username(),
         "updated_at":      _dt.datetime.utcnow().isoformat(),
     }
+    tiers = {"rate_per_sqm_2": None if rate_2 in (None, "") else round(float(rate_2), 4),
+             "rate_per_sqm_3": None if rate_3 in (None, "") else round(float(rate_3), 4)}
     try:
+        get_client().table("price_rates").upsert(
+            {**row, "cost_per_sqm": round(float(cost or 0), 4), **tiers},
+            on_conflict="filter_type,media_type").execute()
+        return
+    except Exception as exc:
+        if "rate_per_sqm_" not in str(exc) and "cost_per_sqm" not in str(exc):
+            raise
+    try:
+        # migrate_price_tiers.sql not run yet: the rate and its cost.
         get_client().table("price_rates").upsert(
             {**row, "cost_per_sqm": round(float(cost or 0), 4)},
             on_conflict="filter_type,media_type").execute()

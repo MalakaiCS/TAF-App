@@ -408,7 +408,7 @@ def _sync(patch, rows, due=0, on=True):
         sent.append((oid, built, md5)) or {"state": "draft"}))
     patch.set(_xero, "sweep", lambda: (
         swept.append(1) or {"done": due, "problems": []}))
-    sync = _xero.Sync(prices=lambda: (PRICES, {}),
+    sync = _xero.Sync(prices=lambda customer: (PRICES, {}),
                       customer=lambda name: {"legal_name": name + " Pty Ltd"},
                       prepare=lambda items: [dict(i, prepared=True)
                                              for i in items],
@@ -449,7 +449,7 @@ def test_switched_off_the_sync_does_nothing():
 
 def test_saving_or_changing_an_order_wakes_the_sync():
     from taf_order_app import db, xero as _xero
-    sync = _xero.Sync(prices=lambda: ({}, {}), customer=lambda n: {})
+    sync = _xero.Sync(prices=lambda c: ({}, {}), customer=lambda n: {})
     db.ORDER_LISTENERS.append(sync.nudge)
     try:
         db._order_changed()

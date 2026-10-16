@@ -2,12 +2,18 @@
 -- Step 37: Xero, linked for good
 --
 -- One Xero connection for the whole company, made once by a manager and used
--- by every staff account from then on:
+-- by every staff account from then on. It runs one of two ways:
 --
---   * every order becomes a DRAFT invoice in Xero, dated the day on the work
---     order, and is kept up to date while it is still a draft;
---   * when the job is marked Complete (or Dispatched) the invoice is dated
---     that day, approved, and emailed to the contact on file in Xero.
+--   TRIAL (mode 'manual', where it starts) - nothing goes to Xero by itself.
+--     On an order, "Send to Xero & invoice customer" makes the invoice,
+--     approves it, has Xero email it to the contact on file, and marks the
+--     order Complete; "Send draft to Xero" makes the draft only.
+--
+--   AUTOMATIC (mode 'automatic', switched on by a manager after the trial) -
+--     every order from then on becomes a DRAFT invoice in Xero, dated the day
+--     on the work order, kept up to date while it is a draft; when the job is
+--     marked Complete (or Dispatched) the invoice is dated that day, approved,
+--     and emailed to the contact on file in Xero.
 --
 -- What this file adds:
 --
@@ -47,9 +53,10 @@ CREATE TABLE IF NOT EXISTS public.xero_connection (
   state_at         timestamptz,
   connected_by     uuid,
   connected_at     timestamptz,
-  -- Orders raised from this moment on go to Xero. Kept across a connection
-  -- that drops, so the orders taken while it was down still go once it is
-  -- back; cleared by a deliberate Disconnect.
+  -- Automatic mode: orders raised from this moment on go to Xero by
+  -- themselves. Kept across a connection that drops, so the orders taken
+  -- while it was down still go once it is back; cleared by a deliberate
+  -- Disconnect.
   drafts_from      timestamptz,
   refreshed_at     timestamptz,
   -- Xero's refresh tokens work once. Two requests renewing at the same time
@@ -58,6 +65,11 @@ CREATE TABLE IF NOT EXISTS public.xero_connection (
   problem          text,
   updated_at       timestamptz NOT NULL DEFAULT now()
 );
+
+-- Trial ('manual') until a manager publishes it ('automatic').
+ALTER TABLE public.xero_connection
+  ADD COLUMN IF NOT EXISTS mode text NOT NULL DEFAULT 'manual'
+  CHECK (mode IN ('manual', 'automatic'));
 
 ALTER TABLE public.xero_connection ENABLE ROW LEVEL SECURITY;
 -- No policies, and no grants: not readable or writable by any app sign-in.
@@ -197,6 +209,7 @@ SET search_path = public, pg_temp
 AS $$
 DECLARE
   v_from     timestamptz;
+  v_mode     text;
   v_done_new boolean;
   v_done_old boolean := false;
 BEGIN
@@ -209,9 +222,17 @@ BEGIN
       RETURN OLD;
     END IF;
 
-    SELECT drafts_from INTO v_from
+    -- In the trial nothing goes by itself: the button on the order does it.
+    SELECT drafts_from, mode INTO v_from, v_mode
       FROM public.xero_connection WHERE id = 1;
-    IF v_from IS NULL OR NEW.created_at < v_from THEN
+    IF COALESCE(v_mode, 'manual') <> 'automatic' THEN
+      RETURN NEW;
+    END IF;
+    -- Orders from since it went automatic, and any order already sent to
+    -- Xero by hand during the trial.
+    IF NOT ((v_from IS NOT NULL AND NEW.created_at >= v_from)
+            OR EXISTS (SELECT 1 FROM public.xero_invoices
+                        WHERE order_id = NEW.id)) THEN
       RETURN NEW;
     END IF;
 
@@ -282,7 +303,7 @@ BEGIN
          x.lines_hash, public._xero_source_md5(o), x.state
     FROM public.orders o
     JOIN public.xero_connection c
-      ON c.id = 1 AND c.refresh_token IS NOT NULL
+      ON c.id = 1 AND c.refresh_token IS NOT NULL AND c.mode = 'automatic'
      AND c.drafts_from IS NOT NULL AND o.created_at >= c.drafts_from
     LEFT JOIN public.xero_invoices x ON x.order_id = o.id
    WHERE (x.claimed_until IS NULL OR x.claimed_until < now())
@@ -356,11 +377,11 @@ BEGIN
   UPDATE public.xero_connection c
      SET (access_token, refresh_token, expires_at, tenant_id, tenant_name,
           state, state_by, state_at, connected_by, connected_at, drafts_from,
-          refreshed_at, refreshing_until, problem)
+          refreshed_at, refreshing_until, problem, mode)
        = (SELECT r.access_token, r.refresh_token, r.expires_at, r.tenant_id,
                  r.tenant_name, r.state, r.state_by, r.state_at,
                  r.connected_by, r.connected_at, r.drafts_from,
-                 r.refreshed_at, r.refreshing_until, r.problem
+                 r.refreshed_at, r.refreshing_until, r.problem, r.mode
             FROM jsonb_populate_record(c, p_patch - 'id') r),
          updated_at = now()
    WHERE c.id = 1;
@@ -503,7 +524,7 @@ BEGIN
 END $$;
 
 
--- ── Optional: without any PC switched on ────────────────────────────────────
+-- ── Optional, once automatic: without any PC switched on ────────────────────
 -- The app sends approvals the moment a job is completed, and every few
 -- minutes after that from any PC that is open. To have completed jobs
 -- invoiced even when no PC is on, have the database ask every 10 minutes

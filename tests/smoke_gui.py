@@ -1686,6 +1686,146 @@ def _steps(app, gui, root):
             _x.status, _x.invoices, _x.owing = saved
     add("dialogs: the Xero screen lists every order's invoice", _xero_screen)
 
+    def _line_price_section():
+        """A price typed on a line is kept as set by hand; left empty, the
+        line waits for the customer's tier price."""
+        for typed, want in (("27.5", (27.5, "manual")), ("", (None, None))):
+            dlg = gui.LineItemDialog(root, title="Price",
+                                     initial={"Quantity": 2, "Short": 595,
+                                              "Long": 595, "Channel": 45})
+            dlg._price.var.set(typed)
+            dlg._price.txt.insert("1.0", "Special wording")
+            dlg._save()
+            got = dlg.result or {}
+            assert (got.get("Unit Price"), got.get("Price Source")) == want, got
+            assert got.get("Xero Description") == "Special wording", got
+        # Not a number: refused, the dialog stays open.
+        said = []
+        was = gui.messagebox.showerror
+        gui.messagebox.showerror = lambda *a, **k: said.append(a)
+        try:
+            dlg = gui.LineItemDialog(root, title="Price",
+                                     initial={"Quantity": 2, "Short": 595,
+                                              "Long": 595, "Channel": 45})
+            dlg._price.var.set("lots")
+            dlg._save()
+            assert dlg.result is None and said, said
+            dlg.destroy()
+        finally:
+            gui.messagebox.showerror = was
+    add("dialogs: a line's price and Xero description", _line_price_section)
+
+    def _order_prices():
+        """The work order shows each line's price and the order's total,
+        priced from the customer's tier."""
+        app._show_tab("new_order")
+        root.update()
+        saved = list(app.items)
+        try:
+            app.items = [
+                {"item_kind": "filter", "Filter Type": "V-form",
+                 "Media Type": "G4", "Short": 595, "Long": 595, "Channel": 45,
+                 "Quantity": 4, "Part Number": "PPFG445-030"},
+                {"item_kind": "filter", "Filter Type": "V-form",
+                 "Media Type": "G4", "Short": 595, "Long": 595, "Channel": 45,
+                 "Quantity": 1, "Part Number": "PPFG445-030",
+                 "Unit Price": 20.0, "Price Source": "manual"},
+                {"item_kind": "bag", "product_type": "3-Peak", "quantity": 2,
+                 "media": "F7", "width": 592, "height": 592, "depth": 600,
+                 "part_number": "NO-PRICE"}]
+            app._apply_prices({"PPFG445-030": 27.0}, {}, 2)
+            vals = [app.tree.item(i, "values") for i in app.tree.get_children()]
+            cols = list(app.tree["columns"])
+            unit = [v[cols.index("price")] for v in vals]
+            line = [v[cols.index("total")] for v in vals]
+            assert unit == ["27.00", "✎ 20.00", "—"], unit
+            assert line == ["108.00", "20.00", "—"], line
+            right = app._items_card._hdr_right_var.get() \
+                if hasattr(app._items_card, "_hdr_right_var") else ""
+            assert app.items[0]["Price Source"] == "tier 2"
+            total, missing = gui._order_money(app.items)
+            assert (total, missing) == (128.0, 1), (total, missing)
+            del right
+        finally:
+            app.items = saved
+            app._refresh_items_tree()
+    add("new order: prices from the customer's tier, and the total",
+        _order_prices)
+
+    def _wording_screen():
+        before = set(root.winfo_children())
+        dlg = app._xero_wording()
+        root.update()
+        trees = [w for w in _walk(dlg) if isinstance(w, gui.ttk.Treeview)]
+        rows = trees[0].get_children()
+        assert len(rows) == 3, rows
+        example = trees[0].item(rows[2], "values")[3]
+        assert example.startswith("Galvanised Pleated Panel Filter in G4"), example
+        for w in set(root.winfo_children()) - before:
+            w.destroy()
+    add("dialogs: invoice wording", _wording_screen)
+
+    def _send_to_xero():
+        """The trial's button: priced, confirmed, sent, and the order marked
+        Complete - with nothing sent for an order that has an unpriced line."""
+        from taf_order_app import features as _feat
+        from taf_order_app import xero as _x
+        sent, completed, said = [], [], []
+        saved = (_x.push_draft, gui._db.set_order_status,
+                 gui.messagebox.askyesno, gui.messagebox.showinfo,
+                 gui.messagebox.showwarning, dict(_feat._switches))
+        _x.push_draft = lambda oid, built, md5="", invoice_now=False: (
+            sent.append((oid, built, invoice_now))
+            or {"state": "sent", "number": "INV-1", "emailed_to": "a@b.example"})
+        gui._db.set_order_status = lambda oid, st: completed.append((oid, st))
+        gui.messagebox.askyesno = lambda *a, **k: said.append(a) or True
+        gui.messagebox.showinfo = lambda *a, **k: said.append(a)
+        gui.messagebox.showwarning = lambda *a, **k: said.append(a)
+        _feat._switches = {"xero_live": True}
+        loaded = dict(app._tab_loaded)
+        app._refresh_orders_list = lambda: None   # the list stays as it is
+        try:
+            priced = {"source": "db", "db_id": "o-1", "order_no": "21692",
+                      "customer": "BATARE", "status": "Pending",
+                      "db_header": {"Order Number": "21692",
+                                    "Customer Name": "BATARE",
+                                    "Date Ordered": "16/10/26"},
+                      "db_items": [{"item_kind": "filter",
+                                    "Filter Type": "V-form",
+                                    "Media Type": "G4", "Short": 595,
+                                    "Long": 595, "Channel": 45, "Quantity": 2,
+                                    "Unit Price": 30.0,
+                                    "Price Source": "tier 1"}]}
+            # A bag with no part number and no price on the order.
+            unpriced = dict(priced, db_id="o-2", order_no="21693",
+                            db_header=dict(priced["db_header"],
+                                           **{"Order Number": "21693"}),
+                            db_items=[{"item_kind": "bag",
+                                       "product_type": "3-Peak",
+                                       "quantity": 1, "media": "F7",
+                                       "width": 592, "height": 592,
+                                       "depth": 600}])
+            app._xero_send_orders([priced, unpriced], True)
+            for _ in range(100):
+                root.update()
+                if len(said) >= 2:          # asked, then said what happened
+                    break
+                time.sleep(0.05)
+            assert [s[0] for s in sent] == ["o-1"] and sent[0][2] is True, sent
+            assert sent[0][1]["invoice"]["lines"][0]["unit_amount"] == 30.0
+            assert completed == [("o-1", "Complete")], completed
+            ask = str(said[0])
+            assert "$60.00 ex GST" in ask and "21693" in ask and \
+                "no price" in ask, ask
+        finally:
+            (_x.push_draft, gui._db.set_order_status, gui.messagebox.askyesno,
+             gui.messagebox.showinfo, gui.messagebox.showwarning,
+             _feat._switches) = saved
+            del app._refresh_orders_list
+            app._tab_loaded.clear()
+            app._tab_loaded.update(loaded)
+    add("orders: Send to Xero & invoice customer", _send_to_xero)
+
     def _cut_list():
         from taf_order_app import features as _feat
         _feat._switches = {"channel_calculator": True}

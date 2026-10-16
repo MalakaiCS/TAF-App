@@ -6,9 +6,13 @@ the sign-in to Xero is kept where no app account can read it
 can download and unzip must not carry the keys to somebody's accounts, and
 these are the keys that move money.
 
-How an order reaches Xero:
+How an order reaches Xero. In the TRIAL (where a new link starts) nothing
+goes by itself: the order's "Send to Xero & invoice customer" button makes
+the invoice, approves it, has Xero email it and marks the order Complete;
+"Send draft to Xero" makes the draft only. Once a manager publishes it
+(AUTOMATIC):
 
-  * Every order raised since Xero was linked becomes a DRAFT sales invoice,
+  * Every order raised since then becomes a DRAFT sales invoice,
     dated the day on the work order. Pricing it needs the price list and the
     part-number rules, which are here, so a PC prices the order
     (`draft_from`) and hands the lines to the function (`push_draft`). While
@@ -116,12 +120,28 @@ def disconnect() -> Dict[str, Any]:
 
 
 def push_draft(order_id: str, built: Dict[str, Any],
-               source_md5: str = "") -> Dict[str, Any]:
-    """Make or update one order's draft invoice. `built` is `draft_from`'s."""
+               source_md5: str = "", invoice_now: bool = False) -> Dict[str, Any]:
+    """Make or update one order's draft invoice. `built` is `draft_from`'s.
+
+    `invoice_now` is the order's "Send to Xero & invoice customer" button:
+    the invoice is approved and emailed there and then, dated today. Refused,
+    before anything is made, if a line has no price.
+    """
     return _call("draft", {"order_id": str(order_id),
                            "invoice": built["invoice"],
                            "hash": built["hash"],
-                           "source_md5": source_md5 or None})
+                           "source_md5": source_md5 or None,
+                           "invoice_now": bool(invoice_now)}, timeout=120)
+
+
+MODES = {"manual": "Trial - sent from the button on each order",
+         "automatic": "Automatic - every order goes as a draft, invoiced "
+                      "when the job is complete"}
+
+
+def set_mode(mode: str) -> Dict[str, Any]:
+    """Trial ('manual') or 'automatic'. Managers only."""
+    return _call("mode", {"mode": mode})
 
 
 def sweep() -> Dict[str, Any]:
@@ -186,9 +206,15 @@ def _qty(value) -> float:
 def draft_from(header: Dict[str, Any], items: Iterable[Dict[str, Any]],
                customer: Optional[Dict[str, Any]] = None,
                prices: Optional[Dict[str, float]] = None,
-               rates: Optional[Dict[str, float]] = None) -> Dict[str, Any]:
+               rates: Optional[Dict[str, float]] = None,
+               wording: Optional[List[Dict[str, Any]]] = None) -> Dict[str, Any]:
     """One order, priced the way the CSV export prices it, as the draft the
     function sends to Xero.
+
+    The price is the one on the work order line; a line without one (an
+    order raised on a phone) is priced from `prices` / `rates`, which are the
+    customer's tier's. The description is the invoice wording
+    (invoice_wording.py), never the worksheet's.
 
     Returns {"invoice": ..., "hash": ..., "unpriced": n}. A line nothing can
     price is listed separately rather than dropped: it goes on the draft at
@@ -196,6 +222,7 @@ def draft_from(header: Dict[str, Any], items: Iterable[Dict[str, Any]],
     approved until the price is on the order. The hash is of everything sent,
     so an unchanged order is not sent again.
     """
+    from . import invoice_wording as _wording
     from . import pricing as _pricing
     lines = _pricing.quote_lines(list(items or []), prices, rates)
     priced, unpriced = [], []
@@ -203,6 +230,7 @@ def draft_from(header: Dict[str, Any], items: Iterable[Dict[str, Any]],
         qty = _qty(line.get("quantity"))
         if qty <= 0:
             continue
+        line["description"] = _wording.describe(line["item"], wording)
         price = _qty(line.get("unit_price"))
         if line.get("source") and price > 0:
             priced.append({"description": str(line.get("description") or "Filter"),
@@ -237,9 +265,10 @@ class Sync:
     other: an order is held by one PC while it is worked on, and an order
     already in Xero as it stands is not sent again.
 
-    Nothing here touches Tk. `prices` returns (prices, rates);
-    `customer(name)` returns the customer's record or {}; `prepare(items)`
-    fills in what a line needs to be priced (part numbers on web orders).
+    Nothing here touches Tk. `prices(customer)` returns (prices, rates) for
+    that customer's tier; `customer(name)` returns the customer's record or
+    {}; `prepare(items)` fills in what a line needs to be priced (part
+    numbers on web orders).
     """
 
     EVERY = 180          # seconds between rounds
@@ -299,21 +328,20 @@ class Sync:
             status()
         made, problems = 0, []
         rows = _db.xero_orders_to_draft(self.BATCH)
-        if rows:
-            prices, rates = self._prices()
-            for row in rows:
-                header = dict(row.get("header") or {})
-                header.setdefault("Customer Name", row.get("customer_name") or "")
-                items = self._prepare(list(row.get("items") or []))
-                customer = self._customer(header.get("Customer Name") or "") or {}
-                built = draft_from(header, items, customer, prices, rates)
-                out = push_draft(row["order_id"], built, row.get("source_md5") or "")
-                if out.get("error"):
-                    problems.append(out["error"])
-                    if "not connected" in out["error"].lower():
-                        break
-                elif not out.get("busy"):
-                    made += 1
+        for row in rows:
+            header = dict(row.get("header") or {})
+            header.setdefault("Customer Name", row.get("customer_name") or "")
+            items = self._prepare(list(row.get("items") or []))
+            customer = self._customer(header.get("Customer Name") or "") or {}
+            prices, rates = self._prices(customer)
+            built = draft_from(header, items, customer, prices, rates)
+            out = push_draft(row["order_id"], built, row.get("source_md5") or "")
+            if out.get("error"):
+                problems.append(out["error"])
+                if "not connected" in out["error"].lower():
+                    break
+            elif not out.get("busy"):
+                made += 1
         swept: Dict[str, Any] = {}
         if _db.xero_due_count() > 0:
             swept = sweep()

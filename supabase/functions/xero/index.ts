@@ -1,13 +1,23 @@
 // Supabase Edge Function: xero
 //
 // Xero, linked for good. One connection for the whole company, made once by
-// a manager; every staff account works through it from then on.
+// a manager; every staff account works through it from then on. It runs one
+// of two ways (xero_connection.mode):
 //
+//   TRIAL ('manual', where it starts): nothing goes by itself. The button on
+//   an order sends it - as a draft, or invoiced there and then (approved and
+//   emailed by Xero to the contact on file), after which the app marks the
+//   order Complete.
+//
+//   AUTOMATIC ('automatic', published by a manager after the trial):
 //   * Each order goes to Xero as a DRAFT sales invoice, dated the day on the
 //     work order, and is kept up to date while it is still a draft.
 //   * When the job is marked Complete (or Dispatched) - from any PC, phone or
 //     screen - the invoice is dated that day, approved, and emailed by Xero to
 //     the contact on file there.
+//
+// A part number Xero has no item for is made an item in Xero (code, name and
+// sales description), so every line carries an item code.
 //
 // Everything about Xero that is a secret lives here and only here. The client
 // secret is a function secret; the sign-in (access and refresh tokens) is in
@@ -23,11 +33,13 @@
 //
 // Actions (?do=...):
 //
-//   status      connected or not, and to which organisation    staff
+//   status      connected or not, to which organisation, mode  staff
+//   mode        trial ('manual') or 'automatic'                 manager
 //   start       the URL a manager signs in to Xero at           manager
 //   finish      where Xero sends them back                      (Xero)
 //   disconnect  end the link                                    manager
-//   draft       make or update one order's draft invoice        staff
+//   draft       make or update one order's draft invoice; with
+//               invoice_now, approve and email it there and then staff
 //   sweep       approve and email completed jobs; take deleted
 //               orders' drafts back out                         staff, or the
 //                                                               service role
@@ -44,8 +56,9 @@
 // --no-verify-jwt because Xero sends the person back to `finish` in a
 // browser, with no app sign-in. Every other action checks the caller here.
 //
-// Optional secrets: XERO_ACCOUNT_CODE (default 200, Sales) and XERO_TAX_TYPE
-// (default OUTPUT, GST on Income).
+// Optional secrets: XERO_ACCOUNT_CODE (default 200, Sales), XERO_TAX_TYPE
+// (default OUTPUT, GST on Income), XERO_CREATE_ITEMS=false to stop part
+// numbers being made items in Xero, and XERO_SCOPES.
 
 const CORS = {
   "Access-Control-Allow-Origin": "*",
@@ -54,12 +67,17 @@ const CORS = {
   "Access-Control-Allow-Methods": "POST, GET, OPTIONS",
 };
 
-// What the app may do in Xero: invoices, contacts, and read the items and
-// the organisation's payment terms. XERO_SCOPES overrides it, for a Xero app
-// set up with Xero's newer, narrower scopes.
+// What the app may do in Xero, asked for once when a manager connects:
+//   accounting.transactions  invoices now; purchase orders later
+//   accounting.contacts      find customers now; create them later
+//   accounting.settings      items (made for new part numbers) and the
+//                            organisation's payment terms
+// Asking for all of it now means adding those later needs no reconnecting.
+// XERO_SCOPES overrides it, for a Xero app set up with Xero's newer, narrower
+// scopes.
 const SCOPES = () => env("XERO_SCOPES",
   "offline_access accounting.transactions accounting.contacts " +
-  "accounting.settings.read");
+  "accounting.settings");
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const DAY = /^\d{4}-\d{2}-\d{2}$/;
 const MINUTE = 60_000;
@@ -432,7 +450,9 @@ function readInvoice(raw: Any): { ok: true; inv: Row } | { ok: false; error: str
       if (!Number.isFinite(q) || q <= 0 || !Number.isFinite(u) || u < 0) return null;
       out.push({ description: String(l?.description ?? "").slice(0, 3900) || "Filter",
                  quantity: q, unit_amount: Math.round(u * 100) / 100,
-                 item_code: String(l?.item_code ?? "").trim().slice(0, 30) });
+                 // Never shortened: a cut-down code is a different item.
+                 // One too long for Xero (30) just goes without.
+                 item_code: String(l?.item_code ?? "").trim().slice(0, 64) });
     }
     return out;
   };
@@ -451,8 +471,42 @@ function readInvoice(raw: Any): { ok: true; inv: Row } | { ok: false; error: str
   } };
 }
 
+/** Make the part numbers Xero has no item for into items, so the line can
+ *  carry its code. Never a reason for the invoice to fail: an item Xero will
+ *  not take is simply left off the line, as before. */
+async function makeItems(lines: Line[], codes: Map<string, string>) {
+  if (env("XERO_CREATE_ITEMS", "true").toLowerCase() === "false") return;
+  const wanted = new Map<string, Line>();
+  for (const l of lines) {
+    const code = (l.item_code ?? "").trim();
+    if (!code || code.length > 30 || codes.has(code.toUpperCase())) continue;
+    wanted.set(code.toUpperCase(), { ...l, item_code: code });
+  }
+  if (!wanted.size) return;
+  const items = [...wanted.values()].map((l) => ({
+    Code: l.item_code,
+    Name: (l.description.split("\n")[0] || l.item_code!).slice(0, 50),
+    Description: l.description.slice(0, 4000),
+    IsSold: true,
+    IsPurchased: false,
+    SalesDetails: { AccountCode: ACCOUNT(), TaxType: TAX() },
+  }));
+  try {
+    const out = await xero("POST", "/api.xro/2.0/Items?summarizeErrors=false",
+                           { Items: items });
+    for (const it of out?.Items ?? []) {
+      const failed = (it?.ValidationErrors ?? []).length > 0;
+      if (it?.Code && !failed) codes.set(String(it.Code).toUpperCase(), String(it.Code));
+    }
+  } catch {
+    // No permission to make items (an older connection), or Xero refused:
+    // the lines go without codes.
+  }
+}
+
 async function lineItems(inv: Row) {
   const codes = await itemCodes();
+  await makeItems(inv.lines, codes);
   const one = (l: Line, desc: string) => {
     const item: Row = { Description: desc, Quantity: l.quantity,
                         UnitAmount: l.unit_amount, AccountCode: ACCOUNT(),
@@ -477,12 +531,26 @@ async function handOver(row: Row, cur: Row | null) {
   return { state: "gone", error };
 }
 
-async function draftOne(row: Row, inv: Row, hash: string, md5: string | null) {
+async function draftOne(row: Row, inv: Row, hash: string, md5: string | null,
+                        now = false) {
   if (FINISHED.includes(row.state) || row.delete_wanted) {
     await put(row.order_id, { claimed_until: null });
-    return { state: row.state, unchanged: true };
+    if (now && row.state === "gone") {
+      throw new Problem(row.error || "Its invoice was changed by hand in Xero.");
+    }
+    return { state: row.state, unchanged: true, already: true,
+             number: row.invoice_number ?? "", emailed_to: row.emailed_to ?? "" };
   }
   const unpriced = inv.unpriced.length;
+  if (now && unpriced) {
+    throw new Problem(`${unpriced} line${unpriced === 1 ? " has" : "s have"} no ` +
+      "price. Put the price on the work order, then send it again.");
+  }
+  if (now) {
+    // Invoiced from its button: the job is done today.
+    row = await put(row.order_id, { complete_wanted: true,
+                                    completed_on: row.completed_on ?? today() });
+  }
   if (row.invoice_id && row.lines_hash === hash) {
     row = await put(row.order_id, { source_md5: md5 });
     if (row.complete_wanted && row.state === "draft" && !row.unpriced) {
@@ -705,7 +773,7 @@ Deno.serve(async (req: Request) => {
         tenant_id: org?.tenantId ?? null, tenant_name: org?.tenantName ?? "",
         state: null, state_by: null, state_at: null,
         connected_by: c.state_by ?? null, connected_at: nowIso(),
-        drafts_from: c.drafts_from ?? nowIso(), problem: null,
+        problem: null,
       });
       return text(`Xero is connected${org?.tenantName ? ` to ${org.tenantName}` : ""}. ` +
                   "You can close this window and go back to the app.");
@@ -729,7 +797,23 @@ Deno.serve(async (req: Request) => {
       }
       return json({ connected: !!c.refresh_token, organisation: c.tenant_name ?? "",
                     connected_at: c.connected_at ?? null,
+                    mode: c.mode ?? "manual",
                     drafts_from: c.drafts_from ?? null, problem: c.problem ?? "" });
+    }
+
+    if (action === "mode") {
+      if (!who.manager) return json({ error: "Only a manager can change how Xero is used." }, 403);
+      const mode = String(body.mode ?? "");
+      if (mode !== "manual" && mode !== "automatic") {
+        return json({ error: "The mode is 'manual' (trial) or 'automatic'." }, 400);
+      }
+      const c = await conn();
+      // Going automatic: orders from now on go by themselves. Not the orders
+      // of the trial, which were sent by hand or not at all.
+      const patch: Row = { mode };
+      if (mode === "automatic" && c.mode !== "automatic") patch.drafts_from = nowIso();
+      const after = await connPut(patch);
+      return json({ mode: after?.mode ?? mode, drafts_from: after?.drafts_from ?? null });
     }
 
     if (action === "start" || action === "disconnect") {
@@ -774,10 +858,11 @@ Deno.serve(async (req: Request) => {
       const hash = String(body.hash ?? "").replace(/[^0-9a-zA-Z]/g, "").slice(0, 64);
       if (!hash) return json({ error: "No hash was given." }, 400);
       const md5 = body.source_md5 ? String(body.source_md5).slice(0, 64) : null;
+      const now = body.invoice_now === true;
       const row = await claim(order);
       if (!row) return json({ busy: true });
       try {
-        return json(await draftOne(row, read.inv, hash, md5));
+        return json(await draftOne(row, read.inv, hash, md5, now));
       } catch (e) {
         return json(await failed(row, e, md5), 422);
       }

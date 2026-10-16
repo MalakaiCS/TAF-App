@@ -81,6 +81,7 @@ class World:
                       "ContactStatus": "ARCHIVED"},
         }
         self.items = ["FPFG425-040"]
+        self.item_rows: list = []
         self.invoices: dict = {}
         self.idempotent: dict = {}
         self.emails: list = []
@@ -185,6 +186,16 @@ def xero_api(method: str, path: str, query: dict, body, headers):
         term = q("searchTerm").lower()
         return 200, {"Contacts": [c for c in W.contacts.values()
                                   if term in c["Name"].lower()]}
+    if kind == "Items" and method == "POST":
+        made = []
+        for it in (body or {}).get("Items", []):
+            if len(it.get("Code", "")) > 30 or not it.get("Name"):
+                made.append(dict(it, ValidationErrors=[{"Message": "bad"}]))
+                continue
+            W.items.append(it["Code"])
+            W.item_rows.append(it)
+            made.append(it)
+        return 200, {"Items": made}
     if kind == "Items":
         return 200, {"Items": [{"Code": c} for c in W.items]}
     if kind == "Organisation":
@@ -400,15 +411,49 @@ def run_checks() -> None:
     code, body = get(f"?do=finish&code=good&state={state}")
     check("signing in connects it, for the whole company",
           code == 200 and "Total Air Filtration" in body, body)
-    check("and remembers who, and from when orders go across",
-          W.conn.get("connected_by") == "u-boss" and W.conn.get("drafts_from")
-          and W.conn.get("state") is None, json.dumps(W.conn)[:300])
+    check("and remembers who connected it",
+          W.conn.get("connected_by") == "u-boss" and W.conn.get("state") is None,
+          json.dumps(W.conn)[:300])
     code, body = get(f"?do=finish&code=good&state={state}")
     check("the same sign-in link cannot be used twice", code == 400, body)
     code, out = call("status")
     check("any staff account sees it connected",
           code == 200 and out.get("connected") and
           out.get("organisation") == "Total Air Filtration", str(out))
+    check("starting in the trial: nothing goes to Xero by itself",
+          out.get("mode") == "manual" and not W.conn.get("drafts_from"), str(out))
+
+    print("\n── the trial: the button on the order ──")
+    t1 = str(uuid.uuid4())
+    code, out = call("draft", {"order_id": t1, "invoice": invoice(
+        number="TAF-ON-0901"), "hash": "t1", "invoice_now": True})
+    inv = xinv(t1)
+    brisbane = (now() + dt.timedelta(hours=10)).date().isoformat()
+    check("Send to Xero & invoice: made, approved and emailed in one go",
+          code == 200 and out.get("state") == "sent" and
+          inv.get("Status") == "AUTHORISED" and
+          ("TAF-ON-0901", "accounts@bells.example") in W.emails, str(out))
+    check("dated today, the day it was invoiced",
+          inv.get("Date") == brisbane, f"{inv.get('Date')} {brisbane}")
+    code, out = call("draft", {"order_id": t1, "invoice": invoice(
+        number="TAF-ON-0901"), "hash": "t1", "invoice_now": True})
+    check("pressed again, it says it is already invoiced - nothing twice",
+          out.get("already") and out.get("number") == "TAF-ON-0901" and
+          sum(1 for e in W.emails if e[0] == "TAF-ON-0901") == 1, str(out))
+    t2 = str(uuid.uuid4())
+    code, out = call("draft", {"order_id": t2, "invoice": invoice(
+        number="TAF-ON-0902", unpriced=[{"description": "Odd", "quantity": 1}]),
+        "hash": "t2", "invoice_now": True})
+    check("a line with no price stops the invoice, before anything is made",
+          code == 422 and "no price" in out.get("error", "") and
+          not W.rows[t2]["invoice_id"], str(out))
+    code, out = call("mode", {"mode": "automatic"})
+    check("somebody on the floor cannot publish it", code == 403, str(out))
+    code, out = call("mode", {"mode": "sometimes"}, auth="Bearer boss")
+    check("the mode is trial or automatic, nothing else", code == 400, str(out))
+    code, out = call("mode", {"mode": "automatic"}, auth="Bearer boss")
+    check("a manager publishes it: orders from now on go by themselves",
+          out.get("mode") == "automatic" and W.conn.get("drafts_from"), str(out))
 
     print("\n── an order becomes a draft invoice ──")
     o1 = str(uuid.uuid4())
@@ -426,10 +471,14 @@ def run_checks() -> None:
           inv.get("InvoiceNumber") == "TAF-ON-1001" and
           inv.get("Reference") == "PO 4471", json.dumps(inv)[:300])
     lines = inv.get("LineItems", [])
-    check("item codes Xero knows go on (as Xero spells them); ones it does "
-          "not are left off rather than failing the invoice",
-          lines and lines[0].get("ItemCode") == "FPFG425-040" and
-          "ItemCode" not in lines[1], json.dumps(lines))
+    check("item codes Xero knows go on, as Xero spells them",
+          lines and lines[0].get("ItemCode") == "FPFG425-040", json.dumps(lines))
+    made_item = next((i for i in W.item_rows if i["Code"] == "NOT-IN-XERO"), {})
+    check("a part number Xero has no item for is made an item, and used",
+          lines[1].get("ItemCode") == "NOT-IN-XERO" and
+          made_item.get("Name") == "Bag 592x592x600 F7" and
+          made_item.get("SalesDetails", {}).get("AccountCode") == "200",
+          json.dumps(made_item))
     check("priced ex GST, to Sales with GST on Income",
           inv.get("LineAmountTypes") == "Exclusive" and
           all(l["AccountCode"] == "200" and l["TaxType"] == "OUTPUT"
@@ -466,7 +515,8 @@ def run_checks() -> None:
     check("due on the contact's terms from that day",
           inv.get("DueDate") == "2026-10-30", inv.get("DueDate"))
     check("and Xero emails it to the contact on file",
-          W.emails == [("TAF-ON-1001", "accounts@bells.example")] and
+          [e for e in W.emails if e[0] == "TAF-ON-1001"]
+          == [("TAF-ON-1001", "accounts@bells.example")] and
           W.rows[o1]["state"] == "sent" and
           W.rows[o1]["emailed_to"] == "accounts@bells.example",
           f"{W.emails} {W.rows[o1]['state']}")
@@ -475,7 +525,8 @@ def run_checks() -> None:
           out.get("state") == "sent" and xinv(o1)["LineItems"][0]["Quantity"] == 12,
           str(out))
     code, out = call("sweep")
-    check("and is not sent twice", len(W.emails) == 1, str(W.emails))
+    check("and is not sent twice",
+          sum(1 for e in W.emails if e[0] == "TAF-ON-1001") == 1, str(W.emails))
 
     print("\n── completed before its draft was made ──")
     o2 = str(uuid.uuid4())
@@ -540,6 +591,14 @@ def run_checks() -> None:
           "the reference", out.get("state") == "draft" and
           inv.get("InvoiceNumber", "").startswith("INV-") and
           inv.get("Reference") == "TAF-ON-1001 - PO 4471", json.dumps(inv)[:200])
+
+    o9 = str(uuid.uuid4())
+    code, out = draft(o9, invoice(number="TAF-ON-1009", lines=[
+        {"description": "Odd", "quantity": 1, "unit_amount": 5,
+         "item_code": "X" * 31}]))
+    check("a code Xero cannot take goes without one, rather than failing",
+          out.get("state") == "draft" and
+          "ItemCode" not in xinv(o9)["LineItems"][0], str(out))
 
     o7 = str(uuid.uuid4())
     draft(o7, invoice(number="TAF-ON-1007"))

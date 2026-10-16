@@ -258,12 +258,22 @@ log, stock management and a customer database.
   listed before the file is written, so a line is never quietly dropped off
   an invoice.
 - **Xero, linked** (optional, see *Link Xero* below) — connected once by a
-  manager, for everyone. Every order becomes a **draft** invoice in Xero,
-  dated the day on the work order, and follows the order while it is a draft.
-  When the job is marked **Complete** (or Dispatched) — on any PC or phone —
-  the invoice is dated that day, **approved**, and **emailed** by Xero to the
-  contact on file. A line with no price holds it back as a draft until the
-  price is on the order.
+  manager, for everyone. It starts as a **trial**: on an order, **Send to
+  Xero & invoice customer** makes the invoice, approves it, has Xero email it
+  to the customer and marks the order Complete; **Send draft to Xero** makes
+  a draft to check. When the trial is done a manager **publishes** it to
+  automatic: every order becomes a draft by itself, approved and emailed when
+  its job is marked Complete. A line with no price never goes out on an
+  invoice. Part numbers Xero doesn't have yet are made items in Xero.
+- **Prices on the work order, in three tiers** — each customer is on Tier 1,
+  2 or 3, and every product and rate has a price per tier. Each line on the
+  work order shows its unit price and line total, filled in from the
+  customer's tier (or typed by hand, marked ✎), and the order shows its total
+  ex GST. Prices are on screen and on the invoice only — never on the
+  workshop's worksheets.
+- **Invoice wording** — what each kind of filter says on the customer's
+  invoice ("Galvanised Pleated Panel Filter in G4 / Size: 595 x 595 x 45mm"),
+  set once on the Xero screen; any line can say something else.
 - **Backup & Export** — one button writes a dated zip of spreadsheets:
   every order, every line, customers, quotes, stock and prices. They open in
   Excel and need nothing else — not this app, not an account, not the
@@ -404,6 +414,7 @@ just run it — nothing is lost and nothing is duplicated.
 | 35 | `migrate_label_switches.sql` | Switching delivery labels off for a customer, or for everyone (needs step 33) | recommended |
 | 36 | `migrate_merge_names.sql` | A merged (or renamed) account's name follows onto its past orders and quotes - and fixes merges already made (needs step 33) | recommended |
 | 37 | `migrate_xero_link.sql` | Xero linked for good: every order becomes a draft invoice, approved and emailed when the job is complete. Keeps the Xero sign-in where no app account can read it | recommended |
+| 38 | `migrate_price_tiers.sql` | Three price tiers: each customer on Tier 1, 2 or 3, and a price per tier for every product and rate | recommended |
 
 **Step 16 is the one that matters most.** Every policy in the older scripts is
 `TO authenticated USING (true)` — meaning *anyone Supabase counts as signed
@@ -641,18 +652,38 @@ every customer's late job in a stranger's inbox.
 
 ### Link Xero (optional)
 
-One connection for the whole company. Every order raised from then on becomes
-a **draft** sales invoice in Xero, dated the day on the work order, and is
-kept up to date while it is a draft. When the job is marked **Complete** (or
-Dispatched) — on any PC, phone or screen — the invoice is dated that day,
-**approved**, and **emailed by Xero** to the contact on file there, due on
-that contact's payment terms in Xero.
+One connection for the whole company, made once by a manager. Staff never
+sign in to Xero themselves, so Xero's two-factor sign-in is only ever asked
+of that manager, once, in the browser — the app keeps the connection alive
+from then on.
+
+It runs one of two ways:
+
+- **Trial** (where it starts) — nothing goes to Xero by itself. On an order
+  (View Order, or Previous Orders → Order ▾): **Send to Xero & invoice
+  customer** makes the invoice, approves it dated today, has Xero email it to
+  the contact on file, and marks the order **Complete**. **Send draft to
+  Xero** makes a draft to look at in Xero, with nothing sent to the customer.
+- **Automatic** — once a manager presses **Publish: automatic** on the Xero
+  screen. Every order raised from then on becomes a **draft** invoice in
+  Xero, dated the day on the work order and kept up to date while it's a
+  draft. When the job is marked **Complete** (or Dispatched) — on any PC,
+  phone or screen — the invoice is dated that day, **approved**, and
+  **emailed by Xero** to the contact on file, due on that contact's payment
+  terms in Xero. **Back to trial** undoes it.
+
+Each line goes across at its price on the work order (or the customer's
+tier price, for a line without one), worded with the **invoice wording**
+(Xero screen → Invoice wording…), never the worksheet's description. A part
+number Xero has no item for is made an item in Xero, so every line carries
+an item code.
 
 The Xero client secret is a function secret, and the sign-in to Xero is kept
 in a table no app account can read — only the `xero` function can. Neither is
 ever on a PC.
 
-1. Run `migrate_xero_link.sql` (step 37).
+1. Run `migrate_xero_link.sql` (step 37) and `migrate_price_tiers.sql`
+   (step 38).
 2. At [developer.xero.com](https://developer.xero.com/app/manage) make a
    **Web app**. Its redirect URI is
    `https://<your-project>.supabase.co/functions/v1/xero?do=finish`.
@@ -667,19 +698,26 @@ ever on a PC.
    `--no-verify-jwt` because Xero sends you back to the function in a
    browser; the function checks every other request itself. Optional:
    `XERO_ACCOUNT_CODE` (default `200`, Sales), `XERO_TAX_TYPE` (default
-   `OUTPUT`, GST on Income), and `XERO_SCOPES` if your Xero app was set up
-   with Xero's newer narrower scopes.
+   `OUTPUT`, GST on Income), `XERO_CREATE_ITEMS=false` to stop part numbers
+   being made items, and `XERO_SCOPES` if your Xero app was set up with
+   Xero's newer narrower scopes.
 4. A Director or Admin switches on **Xero, connected** (Settings → Features). A
-   manager opens
-   **Xero…** (under your name → Testable Features), presses **Connect**,
-   signs in to Xero and picks the organisation. That is the only time.
+   manager opens **Xero…** (under your name → Testable Features), presses
+   **Connect**, signs in to Xero (with its two-factor code) and picks the
+   organisation. That is the only time.
+
+The connection asks Xero for invoices and purchase orders
+(`accounting.transactions`), contacts (`accounting.contacts`) and items and
+settings (`accounting.settings`) up front, so making customers and purchase
+orders in Xero later won't need connecting again.
 
 **What it needs from Xero.** Each customer must be a contact in Xero under the
 same name as in the app (its legal name, name or short name — case doesn't
 matter), with the email address their invoices go to. One that isn't is
 listed on the Xero screen with what to fix, and goes through by itself once
 it's fixed. Part numbers that are item codes in Xero are sent as item codes;
-any that aren't are sent as plain lines rather than failing the invoice.
+any that aren't are made items in Xero first (a code Xero can't take — over
+30 characters — goes as a plain line rather than failing the invoice).
 
 **What holds an invoice back.** A line nothing could price goes on the draft
 at $0 marked *NO PRICE*, and that invoice is not approved or emailed until the
@@ -693,11 +731,30 @@ with the app open renews it, at least once a week, so it doesn't lapse; if it
 ever does (or someone disconnects the app in Xero), the Xero screen says so
 and a manager presses **Connect** again — orders taken meanwhile still go.
 
-Drafts are priced on a PC, because the price list and part-number rules live
-in the desktop app: any PC with the app open sends them within a few minutes,
-and straight away for orders it saves. Approvals go the moment a job is
+Once automatic, drafts are priced on a PC, because the price list and
+part-number rules live in the desktop app: any PC with the app open sends
+them within a few minutes, and straight away for orders it saves. Approvals go the moment a job is
 marked complete; to have them go even when no PC is on, schedule the sweep
 — the recipe is at the bottom of `migrate_xero_link.sql`.
+
+### Price tiers
+
+Run `migrate_price_tiers.sql` (step 38). Then:
+
+- **Customers** — a manager sets each customer's **Price tier** (Tier 1, 2
+  or 3) on the customer card. Everyone starts on Tier 1. Only a manager can
+  change it; the database refuses anyone else.
+- **Products and rates** — each has a Tier 1 price (the price it always had)
+  and optional Tier 2 and Tier 3 prices; an empty one charges the Tier 1
+  price. Edit them on Products, or import them: a price file with columns
+  headed *Tier 1*, *Tier 2* and *Tier 3* (or *Tier 2 Price* and so on
+  beside the usual price column) fills all three.
+- **The work order** — each line shows **Unit $** and **Line $**, filled in
+  from the customer's tier as lines are added and when the customer changes.
+  Type a price on a line (its *Price & invoice* box) to set it by hand; it is
+  marked ✎ and stays as typed. A price agreed with one customer (Per-customer
+  pricing) wins over their tier. The order's total ex GST is above the lines.
+  None of it is printed on the worksheets.
 
 ### Enable sending from a phone (optional)
 
@@ -1050,6 +1107,8 @@ taf_order_app/
   po_import.py             Purchase-order import + phone inbox
   part_numbers.py          Part numbers, square metres, filter-type rules
   pricing.py               Price lists, quote lines, Xero export
+  invoice_wording.py       What each kind of filter says on a Xero invoice
+  xero.py                  Talking to the xero function; the background sync
   quote_pdf.py             The quote PDF
   stock_usage.py           What an order takes out of stock
   delivery.py              Run sheets and what's ready to go out

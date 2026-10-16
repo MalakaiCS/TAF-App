@@ -149,7 +149,18 @@ WITH checks(step, file, purpose, needed, present) AS (VALUES
 
   (37, 'migrate_xero_link.sql', 'Xero linked: orders become draft invoices, approved and emailed when complete', 'recommended',
       to_regclass('public.xero_invoices') IS NOT NULL
-      AND to_regprocedure('public.xero_orders_to_draft(integer)') IS NOT NULL)
+      AND to_regprocedure('public.xero_orders_to_draft(integer)') IS NOT NULL
+      AND EXISTS (SELECT 1 FROM information_schema.columns
+                   WHERE table_schema='public' AND table_name='xero_connection'
+                     AND column_name='mode')),
+
+  (38, 'migrate_price_tiers.sql', 'Three price tiers: each customer on Tier 1, 2 or 3', 'recommended',
+      EXISTS (SELECT 1 FROM information_schema.columns
+               WHERE table_schema='public' AND table_name='customers'
+                 AND column_name='price_tier')
+      AND EXISTS (SELECT 1 FROM information_schema.columns
+               WHERE table_schema='public' AND table_name='price_list'
+                 AND column_name='unit_price_3'))
 )
 SELECT step,
        CASE WHEN present THEN 'already done' ELSE 'RUN THIS' END AS status,

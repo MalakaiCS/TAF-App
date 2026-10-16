@@ -57,6 +57,7 @@ ORDER = [
     "migrate_label_switches.sql",
     "migrate_merge_names.sql",
     "migrate_xero_link.sql",
+    "migrate_price_tiers.sql",
 ]
 
 

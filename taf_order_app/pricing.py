@@ -179,6 +179,22 @@ def _best_price_column(rows: List[List[Any]], start: int,
     return best if filled[best] else price_cols[0]
 
 
+_TIER_HEADING = re.compile(r"\b(?:tier|level|lvl)\s*([123])\b|\bt([123])\b")
+
+
+def tier_columns(row: Iterable[Any]) -> Dict[int, int]:
+    """Columns headed for a price tier: "Tier 2", "Tier 3 Price", "Level 2".
+    {tier: column}. Tier 1's column is read as the price; 2 and 3 as the
+    other tiers' prices."""
+    out: Dict[int, int] = {}
+    for i, cell in enumerate(row):
+        m = _TIER_HEADING.search(_norm_heading(cell))
+        if m:
+            tier = int(m.group(1) or m.group(2))
+            out.setdefault(tier, i)
+    return out
+
+
 def _heading_of(row: List[Any], idx: int) -> str:
     """The heading text at a column, for the report."""
     if idx is None or idx >= len(row):
@@ -210,16 +226,29 @@ def read_price_file(path) -> Tuple[List[Dict[str, Any]], List[str], List[str]]:
                 continue
             if cols is None:
                 cands = _candidates(row)
+                tiers = tier_columns(row)
+                if 1 in tiers:
+                    cands["price"] = [tiers[1]]
+                elif "price" in cands:
+                    # Tier 2 and 3 are never the main price.
+                    cands["price"] = [c for c in cands["price"]
+                                      if c not in tiers.values()] or None
+                    if cands["price"] is None:
+                        del cands["price"]
                 if "code" in cands and "price" in cands:
                     cols = {f: idxs[0] for f, idxs in cands.items()}
                     cols["price"] = _best_price_column(
                         raw, n + 1, cols["code"], cands["price"])
+                    for tier in (2, 3):
+                        if tier in tiers:
+                            cols[f"tier{tier}"] = tiers[tier]
                     # Say which columns were used. Reading the wrong one is
                     # the failure that looks like "it imported nothing", and
                     # it should never again be something you can't see.
                     report.append(f"{path.name} · {sheet_name}: " + ", ".join(
                         f"{f} = {_heading_of(row, cols[f])}"
-                        for f in ("code", "price", "desc", "name") if f in cols))
+                        for f in ("code", "price", "tier2", "tier3", "desc",
+                                  "name") if f in cols))
                 continue          # the heading row itself is never data
 
             def _cell(name, _row=row, _cols=cols):
@@ -232,13 +261,18 @@ def read_price_file(path) -> Tuple[List[Dict[str, Any]], List[str], List[str]]:
                 continue
             if not re.search(r"[0-9]", code):
                 continue          # a section heading, not a part number
-            out.append({
+            entry = {
                 "part_number": code.upper(),
                 "description": str(_cell("desc") or "").strip(),
                 "name":        str(_cell("name") or "").strip(),
                 "unit_price":  round(price, 4),
                 "sheet":       sheet_name,
-            })
+            }
+            for tier in (2, 3):
+                value = _money(_cell(f"tier{tier}"))
+                if value is not None and value > 0:
+                    entry[f"unit_price_{tier}"] = round(value, 4)
+            out.append(entry)
 
     if not out and not problems:
         problems.append(
@@ -322,6 +356,99 @@ def nearest_priced_part(item: Dict[str, Any],
 PART_PREFIX_FOR_NEAREST = dict(_pn.PART_NUMBER_PREFIXES)
 
 
+def line_quantity(item: Dict[str, Any]) -> int:
+    """How many, whichever kind of line: filters say "Quantity", bags and
+    rolls say "quantity"."""
+    raw = item.get("Quantity")
+    if raw in (None, ""):
+        raw = item.get("quantity")
+    try:
+        return max(0, int(float(str(raw or 0).strip())))
+    except (TypeError, ValueError):
+        return 0
+
+
+def line_part_number(item: Dict[str, Any]) -> str:
+    return str(item.get("Part Number") or item.get("part_number")
+               or "").strip().upper()
+
+
+# ── Price tiers (migrate_price_tiers.sql) ────────────────────────────────────
+# Each customer is on Tier 1, 2 or 3. Every product and every rate per m2 has
+# a Tier 1 price, and may have a Tier 2 and Tier 3; a tier with none set is
+# charged at Tier 1.
+
+TIERS = (1, 2, 3)
+_TIER_PRICE = {1: "unit_price", 2: "unit_price_2", 3: "unit_price_3"}
+_TIER_RATE = {1: "rate_per_sqm", 2: "rate_per_sqm_2", 3: "rate_per_sqm_3"}
+
+
+def tier_of(customer: Optional[Dict[str, Any]]) -> int:
+    try:
+        tier = int((customer or {}).get("price_tier") or 1)
+    except (TypeError, ValueError):
+        tier = 1
+    return tier if tier in TIERS else 1
+
+
+def _tiered(row: Dict[str, Any], columns: Dict[int, str], tier: int):
+    """The row's price for a tier, or its Tier 1 price when that tier has
+    none. None when it has no Tier 1 price either."""
+    for col in (columns.get(tier), columns[1]):
+        value = row.get(col) if col else None
+        if value in (None, ""):
+            continue
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            continue
+    return None
+
+
+def prices_for_tier(rows: Iterable[Dict[str, Any]], tier: int = 1) -> Dict[str, float]:
+    """Part number -> price, for one tier, from price_list rows."""
+    out: Dict[str, float] = {}
+    for row in rows or []:
+        part = str(row.get("part_number") or "").strip().upper()
+        price = _tiered(row, _TIER_PRICE, tier)
+        if part and price is not None:
+            out[part] = price
+    return out
+
+
+def rates_for_tier(rows: Iterable[Dict[str, Any]], tier: int = 1) -> Dict[str, float]:
+    """Rate key -> price per m2, for one tier, from price_rates rows."""
+    out: Dict[str, float] = {}
+    for row in rows or []:
+        rate = _tiered(row, _TIER_RATE, tier)
+        if rate is not None:
+            out[_rate_key(row.get("filter_type") or "",
+                          row.get("media_type") or "")] = rate
+    return out
+
+
+def price_line(item: Dict[str, Any], prices: Optional[Dict[str, float]],
+               rates: Optional[Dict[str, float]], tier: int = 1) -> Dict[str, Any]:
+    """Fill in a work-order line's price from the customer's tier.
+
+    A price somebody typed on the line ("Price Source" manual) is theirs and
+    is kept. Otherwise the line is priced afresh - a new customer on the
+    order, or a changed size, is a different price. A line nothing can price
+    is left with no price, which is what stops it being invoiced at $0.
+    Returns the item, changed in place.
+    """
+    if item.get("Price Source") == "manual" or item.get("item_kind") == "catalogue":
+        return item              # typed, or picked with its price
+    item.pop("Unit Price", None)
+    item.pop("Price Source", None)
+    unit, source = price_for_item(item, prices, rates)
+    if unit > 0 and source:
+        item["Unit Price"] = round(unit, 2)
+        item["Price Source"] = f"tier {tier}" if source in ("list", "rate") \
+            else (f"tier {tier}, {source}" if source == "near" else source)
+    return item
+
+
 def price_for_item(item: Dict[str, Any],
                    prices: Optional[Dict[str, float]] = None,
                    rates: Optional[Dict[str, float]] = None) -> Tuple[float, str]:
@@ -332,19 +459,20 @@ def price_for_item(item: Dict[str, Any],
     human. "near" is a price taken from the same filter a few millimetres
     thicker or thinner, and is always shown as such.
     """
-    # A line someone entered a price on themselves — picked out of the price
-    # list, or a one-off nobody has a part number for. It is already priced,
-    # and guessing at it from dimensions it doesn't have would be worse.
-    if item.get("item_kind") == "catalogue":
-        try:
-            unit = float(item.get("Unit Price") or 0)
-        except (TypeError, ValueError):
-            unit = 0.0
-        if unit > 0:
-            return (round(unit, 4), item.get("_price_source") or "list")
-        # Fall through: it may still carry a part number the list knows.
+    # A line that carries its own price - typed on the work order, filled in
+    # from the customer's tier when the line was added, or picked out of the
+    # price list. The work order is where the price is agreed, so that is the
+    # price; working it out again from today's list would be a different one.
+    try:
+        unit = float(item.get("Unit Price") or 0)
+    except (TypeError, ValueError):
+        unit = 0.0
+    if unit > 0:
+        return (round(unit, 4), item.get("Price Source")
+                or item.get("_price_source") or "list")
+    # Otherwise fall through: it may carry a part number the list knows.
 
-    part = (item.get("Part Number") or "").strip().upper()
+    part = line_part_number(item)
     if part and prices:
         listed = prices.get(part)
         if listed is not None:
@@ -379,12 +507,14 @@ def why_unpriced(item: Dict[str, Any],
     # If it has none, that is simply a price nobody has entered — nothing to
     # do with filter types or dimensions it was never going to have.
     if item.get("item_kind") == "catalogue":
-        part = (item.get("Part Number") or "").strip().upper()
+        part = line_part_number(item)
         if part and prices and part not in prices:
             return f"{part} is not in the price list"
         return "no price entered for this line"
 
-    part = (item.get("Part Number") or "").strip().upper()
+    part = line_part_number(item)
+    if not part and item.get("item_kind") == "bag":
+        return "this bag has no part number - put its price on the work order"
     if not part:
         ftype = (item.get("Filter Type") or "").strip()
         if not ftype:
@@ -432,13 +562,10 @@ def quote_lines(items: Iterable[Dict[str, Any]],
     explained rather than dropped or quietly zeroed."""
     out: List[Dict[str, Any]] = []
     for it in items or []:
-        try:
-            qty = max(0, int(str(it.get("Quantity") or 0).strip()))
-        except (TypeError, ValueError):
-            qty = 0
+        qty = line_quantity(it)
         unit, source = price_for_item(it, prices, rates)
         out.append({
-            "part_number": (it.get("Part Number") or "").strip().upper(),
+            "part_number": line_part_number(it),
             "description": describe_item(it),
             "quantity":    qty,
             "unit_price":  unit,
@@ -473,7 +600,7 @@ def cost_for_item(item: Dict[str, Any],
         if own > 0:
             return (round(own, 4), "list")
 
-    part = (item.get("Part Number") or "").strip().upper()
+    part = line_part_number(item)
     if part and costs:
         listed = costs.get(part)
         if listed:                       # 0 means "not known", not "free"
@@ -586,8 +713,11 @@ def describe_item(item: Dict[str, Any]) -> str:
         return text
 
     if (item.get("item_kind") or "filter") == "bag":
-        bits = [str(item.get("Filter Type") or "Bag Filter")]
-        dims = " x ".join(str(item.get(k)) for k in ("width", "height")
+        kind = str(item.get("product_type") or item.get("Filter Type")
+                   or "Bag Filter")
+        media = str(item.get("media") or "").strip()
+        bits = [kind + (f" {media}" if media else "")]
+        dims = " x ".join(str(item.get(k)) for k in ("width", "height", "depth")
                           if item.get(k))
         if dims:
             bits.append(dims + "mm")
@@ -752,8 +882,9 @@ def invoice_for_order(header: Dict[str, Any],
                       invoice_number: str = "",
                       account_code: str = "200",
                       tax_type: str = "GST on Income",
-                      due_days: int = 30) -> Tuple[List[Dict[str, str]],
-                                                   List[Dict[str, Any]]]:
+                      due_days: int = 30,
+                      wording: Optional[List[Dict[str, Any]]] = None
+                      ) -> Tuple[List[Dict[str, str]], List[Dict[str, Any]]]:
     """Price a finished order and return (Xero rows, lines nothing could price).
 
     The unpriced lines come back rather than being dropped: an invoice that is
@@ -761,6 +892,11 @@ def invoice_for_order(header: Dict[str, Any],
     is the only thing that can ask a person what to do about it.
     """
     lines = quote_lines(items, prices, rates)
+    # What the customer reads on the invoice: the standard wording for the
+    # filter type, or the line's own (invoice_wording.py).
+    from . import invoice_wording as _wording
+    for line in lines:
+        line["description"] = _wording.describe(line["item"], wording)
     number = (invoice_number or "").strip() or (header.get("Order Number") or "").strip()
     rows = xero_rows(header, [l for l in lines if l.get("source")],
                      customer=customer, account_code=account_code,

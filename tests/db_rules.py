@@ -790,7 +790,32 @@ def run_xero_checks(pg: Postgres) -> None:
     # The merge checks' orders were all made moments ago: before the link.
     q(pg, "UPDATE orders SET created_at = now() - interval '3 hours';")
     q(pg, "SELECT xero_conn_put(jsonb_build_object('refresh_token', 'r1', "
-          "'access_token', 'a1', 'drafts_from', now() - interval '1 hour'));")
+          "'access_token', 'a1'));")
+    check("a new link starts in the trial: nothing goes by itself",
+          q(pg, "SELECT mode FROM xero_connection;") == "manual")
+    trial = q(pg, "INSERT INTO orders (id, user_id, customer_name, "
+                  "order_number, header, items) VALUES (gen_random_uuid(), "
+                  f"'{DAVE}', 'Bells', 'T-1', '{{\"status\": \"Pending\"}}', "
+                  "'[]') RETURNING id;").splitlines()[0]
+    ok, out, err = as_in(pg, "f", DAVE,
+                         "SELECT count(*) FROM xero_orders_to_draft(50);")
+    check("in the trial no order is offered for a draft", ok and out == "0",
+          out or err)
+    q(pg, f"UPDATE orders SET header = header || '{{\"status\": "
+          f"\"Complete\"}}' WHERE id = '{trial}';")
+    check("and completing a job sends nothing - the button on the order does",
+          q(pg, f"SELECT count(*) FROM xero_invoices "
+                f"WHERE order_id = '{trial}';") == "0")
+    # Sent from its button during the trial, then put back to Pending.
+    q(pg, f"SELECT 1 FROM xero_claim('{trial}', 0);")
+    q(pg, f"SELECT 1 FROM xero_invoice_put('{trial}', "
+          "'{\"state\": \"draft\", \"invoice_id\": \"INV-T\"}');")
+    q(pg, f"UPDATE orders SET header = header || '{{\"status\": "
+          f"\"Pending\"}}' WHERE id = '{trial}';")
+    q(pg, "SELECT xero_conn_put(jsonb_build_object('mode', 'automatic', "
+          "'drafts_from', now() - interval '1 hour'));")
+    q(pg, f"UPDATE orders SET created_at = now() - interval '2 hours' "
+          f"WHERE id = '{trial}';")
     for who, label in ((DAVE, "somebody on the floor"),
                        (KAI, "a director")):
         ok, out, err = as_in(pg, "f", who,
@@ -893,6 +918,12 @@ def run_xero_checks(pg: Postgres) -> None:
           q(pg, f"SELECT complete_wanted FROM xero_invoices "
                 f"WHERE order_id = '{fresh}';") == "t")
     q(pg, f"UPDATE orders SET header = header || '{{\"status\": "
+          f"\"Complete\"}}' WHERE id = '{trial}';")
+    check("once automatic, a trial order already in Xero is invoiced when "
+          "its job is done",
+          q(pg, f"SELECT complete_wanted FROM xero_invoices "
+                f"WHERE order_id = '{trial}';") == "t")
+    q(pg, f"UPDATE orders SET header = header || '{{\"status\": "
           f"\"Complete\"}}' WHERE id = '{old}';")
     check("an order from before the link is never invoiced by it",
           q(pg, f"SELECT count(*) FROM xero_invoices "
@@ -926,6 +957,10 @@ def run_xero_checks(pg: Postgres) -> None:
                        f"WHERE id = '{late}';") == "Complete", err)
     q(pg, "ALTER TABLE xero_invoices DROP CONSTRAINT nope;")
 
+    ok, _o, err = pg.psql("SELECT xero_conn_put('{\"mode\": \"sometimes\"}');",
+                          "f")
+    check("the mode is only ever trial or automatic", not ok, err)
+
     a = q(pg, "SELECT COALESCE(xero_conn_begin_refresh(30), '-');")
     b = q(pg, "SELECT COALESCE(xero_conn_begin_refresh(30), '-');")
     check("the sign-in is renewed by one request at a time",
@@ -940,6 +975,35 @@ def run_xero_checks(pg: Postgres) -> None:
     check("a renewal that lost the race does not overwrite the winner's",
           stale == "f" and good == "t" and after == "r2/a2/true/true",
           f"{stale} {good} {after}")
+
+
+def run_tier_checks(pg: Postgres) -> None:
+    print("\n── price tiers (step 38) ──")
+    ok, _o, err = pg.psql((ROOT / "migrate_price_tiers.sql").read_text(
+        encoding="utf-8"), "f")
+    check("step 38 runs again cleanly", ok, err)
+    check("every customer starts on Tier 1",
+          q(pg, "SELECT count(*) FROM customers WHERE price_tier <> 1;") == "0")
+    ok, _o, err = pg.psql(f"UPDATE customers SET price_tier = 4 "
+                          f"WHERE id = '{A}';", "f")
+    check("there is no Tier 4", not ok, err)
+    ok, _o, err = as_in(pg, "f", DAVE, f"UPDATE customers SET price_tier = 3 "
+                                       f"WHERE id = '{A}' RETURNING id;")
+    check("somebody on the floor cannot move a customer's tier",
+          not ok and "Only a manager" in err, _o or err)
+    ok, _o, err = as_in(pg, "f", DAVE, f"UPDATE customers SET notes = 'x' "
+                                       f"WHERE id = '{A}' RETURNING id;")
+    check("but can still edit the rest of the customer", ok and _o, err)
+    ok, _o, err = as_in(pg, "f", SARAH, f"UPDATE customers SET price_tier = 3 "
+                                        f"WHERE id = '{A}' RETURNING id;")
+    check("a manager can", ok and _o, err)
+    q(pg, "INSERT INTO price_list (part_number, unit_price, unit_price_3) "
+          "VALUES ('TIER-1', 10, 8) ON CONFLICT (part_number) DO UPDATE SET "
+          "unit_price_3 = 8;")
+    check("a product carries a price for each tier, blank meaning Tier 1's",
+          q(pg, "SELECT unit_price || '/' || COALESCE(unit_price_2::text, '-') "
+                "|| '/' || unit_price_3 FROM price_list "
+                "WHERE part_number = 'TIER-1';") == "10.0000/-/8.0000")
 
 
 def _skip(why: str) -> int:
@@ -964,6 +1028,7 @@ def main() -> int:
         run_checks(pg)
         run_merge_checks(pg)
         run_xero_checks(pg)
+        run_tier_checks(pg)
     finally:
         pg.stop()
     print(f"\n{len(FAILURES)} FAILED" if FAILURES
