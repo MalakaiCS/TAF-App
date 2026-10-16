@@ -1149,6 +1149,16 @@ var TAFAPP = (function () {
      the state it opened with — the same rule the desktop's View Order
      follows. Leaving "Complete" on offer after an order has been completed
      is how somebody presses it twice and wonders which one took. */
+  /* A finished job's invoice is approved and emailed by the xero function.
+     The database has already noted the day it was finished, and a PC or the
+     scheduled sweep would get to it within minutes; asking now just means it
+     goes now. Nothing is said either way: it is not this screen's job, and
+     Xero not being linked is not a fault. */
+  function xeroNudge(status) {
+    if (status !== "Complete" && status !== "Dispatched") { return; }
+    D.callFunction("xero?do=sweep", {}).catch(function () {});
+  }
+
   function drawStatus(actions, row, body, pill, close) {
     U.clear(actions);
     ["In Production", "Complete", "Dispatched"].forEach(function (want) {
@@ -1175,6 +1185,7 @@ var TAFAPP = (function () {
           pill.textContent = want;
           loadedAt = 0;
           drawStatus(actions, row, body, pill, close);
+          if (!out.queued) { xeroNudge(want); }
           U.notice(body, out.queued
             ? "Set to " + want + " on this phone, and waiting for signal."
             : "Status set to " + want + ".", "ok");
@@ -1950,6 +1961,7 @@ var TAFAPP = (function () {
       });
       chain.then(function () {
         loadedAt = 0;
+        xeroNudge("Dispatched");
         if (problems.length) {
           U.notice(main, (list.length - problems.length) + " of " + list.length
                    + " dispatched. These did not: " + problems.join("; "));

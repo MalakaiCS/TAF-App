@@ -326,37 +326,136 @@ def test_a_site_not_yet_round_again_is_left_alone():
 
 # ── Xero, connected ──────────────────────────────────────────────────────────
 
-def test_a_line_with_no_price_does_not_go_on_an_invoice():
-    """A line Xero would take at zero is a line that quietly invoices a
-    customer nothing for something they are getting."""
+PRICES = {"PPFG445-030": 88.5}
+
+
+def _draft(items, header=None, customer=None):
     from taf_order_app import xero as _xero
-    out = _xero.invoice_from(
-        {"customer_name": "Bells", "order_number": "PO-1"},
-        [{"description": "V-form", "quantity": 4, "unit_price": 88.5,
-          "part_number": "PPFG445-030"},
-         {"description": "Stepped", "quantity": 2, "unit_price": 0}])
-    assert len(out["invoice"]["LineItems"]) == 1
-    assert len(out["skipped"]) == 1
+    head = {"Customer Name": "BELLS", "Order Number": "PO-8842",
+            "Date Ordered": "14/10/26", "Job": "AHU 3"}
+    head.update(header or {})
+    return _xero.draft_from(head, items, customer, PRICES, {})
 
 
-def test_an_invoice_carries_the_order_number_as_its_reference():
+def _item(qty=4, part="PPFG445-030"):
+    return {"Filter Type": "V-form", "Short": 595, "Long": 595,
+            "Channel": 45, "Quantity": qty, "Part Number": part}
+
+
+def test_a_line_with_no_price_is_kept_apart_not_dropped():
+    """It goes on the draft at $0 marked NO PRICE, so it is seen, and holds
+    the invoice back from being approved - never quietly left off."""
+    out = _draft([_item(), _item(2, "NOPE-1")])
+    inv = out["invoice"]
+    assert [l["item_code"] for l in inv["lines"]] == ["PPFG445-030"]
+    assert inv["lines"][0]["unit_amount"] == 88.5
+    assert inv["lines"][0]["quantity"] == 4
+    assert len(inv["unpriced"]) == 1 and out["unpriced"] == 1
+
+
+def test_the_draft_is_dated_the_day_on_the_work_order():
+    assert _draft([_item()])["invoice"]["date"] == "2026-10-14"
+
+
+def test_the_order_number_is_the_invoice_number_and_the_job_its_reference():
+    """As the CSV export has always done it."""
+    inv = _draft([_item()])["invoice"]
+    assert inv["number"] == "PO-8842"
+    assert inv["reference"] == "AHU 3"
+
+
+def test_the_customer_is_looked_for_in_xero_by_every_name_it_has():
+    inv = _draft([_item()], customer={
+        "legal_name": "Bells Pty Ltd", "name": "BELLS", "short_name": "Bells",
+        "payment_terms": "Net 14"})["invoice"]
+    assert inv["contact_names"] == ["Bells Pty Ltd", "BELLS"]
+    assert inv["terms"] == "Net 14"
+
+
+def test_an_unchanged_order_is_not_sent_again_and_a_changed_one_is():
+    assert _draft([_item()])["hash"] == _draft([_item()])["hash"]
+    assert _draft([_item()])["hash"] != _draft([_item(5)])["hash"]
+
+
+class _Patch:
+    """Stand-ins for a test, put back afterwards (the runner has no
+    monkeypatch)."""
+
+    def __init__(self):
+        self._undo = []
+
+    def set(self, obj, name, value):
+        self._undo.append((obj, name, getattr(obj, name)))
+        setattr(obj, name, value)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_exc):
+        for obj, name, value in reversed(self._undo):
+            setattr(obj, name, value)
+
+
+def _sync(patch, rows, due=0, on=True):
     from taf_order_app import xero as _xero
-    out = _xero.invoice_from({"customer_name": "Bells",
-                              "order_number": "PO-8842"},
-                             [{"description": "x", "quantity": 1,
-                               "unit_price": 10}])
-    assert out["invoice"]["Reference"] == "PO-8842"
-    assert out["invoice"]["Type"] == "ACCREC"
+    sent, swept = [], []
+    patch.set(_xero._db, "is_ready", lambda: True)
+    patch.set(_xero._db, "current_user", lambda: object())
+    patch.set(_xero._db, "xero_orders_to_draft", lambda n: rows)
+    patch.set(_xero._db, "xero_due_count", lambda: due)
+    patch.set(_xero, "status", lambda: {"connected": True})
+    patch.set(_xero, "push_draft", lambda oid, built, md5: (
+        sent.append((oid, built, md5)) or {"state": "draft"}))
+    patch.set(_xero, "sweep", lambda: (
+        swept.append(1) or {"done": due, "problems": []}))
+    sync = _xero.Sync(prices=lambda: (PRICES, {}),
+                      customer=lambda name: {"legal_name": name + " Pty Ltd"},
+                      prepare=lambda items: [dict(i, prepared=True)
+                                             for i in items],
+                      is_on=lambda: on)
+    return sync, sent, swept
 
 
-def test_an_invoice_goes_over_as_a_draft():
-    """Nothing this program does should send a customer an invoice without
-    somebody in the office having looked at it."""
-    from taf_order_app import xero as _xero
-    out = _xero.invoice_from({"customer_name": "B"},
-                             [{"description": "x", "quantity": 1,
-                               "unit_price": 10}])
-    assert out["invoice"]["Status"] == "DRAFT"
+def test_the_sync_prices_each_order_and_sends_it():
+    rows = [{"order_id": "o1", "customer_name": "Bells",
+             "header": {"Order Number": "A-1", "Date Ordered": "15/10/26"},
+             "items": [_item()], "source_md5": "m1"}]
+    with _Patch() as patch:
+        sync, sent, swept = _sync(patch, rows)
+        out = sync.run_once()
+    assert out["drafted"] == 1 and not swept
+    oid, built, md5 = sent[0]
+    assert (oid, md5) == ("o1", "m1")
+    assert built["invoice"]["contact_names"] == ["Bells Pty Ltd", "Bells"]
+    assert built["invoice"]["date"] == "2026-10-15"
+    assert built["invoice"]["lines"][0]["unit_amount"] == 88.5
+
+
+def test_the_sync_only_asks_xero_to_approve_when_something_is_waiting():
+    with _Patch() as patch:
+        sync, sent, swept = _sync(patch, [], due=0)
+        sync.run_once()
+        assert not swept
+        sync, sent, swept = _sync(patch, [], due=2)
+        assert sync.run_once()["sent"] == 2 and swept == [1]
+
+
+def test_switched_off_the_sync_does_nothing():
+    rows = [{"order_id": "o1", "header": {}, "items": [_item()]}]
+    with _Patch() as patch:
+        sync, sent, swept = _sync(patch, rows, due=3, on=False)
+        assert sync.run_once() == {} and not sent and not swept
+
+
+def test_saving_or_changing_an_order_wakes_the_sync():
+    from taf_order_app import db, xero as _xero
+    sync = _xero.Sync(prices=lambda: ({}, {}), customer=lambda n: {})
+    db.ORDER_LISTENERS.append(sync.nudge)
+    try:
+        db._order_changed()
+        assert sync._wake.is_set()
+    finally:
+        db.ORDER_LISTENERS.remove(sync.nudge)
 
 
 def test_no_xero_secret_is_anywhere_near_the_installer():
@@ -379,9 +478,10 @@ def test_the_function_will_not_renew_from_a_token_it_already_used():
     that dies the first time two requests overlap."""
     ts = (ROOT / "supabase" / "functions" / "xero" /
           "index.ts").read_text(encoding="utf-8")
-    body = ts.split("async function token()")[1]
-    assert "await remember(" in body
-    assert body.index("await remember(") < body.index("return String(got.access_token)")
+    body = ts.split("async function token(")[1].split("\nasync function ")[0]
+    assert "xero_conn_begin_refresh" in body       # one renewal at a time
+    assert body.index('"xero_conn_end_refresh"') < \
+        body.index("return String(got.access_token)")
 
 
 def test_connecting_checks_the_link_was_one_we_started():
@@ -389,7 +489,7 @@ def test_connecting_checks_the_link_was_one_we_started():
     to us."""
     ts = (ROOT / "supabase" / "functions" / "xero" /
           "index.ts").read_text(encoding="utf-8")
-    assert "state !== have.state" in ts
+    assert "state !== c.state" in ts
 
 
 # ── Orders straight from email ───────────────────────────────────────────────

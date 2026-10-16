@@ -16226,6 +16226,7 @@ class ModernOrderApp(tk.Frame):
                 if hasattr(self, "_refresh_feature_switches"):
                     self._refresh_feature_switches()
                 self._refresh_media_codes()
+                self._start_xero_sync()
                 cft = data.get("custom_filter_types")
                 if isinstance(cft, list):
                     self._custom_filter_types = [str(x) for x in cft]
@@ -18452,102 +18453,249 @@ class ModernOrderApp(tk.Frame):
                  variant="secondary").pack(side="right", padx=(0, px(8)))
         _reload()
 
-    # ── Xero, connected ───────────────────────────────────────────────────
+    # ── Xero, linked ──────────────────────────────────────────────────────
+
+    def _start_xero_sync(self):
+        """Keep Xero up to date from this PC: orders become draft invoices,
+        completed jobs are approved and emailed. Started once features are
+        known; each round checks the switch, so turning it off stops it."""
+        if getattr(self, "_xero_sync", None) is not None:
+            return
+
+        def _prepare(items):
+            # An order raised on the web has no part numbers yet - the same
+            # filling-in View Order and Invoice do.
+            for it in items:
+                if _pn.needs_part_number(it):
+                    self._stamp_item(it)
+            return items
+
+        def _round(last):
+            done = (last.get("drafted") or 0, last.get("sent") or 0)
+            if not any(done):
+                return
+            bits = []
+            if done[0]:
+                bits.append(f"{done[0]} draft{'s' if done[0] != 1 else ''} "
+                            "updated")
+            if done[1]:
+                bits.append(f"{done[1]} invoice{'s' if done[1] != 1 else ''} "
+                            "approved and emailed")
+            self.master.after(0, lambda: self.status_var.set(
+                "Xero: " + ", ".join(bits) + "."))
+
+        self._xero_sync = _xero.Sync(
+            prices=lambda: self._load_prices(),
+            customer=self._customer_record,
+            prepare=_prepare,
+            is_on=lambda: _features.is_on("xero_live"),
+            on_round=_round)
+        _db.ORDER_LISTENERS.append(self._xero_sync.nudge)
+        self._xero_sync.start()
 
     def _xero(self):
         dlg = tk.Toplevel(self.master, bg=CBG)
         dlg.title("Xero")
         dlg.transient(self.master)
-        _centre_on_parent(dlg, self.master, px(840), px(600))
+        _centre_on_parent(dlg, self.master, px(980), px(640))
         tk.Label(dlg, text="Xero", bg=CBG, fg=CA,
                  font=F_TTL).pack(anchor="w", padx=px(16), pady=(px(12), 0))
         state = tk.Label(dlg, text="Checking…", bg=CBG, fg=CMU, font=F_SM,
-                         wraplength=px(780), justify="left")
+                         wraplength=px(940), justify="left")
         state.pack(anchor="w", padx=px(16), pady=(px(4), px(10)))
+        manager = _db.can_manage_prices()
 
-        wrap = tk.Frame(dlg, bg=CCA, highlightbackground=CBR,
-                        highlightthickness=1)
-        wrap.pack(fill="both", expand=True, padx=px(16))
-        tree = ttk.Treeview(wrap, columns=("customer", "ref", "due", "owing",
-                                           "late"),
-                            show="headings", style="TAF.Treeview")
-        for key, label, wd, anc in [("customer", "Customer", 260, "w"),
-                                    ("ref", "Invoice", 140, "w"),
-                                    ("due", "Due", 110, "w"),
-                                    ("owing", "Owing", 110, "e"),
-                                    ("late", "Days late", 100, "e")]:
-            tree.heading(key, text=label)
-            tree.column(key, width=px(wd), anchor=anc)
-        tree.tag_configure("late", background="#FCE9E6")
-        tree.pack(fill="both", expand=True)
+        foot = tk.Frame(dlg, bg=CBG, padx=px(16), pady=px(12))
+        foot.pack(side="bottom", fill="x")
+        nb = ttk.Notebook(dlg)
+        nb.pack(fill="both", expand=True, padx=px(16))
+
+        def _table(cols):
+            wrap = tk.Frame(nb, bg=CCA, highlightbackground=CBR,
+                            highlightthickness=1)
+            tree = ttk.Treeview(wrap, columns=[c[0] for c in cols],
+                                show="headings", style="TAF.Treeview")
+            for key, label, wd, anc in cols:
+                tree.heading(key, text=label)
+                tree.column(key, width=px(wd), anchor=anc,
+                            stretch=key in ("note", "customer"))
+            sb = ttk.Scrollbar(wrap, orient="vertical", command=tree.yview)
+            tree.configure(yscrollcommand=sb.set)
+            sb.pack(side="right", fill="y")
+            tree.pack(fill="both", expand=True)
+            return wrap, tree
+
+        orders_wrap, orders = _table([
+            ("order", "Order", 120, "w"), ("customer", "Customer", 200, "w"),
+            ("job", "Job", 100, "w"), ("xero", "In Xero", 170, "w"),
+            ("invoice", "Invoice", 100, "w"), ("total", "Total", 90, "e"),
+            ("note", "Note", 300, "w")])
+        orders.tag_configure("problem", background="#FCE9E6")
+        orders.tag_configure("done", foreground=CMU)
+        nb.add(orders_wrap, text="  Orders to invoices  ")
+        owing_wrap, owing = _table([
+            ("customer", "Customer", 260, "w"), ("ref", "Invoice", 140, "w"),
+            ("due", "Due", 110, "w"), ("owing", "Owing", 110, "e"),
+            ("late", "Days late", 100, "e")])
+        owing.tag_configure("late", background="#FCE9E6")
+        nb.add(owing_wrap, text="  What is owed  ")
+
+        def _alive():
+            try:
+                return bool(dlg.winfo_exists())
+            except tk.TclError:
+                return False
 
         def _refresh():
+            state.config(text="Checking…")
+
             def _work():
                 got = _xero.status()
-                owed = _xero.owing() if got.get("connected") else None
-                self.master.after(0, lambda: _show(got, owed))
+                listed = owed = None
+                if got.get("connected"):
+                    listed = _xero.invoices()
+                    owed = _xero.owing()
+                self.master.after(0, lambda: _alive() and _show(got, listed, owed))
             threading.Thread(target=_work, daemon=True).start()
 
-        def _show(got, owed):
+        def _show(got, listed, owed):
+            for tree in (orders, owing):
+                for iid in tree.get_children():
+                    tree.delete(iid)
             if got.get("error"):
                 state.config(text=str(got["error"]))
                 return
             if not got.get("connected"):
-                state.config(text="Not connected yet. Press Connect, sign in "
-                                  "to Xero in the browser, then come back "
-                                  "and press Refresh.\nThe CSV export is not "
-                                  "going anywhere either way.")
+                state.config(text=(got.get("problem") or
+                                   "Not connected. A manager presses Connect "
+                                   "and signs in to Xero in the browser - "
+                                   "once, for everyone.")
+                             + "\nThe CSV export works either way.")
                 return
+            since = str(got.get("drafts_from") or "")[:10]
+            rows = (listed or {}).get("rows") or []
+            stuck = 0
+            for r in rows:
+                xs = r.get("state") or "waiting"
+                note = r.get("error") or ""
+                if xs == "sent" and r.get("emailed_to"):
+                    note = note or f"Emailed to {r['emailed_to']}"
+                stuck += bool(r.get("error")) and xs not in ("deleted",)
+                tag = ("problem",) if r.get("error") else \
+                    ("done",) if xs in ("sent", "deleted") else ()
+                total = r.get("total")
+                orders.insert("", "end", iid=str(r.get("order_id")), tags=tag,
+                              values=(r.get("order_number") or "",
+                                      r.get("customer_name") or "",
+                                      r.get("order_status") or "",
+                                      _xero.STATES.get(xs, xs),
+                                      r.get("invoice_number") or "",
+                                      f"${float(total):,.2f}" if total else "",
+                                      note))
+            owed_rows = (owed or {}).get("rows") or []
+            for i, r in enumerate(owed_rows):
+                owing.insert("", "end", iid=str(i),
+                             tags=("late",) if r.get("days_late") else (),
+                             values=(r.get("customer"), r.get("number"),
+                                     r.get("due"),
+                                     f"${float(r.get('owing') or 0):,.2f}",
+                                     r.get("days_late") or ""))
             org = got.get("organisation") or "your Xero"
-            for iid in tree.get_children():
-                tree.delete(iid)
-            rows = (owed or {}).get("rows") or []
-            for i, r in enumerate(rows):
-                tree.insert("", "end", iid=str(i),
-                            tags=("late",) if r.get("days_late") else (),
-                            values=(r.get("customer"), r.get("number"),
-                                    r.get("due"),
-                                    f"${float(r.get('owing') or 0):,.2f}",
-                                    r.get("days_late") or ""))
-            behind = sum(1 for r in rows if r.get("days_late"))
-            state.config(
-                text=f"Connected to {org}. "
-                     f"${float((owed or {}).get('owed') or 0):,.2f} "
-                     f"outstanding across {len(rows)} invoice"
-                     f"{'' if len(rows) == 1 else 's'}"
-                     + (f", {behind} of them late." if behind else ".")
-                     + ((" " + str(owed.get("error")))
-                        if owed and owed.get("error") else ""))
+            text = (f"Connected to {org}. Every order raised since {since} "
+                    "goes to Xero as a draft invoice dated the day on the work "
+                    "order. When the job is marked Complete it is dated that "
+                    "day, approved, and emailed to the contact in Xero.")
+            if stuck:
+                text += (f"\n{stuck} need{'s' if stuck == 1 else ''} "
+                         "attention - see the Note (highlighted).")
+            if owed and not owed.get("error"):
+                text += (f"\n${float(owed.get('owed') or 0):,.2f} outstanding "
+                         f"across {len(owed_rows)} invoice"
+                         f"{'' if len(owed_rows) == 1 else 's'}.")
+            state.config(text=text)
+
+        def _send_now():
+            sync = getattr(self, "_xero_sync", None)
+            if sync is None:
+                return
+            state.config(text="Sending to Xero…")
+
+            def _work():
+                try:
+                    sync.run_once()
+                except Exception:
+                    pass
+                self.master.after(0, lambda: _alive() and _refresh())
+            threading.Thread(target=_work, daemon=True).start()
+
+        def _retry():
+            picked = orders.selection()
+            if not picked:
+                messagebox.showinfo("Xero", "Select an order in the list first.",
+                                    parent=dlg)
+                return
+            state.config(text="Trying again…")
+
+            def _work():
+                for oid in picked:
+                    _xero.retry(oid)
+                if getattr(self, "_xero_sync", None) is not None:
+                    try:
+                        self._xero_sync.run_once()
+                    except Exception:
+                        pass
+                self.master.after(0, lambda: _alive() and _refresh())
+            threading.Thread(target=_work, daemon=True).start()
 
         def _connect():
             def _work():
                 url = _xero.connect_url()
-                self.master.after(0, lambda: _open(url))
+                why = "" if url else _xero.connect_problem()
+                self.master.after(0, lambda: _alive() and _open(url, why))
             threading.Thread(target=_work, daemon=True).start()
 
-        def _open(url):
+        def _open(url, why):
             if not url:
-                state.config(text="Could not start the connection. The Xero "
-                                  "app may not be set up on this Supabase "
-                                  "project yet.")
+                state.config(text=why or "Could not start the connection. The "
+                             "Xero app may not be set up on this Supabase "
+                             "project yet.")
                 return
             try:
                 import webbrowser
                 webbrowser.open(url)
-                state.config(text="Sign in to Xero in the browser, then press "
-                                  "Refresh.")
+                state.config(text="Sign in to Xero in the browser and choose "
+                                  "the organisation, then press Refresh.")
             except Exception as exc:
                 state.config(text=str(exc))
 
-        foot = tk.Frame(dlg, bg=CBG, padx=px(16), pady=px(12))
-        foot.pack(fill="x")
+        def _disconnect():
+            if not messagebox.askyesno(
+                    "Disconnect Xero",
+                    "Disconnect Xero for everyone?\n\nOrders stop going to "
+                    "Xero, and completed jobs are no longer approved and "
+                    "emailed, until a manager connects it again. Invoices "
+                    "already in Xero are not touched.",
+                    icon="warning", default="no", parent=dlg):
+                return
+
+            def _work():
+                _xero.disconnect()
+                self.master.after(0, lambda: _alive() and _refresh())
+            threading.Thread(target=_work, daemon=True).start()
+
         flat_btn(foot, "Close", dlg.destroy, bg=CNE,
                  pady=px(6)).pack(side="right")
         flat_btn(foot, "Refresh", _refresh, bg=CNE, pady=px(6),
                  variant="secondary").pack(side="right", padx=(0, px(8)))
-        if _db.can_manage_prices():
+        flat_btn(foot, "Retry selected", _retry, bg=CNE, pady=px(6),
+                 variant="secondary").pack(side="right", padx=(0, px(8)))
+        flat_btn(foot, "Send now", _send_now, bg=CNE, pady=px(6),
+                 variant="secondary").pack(side="right", padx=(0, px(8)))
+        if manager:
             flat_btn(foot, "Connect", _connect, bg=CA,
                      pady=px(6)).pack(side="left")
+            flat_btn(foot, "Disconnect", _disconnect, bg=CNE, pady=px(6),
+                     variant="secondary").pack(side="left", padx=(px(8), 0))
         else:
             tk.Label(foot, text="Only a manager can connect Xero.", bg=CBG,
                      fg=CMU, font=F_SM).pack(side="left")

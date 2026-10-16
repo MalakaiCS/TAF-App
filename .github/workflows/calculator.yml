@@ -10,6 +10,9 @@ name: Calculator and API
 #     field of every answer. Node is required here, so it cannot skip.
 #   - api_function.py serves the real function with Deno against a stand-in
 #     for Supabase's auth and REST API, and calls it over HTTP.
+#   - xero_function.py does the same for the xero function, against a
+#     stand-in for Xero as well: an order drafted, completed, approved and
+#     emailed, and the ways that goes wrong.
 
 on:
   push:
@@ -19,6 +22,7 @@ on:
       - 'supabase/functions/**'
       - 'tests/test_calc_parity.py'
       - 'tests/api_function.py'
+      - 'tests/xero_function.py'
       - '.github/workflows/calculator.yml'
   pull_request:
     paths:
@@ -27,6 +31,7 @@ on:
       - 'supabase/functions/**'
       - 'tests/test_calc_parity.py'
       - 'tests/api_function.py'
+      - 'tests/xero_function.py'
   workflow_dispatch:
 
 jobs:
@@ -68,3 +73,8 @@ jobs:
         env:
           REQUIRE_DENO: "1"
         run: python tests/api_function.py
+
+      - name: Xero gets the right invoice, at the right time
+        env:
+          REQUIRE_DENO: "1"
+        run: python tests/xero_function.py

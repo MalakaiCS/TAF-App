@@ -772,6 +772,176 @@ def run_merge_checks(pg: Postgres) -> None:
           names()["A-3"] + err)
 
 
+XERO_MIGRATION = ROOT / "migrate_xero_link.sql"
+
+
+def run_xero_checks(pg: Postgres) -> None:
+    """Step 37, on the full schema the merge checks loaded."""
+    print("\n── Xero, linked (step 37) ──")
+    q(pg, "INSERT INTO catalog_lists (key, value) VALUES ('xero_tokens', "
+          "'{\"refresh_token\": \"leaked\"}') ON CONFLICT (key) DO UPDATE "
+          "SET value = EXCLUDED.value;")
+    ok, _o, err = pg.psql(XERO_MIGRATION.read_text(encoding="utf-8"), "f")
+    check("step 37 runs again cleanly", ok, err)
+    check("the old Xero sign-in every account could read is gone",
+          q(pg, "SELECT count(*) FROM catalog_lists "
+                "WHERE key = 'xero_tokens';") == "0")
+
+    # The merge checks' orders were all made moments ago: before the link.
+    q(pg, "UPDATE orders SET created_at = now() - interval '3 hours';")
+    q(pg, "SELECT xero_conn_put(jsonb_build_object('refresh_token', 'r1', "
+          "'access_token', 'a1', 'drafts_from', now() - interval '1 hour'));")
+    for who, label in ((DAVE, "somebody on the floor"),
+                       (KAI, "a director")):
+        ok, out, err = as_in(pg, "f", who,
+                             "SELECT refresh_token FROM xero_connection;")
+        check(f"{label} cannot read the Xero sign-in", not ok, out)
+        ok, out, err = as_in(pg, "f", who, "SELECT xero_conn_get();")
+        check(f"{label} cannot read it through the function's door either",
+              not ok, out)
+    ok, _o, err = as_in(pg, "f", SARAH, "UPDATE xero_connection SET "
+                                        "refresh_token = 'mine';")
+    check("nor can a manager change it", not ok, err)
+
+    def new_order(number, created="now()", who=DAVE):
+        return q(pg, "INSERT INTO orders (id, user_id, customer_name, "
+                     "order_number, header, items, created_at) VALUES "
+                     f"(gen_random_uuid(), '{who}', 'Bells', '{number}', "
+                     f"'{{\"Order Number\": \"{number}\", \"status\": "
+                     f"\"Pending\"}}', '[{{\"Quantity\": 2}}]', {created}) "
+                     "RETURNING id;").splitlines()[0]
+
+    old = new_order("X-OLD", "now() - interval '2 days'")
+    fresh = new_order("X-1")
+    ok, out, err = as_in(pg, "f", DAVE,
+                         "SELECT string_agg(order_number, ',') FROM orders "
+                         "WHERE id IN (SELECT order_id FROM "
+                         "xero_orders_to_draft(50));")
+    check("orders raised since Xero was linked are offered for a draft, "
+          "older ones are not", ok and out == "X-1", out or err)
+    ok, out, err = as_in(pg, "f", STRANGER,
+                         "SELECT count(*) FROM xero_orders_to_draft(50);")
+    check("an account that is not approved staff gets none",
+          not ok and "Only staff" in err, out or err)
+    ok, out, err = as_in(pg, "f", DAVE,
+                         f"INSERT INTO xero_invoices (order_id) "
+                         f"VALUES ('{fresh}');")
+    check("staff cannot write the invoice rows themselves", not ok, out)
+
+    first = q(pg, f"SELECT count(*) FROM xero_claim('{fresh}', 90);")
+    second = q(pg, f"SELECT count(*) FROM xero_claim('{fresh}', 90);")
+    check("an order is worked on by one request at a time",
+          first == "1" and second == "0", f"{first}/{second}")
+    ok, out, err = as_in(pg, "f", DAVE,
+                         "SELECT count(*) FROM xero_orders_to_draft(50);")
+    check("and is not offered again while it is held", ok and out == "0",
+          out or err)
+
+    md5 = q(pg, f"SELECT _xero_source_md5(o) FROM orders o "
+                f"WHERE id = '{fresh}';")
+    q(pg, f"SELECT 1 FROM xero_invoice_put('{fresh}', jsonb_build_object("
+          f"'state', 'draft', 'invoice_id', 'INV-1', 'source_md5', '{md5}', "
+          f"'claimed_until', null));")
+    ok, out, err = as_in(pg, "f", DAVE,
+                         "SELECT count(*) FROM xero_orders_to_draft(50);")
+    check("an order whose draft is up to date is left alone",
+          ok and out == "0", out or err)
+    q(pg, f"UPDATE orders SET header = header || '{{\"Notes\": \"rush\"}}' "
+          f"WHERE id = '{fresh}';")
+    ok, out, err = as_in(pg, "f", DAVE,
+                         "SELECT count(*) FROM xero_orders_to_draft(50);")
+    check("a note does not send the draft round again", ok and out == "0",
+          out or err)
+    q(pg, f"UPDATE orders SET items = '[{{\"Quantity\": 3}}]' "
+          f"WHERE id = '{fresh}';")
+    ok, out, err = as_in(pg, "f", DAVE,
+                         "SELECT count(*) FROM xero_orders_to_draft(50);")
+    check("a changed line does", ok and out == "1", out or err)
+
+    ok, out, err = as_in(pg, "f", DAVE,
+                         f"SELECT merge_order_header('{fresh}', "
+                         "'{\"status\": \"Complete\"}');")
+    row = q(pg, f"SELECT complete_wanted || '/' || (completed_on = "
+                f"(now() AT TIME ZONE 'Australia/Brisbane')::date) FROM "
+                f"xero_invoices WHERE order_id = '{fresh}';")
+    check("marking the job Complete - by anyone, from any screen - notes "
+          "the day it was finished", ok and row == "true/true", row + err)
+    ok, out, err = as_in(pg, "f", DAVE, "SELECT xero_due_count();")
+    check("and it is waiting to be approved and emailed",
+          ok and out == "1", out or err)
+    ok, out, err = as_in(pg, "f", DAVE,
+                         "SELECT count(*) FROM xero_orders_to_draft(50);")
+    check("a completed job's draft is not rewritten from the order",
+          ok and out == "0", out or err)
+    q(pg, f"UPDATE xero_invoices SET unpriced = 1 WHERE order_id = '{fresh}';")
+    ok, out, err = as_in(pg, "f", DAVE,
+                         "SELECT xero_due_count() || '/' || count(*) "
+                         "FROM xero_orders_to_draft(50);")
+    check("unless a line had no price: that holds it back, and fixing the "
+          "order sends it again", ok and out == "0/1", out or err)
+    q(pg, f"UPDATE xero_invoices SET unpriced = 0 WHERE order_id = '{fresh}';")
+
+    q(pg, f"UPDATE orders SET header = header || "
+          f"'{{\"status\": \"In Production\"}}' WHERE id = '{fresh}';")
+    check("put back into production before it went, it waits again",
+          q(pg, f"SELECT complete_wanted::text || '/' || "
+                f"COALESCE(completed_on::text, '-') FROM xero_invoices "
+                f"WHERE order_id = '{fresh}';") == "false/-")
+    q(pg, f"UPDATE orders SET header = header || "
+          f"'{{\"status\": \"Dispatched\"}}' WHERE id = '{fresh}';")
+    check("going straight to Dispatched counts as finished",
+          q(pg, f"SELECT complete_wanted FROM xero_invoices "
+                f"WHERE order_id = '{fresh}';") == "t")
+    q(pg, f"UPDATE orders SET header = header || '{{\"status\": "
+          f"\"Complete\"}}' WHERE id = '{old}';")
+    check("an order from before the link is never invoiced by it",
+          q(pg, f"SELECT count(*) FROM xero_invoices "
+                f"WHERE order_id = '{old}';") == "0")
+
+    q(pg, f"SELECT 1 FROM xero_invoice_put('{fresh}', "
+          "'{\"state\": \"sent\"}');")
+    q(pg, f"UPDATE orders SET header = header || "
+          f"'{{\"status\": \"In Production\"}}' WHERE id = '{fresh}';")
+    check("an invoice already sent is not pulled back by a status change",
+          q(pg, f"SELECT complete_wanted FROM xero_invoices "
+                f"WHERE order_id = '{fresh}';") == "t")
+
+    gone = new_order("X-2")
+    q(pg, f"SELECT 1 FROM xero_claim('{gone}', 0);")
+    q(pg, f"SELECT 1 FROM xero_invoice_put('{gone}', "
+          "'{\"state\": \"draft\", \"invoice_id\": \"INV-2\"}');")
+    q(pg, f"DELETE FROM orders WHERE id = '{gone}';")
+    check("deleting an order asks for its draft to come back out of Xero",
+          q(pg, f"SELECT delete_wanted FROM xero_invoices "
+                f"WHERE order_id = '{gone}';") == "t")
+
+    q(pg, "ALTER TABLE xero_invoices ADD CONSTRAINT nope CHECK (false) "
+          "NOT VALID;")
+    late = new_order("X-3")
+    ok, _o, err = pg.psql(f"UPDATE orders SET header = header || "
+                          f"'{{\"status\": \"Complete\"}}' WHERE id = '{late}';",
+                          "f")
+    check("an order still saves when the Xero side cannot be written",
+          ok and q(pg, f"SELECT header ->> 'status' FROM orders "
+                       f"WHERE id = '{late}';") == "Complete", err)
+    q(pg, "ALTER TABLE xero_invoices DROP CONSTRAINT nope;")
+
+    a = q(pg, "SELECT COALESCE(xero_conn_begin_refresh(30), '-');")
+    b = q(pg, "SELECT COALESCE(xero_conn_begin_refresh(30), '-');")
+    check("the sign-in is renewed by one request at a time",
+          a == "r1" and b == "-", f"{a}/{b}")
+    stale = q(pg, "SELECT xero_conn_end_refresh('r0', "
+                  "'{\"refresh_token\": \"x\"}');")
+    good = q(pg, "SELECT xero_conn_end_refresh('r1', "
+                 "'{\"refresh_token\": \"r2\", \"access_token\": \"a2\"}');")
+    after = q(pg, "SELECT refresh_token || '/' || access_token || '/' || "
+                  "(refreshing_until IS NULL) || '/' || (drafts_from IS NOT "
+                  "NULL) FROM xero_connection;")
+    check("a renewal that lost the race does not overwrite the winner's",
+          stale == "f" and good == "t" and after == "r2/a2/true/true",
+          f"{stale} {good} {after}")
+
+
 def _skip(why: str) -> int:
     """Skipping is fine on a laptop. In CI it is not: a workflow that goes
     green having checked nothing is worse than no workflow, because it is
@@ -793,6 +963,7 @@ def main() -> int:
     try:
         run_checks(pg)
         run_merge_checks(pg)
+        run_xero_checks(pg)
     finally:
         pg.stop()
     print(f"\n{len(FAILURES)} FAILED" if FAILURES

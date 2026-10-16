@@ -145,7 +145,11 @@ WITH checks(step, file, purpose, needed, present) AS (VALUES
                  AND column_name='delivery_labels')),
 
   (36, 'migrate_merge_names.sql', 'An account''s name follows onto its orders after a merge or rename', 'recommended',
-      to_regprocedure('public.sync_customer_order_names(uuid)') IS NOT NULL)
+      to_regprocedure('public.sync_customer_order_names(uuid)') IS NOT NULL),
+
+  (37, 'migrate_xero_link.sql', 'Xero linked: orders become draft invoices, approved and emailed when complete', 'recommended',
+      to_regclass('public.xero_invoices') IS NOT NULL
+      AND to_regprocedure('public.xero_orders_to_draft(integer)') IS NOT NULL)
 )
 SELECT step,
        CASE WHEN present THEN 'already done' ELSE 'RUN THIS' END AS status,

@@ -514,6 +514,20 @@ def customer_for_order(customer_name: str, customer_id: str = "") -> "dict | Non
     return None
 
 
+# Called (with no arguments) after this PC saves, changes or deletes an order:
+# how the Xero sync hears there is something to send without polling hard.
+# A listener must be quick and must not raise; any that does is ignored.
+ORDER_LISTENERS: list = []
+
+
+def _order_changed() -> None:
+    for listener in list(ORDER_LISTENERS):
+        try:
+            listener()
+        except Exception:
+            pass
+
+
 def save_order(header: dict, items: list, order_type: str) -> "str | None":
     """Insert an order and return its new id (or None if it can't be read)."""
     user = _current_user
@@ -549,6 +563,7 @@ def save_order(header: dict, items: list, order_type: str) -> "str | None":
             resp = get_client().table("orders").insert(data).execute()
         else:
             raise
+    _order_changed()
     try:
         return (resp.data or [{}])[0].get("id")
     except Exception:
@@ -766,6 +781,7 @@ def get_all_orders(limit: int = 0) -> list:
 
 def delete_order(order_id: str) -> None:
     get_client().rpc("delete_order_by_role", {"order_id": order_id}).execute()
+    _order_changed()
 
 
 def archive_order(order_id: str) -> None:
@@ -1011,6 +1027,7 @@ def merge_order_header(order_id: str, patch: dict) -> None:
             "p_patch":    patch,
         }).execute()
         if resp.data:                      # the RPC returns the updated id
+            _order_changed()
             return
         raise RuntimeError(
             "The database did not change that order. It may have been "
@@ -1030,6 +1047,7 @@ def merge_order_header(order_id: str, patch: dict) -> None:
         raise RuntimeError(
             "The database did not change that order. It may have been "
             "deleted, or your account may not be allowed to change it.")
+    _order_changed()
 
 
 # ── Priority ──────────────────────────────────────────────────────────────────
@@ -1037,6 +1055,29 @@ def merge_order_header(order_id: str, patch: dict) -> None:
 def set_order_priority(order_id: str, priority: bool) -> None:
     """Set or clear the priority flag stored in the order's header JSON."""
     merge_order_header(order_id, {"priority": priority})
+
+
+# ── Xero (see migrate_xero_link.sql) ─────────────────────────────────────────
+
+def xero_orders_to_draft(limit: int = 10) -> list:
+    """Orders whose Xero draft needs making or bringing up to date, with their
+    lines. Empty when Xero is not linked or step 37 has not been run."""
+    try:
+        resp = get_client().rpc("xero_orders_to_draft",
+                                {"p_limit": int(limit)}).execute()
+        return list(resp.data or [])
+    except Exception:
+        return []
+
+
+def xero_due_count() -> int:
+    """How many invoices are waiting on Xero to be approved and emailed, or
+    taken back out."""
+    try:
+        resp = get_client().rpc("xero_due_count", {}).execute()
+        return int(resp.data or 0)
+    except Exception:
+        return 0
 
 
 # ── Order Status ──────────────────────────────────────────────────────────────

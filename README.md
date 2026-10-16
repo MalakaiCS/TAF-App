@@ -257,6 +257,13 @@ log, stock management and a customer database.
   splits one file into one invoice per order. Anything it couldn't price is
   listed before the file is written, so a line is never quietly dropped off
   an invoice.
+- **Xero, linked** (optional, see *Link Xero* below) — connected once by a
+  manager, for everyone. Every order becomes a **draft** invoice in Xero,
+  dated the day on the work order, and follows the order while it is a draft.
+  When the job is marked **Complete** (or Dispatched) — on any PC or phone —
+  the invoice is dated that day, **approved**, and **emailed** by Xero to the
+  contact on file. A line with no price holds it back as a draft until the
+  price is on the order.
 - **Backup & Export** — one button writes a dated zip of spreadsheets:
   every order, every line, customers, quotes, stock and prices. They open in
   Excel and need nothing else — not this app, not an account, not the
@@ -396,6 +403,7 @@ just run it — nothing is lost and nothing is duplicated.
 | 34 | `migrate_c_channel.sql` | C-channel weights: material, centre widths and measured weights saved with the other settings (needs step 33) | recommended |
 | 35 | `migrate_label_switches.sql` | Switching delivery labels off for a customer, or for everyone (needs step 33) | recommended |
 | 36 | `migrate_merge_names.sql` | A merged (or renamed) account's name follows onto its past orders and quotes - and fixes merges already made (needs step 33) | recommended |
+| 37 | `migrate_xero_link.sql` | Xero linked for good: every order becomes a draft invoice, approved and emailed when the job is complete. Keeps the Xero sign-in where no app account can read it | recommended |
 
 **Step 16 is the one that matters most.** Every policy in the older scripts is
 `TO authenticated USING (true)` — meaning *anyone Supabase counts as signed
@@ -631,6 +639,66 @@ it is refused. Each person's copy goes to their address alone — a summary of
 the whole factory bcc'd around is one wrong address away from being a list of
 every customer's late job in a stranger's inbox.
 
+### Link Xero (optional)
+
+One connection for the whole company. Every order raised from then on becomes
+a **draft** sales invoice in Xero, dated the day on the work order, and is
+kept up to date while it is a draft. When the job is marked **Complete** (or
+Dispatched) — on any PC, phone or screen — the invoice is dated that day,
+**approved**, and **emailed by Xero** to the contact on file there, due on
+that contact's payment terms in Xero.
+
+The Xero client secret is a function secret, and the sign-in to Xero is kept
+in a table no app account can read — only the `xero` function can. Neither is
+ever on a PC.
+
+1. Run `migrate_xero_link.sql` (step 37).
+2. At [developer.xero.com](https://developer.xero.com/app/manage) make a
+   **Web app**. Its redirect URI is
+   `https://<your-project>.supabase.co/functions/v1/xero?do=finish`.
+3. Set its details as function secrets and deploy:
+
+   ```bash
+   supabase secrets set XERO_CLIENT_ID=... XERO_CLIENT_SECRET=...
+   supabase secrets set XERO_REDIRECT_URI=https://<your-project>.supabase.co/functions/v1/xero?do=finish
+   supabase functions deploy xero --no-verify-jwt
+   ```
+
+   `--no-verify-jwt` because Xero sends you back to the function in a
+   browser; the function checks every other request itself. Optional:
+   `XERO_ACCOUNT_CODE` (default `200`, Sales), `XERO_TAX_TYPE` (default
+   `OUTPUT`, GST on Income), and `XERO_SCOPES` if your Xero app was set up
+   with Xero's newer narrower scopes.
+4. A Director or Admin switches on **Xero, connected** (Settings → Features). A
+   manager opens
+   **Xero…** (under your name → Testable Features), presses **Connect**,
+   signs in to Xero and picks the organisation. That is the only time.
+
+**What it needs from Xero.** Each customer must be a contact in Xero under the
+same name as in the app (its legal name, name or short name — case doesn't
+matter), with the email address their invoices go to. One that isn't is
+listed on the Xero screen with what to fix, and goes through by itself once
+it's fixed. Part numbers that are item codes in Xero are sent as item codes;
+any that aren't are sent as plain lines rather than failing the invoice.
+
+**What holds an invoice back.** A line nothing could price goes on the draft
+at $0 marked *NO PRICE*, and that invoice is not approved or emailed until the
+price is on the order. A contact with no email address gets approved but not
+emailed — fix it in Xero and press **Retry**. An invoice somebody approves,
+voids or deletes by hand in Xero is left alone from then on. Deleting an order
+takes its draft back out of Xero.
+
+**Staying linked.** Xero ends a sign-in that isn't used for 60 days. Any PC
+with the app open renews it, at least once a week, so it doesn't lapse; if it
+ever does (or someone disconnects the app in Xero), the Xero screen says so
+and a manager presses **Connect** again — orders taken meanwhile still go.
+
+Drafts are priced on a PC, because the price list and part-number rules live
+in the desktop app: any PC with the app open sends them within a few minutes,
+and straight away for orders it saves. Approvals go the moment a job is
+marked complete; to have them go even when no PC is on, schedule the sweep
+— the recipe is at the bottom of `migrate_xero_link.sql`.
+
 ### Enable sending from a phone (optional)
 
 Lets staff photograph a purchase order on their phone and have it arrive in the
@@ -687,11 +755,13 @@ Quote from the **Quotes** tab — add lines, or **Load from an Order** to pull a
 saved one in. **Quote** on the New Order tab and on a saved order in Previous
 Orders does the same for what is already in front of you.
 
-**Why a CSV and not the Xero API?** The CSV import needs no app registration,
-no OAuth callback and no stored credentials, and Xero previews the whole batch
-for approval before creating anything. Import it in Xero under
-**Business → Invoices → Import**, and check the account code and tax rate on
-the preview.
+**The CSV and the link.** The CSV import needs no app registration and no
+stored credentials, and Xero previews the whole batch before creating
+anything: import it under **Business → Invoices → Import**, and check the
+account code and tax rate on the preview. It keeps working whether or not Xero
+is linked — it is what you fall back to on the afternoon Xero is down. Once
+Xero is linked (below), orders go across by themselves and you will rarely
+need it.
 
 ### Turn on automatic stock deduction (optional)
 
@@ -1003,6 +1073,7 @@ tests/                     Rule tests — `python tests/run.py`, run by CI
   db_rules.py              Checks the database rules on a real Postgres
   web_app.py               Drives the web app in a real browser
   api_function.py          Serves the filter-calculator function and calls it
+  xero_function.py         Serves the xero function against a stand-in Xero
   user_management.py       Roles & user admin
   models.py / validation.py
 fonts/                     Bundled Public Sans (OFL)
@@ -1079,6 +1150,7 @@ python tests/smoke_gui.py # starts the real window and builds every screen
 python tests/db_rules.py  # runs migrations on a throwaway Postgres and tries to break them
 python tests/web_app.py   # drives the web app in Chromium (needs Playwright)
 python tests/api_function.py  # serves the filter-calculator function with Deno
+python tests/xero_function.py # the xero function, an order from draft to emailed
 ```
 
 `tests/test_calc_parity.py` (part of `run.py`) sends the same requests through

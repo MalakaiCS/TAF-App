@@ -56,6 +56,7 @@ ORDER = [
     "migrate_c_channel.sql",
     "migrate_label_switches.sql",
     "migrate_merge_names.sql",
+    "migrate_xero_link.sql",
 ]
 
 

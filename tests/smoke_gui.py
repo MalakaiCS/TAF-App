@@ -1641,6 +1641,51 @@ def _steps(app, gui, root):
         _feat._switches = {}
     add("dialogs: every feature screen", _new_screens)
 
+    def _xero_screen():
+        """Where every order's invoice is up to, with what stopped one."""
+        from tkinter import ttk
+        from taf_order_app import xero as _x
+        saved = (_x.status, _x.invoices, _x.owing)
+        _x.status = lambda: {"connected": True, "organisation": "TAF",
+                             "drafts_from": "2026-10-16T00:00:00Z"}
+        _x.invoices = lambda: {"rows": [
+            {"order_id": "o1", "order_number": "21692",
+             "customer_name": "BATARE", "order_status": "Complete",
+             "state": "sent", "invoice_number": "21692", "total": 418.0,
+             "emailed_to": "accounts@batare.example"},
+            {"order_id": "o2", "order_number": "21700",
+             "customer_name": "Nobody", "order_status": "Pending",
+             "state": "waiting",
+             "error": 'Xero has no contact called "Nobody".'}]}
+        _x.owing = lambda: {"rows": [], "owed": 0.0, "error": ""}
+        before = set(root.winfo_children())
+        try:
+            app._xero()
+            dlg = None
+            for _ in range(80):
+                root.update()
+                opened = set(root.winfo_children()) - before
+                dlg = next(iter(opened), None)
+                trees = [w for w in _walk(dlg) if isinstance(w, ttk.Treeview)] \
+                    if dlg else []
+                if trees and trees[0].get_children():
+                    break
+                time.sleep(0.05)
+            assert dlg is not None, "the Xero screen did not open"
+            orders = trees[0]
+            assert set(orders.get_children()) == {"o1", "o2"}, \
+                orders.get_children()
+            assert "Approved and emailed" in orders.item("o1", "values")
+            assert "problem" in orders.item("o2", "tags")
+            words = " ".join(str(w.cget("text")) for w in _walk(dlg)
+                             if isinstance(w, tk.Label))
+            assert "Connected to TAF" in words and "1 needs attention" in words, \
+                words
+            dlg.destroy()
+        finally:
+            _x.status, _x.invoices, _x.owing = saved
+    add("dialogs: the Xero screen lists every order's invoice", _xero_screen)
+
     def _cut_list():
         from taf_order_app import features as _feat
         _feat._switches = {"channel_calculator": True}
