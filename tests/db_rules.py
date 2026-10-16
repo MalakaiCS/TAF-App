@@ -336,7 +336,7 @@ def run_checks(pg: Postgres) -> None:
 
 MERGE_MIGRATION = ROOT / "migrate_packing_and_merge.sql"
 NEEDS_STORAGE = {"migrate_po_inbox.sql", "migrate_avatars.sql",
-                 "migrate_order_files.sql"}
+                 "migrate_order_files.sql", "migrate_stock_images.sql"}
 
 A = "10000000-0000-0000-0000-00000000000a"    # stays: CAS - Tweed Heads
 B = "10000000-0000-0000-0000-00000000000b"    # duplicate of A

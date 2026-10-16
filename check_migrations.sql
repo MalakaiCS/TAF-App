@@ -169,7 +169,10 @@ WITH checks(step, file, purpose, needed, present) AS (VALUES
 
   (40, 'migrate_purchasing.sql', 'Buying through Xero: suppliers, items, multi-item requests, receiving into stock', 'recommended',
       to_regclass('public.suppliers') IS NOT NULL
-      AND to_regprocedure('public.receive_purchase(uuid,jsonb)') IS NOT NULL)
+      AND to_regprocedure('public.receive_purchase(uuid,jsonb)') IS NOT NULL),
+
+  (41, 'migrate_stock_images.sql', 'The storage bucket for pictures of stock items', 'recommended',
+      EXISTS (SELECT 1 FROM storage.buckets WHERE id = 'stock-images'))
 )
 SELECT step,
        CASE WHEN present THEN 'already done' ELSE 'RUN THIS' END AS status,

@@ -63,9 +63,5 @@ drop policy if exists "stock_tx_insert" on stock_transactions;
 CREATE POLICY "stock_tx_insert"
     ON stock_transactions FOR INSERT TO authenticated WITH CHECK (true);
 
--- Storage bucket for product images
--- Go to Supabase → Storage → New Bucket
--- Name: stock-images
--- Public: YES  (so image URLs work without auth tokens)
--- Then add this policy to the bucket:
---   Authenticated users can upload/update/delete
+-- Storage bucket for product images: run migrate_stock_images.sql (step 41),
+-- which makes the stock-images bucket and who may change what is in it.

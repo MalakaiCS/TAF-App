@@ -15218,9 +15218,15 @@ class ModernOrderApp(tk.Frame):
                         url = _db.upload_stock_image(item_id, _local_img_path[0])
                         _db.update_stock_item(item_id, {"image_url": url})
                     except Exception as img_exc:
+                        why = str(img_exc)
+                        if "bucket not found" in why.lower():
+                            why = ("The place pictures are kept hasn't been "
+                                   "set up yet. Run migrate_stock_images.sql "
+                                   "(step 41) in the Supabase SQL Editor, "
+                                   "then attach the picture again.")
                         messagebox.showwarning(
                             "Image Upload",
-                            f"Item saved but image upload failed:\n{img_exc}")
+                            f"Item saved but image upload failed:\n{why}")
 
                 _db.log_action(
                     "stock_created" if is_new else "stock_updated",
