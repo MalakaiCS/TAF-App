@@ -1120,6 +1120,14 @@ so what CI gates is the measured bar width the decoding established.
   profile photo loads in the background (cached on disk). The audit log is
   written by a background thread. Search boxes wait for typing to pause.
   The build is not UPX-compressed.
+- **Staying signed in:** the sign-in token lasts an hour and the database
+  library renews it on one timer that gives up after a failed attempt or
+  two (asleep, offline), after which every request failed "JWT expired"
+  until you signed in again. `taf_order_app/db_session.py` wraps where every
+  database request is sent: it renews the token when under five minutes
+  are left, renews and resends once on an expired-token reply, resends once
+  on a stale connection (a write only when it cannot have arrived), and a
+  watchdog renews every minute it is due until it succeeds.
 - **No command prompt windows:** every program the app starts on Windows
   (PowerShell, schtasks, Word) runs hidden - `taf_order_app/quiet.py`.
 - **Threads:** background work hands results back with `.after()` or by

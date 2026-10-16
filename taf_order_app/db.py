@@ -16,6 +16,15 @@ def init(anon_key: str) -> None:
     global _client
     from supabase import create_client
     _client = create_client(SUPABASE_URL, anon_key)
+    # Renew the sign-in before it runs out, and recover a request that
+    # failed on an expired token or a stale connection - instead of having
+    # to sign out and back in.
+    try:
+        from . import db_session
+        db_session.install(lambda: _client,
+                           lambda: _current_user is not None)
+    except Exception:
+        pass
 
 
 # Loading the database library and making the client is most of a second.
