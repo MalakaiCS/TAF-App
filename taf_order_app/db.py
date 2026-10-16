@@ -454,6 +454,69 @@ def set_line_made(order_id: str, line_id: str, made: bool = True,
             "deleted, or your account may not be allowed to change it.")
 
 
+def replace_order_line(order_id: str, line_id: str, new_line: dict) -> list:
+    """Put a corrected line on a saved order in place of the old one.
+
+    Read fresh, like set_line_fields: whether the line has been made (ticked
+    on the floor since the office opened the order) is kept from the order
+    as it is now, not from the screen. Returns the saved items; a refused
+    write raises.
+    """
+    resp = (get_client().table("orders")
+            .select("items").eq("id", order_id).single().execute())
+    items = with_line_ids(list((resp.data or {}).get("items") or []))
+    for i, line in enumerate(items):
+        if str(line.get(LINE_ID)) != str(line_id):
+            continue
+        fixed = dict(new_line)
+        for key, value in line.items():
+            if key == LINE_ID or key.startswith("made"):
+                fixed[key] = value
+        items[i] = fixed
+        break
+    else:
+        raise RuntimeError(
+            "That line was not found on the order. It may have been "
+            "changed or removed since this screen was opened.")
+    out = (get_client().table("orders")
+           .update({"items": items}).eq("id", order_id).execute())
+    if not (out.data or []):
+        raise RuntimeError(
+            "The database did not change that order. It may have been "
+            "deleted, or your account may not be allowed to change it.")
+    _order_changed()
+    return items
+
+
+ORDER_DETAIL_COLUMNS = {"Date Ordered": "date_ordered", "Date Due": "date_due",
+                        "Job": "job"}
+
+
+def update_order_details(order_id: str, patch: dict) -> None:
+    """Correct an order's dates, job or delivery fee. The header is what the
+    order window, reprints and invoices read; the matching columns are what
+    the lists sort and filter on, so both change."""
+    merge_order_header(str(order_id), dict(patch))
+    cols = {ORDER_DETAIL_COLUMNS[k]: v for k, v in patch.items()
+            if k in ORDER_DETAIL_COLUMNS}
+    if cols:
+        get_client().table("orders").update(cols).eq(
+            "id", str(order_id)).execute()
+
+
+def xero_invoice_for(order_id: str) -> dict:
+    """Where this order's Xero invoice is up to - {} when it has none (or
+    step 37 has not been run)."""
+    try:
+        resp = (get_client().table("xero_invoices")
+                .select("state, invoice_number").eq("order_id", str(order_id))
+                .limit(1).execute())
+        rows = resp.data or []
+        return rows[0] if rows else {}
+    except Exception:
+        return {}
+
+
 def set_line_fields(order_id: str, line_id: str, fields: dict) -> list:
     """Change named fields on one line of a saved order - its packing plan,
     its calculator inputs - and nothing else.
@@ -1450,6 +1513,22 @@ def price_tiers_ready() -> bool:
         except Exception:
             _PRICE_TIERS["ok"] = False
     return _PRICE_TIERS["ok"]
+
+
+_CUSTOMER_EXTRAS: dict = {}
+
+
+def customer_extras_ready() -> bool:
+    """Whether migrate_customer_xero_delivery.sql (step 39) has been run:
+    customers.xero_contact_id and customers.delivery_fee. Asked once."""
+    if "ok" not in _CUSTOMER_EXTRAS:
+        try:
+            get_client().table("customers").select("delivery_fee") \
+                .limit(1).execute()
+            _CUSTOMER_EXTRAS["ok"] = True
+        except Exception:
+            _CUSTOMER_EXTRAS["ok"] = False
+    return _CUSTOMER_EXTRAS["ok"]
 
 
 def customer_wants_labels(customer: "dict | None") -> bool:

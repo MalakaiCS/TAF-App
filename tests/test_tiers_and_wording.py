@@ -171,8 +171,8 @@ def test_a_bag_type_can_have_wording_too():
 def test_stored_wording_is_checked_before_it_is_used():
     assert wording.clean([{"filter_type": "V-form"}, "junk",
                           {"filter_type": "X", "wording": "ok",
-                           "min_depth": "-5"}]) == [
-        {"filter_type": "X", "min_depth": 0, "wording": "ok"}]
+                           "min_depth": "-5", "max_depth": "x"}]) == [
+        {"filter_type": "X", "min_depth": 0, "max_depth": 0, "wording": "ok"}]
     wording.set_rules(None)
     assert wording.current() == wording.DEFAULT_RULES
 
@@ -201,3 +201,77 @@ def test_the_csv_export_uses_the_same_wording():
         wording=wording.DEFAULT_RULES)
     assert rows[0]["*Description"].startswith("Galvanised Pleated Panel Filter")
     assert rows[0]["*UnitAmount"] == "30.00"
+
+
+def _panel(depth, ftype="Flat Panel"):
+    return {"Filter Type": ftype, "Media Type": "G4", "Short": 595,
+            "Long": 595, "Channel": depth}
+
+
+def test_flat_panel_wording_covers_10_to_25mm():
+    for depth in (10, 11, 25):
+        assert wording.describe(_panel(depth), wording.DEFAULT_RULES).startswith(
+            "Galvanised Flat Panel Filters"), depth
+    assert not wording.describe(_panel(28), wording.DEFAULT_RULES).startswith(
+        "Galvanised")
+
+
+def test_flyscreen_wording_covers_9_and_11mm():
+    for depth in (9, 11):
+        assert wording.describe(_panel(depth, "Flyscreen"),
+                                wording.DEFAULT_RULES).startswith(
+            "Flat Panel Flyscreen Filter"), depth
+
+
+def test_a_rule_says_its_depths():
+    assert [wording.depth_text(r) for r in wording.DEFAULT_RULES] == [
+        "9-11mm", "10-25mm", "30mm+"]
+
+
+def test_a_flyscreen_is_9_or_11mm_and_a_flat_panel_10_to_25():
+    from taf_order_app import part_numbers as pn
+    assert [pn.filter_type_for_thickness(d) for d in (9, 10, 11, 12, 25)] == [
+        "Flyscreen", "Flat Panel", "Flyscreen", "Flat Panel", "Flat Panel"]
+
+
+# ── Delivery fees ────────────────────────────────────────────────────────────
+
+def test_the_order_says_its_delivery_fee_or_takes_the_customers():
+    assert pricing.delivery_fee({"Delivery Fee": "25"}, {"delivery_fee": 40}) == 25.0
+    assert pricing.delivery_fee({"Delivery Fee": ""}, {"delivery_fee": 40}) == 0.0
+    # An order from before delivery fees, or raised on a phone.
+    assert pricing.delivery_fee({}, {"delivery_fee": "40"}) == 40.0
+    assert pricing.delivery_fee({}, {}) == 0.0
+    assert pricing.delivery_fee({"Delivery Fee": "lots"}) == 0.0
+
+
+def test_the_delivery_fee_goes_on_the_invoice_as_its_own_line():
+    built = xero.draft_from({"Customer Name": "Bells", "Delivery Fee": "35.00"},
+                            [_vform(**{"Unit Price": 10.0, "Price Source": "manual"})],
+                            {"xero_contact_id": "abc"}, {}, {})
+    lines = built["invoice"]["lines"]
+    assert lines[-1] == {"description": "Delivery", "quantity": 1.0,
+                         "unit_amount": 35.0, "item_code": "DELIVERY"}
+    assert built["invoice"]["contact_id"] == "abc"
+    rows, _u = pricing.invoice_for_order(
+        {"Customer Name": "Bells", "Order Number": "A-1",
+         "Date Ordered": "16/10/26"}, [_vform()],
+        customer={"delivery_fee": 20}, prices={"PPFG445-030": 30.0}, rates={})
+    assert [(r["InventoryItemCode"], r["*UnitAmount"]) for r in rows] == [
+        ("PPFG445-030", "30.00"), ("DELIVERY", "20.00")]
+
+
+# ── Prices typed into the table ──────────────────────────────────────────────
+
+def test_a_price_to_more_places_keeps_them_and_a_plain_one_has_two():
+    assert pricing.money_text(27.5) == "27.50"
+    assert pricing.money_text(33.33333) == "33.3333"
+    assert pricing.money_text(0) == "0.00"
+
+
+def test_xero_finds_a_customers_contact_only_when_one_name_matches():
+    contacts = [{"id": "1", "name": "Bells Pty Ltd"}, {"id": "2", "name": "Bells Creek"}]
+    assert xero.best_contact(contacts, ["BELLS PTY LTD", "Bells"])["id"] == "1"
+    assert xero.best_contact(contacts, ["Bells"]) is None
+    assert xero.best_contact(contacts + [{"id": "3", "name": "bells pty ltd"}],
+                             ["Bells Pty Ltd"]) is None

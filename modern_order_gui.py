@@ -105,8 +105,8 @@ def classify_by_channel(channel) -> "tuple[str | None, str | None]":
     Returns ``(filter_type, media_type)`` where either element may be ``None``
     when that field should be left untouched:
 
-      •  9–11 mm  → Flyscreen, GREY media
-      • 12–29 mm  → Flat Panel  (media left as-is)
+      •  9, 11 mm → Flyscreen, GREY media
+      • 10–29 mm  → Flat Panel  (media left as-is)
       • 45, 50 mm → V-form — those depths are only ever made as a V-form
       • 30 mm +   → V-form / pleated panel filter (media left as-is)
 
@@ -135,6 +135,80 @@ TICK_FULL  = "☑"
 TICK_SOME  = "▪"        # some of what's on screen, not all
 
 
+def _set_line_money(item: dict, column: str, text: str) -> dict:
+    """A price typed into a line's Unit $ or Line $ cell.
+
+    Unit $ is the price each; Line $ is the line's total, and sets the price
+    each from it (to four places, so 100.00 over 3 stays 100.00). Either way
+    the price is then the line's own, set by hand. Empty goes back to the
+    customer's tier price. Raises ValueError for anything not a price.
+    """
+    text = str(text or "").replace("✎", "").strip().lstrip("$").replace(",", "")
+    if not text:
+        item.pop("Unit Price", None)
+        item.pop("Price Source", None)
+        return item
+    value = float(text)
+    if value < 0:
+        raise ValueError("A price cannot be less than nothing.")
+    if column == "total":
+        qty = _pricing.line_quantity(item)
+        if qty <= 0:
+            raise ValueError("The line has no quantity to share the total over.")
+        value = value / qty
+    item["Unit Price"] = round(value, 4)
+    item["Price Source"] = "manual"
+    return item
+
+
+def _inline_money_edit(tree, iid, column, initial, on_value):
+    """Type over one cell of a table: Enter (or clicking away) keeps it,
+    Escape leaves it as it was. `on_value(text)` gets what was typed."""
+    try:
+        x, y, w, h = tree.bbox(iid, column)
+    except (ValueError, tk.TclError):
+        return None
+    var = tk.StringVar(value=str(initial or "").replace("✎", "").strip()
+                       .replace("—", ""))
+    ent = tk.Entry(tree, textvariable=var, justify="right", font=F_BODY,
+                   relief="flat", bd=0, highlightthickness=1,
+                   highlightbackground=CA, highlightcolor=CA)
+    ent.place(x=x, y=y, width=max(w, px(70)), height=h)
+    ent.focus_set()
+    ent.select_range(0, "end")
+    state = {"done": False}
+
+    def _finish(keep):
+        if state["done"]:
+            return
+        state["done"] = True
+        text = var.get()
+        try:
+            ent.destroy()
+        except tk.TclError:
+            pass
+        if keep:
+            on_value(text)
+
+    ent.bind("<Return>", lambda _e: _finish(True))
+    ent.bind("<KP_Enter>", lambda _e: _finish(True))
+    ent.bind("<Escape>", lambda _e: _finish(False))
+    ent.bind("<FocusOut>", lambda _e: _finish(True))
+    ent.commit = lambda: _finish(True)          # what Enter does
+    return ent
+
+
+def _fee_value(text: str):
+    """A delivery fee as typed: a number, or None for "no fee". Anything
+    that is not a number is no fee rather than an error mid-save."""
+    text = str(text or "").strip().lstrip("$").replace(",", "")
+    try:
+        fee = round(float(text), 2) if text else None
+    except ValueError:
+        return None
+    return fee if fee and fee > 0 else None
+
+
 def _line_money(item: dict) -> tuple:
     """("27.50", "275.00") for a priced line - a hand-set price marked with
     a pencil - or ("—", "—")."""
@@ -146,7 +220,7 @@ def _line_money(item: dict) -> tuple:
         return ("—", "—")
     qty = _pricing.line_quantity(item)
     mark = "✎ " if item.get("Price Source") == "manual" else ""
-    return (f"{mark}{unit:,.2f}", f"{unit * qty:,.2f}")
+    return (f"{mark}{_pricing.money_text(unit)}", f"{unit * qty:,.2f}")
 
 
 def _order_money(items) -> tuple:
@@ -3178,7 +3252,7 @@ class LineItemDialog(tk.Toplevel):
         # Auto-classification hint under the dimensions
         self._auto_hint = tk.Label(
             dim_f,
-            text="Channel 9–11 → Flyscreen (Grey)   ·   12–29 → Flat Panel   "
+            text="Channel 9 or 11 → Flyscreen (Grey)   ·   10–25 → Flat Panel   "
                  "·   30+ (45 & 50 included) → V-form / Pleated",
             bg=CCA, fg=CMU, font=F_SM, anchor="w")
         self._auto_hint.grid(row=1, column=0, columnspan=4, sticky="w", pady=(10, 0))
@@ -3327,8 +3401,18 @@ class LineItemDialog(tk.Toplevel):
     def _on_filter_type_change(self, *_):
         """A stepped filter is a 40mm V-form plus its 9mm flyscreen — 50mm
         overall, and 180 media, every time. Both are filled in on choosing it
-        so neither has to be remembered."""
-        if self.vars["Filter Type"].get().strip() != "Stepped Filter":
+        so neither has to be remembered.
+
+        An 11mm line is taken for a flyscreen, but flat panels are made at
+        11mm too: choosing Flat Panel on it takes the flyscreen's Grey off
+        again, and choosing Flyscreen puts it on."""
+        ft = self.vars["Filter Type"].get().strip()
+        media = self.vars["Media Type"].get().strip().upper()
+        if ft == "Flyscreen" and media != "GREY":
+            self.vars["Media Type"].set("GREY")
+        elif ft in ("Flat Panel", "V-form") and media == "GREY":
+            self.vars["Media Type"].set("G4")
+        if ft != "Stepped Filter":
             return
         if self.vars["Channel"].get().strip() != str(_pn.STEPPED_THICKNESS):
             self.vars["Channel"].set(str(_pn.STEPPED_THICKNESS))
@@ -9806,6 +9890,7 @@ class ModernOrderApp(tk.Frame):
             "Attention":     tk.StringVar(),
             "Job":           tk.StringVar(),
             "Location":      tk.StringVar(),
+            "Delivery Fee":  tk.StringVar(),
         }
 
         # Auto-note rule: JAF or AES in customer name → add label/wrap note
@@ -9825,7 +9910,7 @@ class ModernOrderApp(tk.Frame):
 
         field_rows = [
             "Customer Name", "Order Number", "Date Ordered",
-            "Date Due", "Attention", "Job", "Location",
+            "Date Due", "Attention", "Job", "Location", "Delivery Fee",
         ]
 
         # Store widget refs for validation highlighting
@@ -9891,6 +9976,20 @@ class ModernOrderApp(tk.Frame):
                 self._hentries[key] = e
                 _Tooltip(e, "\n".join(f"{n}: {d}"
                                       for n, d in _pn.REGIONS.items()))
+            elif key == "Delivery Fee":
+                # The customer's delivery charge, filled in when the account
+                # is picked and added to the invoice. A manager can change it
+                # on an order; for anyone else it is the customer's.
+                e = field_entry(card_body, textvariable=self.hvars[key])
+                e.grid(row=row, column=1, sticky="we", pady=4)
+                self._hentries[key] = e
+                if not (_db.is_ready() and _db.can_manage_prices()):
+                    e.config(state="readonly")
+                _Tooltip(e, "Delivery charge ex GST, from the customer's "
+                            "account. Added to the invoice. Empty = none.")
+                self.hvars[key].trace_add(
+                    "write", lambda *_: self.master.after_idle(
+                        self._refresh_items_tree))
             else:
                 e = field_entry(card_body, textvariable=self.hvars[key])
                 e.grid(row=row, column=1, sticky="we", pady=4)
@@ -10052,7 +10151,7 @@ class ModernOrderApp(tk.Frame):
                              command=self.tree.yview)
         vsb.grid(row=0, column=1, sticky="ns")
         self.tree.configure(yscrollcommand=vsb.set)
-        self.tree.bind("<Double-1>", lambda e: self._edit_item())
+        self.tree.bind("<Double-1>", self._items_double_click)
         self.tree.bind("<Delete>", lambda _e: self._delete_item())
         self.tree.bind("<Return>", lambda _e: self._edit_item())
 
@@ -13373,6 +13472,9 @@ class ModernOrderApp(tk.Frame):
                 ("Put this name on their past orders…",
                  lambda: self._sync_customer_order_names(ask=True)),
                 None,
+                ("Open in Xero",          lambda: self._customer_xero(link=False)),
+                ("Link to a Xero contact…", lambda: self._customer_xero(link=True)),
+                None,
                 ("Delete this customer…", self._delete_customer),
             ]
 
@@ -13808,6 +13910,18 @@ class ModernOrderApp(tk.Frame):
             if not _db.can_manage_prices():
                 for w in body.grid_slaves(row=_row - 1, column=1):
                     w.config(state="disabled")
+        # A delivery charge every order of theirs carries. Managers only.
+        extras_on = _db.is_ready() and _db.customer_extras_ready()
+        _fee = g.get("delivery_fee")
+        v_fee = tk.StringVar(value="" if _fee in (None, "") else f"{float(_fee):.2f}")
+        if extras_on:
+            _row_f("Delivery fee $", v_fee)
+            tk.Label(body, text="ex GST, on every order. Empty = none.",
+                     bg=CBG, fg=CMU, font=F_SM).grid(row=_row - 1, column=2,
+                                                     sticky="w", padx=(8, 0))
+            if not _db.can_manage_prices():
+                for w in body.grid_slaves(row=_row - 1, column=1):
+                    w.config(state="disabled")
         # Active toggle
         tk.Label(body, text="Status", bg=CBG, fg=CTX,
                  font=F_BODY, width=18, anchor="w").grid(
@@ -13896,6 +14010,8 @@ class ModernOrderApp(tk.Frame):
                    else {}),
                 **({"price_tier": int(v_tier.get().split()[-1])}
                    if tiers_on and _db.can_manage_prices() else {}),
+                **({"delivery_fee": _fee_value(v_fee.get())}
+                   if extras_on and _db.can_manage_prices() else {}),
                 "notes":            txt_notes.get("1.0", "end").strip(),
             }
             if is_new:
@@ -13956,6 +14072,164 @@ class ModernOrderApp(tk.Frame):
         flat_btn(foot, "Cancel",        dlg.destroy, bg=CNE, pady=6).pack(side="right", padx=(8, 0))
         flat_btn(foot, "Save Customer", _save,       bg=CGR, pady=6).pack(side="right")
         dlg.bind("<Escape>", lambda e: dlg.destroy())
+
+    def _customer_xero(self, link: bool = False):
+        """The selected customer's contact in Xero.
+
+        Open: straight to their contact page in Xero if they are linked;
+        otherwise their contact is looked for by name, and linked if exactly
+        one matches. Link (or no single match): pick the contact from a
+        search. The link is kept on the customer and used for their invoices,
+        so a customer called something else in Xero still goes to the right
+        contact.
+        """
+        cust = self._get_selected_customer()
+        title = "Xero"
+        if not cust:
+            messagebox.showinfo(title, "Select a customer first.")
+            return
+        if not _features.is_on("xero_live"):
+            messagebox.showinfo(title, "Xero is switched off. A Director or "
+                                "Admin switches on \"Xero, connected\" under "
+                                "Settings → Features.")
+            return
+        if not (_db.is_ready() and _db.customer_extras_ready()):
+            messagebox.showinfo(title, "This needs "
+                                "migrate_customer_xero_delivery.sql (step 39) "
+                                "run in Supabase first.")
+            return
+        import webbrowser
+        if not link and cust.get("xero_contact_id"):
+            webbrowser.open(_xero.contact_url(cust["xero_contact_id"]))
+            return
+        names = _xero.contact_names(cust, {})
+
+        def _save(contact):
+            try:
+                _db.update_customer(cust["id"], {"xero_contact_id": contact["id"]
+                                                 if contact else None})
+            except Exception as exc:
+                messagebox.showerror(title, f"Not saved:\n{exc}")
+                return False
+            cust["xero_contact_id"] = contact["id"] if contact else None
+            for rec in getattr(self, "_customer_records", None) or []:
+                if rec.get("id") == cust.get("id"):
+                    rec["xero_contact_id"] = cust["xero_contact_id"]
+            self.status_var.set(
+                f"{cust.get('name', '')} linked to {contact['name']} in Xero."
+                if contact else f"{cust.get('name', '')} unlinked from Xero.")
+            return True
+
+        def _work():
+            found = []
+            for n in names:
+                got = _xero.find_contacts(n)
+                if got.get("error"):
+                    self.master.after(0, lambda e=got["error"]:
+                                      messagebox.showerror(title, e))
+                    return
+                found = got.get("contacts") or []
+                if found:
+                    break
+            self.master.after(0, lambda: _found(found))
+
+        def _found(found):
+            best = None if link else _xero.best_contact(found, names)
+            if best:
+                if _save(best):
+                    webbrowser.open(_xero.contact_url(best["id"]))
+                return
+            self._xero_contact_picker(cust, names[0] if names else "", found,
+                                      _save, open_after=not link)
+
+        self.status_var.set("Looking in Xero…")
+        threading.Thread(target=_work, daemon=True).start()
+
+    def _xero_contact_picker(self, cust, term, found, save, open_after=False):
+        """Choose which Xero contact a customer is."""
+        dlg = tk.Toplevel(self.master, bg=CBG)
+        dlg.title("Link to a Xero contact")
+        dlg.transient(self.master)
+        _centre_on_parent(dlg, self.master, px(620), px(460))
+        tk.Label(dlg, text=f"Which contact in Xero is {cust.get('name', '')}?",
+                 bg=CBG, fg=CA, font=F_SEC).pack(anchor="w", padx=px(16),
+                                                 pady=(px(12), px(6)))
+        bar = tk.Frame(dlg, bg=CBG)
+        bar.pack(fill="x", padx=px(16))
+        v_term = tk.StringVar(value=term)
+        ent = field_entry(bar, textvariable=v_term)
+        ent.pack(side="left", fill="x", expand=True)
+        wrap = tk.Frame(dlg, bg=CCA, highlightbackground=CBR, highlightthickness=1)
+        wrap.pack(fill="both", expand=True, padx=px(16), pady=px(8))
+        tree = ttk.Treeview(wrap, columns=("name", "email"), show="headings",
+                            style="TAF.Treeview")
+        tree.heading("name", text="Contact in Xero")
+        tree.heading("email", text="Email (where invoices go)")
+        tree.column("name", width=px(300), anchor="w")
+        tree.column("email", width=px(260), anchor="w")
+        tree.pack(fill="both", expand=True)
+        note = tk.Label(dlg, text="", bg=CBG, fg=CMU, font=F_SM)
+        note.pack(anchor="w", padx=px(16))
+        shown = {}
+
+        def _fill(contacts):
+            for iid in tree.get_children():
+                tree.delete(iid)
+            shown.clear()
+            for c in contacts:
+                shown[c["id"]] = c
+                tree.insert("", "end", iid=c["id"],
+                            values=(c.get("name", ""), c.get("email") or "— none —"))
+            note.config(text="" if contacts else
+                        "Nothing in Xero by that name. Search for another "
+                        "part of it, or add them in Xero first.")
+
+        def _search(_e=None):
+            term_now = v_term.get().strip()
+
+            def _work():
+                got = _xero.find_contacts(term_now)
+                self.master.after(0, lambda: dlg.winfo_exists() and (
+                    note.config(text=got["error"]) if got.get("error")
+                    else _fill(got.get("contacts") or [])))
+            threading.Thread(target=_work, daemon=True).start()
+
+        def _link():
+            sel = tree.selection()
+            if not sel:
+                note.config(text="Pick the contact first.")
+                return
+            contact = shown[sel[0]]
+            if not contact.get("email") and not messagebox.askyesno(
+                    "Link to a Xero contact",
+                    f"{contact['name']} has no email address in Xero, so "
+                    "invoices to them cannot be emailed until one is added "
+                    "there.\n\nLink them anyway?", parent=dlg):
+                return
+            if save(contact):
+                dlg.destroy()
+                if open_after:
+                    import webbrowser
+                    webbrowser.open(_xero.contact_url(contact["id"]))
+
+        def _unlink():
+            if save(None):
+                dlg.destroy()
+
+        flat_btn(bar, "Search", _search, bg=CNE, pady=px(5)).pack(
+            side="left", padx=(px(8), 0))
+        ent.bind("<Return>", _search)
+        tree.bind("<Double-1>", lambda _e: _link())
+        foot = tk.Frame(dlg, bg=CBG, padx=px(16), pady=px(10))
+        foot.pack(fill="x")
+        flat_btn(foot, "Cancel", dlg.destroy, bg=CNE, pady=px(6)).pack(side="right")
+        flat_btn(foot, "Link", _link, bg=CGR, pady=px(6)).pack(
+            side="right", padx=(0, px(8)))
+        if cust.get("xero_contact_id"):
+            flat_btn(foot, "Unlink", _unlink, bg=CNE, pady=px(6),
+                     variant="secondary").pack(side="left")
+        _fill(found)
+        return dlg
 
     def _toggle_customer_labels(self):
         """Delivery labels on or off for the selected customer."""
@@ -18709,9 +18983,9 @@ class ModernOrderApp(tk.Frame):
         tk.Label(dlg, text="What a line says on the customer's invoice in Xero "
                            "(never printed on the worksheets). Blanks: "
                            + "  ".join(_wording.PLACEHOLDERS)
-                           + "\nA rule covers its filter type from the depth "
-                             "given upwards; the deepest one a line reaches "
-                             "wins. A type with no rule keeps the plain "
+                           + "\nA rule covers its filter type over the depths "
+                             "given (an empty To is \"and thicker\"). A type "
+                             "or depth with no rule keeps the plain "
                              "description.",
                  bg=CBG, fg=CMU, font=F_SM, justify="left",
                  wraplength=px(780)).pack(anchor="w", padx=px(16), pady=(px(4), px(8)))
@@ -18721,16 +18995,18 @@ class ModernOrderApp(tk.Frame):
         wrap.pack(fill="both", expand=True, padx=px(16))
         tree = ttk.Treeview(wrap, columns=("type", "from", "wording", "example"),
                             show="headings", style="TAF.Treeview", height=6)
-        for key, label, wd in (("type", "Filter type", 130), ("from", "From depth", 90),
+        for key, label, wd in (("type", "Filter type", 130), ("from", "Depths", 90),
                                ("wording", "Wording", 280), ("example", "Example", 280)):
             tree.heading(key, text=label)
             tree.column(key, width=px(wd), anchor="w", stretch=key != "from")
         tree.pack(fill="both", expand=True)
 
         def _sample(rule):
+            depth = rule["min_depth"] or 25
+            if not rule.get("max_depth") and depth >= 30:
+                depth = max(depth, 45)
             return {"Filter Type": rule["filter_type"], "Media Type": "G4",
-                    "Short": 595, "Long": 595,
-                    "Channel": max(rule["min_depth"], 45 if rule["min_depth"] else 25),
+                    "Short": 595, "Long": 595, "Channel": depth,
                     "item_kind": "filter"}
 
         def _draw():
@@ -18739,13 +19015,14 @@ class ModernOrderApp(tk.Frame):
             for i, r in enumerate(rules):
                 tree.insert("", "end", iid=str(i), values=(
                     r["filter_type"],
-                    f"{r['min_depth']}mm" if r["min_depth"] else "any",
+                    _wording.depth_text(r),
                     r["wording"].replace("\n", " / "),
                     _wording.fill(r["wording"], _sample(r)).replace("\n", " / ")))
 
         def _edit(index=None):
             rule = dict(rules[index]) if index is not None else \
                 {"filter_type": self.all_filter_types[0], "min_depth": 0,
+                 "max_depth": 0,
                  "wording": "{Filter Type} in {Media}\nSize: {Size}"}
             ed = tk.Toplevel(dlg, bg=CBG)
             ed.title("Wording")
@@ -18755,18 +19032,25 @@ class ModernOrderApp(tk.Frame):
             body.pack(fill="both", expand=True)
             v_type = tk.StringVar(value=rule["filter_type"])
             v_from = tk.StringVar(value=str(rule["min_depth"] or ""))
+            v_to = tk.StringVar(value=str(rule.get("max_depth") or ""))
             tk.Label(body, text="Filter type", bg=CBG, fg=CTX,
                      font=F_BODY).grid(row=0, column=0, sticky="w", pady=4)
             ttk.Combobox(body, textvariable=v_type, width=24,
                          values=list(self.all_filter_types)
                          + sorted(_BAG_TYPES | _ROLL_TYPES)).grid(
                 row=0, column=1, sticky="w", pady=4)
-            tk.Label(body, text="From depth (mm)", bg=CBG, fg=CTX,
+            tk.Label(body, text="Depth from (mm)", bg=CBG, fg=CTX,
                      font=F_BODY).grid(row=1, column=0, sticky="w", pady=4)
             field_entry(body, textvariable=v_from, width=8).grid(
                 row=1, column=1, sticky="w", pady=4)
-            tk.Label(body, text="Empty = any depth", bg=CBG, fg=CMU,
-                     font=F_SM).grid(row=1, column=2, sticky="w", padx=(8, 0))
+            to_wrap = tk.Frame(body, bg=CBG)
+            to_wrap.grid(row=1, column=2, sticky="w", padx=(8, 0))
+            tk.Label(to_wrap, text="to", bg=CBG, fg=CTX,
+                     font=F_BODY).pack(side="left")
+            field_entry(to_wrap, textvariable=v_to, width=8).pack(
+                side="left", padx=(6, 6))
+            tk.Label(to_wrap, text="mm  (empty = any / and thicker)", bg=CBG,
+                     fg=CMU, font=F_SM).pack(side="left")
             tk.Label(body, text="Wording", bg=CBG, fg=CTX,
                      font=F_BODY).grid(row=2, column=0, sticky="nw", pady=4)
             txt = tk.Text(body, width=50, height=4, wrap="word", font=F_BODY,
@@ -18781,6 +19065,7 @@ class ModernOrderApp(tk.Frame):
                 ftype = v_type.get().strip()
                 try:
                     depth = int(v_from.get().strip() or 0)
+                    to_depth = int(v_to.get().strip() or 0)
                 except ValueError:
                     messagebox.showerror("Wording", "The depth is a whole "
                                          "number of mm, or empty.", parent=ed)
@@ -18789,8 +19074,12 @@ class ModernOrderApp(tk.Frame):
                     messagebox.showerror("Wording", "Choose a filter type and "
                                          "write the wording.", parent=ed)
                     return
+                if to_depth and to_depth < depth:
+                    messagebox.showerror("Wording", "The second depth has to "
+                                         "be the thicker one.", parent=ed)
+                    return
                 new = {"filter_type": ftype, "min_depth": max(0, depth),
-                       "wording": wording}
+                       "max_depth": max(0, to_depth), "wording": wording}
                 if index is None:
                     rules.append(new)
                 else:
@@ -20025,6 +20314,9 @@ class ModernOrderApp(tk.Frame):
         region = str(cust.get("region") or "").strip()
         if region in _pn.REGION_NAMES:
             self.hvars["Location"].set(region)
+        # Their delivery charge, if their account carries one.
+        fee = _pricing.delivery_fee({}, cust)
+        self.hvars["Delivery Fee"].set(f"{fee:.2f}" if fee else "")
         # Their tier's prices on the lines already entered.
         self._schedule_reprice()
 
@@ -20939,8 +21231,13 @@ class ModernOrderApp(tk.Frame):
         n = len(self.items)
         right = f"{n} item{'s' if n != 1 else ''}"
         total, unpriced = _order_money(self.items)
-        if total:
-            right += f"  ·  ${total:,.2f} ex GST"
+        fee = _pricing.delivery_fee(
+            {"Delivery Fee": self.hvars["Delivery Fee"].get()}
+            if "Delivery Fee" in getattr(self, "hvars", {}) else {})
+        if total or fee:
+            right += f"  ·  ${total + fee:,.2f} ex GST"
+            if fee:
+                right += f" (incl. ${fee:,.2f} delivery)"
         if unpriced and self.items:
             right += f"  ·  {unpriced} without a price"
         # The channel the whole order takes, pages sharing lengths where
@@ -20982,6 +21279,32 @@ class ModernOrderApp(tk.Frame):
                                          str(rec.get("short_name") or "").upper()):
                 return rec
         return self._customer_record(name) if name else {}
+
+    def _items_double_click(self, event):
+        """Double-click a line to edit it - or its Unit $ / Line $ to type a
+        price straight in."""
+        col_id = self.tree.identify_column(event.x)
+        iid = self.tree.identify_row(event.y)
+        cols = list(self.tree["columns"])
+        column = cols[int(col_id[1:]) - 1] if col_id not in ("", "#0") else ""
+        if iid and column in ("price", "total"):
+            idx = int(iid)
+
+            def _typed(text):
+                try:
+                    _set_line_money(self.items[idx], column, text)
+                except (ValueError, IndexError):
+                    messagebox.showerror("Price", "Type the price as a number, "
+                                         "e.g. 27.50 - or clear it for the "
+                                         "customer's tier price.")
+                    return
+                self._refresh_items_tree()
+                self.status_var.set(f"Line {idx + 1}: price set.")
+            _inline_money_edit(self.tree, iid, col_id,
+                               self.tree.set(iid, column), _typed)
+            return "break"
+        self._edit_item()
+        return "break"
 
     def _schedule_reprice(self):
         """Price the lines from the customer's tier, a moment after the last
@@ -24762,6 +25085,10 @@ class ModernOrderApp(tk.Frame):
             if fresh:
                 row.update(fresh)
             _refill()
+        flat_btn(foot, "✏  Dates, job & delivery…",
+                 lambda: self._edit_saved_details(row, dlg, _refill),
+                 variant="secondary", pady=px(6)).pack(side="left",
+                                                       padx=(0, px(8)))
         if _features.is_on("xero_live"):
             flat_btn(foot, "Send to Xero & invoice customer",
                      lambda: self._xero_send_orders([row], True, _after_xero),
@@ -24976,6 +25303,8 @@ class ModernOrderApp(tk.Frame):
             if header.get(key):
                 bits.append(f"{label} {header[key]}")
         bits.append(f"{len(items)} line{'s' if len(items) != 1 else ''}")
+        if _pricing.delivery_fee(header) and "Delivery Fee" in header:
+            bits.append(f"Delivery ${_pricing.delivery_fee(header):,.2f}")
         if row.get("printed"):
             bits.append("Printed" + (f" {row.get('printed_at','')[:10]}"
                                      if row.get("printed_at") else ""))
@@ -25004,17 +25333,20 @@ class ModernOrderApp(tk.Frame):
         tbl_wrap.rowconfigure(0, weight=1)
         tbl_wrap.columnconfigure(0, weight=1)
 
-        cols = ("made", "qty", "item", "size", "media", "notes")
+        cols = ("made", "qty", "item", "size", "media", "price", "total",
+                "notes")
         tree = ttk.Treeview(tbl_wrap, columns=cols, show="headings",
                             style="TAF.Treeview")
         tree.grid(row=0, column=0, sticky="nsew")
         for col, (hd_txt, wd, anc, stretch) in {
             "made":  ("",            38, "center", False),
             "qty":   ("Qty",         60, "center", False),
-            "item":  ("Item",       230, "w",      True),
-            "size":  ("Size (mm)",  160, "center", False),
-            "media": ("Media",      100, "center", False),
-            "notes": ("Notes",      180, "w",      True),
+            "item":  ("Item",       210, "w",      True),
+            "size":  ("Size (mm)",  150, "center", False),
+            "media": ("Media",       80, "center", False),
+            "price": ("Unit $",      80, "e",      False),
+            "total": ("Line $",      84, "e",      False),
+            "notes": ("Notes",      160, "w",      True),
         }.items():
             tree.heading(col, text=hd_txt, anchor="center" if anc == "center" else "w")
             tree.column(col, width=px(wd), anchor=anc, minwidth=px(38), stretch=stretch)
@@ -25029,11 +25361,13 @@ class ModernOrderApp(tk.Frame):
 
         for i, it in enumerate(items):
             done = bool(it.get("made"))
+            cells = self._order_line_cells(it)
             tree.insert("", "end", iid=str(i),
                         tags=("made",) if done else
                              ("even" if i % 2 == 0 else "odd",),
                         values=((TICK_FULL if done else TICK_EMPTY,)
-                                + self._order_line_cells(it)))
+                                + tuple(cells[:4]) + _line_money(it)
+                                + tuple(cells[4:])))
 
         # An order is eight filters, and by Tuesday three of them are made.
         # Which three is the thing nobody could record until now.
@@ -25043,6 +25377,15 @@ class ModernOrderApp(tk.Frame):
         prog_lbl = tk.Label(prog, bg=CCA, fg=CMU, font=F_SM,
                             text=self._line_progress_text(made_n, total_n))
         prog_lbl.pack(side="left")
+        goods, unpriced_n = _order_money(items)
+        fee = _pricing.delivery_fee(header, self._order_row_customer(row, header))
+        money = (f"${goods + fee:,.2f} ex GST"
+                 + (f" (incl. ${fee:,.2f} delivery)" if fee else "")
+                 + (f"  ·  {unpriced_n} without a price" if unpriced_n else ""))
+        tk.Label(prog, bg=CCA, fg=CTX, font=F_BOLD, text=money).pack(side="right")
+        tk.Label(prog, bg=CCA, fg=CMU, font=F_SM,
+                 text="Double-click a line to correct it, or its Unit $ / "
+                      "Line $ to change the price.  ").pack(side="right")
 
         # How each line is wrapped, and whether it needs a brace - the same
         # words the worksheet prints under Notes.
@@ -25097,6 +25440,26 @@ class ModernOrderApp(tk.Frame):
             return "break"
 
         tree.bind("<Button-1>", _toggle_line, add=False)
+
+        def _edit_line(event):
+            if tree.identify_region(event.x, event.y) != "cell":
+                return None
+            iid = tree.identify_row(event.y)
+            col_id = tree.identify_column(event.x)
+            if not iid or col_id == "#1":
+                return "break"
+            column = cols[int(col_id[1:]) - 1]
+            idx = int(iid)
+            if column in ("price", "total"):
+                _inline_money_edit(
+                    tree, iid, col_id, tree.set(iid, column),
+                    lambda text: self._save_saved_line_money(
+                        row, items, idx, column, text, dlg, refill))
+            else:
+                self._edit_saved_line(row, items, idx, dlg, refill)
+            return "break"
+
+        tree.bind("<Double-1>", _edit_line)
 
         # ── Notes ─────────────────────────────────────────────────────────
         side = tk.Frame(split, bg=CCA, highlightbackground=CBR,
@@ -25168,6 +25531,212 @@ class ModernOrderApp(tk.Frame):
         if made == total:
             return f"All {total} lines made"
         return f"{made} of {total} lines made  ·  {total - made} to go"
+
+    # ── Correcting a saved order ──────────────────────────────────────────
+
+    def _order_row_customer(self, row, header) -> dict:
+        """The customer record behind an order in a list, from what is
+        already loaded - for its delivery fee and tier on screen."""
+        cid = str(header.get("customer_id") or row.get("customer_id") or "")
+        name = str(header.get("Customer Name") or row.get("customer") or "")
+        for rec in getattr(self, "_customer_records", None) or []:
+            if (cid and str(rec.get("id") or "") == cid) or (
+                    name and name.upper() in (str(rec.get("name") or "").upper(),
+                                              str(rec.get("short_name") or "").upper())):
+                return rec
+        return {}
+
+    def _saved_order_editable(self, row, parent) -> bool:
+        """A saved order can be corrected - after a word if its invoice has
+        already gone through Xero, because that invoice will not follow."""
+        if row.get("source") != "db" or not row.get("db_id"):
+            messagebox.showinfo("Correct the order", "This order is only on "
+                                "this PC. Open it in New Order to change it.",
+                                parent=parent)
+            return False
+        inv = _db.xero_invoice_for(row["db_id"])
+        if inv.get("state") in ("approved", "sent", "gone"):
+            return messagebox.askyesno(
+                "Correct the order",
+                f"This order has already been invoiced in Xero"
+                f"{' (' + inv['invoice_number'] + ')' if inv.get('invoice_number') else ''}."
+                "\n\nThe change is made here, but the invoice in Xero stays "
+                "as it is - change or credit it in Xero.\n\nChange the "
+                "order anyway?", parent=parent, icon="warning", default="no")
+        return True
+
+    def _after_saved_edit(self, row, items, dlg, refill, what):
+        row["db_items"] = items
+        self._tab_loaded.pop("prev_orders", None)
+        fresh = self._reread_order(row)
+        if fresh:
+            row.update(fresh)
+            row["db_items"] = items
+        try:
+            _db.log_action("order_edited",
+                           f"O/N: {row.get('order_no','')} | "
+                           f"Customer: {row.get('customer','')} | {what}")
+        except Exception:
+            pass
+        self.status_var.set(f"Order {row.get('order_no','')}: {what}.")
+        try:
+            if dlg.winfo_exists():
+                refill()
+        except tk.TclError:
+            pass
+
+    def _edit_saved_line(self, row, items, idx, dlg, refill):
+        """Correct one line of a saved order in the same window it was
+        entered with."""
+        if not self._saved_order_editable(row, dlg):
+            return
+        old = dict(items[idx])
+        kind = old.get("item_kind") or "filter"
+        if kind == "bag":
+            edit = BagLineItemDialog(dlg, title="Correct Bag / Roll Line",
+                                     initial=old, media_types=self.all_media_types)
+        elif kind == "catalogue":
+            edit = CatalogueLineDialog(dlg, title="Correct Product Line",
+                                       initial=old,
+                                       product_types=product_type_names(),
+                                       on_lookup=self._price_list_lookup)
+        else:
+            edit = LineItemDialog(dlg, title="Correct Filter Line", initial=old,
+                                  media_types=self.all_media_types,
+                                  filter_types=self.all_filter_types)
+        dlg.wait_window(edit)
+        try:
+            dlg.grab_set()          # the line's dialog took the grab
+        except tk.TclError:
+            return
+        if not edit.result:
+            return
+        new = dict(edit.result)
+        new["item_kind"] = kind
+        for key in ("Packing", "Calculator"):
+            if key in old and key not in new:
+                new[key] = old[key]
+        if kind == "filter":
+            self._stamp_item(new)
+        try:
+            saved = _db.replace_order_line(row["db_id"], old.get(_db.LINE_ID) or "",
+                                           new)
+        except Exception as exc:
+            messagebox.showerror("Correct the order", f"Not saved:\n{exc}",
+                                 parent=dlg)
+            return
+        self._after_saved_edit(row, saved, dlg, refill, f"line {idx + 1} corrected")
+
+    def _save_saved_line_money(self, row, items, idx, column, text, dlg, refill):
+        if not self._saved_order_editable(row, dlg):
+            return
+        line = dict(items[idx])
+        try:
+            _set_line_money(line, column, text)
+        except ValueError as exc:
+            messagebox.showerror("Price", str(exc) if str(exc) and "could not"
+                                 not in str(exc) else "Type the price as a "
+                                 "number, e.g. 27.50.", parent=dlg)
+            return
+        try:
+            saved = _db.replace_order_line(row["db_id"],
+                                           line.get(_db.LINE_ID) or "", line)
+        except Exception as exc:
+            messagebox.showerror("Price", f"Not saved:\n{exc}", parent=dlg)
+            return
+        self._after_saved_edit(row, saved, dlg, refill,
+                               f"line {idx + 1} price changed")
+
+    def _edit_saved_details(self, row, dlg, refill):
+        """Correct a saved order's dates, job and delivery fee."""
+        if not self._saved_order_editable(row, dlg):
+            return
+        header, _items = self._order_header_items(row, "Correct the order")
+        header = dict(header or {})
+        ed = tk.Toplevel(dlg, bg=CBG)
+        ed.title("Correct the order")
+        ed.transient(dlg)
+        ed.grab_set()
+        body = tk.Frame(ed, bg=CBG, padx=px(16), pady=px(12))
+        body.pack(fill="both", expand=True)
+        body.columnconfigure(1, weight=1)
+        manager = _db.can_manage_prices()
+        fields = [("Date Ordered", "Order date"), ("Date Due", "Due date"),
+                  ("Job", "Job number")]
+        if manager:
+            fields.append(("Delivery Fee", "Delivery fee $"))
+        vars_ = {}
+        for r, (key, label) in enumerate(fields):
+            tk.Label(body, text=label, bg=CBG, fg=CTX, font=F_BODY,
+                     anchor="w").grid(row=r, column=0, sticky="w", pady=4,
+                                      padx=(0, px(10)))
+            if key == "Delivery Fee":
+                now = header.get(key) if key in header else _pricing.delivery_fee(
+                    header, self._order_row_customer(row, header)) or ""
+            else:
+                now = header.get(key, "")
+            var = tk.StringVar(value=str(now or ""))
+            vars_[key] = var
+            wrap = tk.Frame(body, bg=CBG)
+            wrap.grid(row=r, column=1, sticky="ew", pady=4)
+            field_entry(wrap, textvariable=var, width=24).pack(side="left")
+            if key in ("Date Ordered", "Date Due"):
+                btn = tk.Button(wrap, text="📅", bg=CA, fg="white", relief="flat",
+                                bd=0, font=(FAM, 9), padx=6, pady=2,
+                                cursor="hand2")
+                btn.config(command=lambda v=var, b=btn: CalendarPicker(ed, v, anchor=b))
+                btn.pack(side="left", padx=(px(4), 0))
+        tk.Label(body, text="Dates as dd/mm/yy. Due can be ASAP. Reprint the "
+                            "worksheets afterwards if they have changed.",
+                 bg=CBG, fg=CMU, font=F_SM).grid(row=len(fields), column=0,
+                                                 columnspan=2, sticky="w",
+                                                 pady=(px(6), 0))
+
+        def _save():
+            patch = {}
+            for key, var in vars_.items():
+                value = var.get().strip()
+                if key == "Delivery Fee":
+                    fee = _fee_value(value)
+                    value = f"{fee:.2f}" if fee else ""
+                if value != str(header.get(key, "") or "") or (
+                        key == "Delivery Fee" and key not in header):
+                    patch[key] = value
+            if not patch:
+                ed.destroy()
+                return
+            for key in ("Date Ordered", "Date Due"):
+                value = patch.get(key)
+                if value and not (key == "Date Due" and value.upper() == "ASAP") \
+                        and not parse_date(value):
+                    messagebox.showerror("Correct the order",
+                                         f"The {key.lower()} is not a date. "
+                                         "Use dd/mm/yy, like 16/10/26.",
+                                         parent=ed)
+                    return
+            try:
+                _db.update_order_details(row["db_id"], patch)
+            except Exception as exc:
+                messagebox.showerror("Correct the order", f"Not saved:\n{exc}",
+                                     parent=ed)
+                return
+            ed.destroy()
+            try:
+                dlg.grab_set()
+            except tk.TclError:
+                pass
+            if isinstance(row.get("db_header"), dict):
+                row["db_header"].update(patch)
+            self._after_saved_edit(row, row.get("db_items"), dlg, refill,
+                                   "changed " + ", ".join(sorted(patch)).lower())
+
+        foot = tk.Frame(ed, bg=CBG, padx=px(16), pady=px(10))
+        foot.pack(fill="x")
+        flat_btn(foot, "Cancel", ed.destroy, bg=CNE, pady=px(6)).pack(side="right")
+        flat_btn(foot, "Save", _save, bg=CGR, pady=px(6)).pack(
+            side="right", padx=(0, px(8)))
+        ed.bind("<Escape>", lambda _e: ed.destroy())
+        return ed
 
     @staticmethod
     def _order_line_cells(it) -> tuple:

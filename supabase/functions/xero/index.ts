@@ -45,6 +45,8 @@
 //                                                               service role
 //   retry       try one order again now                         staff
 //   list        where each order's invoice is up to             staff
+//   contacts    Xero contacts matching a search, to link a
+//               customer to theirs                              staff
 //   owing       what is outstanding in Xero                     staff
 //
 // Deploy:
@@ -452,7 +454,7 @@ function readInvoice(raw: Any): { ok: true; inv: Row } | { ok: false; error: str
       const q = Number(l?.quantity), u = Number(priced ? l?.unit_amount : 0);
       if (!Number.isFinite(q) || q <= 0 || !Number.isFinite(u) || u < 0) return null;
       out.push({ description: String(l?.description ?? "").slice(0, 3900) || "Filter",
-                 quantity: q, unit_amount: Math.round(u * 100) / 100,
+                 quantity: q, unit_amount: Math.round(u * 10000) / 10000,
                  // Never shortened: a cut-down code is a different item.
                  // One too long for Xero (30) just goes without.
                  item_code: String(l?.item_code ?? "").trim().slice(0, 64) });
@@ -464,6 +466,9 @@ function readInvoice(raw: Any): { ok: true; inv: Row } | { ok: false; error: str
   if (!lines || !unpriced) return { ok: false, error: "The invoice lines are not right." };
   if (!lines.length && !unpriced.length) return { ok: false, error: "The order has no lines." };
   return { ok: true, inv: {
+    // The customer's own link to their Xero contact, when they have one.
+    contact_id: /^[0-9a-f-]{36}$/i.test(String(raw.contact_id ?? ""))
+      ? String(raw.contact_id) : "",
     contact_names: (Array.isArray(raw.contact_names) ? raw.contact_names : [])
       .slice(0, 6).map((n: unknown) => String(n ?? "").slice(0, 200)),
     date: DAY.test(String(raw.date ?? "")) ? String(raw.date) : today(),
@@ -563,7 +568,10 @@ async function draftOne(row: Row, inv: Row, hash: string, md5: string | null,
     return { state: row.state, unchanged: true, number: row.invoice_number };
   }
 
-  let contact = row.contact_id ? await getContact(row.contact_id) : null;
+  // The contact the customer is linked to wins; then the one this order's
+  // invoice already has; then a search by name.
+  let contact = inv.contact_id ? await getContact(inv.contact_id) : null;
+  if (!contact && row.contact_id) contact = await getContact(row.contact_id);
   if (!contact) contact = await findContact(inv.contact_names);
   if (!contact) {
     const name = inv.contact_names.find((n: string) => n.trim()) ?? "this customer";
@@ -902,6 +910,20 @@ Deno.serve(async (req: Request) => {
       } catch (e) {
         return json(await failed(row, e), 422);
       }
+    }
+
+    if (action === "contacts") {
+      // Finding a customer's contact in Xero, to link them.
+      const term = String(body.term ?? "").trim().slice(0, 100);
+      if (!term) return json({ contacts: [] });
+      const out = await xero("GET", "/api.xro/2.0/Contacts?searchTerm=" +
+        encodeURIComponent(term));
+      const contacts = (out?.Contacts ?? [])
+        .filter((c: Row) => c?.ContactStatus !== "ARCHIVED")
+        .slice(0, 25)
+        .map((c: Row) => ({ id: c.ContactID, name: c.Name ?? "",
+                            email: c.EmailAddress ?? "" }));
+      return json({ contacts });
     }
 
     if (action === "list") {

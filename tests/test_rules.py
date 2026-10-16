@@ -90,7 +90,11 @@ def test_wording_on_an_order_is_read_as_what_it_means():
 def test_forty_five_and_fifty_millimetres_are_always_vform():
     assert pn.filter_type_for_thickness(45) == "V-form"
     assert pn.filter_type_for_thickness(50) == "V-form"
-    assert pn.filter_type_for_thickness(10) == "Flyscreen"
+    # Flyscreens are 9 or 11 mm; flat panels 10 to 25.
+    assert pn.filter_type_for_thickness(9) == "Flyscreen"
+    assert pn.filter_type_for_thickness(11) == "Flyscreen"
+    assert pn.filter_type_for_thickness(10) == "Flat Panel"
+    assert pn.filter_type_for_thickness(25) == "Flat Panel"
     assert pn.filter_type_for_thickness(20) == "Flat Panel"
     assert pn.filter_type_for_thickness(0) == ""
 

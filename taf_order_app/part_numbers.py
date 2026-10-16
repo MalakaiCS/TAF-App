@@ -201,11 +201,15 @@ def canonical_filter_type(written: str, extra_types=None, learned=None) -> str:
     return ""
 
 
+FLYSCREEN_THICKNESSES = (9, 11)
+
+
 def filter_type_for_thickness(channel) -> str:
     """The filter type a thickness on its own implies, or "".
 
-        9-11 mm   Flyscreen
-        12-29 mm  Flat Panel
+        9, 11 mm  Flyscreen - the two thicknesses flyscreens are made in
+        10-29 mm  Flat Panel (10-25 in practice; an 11 mm flat panel is
+                  chosen as such on the line)
         45, 50 mm V-form  — only ever made as a V-form
         30 mm +   V-form
     """
@@ -215,9 +219,9 @@ def filter_type_for_thickness(channel) -> str:
         return ""
     if ch in VFORM_THICKNESSES:
         return "V-form"
-    if 9 <= ch <= 11:
+    if ch in FLYSCREEN_THICKNESSES:
         return "Flyscreen"
-    if 12 <= ch <= 29:
+    if 10 <= ch <= 29:
         return "Flat Panel"
     if ch >= 30:
         return "V-form"

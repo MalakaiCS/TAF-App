@@ -12,9 +12,10 @@ screen (Invoice wording) and every PC uses it - and any one line can say
 something else instead (its "Xero description" on the work order). Neither
 is printed on the worksheets.
 
-A rule applies to a filter type (or a bag/roll product type) from a depth
-upwards, so "V-form from 30mm" can read differently from a thinner one. The
-deepest rule a line reaches wins. A line no rule covers keeps the plain
+A rule applies to a filter type (or a bag/roll product type) over a range
+of depths - "Flat Panel 10 to 25mm", "V-form from 30mm" - so a thinner or
+thicker one can read differently. The rule with the deepest start a line
+reaches wins. A line no rule covers keeps the plain
 description the CSV export has always used.
 
 Nothing here touches Tk or the database.
@@ -29,12 +30,13 @@ CATALOG_KEY = "xero_wording"
 PLACEHOLDERS = ("{Media}", "{Size}", "{Width}", "{Height}", "{Depth}",
                 "{Filter Type}", "{Part Number}")
 
+# max_depth 0 is "and thicker".
 DEFAULT_RULES: List[Dict[str, Any]] = [
-    {"filter_type": "Flyscreen", "min_depth": 0,
+    {"filter_type": "Flyscreen", "min_depth": 9, "max_depth": 11,
      "wording": "Flat Panel Flyscreen Filter in {Media}\nSize: {Size}"},
-    {"filter_type": "Flat Panel", "min_depth": 0,
+    {"filter_type": "Flat Panel", "min_depth": 10, "max_depth": 25,
      "wording": "Galvanised Flat Panel Filters in {Media}\nSize: {Size}"},
-    {"filter_type": "V-form", "min_depth": 30,
+    {"filter_type": "V-form", "min_depth": 30, "max_depth": 0,
      "wording": "Galvanised Pleated Panel Filter in {Media}\nSize: {Size}"},
 ]
 
@@ -62,8 +64,10 @@ def clean(rules: Any) -> List[Dict[str, Any]]:
         ft = str(r.get("filter_type") or "").strip()
         wording = str(r.get("wording") or "").strip()
         if ft and wording:
-            out.append({"filter_type": ft[:60],
-                        "min_depth": max(0, _int(r.get("min_depth"))),
+            low = max(0, _int(r.get("min_depth")))
+            high = max(0, _int(r.get("max_depth")))
+            out.append({"filter_type": ft[:60], "min_depth": low,
+                        "max_depth": high if high >= low else 0,
                         "wording": wording[:1000]})
     return out
 
@@ -94,13 +98,26 @@ def _type_of(item: Dict[str, Any]) -> str:
     return str(item.get("Filter Type") or item.get("product_type") or "").strip()
 
 
+def depth_text(rule: Dict[str, Any]) -> str:
+    """"10-25mm", "30mm+", "any"."""
+    low, high = rule.get("min_depth") or 0, rule.get("max_depth") or 0
+    if low and high:
+        return f"{low}-{high}mm"
+    if high:
+        return f"up to {high}mm"
+    return f"{low}mm+" if low else "any"
+
+
 def rule_for(item: Dict[str, Any], rules: Optional[List[Dict[str, Any]]] = None):
-    """The rule this line falls under: its type, the deepest one it reaches."""
+    """The rule this line falls under: its type, within the rule's depths,
+    the one starting deepest."""
     kind = _key(_type_of(item))
     depth = _int(_dims(item)[2])
     best = None
     for r in clean(rules if rules is not None else current()):
         if _key(r["filter_type"]) != kind or depth < r["min_depth"]:
+            continue
+        if r["max_depth"] and depth > r["max_depth"]:
             continue
         if best is None or r["min_depth"] > best["min_depth"]:
             best = r

@@ -1006,6 +1006,26 @@ def run_tier_checks(pg: Postgres) -> None:
                 "WHERE part_number = 'TIER-1';") == "10.0000/-/8.0000")
 
 
+def run_customer_extra_checks(pg: Postgres) -> None:
+    print("\n── Xero contact and delivery fee (step 39) ──")
+    ok, _o, err = pg.psql((ROOT / "migrate_customer_xero_delivery.sql")
+                          .read_text(encoding="utf-8"), "f")
+    check("step 39 runs again cleanly", ok, err)
+    ok, out, err = as_in(pg, "f", DAVE, f"UPDATE customers SET xero_contact_id "
+                                        f"= 'C-1' WHERE id = '{A}' RETURNING id;")
+    check("staff can link a customer to their Xero contact", ok and out, err)
+    ok, out, err = as_in(pg, "f", DAVE, f"UPDATE customers SET delivery_fee = 25 "
+                                        f"WHERE id = '{A}' RETURNING id;")
+    check("somebody on the floor cannot set a delivery fee",
+          not ok and "Only a manager" in err, out or err)
+    ok, out, err = as_in(pg, "f", SARAH, f"UPDATE customers SET delivery_fee = 25 "
+                                         f"WHERE id = '{A}' RETURNING id;")
+    check("a manager can", ok and out, err)
+    ok, _o, err = pg.psql(f"UPDATE customers SET delivery_fee = -1 "
+                          f"WHERE id = '{A}';", "f")
+    check("and it is never less than nothing", not ok, err)
+
+
 def _skip(why: str) -> int:
     """Skipping is fine on a laptop. In CI it is not: a workflow that goes
     green having checked nothing is worse than no workflow, because it is
@@ -1029,6 +1049,7 @@ def main() -> int:
         run_merge_checks(pg)
         run_xero_checks(pg)
         run_tier_checks(pg)
+        run_customer_extra_checks(pg)
     finally:
         pg.stop()
     print(f"\n{len(FAILURES)} FAILED" if FAILURES

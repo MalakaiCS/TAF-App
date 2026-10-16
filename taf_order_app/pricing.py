@@ -356,6 +356,37 @@ def nearest_priced_part(item: Dict[str, Any],
 PART_PREFIX_FOR_NEAREST = dict(_pn.PART_NUMBER_PREFIXES)
 
 
+DELIVERY_CODE = "DELIVERY"
+
+
+def delivery_fee(header: Dict[str, Any],
+                 customer: Optional[Dict[str, Any]] = None) -> float:
+    """The delivery charge on an order, ex GST.
+
+    What the order says ("Delivery Fee", filled in from the customer when the
+    order was entered, and changeable by a manager). An order from before
+    there was such a thing - or one raised on a phone - says nothing, and
+    takes the customer's fee.
+    """
+    if "Delivery Fee" in (header or {}):
+        raw = header.get("Delivery Fee")
+    else:
+        raw = (customer or {}).get("delivery_fee")
+    try:
+        fee = float(str(raw if raw is not None else "").strip().lstrip("$") or 0)
+    except (TypeError, ValueError):
+        return 0.0
+    return round(fee, 2) if fee > 0 else 0.0
+
+
+def money_text(value: float) -> str:
+    """"27.50", or "33.3333" when a price really has more places."""
+    value = round(float(value or 0), 4)
+    text = f"{value:.4f}".rstrip("0")
+    whole, _, cents = text.partition(".")
+    return f"{whole}.{cents.ljust(2, '0')}"
+
+
 def line_quantity(item: Dict[str, Any]) -> int:
     """How many, whichever kind of line: filters say "Quantity", bags and
     rolls say "quantity"."""
@@ -844,7 +875,7 @@ def xero_rows(header: Dict[str, Any], lines: Iterable[Dict[str, Any]],
             "InventoryItemCode": line.get("part_number", ""),
             "*Description":      line.get("description", ""),
             "*Quantity":         str(line.get("quantity", 0)),
-            "*UnitAmount":       f'{line.get("unit_price", 0):.2f}',
+            "*UnitAmount":       money_text(line.get("unit_price", 0)),
             "Discount":          "",
             "*AccountCode":      account_code,
             "*TaxType":          tax_type,
@@ -897,6 +928,11 @@ def invoice_for_order(header: Dict[str, Any],
     from . import invoice_wording as _wording
     for line in lines:
         line["description"] = _wording.describe(line["item"], wording)
+    fee = delivery_fee(header, customer)
+    if fee:
+        lines.append({"part_number": DELIVERY_CODE, "description": "Delivery",
+                      "quantity": 1, "unit_price": fee, "line_total": fee,
+                      "source": "delivery", "item": {}})
     number = (invoice_number or "").strip() or (header.get("Order Number") or "").strip()
     rows = xero_rows(header, [l for l in lines if l.get("source")],
                      customer=customer, account_code=account_code,

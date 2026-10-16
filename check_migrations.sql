@@ -160,7 +160,12 @@ WITH checks(step, file, purpose, needed, present) AS (VALUES
                  AND column_name='price_tier')
       AND EXISTS (SELECT 1 FROM information_schema.columns
                WHERE table_schema='public' AND table_name='price_list'
-                 AND column_name='unit_price_3'))
+                 AND column_name='unit_price_3')),
+
+  (39, 'migrate_customer_xero_delivery.sql', 'A customer''s Xero contact and delivery fee', 'recommended',
+      EXISTS (SELECT 1 FROM information_schema.columns
+               WHERE table_schema='public' AND table_name='customers'
+                 AND column_name='delivery_fee'))
 )
 SELECT step,
        CASE WHEN present THEN 'already done' ELSE 'RUN THIS' END AS status,

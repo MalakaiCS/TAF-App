@@ -546,6 +546,27 @@ def run_checks() -> None:
           out.get("state") == "sent" and inv.get("Status") == "AUTHORISED" and
           inv.get("Date") == "2026-10-15", f"{out} {inv.get('Status')}")
 
+    print("\n── a customer linked to their Xero contact ──")
+    code, out = call("contacts", {"term": "bells"})
+    check("searching Xero's contacts finds them, archived ones left out",
+          code == 200 and [c["id"] for c in out.get("contacts", [])] == ["C-BELLS"]
+          and out["contacts"][0]["email"] == "accounts@bells.example", str(out))
+    o_link = str(uuid.uuid4())
+    linked = invoice(names=("Called Something Else",), number="TAF-ON-1100")
+    linked["contact_id"] = "00000000-0000-0000-0000-00000000c0de"
+    W.contacts["00000000-0000-0000-0000-00000000c0de"] = dict(
+        W.contacts["C-BELLS"], ContactID="00000000-0000-0000-0000-00000000c0de")
+    code, out = draft(o_link, linked)
+    check("a customer linked to a contact invoices to it, whatever its name",
+          out.get("state") == "draft" and xinv(o_link)["Contact"]["ContactID"]
+          == "00000000-0000-0000-0000-00000000c0de", str(out))
+    o_cents = str(uuid.uuid4())
+    draft(o_cents, invoice(number="TAF-ON-1101", lines=[
+        {"description": "Thirds", "quantity": 3, "unit_amount": 33.3333}]))
+    check("a unit price to four places goes across as it is",
+          xinv(o_cents)["LineItems"][0]["UnitAmount"] == 33.3333,
+          str(xinv(o_cents).get("LineItems")))
+
     print("\n── things that stop it ──")
     o3 = str(uuid.uuid4())
     code, out = draft(o3, invoice(names=("Nobody Here",), number="TAF-ON-1003"))

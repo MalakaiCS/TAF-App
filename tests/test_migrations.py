@@ -58,6 +58,7 @@ ORDER = [
     "migrate_merge_names.sql",
     "migrate_xero_link.sql",
     "migrate_price_tiers.sql",
+    "migrate_customer_xero_delivery.sql",
 ]
 
 

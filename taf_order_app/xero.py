@@ -153,6 +153,26 @@ def retry(order_id: str) -> Dict[str, Any]:
     return _call("retry", {"order_id": str(order_id)})
 
 
+def find_contacts(term: str) -> Dict[str, Any]:
+    """Xero contacts matching a search: {"contacts": [{id, name, email}]}."""
+    return _call("contacts", {"term": str(term or "")})
+
+
+def contact_url(contact_id: str) -> str:
+    """The contact's page in Xero, for whoever is signed in to Xero."""
+    return f"https://go.xero.com/Contacts/View/{contact_id}"
+
+
+def best_contact(contacts, names) -> Optional[Dict[str, Any]]:
+    """The contact whose name is exactly one of the customer's (ignoring
+    case), when there is exactly one such; otherwise None, and a person
+    picks."""
+    wanted = {str(n or "").strip().lower() for n in names if str(n or "").strip()}
+    hits = [c for c in contacts or []
+            if str(c.get("name") or "").strip().lower() in wanted]
+    return hits[0] if len(hits) == 1 else None
+
+
 def invoices() -> Dict[str, Any]:
     """Where each order's invoice is up to, newest first."""
     return _call("list")
@@ -235,13 +255,18 @@ def draft_from(header: Dict[str, Any], items: Iterable[Dict[str, Any]],
         if line.get("source") and price > 0:
             priced.append({"description": str(line.get("description") or "Filter"),
                            "quantity": qty,
-                           "unit_amount": round(price, 2),
+                           "unit_amount": round(price, 4),
                            "item_code": str(line.get("part_number") or "")})
         else:
             unpriced.append({"description": str(line.get("description") or "Filter"),
                              "quantity": qty})
+    fee = _pricing.delivery_fee(header, customer)
+    if fee:
+        priced.append({"description": "Delivery", "quantity": 1.0,
+                       "unit_amount": fee, "item_code": _pricing.DELIVERY_CODE})
     number = str(header.get("Order Number") or "").strip()
     invoice = {
+        "contact_id": str((customer or {}).get("xero_contact_id") or ""),
         "contact_names": contact_names(customer, header),
         "date": iso_date(header.get("Date Ordered") or ""),
         "number": number,

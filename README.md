@@ -274,6 +274,17 @@ log, stock management and a customer database.
 - **Invoice wording** — what each kind of filter says on the customer's
   invoice ("Galvanised Pleated Panel Filter in G4 / Size: 595 x 595 x 45mm"),
   set once on the Xero screen; any line can say something else.
+- **Delivery fees** — a customer can carry a delivery charge (set by a
+  manager on the customer card). It fills in on every order for them, shows
+  in the order's total, and goes on the invoice as its own Delivery line.
+- **Correcting a saved order** — in View Order, double-click a line to
+  correct it in the same window it was entered with, or its Unit $ / Line $
+  to change the price; **Dates, job & delivery…** corrects the order date,
+  due date, job number and delivery fee. An order already invoiced in Xero
+  says so first, because its invoice won't follow the change.
+- **A customer's Xero contact** — Customers → Customer ▾ → **Open in Xero**
+  goes straight to their contact in Xero; **Link to a Xero contact…** picks
+  it when the names differ, and their invoices go to that contact.
 - **Backup & Export** — one button writes a dated zip of spreadsheets:
   every order, every line, customers, quotes, stock and prices. They open in
   Excel and need nothing else — not this app, not an account, not the
@@ -415,6 +426,7 @@ just run it — nothing is lost and nothing is duplicated.
 | 36 | `migrate_merge_names.sql` | A merged (or renamed) account's name follows onto its past orders and quotes - and fixes merges already made (needs step 33) | recommended |
 | 37 | `migrate_xero_link.sql` | Xero linked for good: every order becomes a draft invoice, approved and emailed when the job is complete. Keeps the Xero sign-in where no app account can read it | recommended |
 | 38 | `migrate_price_tiers.sql` | Three price tiers: each customer on Tier 1, 2 or 3, and a price per tier for every product and rate | recommended |
+| 39 | `migrate_customer_xero_delivery.sql` | A customer's Xero contact (opened from Customers → Customer ▾) and a delivery fee every order of theirs carries | recommended |
 
 **Step 16 is the one that matters most.** Every policy in the older scripts is
 `TO authenticated USING (true)` — meaning *anyone Supabase counts as signed
@@ -739,6 +751,21 @@ them within a few minutes, and straight away for orders it saves. Approvals go t
 marked complete; to have them go even when no PC is on, schedule the sweep
 — the recipe is at the bottom of `migrate_xero_link.sql`.
 
+### Delivery fees and Xero contacts
+
+Run `migrate_customer_xero_delivery.sql` (step 39). Then:
+
+- **Delivery fee** — a manager enters it on the customer card (ex GST; empty
+  for none). Picking that customer on New Order fills in **Delivery Fee**,
+  which only a manager can change on the order; it is added to the order's
+  total and goes on the invoice (Xero and the CSV) as a **Delivery** line
+  with item code `DELIVERY`. Orders entered before the fee existed, or on a
+  phone, take the customer's fee when invoiced.
+- **Xero contact** — Customers → Customer ▾ → **Open in Xero** opens the
+  customer's contact in Xero, finding and linking it by name the first time.
+  When their name in Xero is different, **Link to a Xero contact…** searches
+  Xero and links the one you pick; their invoices then go to that contact.
+
 ### Price tiers
 
 Run `migrate_price_tiers.sql` (step 38). Then:
@@ -755,8 +782,10 @@ Run `migrate_price_tiers.sql` (step 38). Then:
   from the customer's tier as lines are added and when the customer changes.
   Type a price on a line (its *Price & invoice* box) to set it by hand; it is
   marked ✎ and stays as typed. A price agreed with one customer (Per-customer
-  pricing) wins over their tier. The order's total ex GST is above the lines.
-  None of it is printed on the worksheets.
+  pricing) wins over their tier. Unit $ and Line $ can also be typed
+  straight into the table (double-click the cell; a line total sets the
+  price each from it). The order's total ex GST is above the lines. None of
+  it is printed on the worksheets.
 
 ### Enable sending from a phone (optional)
 

@@ -1826,6 +1826,125 @@ def _steps(app, gui, root):
             app._tab_loaded.update(loaded)
     add("orders: Send to Xero & invoice customer", _send_to_xero)
 
+    def _press(win, text):
+        for w in _walk(win):
+            if isinstance(w, gui.PillButton) and w.cget("text") == text:
+                w._cmd()
+                return
+        raise AssertionError(f"no {text!r} button")
+
+    def _correct_saved_order():
+        """A saved order's prices, dates, job and delivery fee are corrected
+        from View Order, and written back to the order."""
+        saved_lines, saved_details, refills = [], [], []
+        stubs = {"xero_invoice_for": lambda oid: {},
+                 "replace_order_line": lambda oid, lid, line: (
+                     saved_lines.append((oid, lid, line)) or [line]),
+                 "update_order_details": lambda oid, patch: saved_details.append(
+                     (oid, patch))}
+        was = {k: getattr(gui._db, k) for k in stubs}
+        was_reread = app._reread_order
+        for k, v in stubs.items():
+            setattr(gui._db, k, v)
+        app._reread_order = lambda row: {}
+        loaded = dict(app._tab_loaded)
+        dlg = gui.tk.Toplevel(root)
+        try:
+            line = {"item_kind": "filter", "Filter Type": "V-form",
+                    "Media Type": "G4", "Short": 595, "Long": 595,
+                    "Channel": 45, "Quantity": 3, "_line_id": "L1",
+                    gui._db.LINE_ID: "L1", "Unit Price": 30.0,
+                    "Price Source": "tier 1"}
+            row = {"source": "db", "db_id": "o-9", "order_no": "21692",
+                   "customer": "BATARE", "db_items": [line],
+                   "db_header": {"Date Ordered": "16/10/26", "Date Due": "ASAP",
+                                 "Job": "AHU 3"}}
+            app._save_saved_line_money(row, [line], 0, "total", "100",
+                                       dlg, lambda: refills.append(1))
+            got = saved_lines[-1][2]
+            assert saved_lines[-1][:2] == ("o-9", "L1"), saved_lines
+            assert (got["Unit Price"], got["Price Source"]) == (33.3333, "manual"), got
+            assert refills, "the window was not redrawn"
+            ed = app._edit_saved_details(row, dlg, lambda: refills.append(2))
+            entries = [w for w in _walk(ed) if isinstance(w, gui.tk.Entry)]
+            for ent, value in zip(entries, ("17/10/26", "24/10/26", "AHU 4")):
+                ent.delete(0, "end")
+                ent.insert(0, value)
+            _press(ed, "Save")
+            oid, patch = saved_details[-1]
+            assert oid == "o-9" and patch.get("Date Ordered") == "17/10/26" \
+                and patch.get("Date Due") == "24/10/26" \
+                and patch.get("Job") == "AHU 4", saved_details
+            # A date that is not one is refused, and nothing saved.
+            said, was_err = [], gui.messagebox.showerror
+            gui.messagebox.showerror = lambda *a, **k: said.append(a)
+            try:
+                n = len(saved_details)
+                ed = app._edit_saved_details(row, dlg, lambda: None)
+                entries = [w for w in _walk(ed) if isinstance(w, gui.tk.Entry)]
+                entries[1].delete(0, "end")
+                entries[1].insert(0, "next tuesday")
+                _press(ed, "Save")
+                assert len(saved_details) == n and said, said
+                ed.destroy()
+            finally:
+                gui.messagebox.showerror = was_err
+        finally:
+            for k, v in was.items():
+                setattr(gui._db, k, v)
+            app._reread_order = was_reread
+            app._tab_loaded.clear()
+            app._tab_loaded.update(loaded)
+            dlg.destroy()
+    add("previous orders: correct a saved order's prices, dates and job",
+        _correct_saved_order)
+
+    def _type_a_price_in():
+        """Unit $ and Line $ can be typed straight into the order's table."""
+        app._show_tab("new_order")
+        root.update()
+        saved = list(app.items)
+        try:
+            app.items = [{"item_kind": "filter", "Filter Type": "V-form",
+                          "Media Type": "G4", "Short": 595, "Long": 595,
+                          "Channel": 45, "Quantity": 4}]
+            app._refresh_items_tree()
+            root.update()
+            cols = list(app.tree["columns"])
+            col_id = f"#{cols.index('total') + 1}"
+            app.tree.see("0")
+            root.update()
+            typed = []
+            ent = gui._inline_money_edit(
+                app.tree, "0", col_id, "",
+                lambda text: (typed.append(text),
+                              gui._set_line_money(app.items[0], "total", text),
+                              app._refresh_items_tree()))
+            assert ent is not None, "the cell could not be typed into"
+            ent.delete(0, "end")
+            ent.insert(0, "200")
+            ent.commit()                    # as pressing Enter does
+            root.update()
+            assert app.items[0].get("Unit Price") == 50.0, (typed, app.items[0])
+            assert app.tree.set("0", "price") == "✎ 50.00", app.tree.set("0", "price")
+        finally:
+            app.items = saved
+            app._refresh_items_tree()
+    add("new order: type a price into Unit $ / Line $", _type_a_price_in)
+
+    def _xero_contact_picker():
+        linked = []
+        dlg = app._xero_contact_picker(
+            {"id": "c1", "name": "BATARE"}, "batare",
+            [{"id": "x-1", "name": "Batare Pty Ltd", "email": "a@b.example"}],
+            lambda c: linked.append(c) or True)
+        root.update()
+        trees = [w for w in _walk(dlg) if isinstance(w, gui.ttk.Treeview)]
+        trees[0].selection_set("x-1")
+        _press(dlg, "Link")
+        assert linked and linked[0]["id"] == "x-1", linked
+    add("customers: link to a Xero contact", _xero_contact_picker)
+
     def _cut_list():
         from taf_order_app import features as _feat
         _feat._switches = {"channel_calculator": True}
