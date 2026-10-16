@@ -87,6 +87,7 @@ a = Analysis(
         'taf_order_app.models',
         'taf_order_app.validation',
         'taf_order_app.quiet',
+        'taf_order_app.tls',
         'taf_order_app.bag_filler',
         'taf_order_app.po_import',
         'taf_order_app.phone_page',

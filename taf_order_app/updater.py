@@ -24,6 +24,8 @@ from pathlib import Path
 import urllib.request
 import urllib.error
 
+from . import tls as _tls          # noqa: F401  - certificates on a Mac
+
 APP_VERSION = "2.30.0"
 
 # Public repo whose GitHub Releases drive updates.
@@ -197,49 +199,147 @@ def cleanup_old_exe() -> None:
     return
 
 
-def _install_mac(info: dict, progress_cb=None) -> None:
-    """Download the disk image, mount it, and show it.
+APP_BUNDLE_NAME = "TAF Order Entry.app"
 
-    A Mac app cannot replace itself the way the Windows installer does. The
-    app being updated is the thing sitting in /Applications, it is running,
-    and anything that swaps it underneath itself is a good way to end up with
-    half an app. So this does the part a person should not have to: fetches
-    the right image for the machine and opens it, with the new copy and the
-    Applications folder side by side. Dragging one onto the other is the last
-    step, and it is the step every Mac app asks for.
+
+def current_bundle(executable: str | None = None) -> Path | None:
+    """The .app this copy is running from: …/TAF Order Entry.app, found
+    from …/Contents/MacOS/TAFOrderEntry. None when not running from one."""
+    p = Path(executable or sys.executable).resolve()
+    for parent in [p] + list(p.parents):
+        if parent.suffix == ".app":
+            return parent
+    return None
+
+
+def install_target(bundle: Path | None) -> Path:
+    """Where the new version goes: over the copy that is running - unless
+    that copy is somewhere it cannot stay. Run straight off the disk image
+    (/Volumes/…) or from Downloads without being moved, macOS runs it from a
+    random read-only folder ("App Translocation"); then it goes to
+    Applications, where it belongs."""
+    if bundle is not None:
+        text = str(bundle)
+        if "/AppTranslocation/" not in text and not text.startswith("/Volumes/"):
+            return bundle
+    return Path("/Applications") / APP_BUNDLE_NAME
+
+
+def _can_replace(target: Path) -> bool:
+    folder = target.parent
+    if not folder.is_dir() or not os.access(folder, os.W_OK):
+        return False
+    return not target.exists() or os.access(target, os.W_OK)
+
+
+def mac_swap_script(new_app: Path, target: Path, mount: Path, dmg: Path,
+                    pid: int, log: Path) -> str:
+    """The shell script that finishes a Mac update once the app has quit:
+    copy the new app in beside the old, swap them, put the old one back if
+    anything fails, then reopen. A failed update leaves the old version
+    working - never half of each."""
+    def q(p) -> str:
+        return "'" + str(p).replace("'", "'\\''") + "'"
+    stage = target.with_name(target.name + ".updating")
+    old = target.with_name(target.name + ".old")
+    return f"""#!/bin/bash
+exec >>{q(log)} 2>&1
+echo "[update] $(date) waiting for the app (pid {pid}) to close"
+for i in $(seq 1 60); do kill -0 {pid} 2>/dev/null || break; sleep 1; done
+fail() {{
+  echo "[update] FAILED: $1 - showing the disk image to drag across instead"
+  open {q(mount)}
+  exit 1
+}}
+rm -rf {q(stage)} {q(old)}
+/usr/bin/ditto {q(new_app)} {q(stage)} || fail "copying the new version"
+if [ -e {q(target)} ]; then
+  mv {q(target)} {q(old)} || {{ rm -rf {q(stage)}; fail "moving the old version aside"; }}
+fi
+if ! mv {q(stage)} {q(target)}; then
+  [ -e {q(old)} ] && mv {q(old)} {q(target)}
+  fail "putting the new version in place"
+fi
+rm -rf {q(old)}
+/usr/bin/xattr -dr com.apple.quarantine {q(target)} 2>/dev/null
+/usr/bin/hdiutil detach {q(mount)} -quiet 2>/dev/null || /usr/bin/hdiutil detach {q(mount)} -force -quiet 2>/dev/null
+rm -f {q(dmg)}
+echo "[update] installed - reopening"
+/usr/bin/open {q(target)}
+"""
+
+
+def _install_mac(info: dict, progress_cb=None) -> None:
+    """Download the disk image, then replace this app with the new one and
+    reopen it - with nothing to drag.
+
+    A running app cannot be swapped underneath itself, so the swap is done
+    by a small script that waits for the app to quit (the window closes
+    itself once this returns), copies the new version in, and reopens it.
+    Where that cannot be done - Applications not writable for this account -
+    the disk image is opened to drag across, as before.
     """
     url = info["download_url"]
-    dmg = Path(tempfile.gettempdir()) / f"TAFOrderEntry-{info.get('version','new')}.dmg"
+    work = Path(tempfile.mkdtemp(prefix="taf-update-"))
+    dmg = work / f"TAFOrderEntry-{info.get('version', 'new')}.dmg"
 
     def _report(block_num, block_size, total_size):
         if total_size > 0 and progress_cb:
-            pct = min(90, int(block_num * block_size / total_size * 100))
+            pct = min(85, int(block_num * block_size / total_size * 85))
             mb = total_size / 1_048_576
             progress_cb(pct, f"Downloading… ({pct}% of {mb:.1f} MB)")
 
     urllib.request.urlretrieve(url, str(dmg), reporthook=_report)
 
-    # Straight off the internet, so it is quarantined and Gatekeeper will
-    # refuse it. This is the app itself handing over its own next version,
-    # not something arriving from nowhere, so the flag comes off here rather
-    # than being left for somebody to work out at the Terminal.
-    try:
-        subprocess.run(["xattr", "-dr", "com.apple.quarantine", str(dmg)],
-                       capture_output=True, timeout=30)
-    except Exception:
-        pass
+    # The app itself fetched it, from its own releases; nothing for
+    # Gatekeeper to stop.
+    subprocess.run(["xattr", "-dr", "com.apple.quarantine", str(dmg)],
+                   capture_output=True, timeout=30)
 
     if progress_cb:
-        progress_cb(95, "Opening the installer…")
-    try:
-        subprocess.run(["open", str(dmg)], check=True, timeout=60)
-    except Exception as exc:
-        raise RuntimeError(
-            f"The update downloaded but would not open.\n\nIt is at:\n{dmg}"
-        ) from exc
+        progress_cb(88, "Opening the update…")
+    mount = work / "volume"
+    mount.mkdir()
+    attach = subprocess.run(
+        ["hdiutil", "attach", "-nobrowse", "-noautoopen", "-readonly",
+         "-mountpoint", str(mount), str(dmg)],
+        capture_output=True, text=True, timeout=120)
+    if attach.returncode != 0:
+        raise RuntimeError("The update downloaded but would not open:\n"
+                           f"{(attach.stderr or attach.stdout).strip()}\n\n"
+                           f"It is at:\n{dmg}")
+    new_app = next(iter(sorted(mount.glob("*.app"))), None)
+    if new_app is None:
+        subprocess.run(["hdiutil", "detach", str(mount), "-quiet"],
+                       capture_output=True, timeout=60)
+        raise RuntimeError("The update has no app in it. Download it from "
+                           f"the releases page instead:\n{RELEASES_PAGE}")
 
+    target = install_target(current_bundle())
+    if not _can_replace(target):
+        # Somewhere this account may not write: the old way, by hand.
+        subprocess.run(["open", str(mount)], timeout=60)
+        if progress_cb:
+            progress_cb(100, "Drag TAF Order Entry onto Applications, "
+                             "then reopen it.")
+        return
+
+    from .paths import user_data_dir
+    data_dir = user_data_dir()
+    data_dir.mkdir(parents=True, exist_ok=True)
+    script = work / "install-update.sh"
+    script.write_text(mac_swap_script(new_app, target, mount, dmg,
+                                      os.getpid(), data_dir / "update.log"),
+                      encoding="utf-8")
+    script.chmod(0o755)
     if progress_cb:
-        progress_cb(100, "Drag TAF Order Entry onto Applications, then reopen it.")
+        progress_cb(95, "Installing… the app will reopen by itself.")
+    # Its own session, so it carries on after this app has gone.
+    subprocess.Popen(["/bin/bash", str(script)], start_new_session=True,
+                     stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                     stderr=subprocess.DEVNULL, close_fds=True)
+    if progress_cb:
+        progress_cb(100, "Installing… the app will reopen by itself.")
 
 
 def download_and_install(info: dict, progress_cb=None) -> None:

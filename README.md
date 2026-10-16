@@ -942,9 +942,18 @@ that is the same block wearing a different hat, and this clears it:
 xattr -cr "/Applications/TAF Order Entry.app"
 ```
 
-Updates from inside the app handle that themselves. The app downloads the
-right image for the machine, clears the flag and opens it — the only manual
-step left is dragging the new copy across.
+Updates from inside the app handle all of that themselves. The app
+downloads the right image for the machine, quits, swaps the new version in
+over the old one (a small script, `updater.mac_swap_script`, waits for it to
+close) and reopens it — nothing to drag. A copy run straight off the disk
+image or from Downloads is moved into Applications. If the copy fails the
+old version is put back and the disk image is opened to drag across instead;
+what happened is in `update.log` in the app's data folder.
+
+The app's own web requests (the update check, the download, profile photos)
+use certifi's certificates as well as the system's (`taf_order_app/tls.py`):
+a packaged Mac app has none where OpenSSL looks, and every check failed with
+`CERTIFICATE_VERIFY_FAILED`.
 
 ---
 

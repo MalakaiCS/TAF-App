@@ -16,6 +16,7 @@ import threading
 from concurrent.futures import ThreadPoolExecutor
 
 from taf_order_app import quiet as _quiet          # noqa: F401  first: no console windows
+from taf_order_app import tls as _tls              # noqa: F401  certificates on a Mac
 from taf_order_app import OrderService
 from taf_order_app.validation import (VALID_FILTER_TYPES, VALID_MEDIA_TYPES,
                                       parse_date, header_problems)
