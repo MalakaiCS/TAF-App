@@ -119,8 +119,12 @@ def test_the_worker_is_not_registered_from_a_file_url():
 #                        back the request it already filed. tests/db_rules.py
 #                        checks that against a real Postgres, including that
 #                        a retry is answered as a success rather than refused.
+#   request_supplies     several requests at once, the same way: each line is
+#                        filed under the client reference plus its place in
+#                        the list, so a retry files nothing new and tells
+#                        nobody again (checked in tests/db_rules.py too).
 REPEATABLE = {"set_order_line_made", "merge_order_header",
-              "adjust_stock_atomic", "request_supply"}
+              "adjust_stock_atomic", "request_supply", "request_supplies"}
 
 
 def _queued_calls() -> list:

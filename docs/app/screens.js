@@ -2592,7 +2592,7 @@ var TAFAPP = (function () {
       var together = lines.length > 1 || !!lines[0].supplier_id;
       // One reference per request, so a send that lost its answer to a
       // dropout and got sent again is filed once, and managers told once.
-      S.send(together ? {
+      var sending = together ? S.send({
         rpc: "request_supplies",
         label: "Supplies · " + label,
         body: {
@@ -2601,7 +2601,7 @@ var TAFAPP = (function () {
         },
         log: { action: "supply_requested",
                details: lines.map(describeRequest).join("; ").slice(0, 500) }
-      } : {
+      }) : S.send({
         rpc: "request_supply",
         label: "Supplies · " + label,
         body: {
@@ -2613,7 +2613,8 @@ var TAFAPP = (function () {
         log: { action: "supply_requested",
                details: label + (lines[0].quantity
                                  ? ", " + lines[0].quantity : "") }
-      }).then(function (res) {
+      });
+      sending.then(function (res) {
         detail.value = ""; qty.value = ""; note.value = "";
         urgent.checked = false;
         basket = []; drawBasket();
