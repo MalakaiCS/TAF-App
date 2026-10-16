@@ -22653,6 +22653,17 @@ class ModernOrderApp(tk.Frame):
                         completed = True
                     except Exception as exc:
                         out["note"] = f"it could not be marked Complete: {exc}"
+                    # The invoice and its packing slip, in one PDF.
+                    try:
+                        items_now = r.get("db_items")
+                        path, problem = self._invoice_paperwork(
+                            dict(r, invoice_no=out.get("number") or ""),
+                            header, items_now)
+                    except Exception as exc:
+                        path, problem = None, str(exc)
+                    out["paperwork"] = path
+                    if problem:
+                        out["paperwork_problem"] = problem
                 results.append((r, header, out, completed))
             self.master.after(0, lambda: _report(results))
 
@@ -22692,7 +22703,15 @@ class ModernOrderApp(tk.Frame):
             if bad:
                 text += ("\n\n" if text else "") + "Needs attention:\n" \
                     + "\n".join(bad)
+            papers = [o.get("paperwork") for _r, _h, o, _c in results
+                      if o.get("paperwork")]
+            missing = [o["paperwork_problem"] for _r, _h, o, _c in results
+                       if o.get("paperwork_problem")]
+            if missing:
+                text += "\n\nInvoice & packing slip: " + " ".join(missing)
             (messagebox.showwarning if bad else messagebox.showinfo)(title, text)
+            for path in papers:
+                self._output_invoice_paperwork(path)
             self._tab_loaded.pop("prev_orders", None)
             try:
                 self._refresh_orders_list()
@@ -22701,6 +22720,87 @@ class ModernOrderApp(tk.Frame):
             if on_done:
                 on_done()
 
+        threading.Thread(target=_work, daemon=True).start()
+
+    # Invoice and packing slip, together. Opened for now; once it has been
+    # tried, True sends it to the printer instead (as the dockets are).
+    INVOICE_PAPERWORK_PRINTS = False
+
+    def _invoice_paperwork(self, row, header=None, items=None):
+        """One PDF for an invoiced order: Xero's invoice, then its packing
+        slip (the delivery docket - the customer's copy and the one they
+        sign). Returns (path, problem): the path is None only when neither
+        could be made. Not on the window's thread - Xero is asked for the
+        invoice."""
+        import tempfile
+        if header is None or items is None:
+            header, items = self._order_header_items(row, "Invoice")
+        header = dict(header or {})
+        number = header.get("Order Number") or row.get("order_no") or "order"
+        parts, problems = [], []
+        tmp = Path(tempfile.mkdtemp(prefix="taf-invoice-"))
+        got = _xero.invoice_pdf(row["db_id"])
+        inv_no = got.get("number") or row.get("invoice_no") or ""
+        if got.get("pdf"):
+            (tmp / "invoice.pdf").write_bytes(got["pdf"])
+            parts.append(str(tmp / "invoice.pdf"))
+        else:
+            problems.append(f"the invoice ({got.get('error') or 'not found'})")
+        try:
+            order = dict(row, job=header.get("Job") or row.get("job", ""),
+                         date_due=header.get("Date Due") or row.get("date_due", ""))
+            built = _dockets.build_dockets(_dockets.group_by_customer([order]),
+                                           lambda _o: list(items or []))
+            parts.append(_dockets.build_dockets_pdf(
+                tmp / "packing.pdf", built, datetime.date.today(),
+                prepared_by=(_db.current_full_name()
+                             or _db.current_username() or "")))
+        except Exception as exc:
+            problems.append(f"the packing slip ({exc})")
+        if not parts:
+            return None, "Neither " + " nor ".join(problems) + " could be made."
+        safe = re.sub(r"[^A-Za-z0-9._ -]+", "_",
+                      f"Invoice {inv_no} - {number}".strip()
+                      if inv_no else f"Invoice - {number}")
+        out = self._invoice_dir() / f"{safe}.pdf"
+        if len(parts) == 1:
+            import shutil
+            shutil.copyfile(parts[0], out)
+        elif not _ProgressDialog._merge(parts, str(out)):
+            return None, "The invoice and packing slip could not be put together."
+        return str(out), ("Missing " + " and ".join(problems) + "."
+                          if problems else "")
+
+    def _output_invoice_paperwork(self, path):
+        """Open it - or, once INVOICE_PAPERWORK_PRINTS is on, print it."""
+        if self.INVOICE_PAPERWORK_PRINTS:
+            self._send_dockets_to_printer(path)
+            return
+        try:
+            _open_path(str(path))
+        except Exception:
+            messagebox.showinfo("Invoice", f"Saved to:\n{path}")
+
+    def _invoice_paperwork_for(self, row):
+        """View Order's "Invoice & packing slip" - for one already invoiced."""
+        if row.get("source") != "db" or not row.get("db_id"):
+            messagebox.showinfo("Invoice & packing slip",
+                                "This order is only on this PC.")
+            return
+        self.status_var.set("Getting the invoice from Xero…")
+
+        def _work():
+            path, problem = self._invoice_paperwork(row)
+
+            def _done():
+                if path:
+                    self._output_invoice_paperwork(path)
+                    self.status_var.set("Invoice & packing slip ready."
+                                        + (f" {problem}" if problem else ""))
+                if problem:
+                    (messagebox.showwarning if path else messagebox.showerror)(
+                        "Invoice & packing slip", problem)
+            self.master.after(0, _done)
         threading.Thread(target=_work, daemon=True).start()
 
     def _invoice_delivery_run(self):
@@ -25126,6 +25226,8 @@ class ModernOrderApp(tk.Frame):
             ("Quote from this order",  _act(self._quote_prev_order, close=True)),
             ("Send draft to Xero",
              lambda: self._xero_send_orders([row], False, _after_xero)),
+            ("Invoice & packing slip (PDF)",
+             lambda: self._invoice_paperwork_for(row)),
             ("Xero import file (CSV)", _act(self._invoice_selected_orders)),
             ("Full history…",          _act(self._view_order_history)),
         ], variant="secondary", pady=px(6)).pack(side="right", padx=(0, px(8)))

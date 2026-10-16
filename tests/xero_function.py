@@ -261,6 +261,13 @@ class Fake(BaseHTTPRequestHandler):
     def log_message(self, *_a):
         pass
 
+    def _send_pdf(self, data: bytes):
+        self.send_response(200)
+        self.send_header("Content-Type", "application/pdf")
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
     def _send(self, code, body):
         data = b"" if body is None else json.dumps(body).encode()
         self.send_response(code)
@@ -288,6 +295,16 @@ class Fake(BaseHTTPRequestHandler):
         if url.path == "/auth/v1/user":
             u = USERS.get(auth)
             return self._send(200, {"id": u[0]}) if u else self._send(401, {})
+        if url.path == "/rest/v1/xero_invoices":
+            if auth != f"Bearer {SERVICE}":
+                return self._send(401, {"message": "service role only"})
+            order = urllib.parse.parse_qs(url.query).get("order_id", [""])[0]
+            order = order.removeprefix("eq.")
+            with LOCK:
+                row = W.rows.get(order)
+            return self._send(200, [{"invoice_id": row["invoice_id"],
+                                     "invoice_number": row["invoice_number"],
+                                     "state": row["state"]}] if row else [])
         if url.path.startswith("/rest/v1/rpc/"):
             if self.headers.get("apikey") != SERVICE or auth != f"Bearer {SERVICE}":
                 return self._send(401, {"message": "service role only"})
@@ -318,6 +335,13 @@ class Fake(BaseHTTPRequestHandler):
                                      "tenantName": "Total Air Filtration"}])
         if self.headers.get("Xero-tenant-id") != "T1":
             return self._send(403, {"Title": "Forbidden"})
+        if "pdf" in (self.headers.get("Accept") or ""):
+            ident = url.path.rstrip("/").split("/")[-1]
+            with LOCK:
+                inv = W.invoices.get(ident)
+            if not inv:
+                return self._send(404, {})
+            return self._send_pdf(b"%PDF-1.4 invoice " + inv["InvoiceNumber"].encode())
         with LOCK:
             code, out = xero_api(method, url.path,
                                  urllib.parse.parse_qs(url.query), body,
@@ -356,6 +380,19 @@ def call(action: str, body=None, auth: str = "Bearer staff", query=""):
             return exc.code, json.loads(raw or b"{}")
         except ValueError:
             return exc.code, raw.decode()
+
+
+def call_raw(action: str, body=None, auth: str = "Bearer staff"):
+    req = urllib.request.Request(
+        f"http://127.0.0.1:{PORT}/?do={action}", data=json.dumps(body or {}).encode(),
+        method="POST", headers={"Content-Type": "application/json",
+                                "Authorization": auth})
+    try:
+        with urllib.request.urlopen(req, timeout=60) as r:
+            return r.status, r.headers.get("Content-Type", ""), r.read(), \
+                r.headers.get("X-Invoice-Number", "")
+    except urllib.error.HTTPError as exc:
+        return exc.code, exc.headers.get("Content-Type", ""), exc.read(), ""
 
 
 def get(query: str):
@@ -640,6 +677,17 @@ def run_checks() -> None:
     code, out = draft(o7, invoice(number="TAF-ON-1007"), h="h7")
     check("a draft somebody approved by hand in Xero is left to them",
           out.get("state") == "gone" and W.rows[o7]["state"] == "gone", str(out))
+
+    print("\n── the invoice as a PDF ──")
+    code, ctype, data, number = call_raw("pdf", {"order_id": t1})
+    check("an invoiced order's PDF comes back from Xero, to print",
+          code == 200 and ctype.startswith("application/pdf") and
+          data.startswith(b"%PDF") and number == "TAF-ON-0901",
+          f"{code} {ctype} {data[:30]!r} {number}")
+    code, ctype, data, _n = call_raw("pdf", {"order_id": str(uuid.uuid4())})
+    check("an order with no invoice says so", code == 404, f"{code} {data[:80]!r}")
+    code, ctype, data, _n = call_raw("pdf", {"order_id": t1}, auth="Bearer stranger")
+    check("and only staff get one", code == 403, str(code))
 
     print("\n── Xero's email has a bad moment ──")
     o10 = str(uuid.uuid4())

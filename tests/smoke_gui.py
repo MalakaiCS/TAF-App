@@ -1770,10 +1770,22 @@ def _steps(app, gui, root):
         Complete - with nothing sent for an order that has an unpriced line."""
         from taf_order_app import features as _feat
         from taf_order_app import xero as _x
-        sent, completed, said = [], [], []
+        sent, completed, said, opened = [], [], [], []
         saved = (_x.push_draft, gui._db.set_order_status,
                  gui.messagebox.askyesno, gui.messagebox.showinfo,
-                 gui.messagebox.showwarning, dict(_feat._switches))
+                 gui.messagebox.showwarning, dict(_feat._switches),
+                 _x.invoice_pdf)
+        # A one-page PDF standing in for Xero's invoice.
+        import io
+        from reportlab.pdfgen import canvas as _canvas
+        buf = io.BytesIO()
+        _c = _canvas.Canvas(buf)
+        _c.drawString(72, 720, "TAX INVOICE INV-1")
+        _c.showPage()
+        _c.save()
+        _x.invoice_pdf = lambda oid, timeout=60: {"pdf": buf.getvalue(),
+                                                  "number": "INV-1"}
+        app._output_invoice_paperwork = lambda path: opened.append(path)
         _x.push_draft = lambda oid, built, md5="", invoice_now=False: (
             sent.append((oid, built, invoice_now))
             or {"state": "sent", "number": "INV-1", "emailed_to": "a@b.example"})
@@ -1806,9 +1818,9 @@ def _steps(app, gui, root):
                                        "width": 592, "height": 592,
                                        "depth": 600}])
             app._xero_send_orders([priced, unpriced], True)
-            for _ in range(100):
+            for _ in range(200):
                 root.update()
-                if len(said) >= 2:          # asked, then said what happened
+                if len(said) >= 2 and opened:   # asked, said, and opened
                     break
                 time.sleep(0.05)
             assert [s[0] for s in sent] == ["o-1"] and sent[0][2] is True, sent
@@ -1817,11 +1829,20 @@ def _steps(app, gui, root):
             ask = str(said[0])
             assert "$60.00 ex GST" in ask and "21693" in ask and \
                 "no price" in ask, ask
+            # The invoice and its packing slip, in one PDF, opened.
+            from pypdf import PdfReader
+            assert len(opened) == 1 and opened[0].endswith(
+                "Invoice INV-1 - 21692.pdf"), opened
+            pages = PdfReader(opened[0]).pages
+            assert len(pages) >= 3, len(pages)      # invoice + two docket copies
+            assert "TAX INVOICE" in pages[0].extract_text()
+            assert "CUSTOMER COPY" in "".join(pg.extract_text() for pg in pages[1:])
         finally:
             (_x.push_draft, gui._db.set_order_status, gui.messagebox.askyesno,
              gui.messagebox.showinfo, gui.messagebox.showwarning,
-             _feat._switches) = saved
+             _feat._switches, _x.invoice_pdf) = saved
             del app._refresh_orders_list
+            del app._output_invoice_paperwork
             app._tab_loaded.clear()
             app._tab_loaded.update(loaded)
     add("orders: Send to Xero & invoice customer", _send_to_xero)

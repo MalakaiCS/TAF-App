@@ -45,6 +45,7 @@
 //                                                               service role
 //   retry       try one order again now                         staff
 //   list        where each order's invoice is up to             staff
+//   pdf         an order's invoice as Xero prints it            staff
 //   contacts    Xero contacts matching a search, to link a
 //               customer to theirs                              staff
 //   owing       what is outstanding in Xero                     staff
@@ -315,6 +316,30 @@ async function xero(method: string, path: string, body?: unknown,
 
 
 // ── Xero's records ──────────────────────────────────────────────────────────
+
+/** The invoice as Xero prints it - the PDF the customer gets. */
+async function invoicePdf(id: string): Promise<ArrayBuffer> {
+  let access = await token();
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const org = await tenant(access);
+    const res = await fetch(`${API()}/api.xro/2.0/Invoices/${encodeURIComponent(id)}`, {
+      headers: { Authorization: `Bearer ${access}`, "Xero-tenant-id": org,
+                 Accept: "application/pdf" },
+    });
+    if (res.status === 401 && attempt === 0) {
+      access = await token(access);
+      continue;
+    }
+    if (!res.ok) {
+      const raw = await res.text();
+      let out: Any = {};
+      try { out = JSON.parse(raw); } catch { out = { Message: raw.slice(0, 200) }; }
+      throw new Problem(why(out, res.status), res.status);
+    }
+    return await res.arrayBuffer();
+  }
+  throw new Problem("Xero would not accept the connection's sign-in.", 401);
+}
 
 async function getInvoice(id: string): Promise<Row | null> {
   try {
@@ -930,6 +955,26 @@ Deno.serve(async (req: Request) => {
       } catch (e) {
         return json(await failed(row, e), 422);
       }
+    }
+
+    if (action === "pdf") {
+      // An order's invoice as a PDF, to print or keep. Only invoices this
+      // app made, found through the order they belong to.
+      const order = String(body.order_id ?? "");
+      if (!UUID.test(order)) return json({ error: "Which order?" }, 400);
+      const res = await fetch(`${SB()}/rest/v1/xero_invoices?order_id=eq.${order}` +
+                              "&select=invoice_id,invoice_number,state", {
+        headers: { apikey: SERVICE(), Authorization: `Bearer ${SERVICE()}`,
+                   Accept: "application/json" },
+      });
+      const rows = res.ok ? await res.json().catch(() => []) : [];
+      const row = Array.isArray(rows) ? rows[0] : null;
+      if (!row?.invoice_id) return json({ error: "This order has no invoice in Xero." }, 404);
+      const pdf = await invoicePdf(String(row.invoice_id));
+      return new Response(pdf, { status: 200, headers: {
+        ...CORS, "Content-Type": "application/pdf",
+        "X-Invoice-Number": String(row.invoice_number ?? ""),
+      } });
     }
 
     if (action === "contacts") {

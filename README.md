@@ -684,6 +684,13 @@ It runs one of two ways:
   **emailed by Xero** to the contact on file, due on that contact's payment
   terms in Xero. **Back to trial** undoes it.
 
+After **Send to Xero & invoice customer**, the invoice as Xero prints it and
+the order's packing slip (its delivery docket: customer copy and the copy
+they sign) are put together in one PDF in the app's `invoices` folder and
+opened. View Order → Actions → **Invoice & packing slip (PDF)** makes it again
+for an order already invoiced. (It opens for now, while it is being tried;
+switching `INVOICE_PAPERWORK_PRINTS` on sends it straight to the printer.)
+
 Xero numbers each invoice itself, carrying on from its own sequence, and the
 order number on the worksheet (the customer's purchase order) goes in the
 invoice's **Reference**. Previous Orders shows each order's Xero invoice

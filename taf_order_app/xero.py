@@ -153,6 +153,37 @@ def retry(order_id: str) -> Dict[str, Any]:
     return _call("retry", {"order_id": str(order_id)})
 
 
+def invoice_pdf(order_id: str, timeout: int = 60) -> Dict[str, Any]:
+    """An order's invoice as Xero prints it: {"pdf": bytes, "number": str}
+    or {"error": str}."""
+    try:
+        session = _db.get_client().auth.get_session()
+        token = getattr(session, "access_token", "") if session else ""
+    except Exception:
+        token = ""
+    if not token:
+        return {"error": "Not signed in."}
+    req = urllib.request.Request(
+        _url("pdf"), data=_json.dumps({"order_id": str(order_id)}).encode(),
+        method="POST", headers={"Authorization": f"Bearer {token}",
+                                "apikey": _db.current_anon_key(),
+                                "Content-Type": "application/json"})
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            data = resp.read()
+            if not data.startswith(b"%PDF"):
+                return {"error": "Xero did not send back a PDF."}
+            return {"pdf": data, "number": resp.headers.get("X-Invoice-Number", "")}
+    except urllib.error.HTTPError as exc:
+        try:
+            msg = _json.loads(exc.read().decode("utf-8") or "{}").get("error", "")
+        except Exception:
+            msg = ""
+        return {"error": msg or f"Xero said {exc.code}."}
+    except Exception as exc:
+        return {"error": str(exc)}
+
+
 def find_contacts(term: str) -> Dict[str, Any]:
     """Xero contacts matching a search: {"contacts": [{id, name, email}]}."""
     return _call("contacts", {"term": str(term or "")})
