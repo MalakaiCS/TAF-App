@@ -408,7 +408,12 @@ def run_checks() -> None:
     code, body = get(f"?do=finish&code=good&state={uuid.uuid4()}")
     check("Xero coming back with a state the app did not start is refused",
           code == 400, body)
-    code, body = get(f"?do=finish&code=good&state={state}")
+    code, body = get(f"?error=access_denied&state={state}")
+    check("cancelled at Xero: said so, and nothing is connected",
+          code == 400 and "not connected" in body and
+          not W.conn.get("refresh_token"), body)
+    # Xero comes back to the plain address the app was registered with.
+    code, body = get(f"?code=good&state={state}")
     check("signing in connects it, for the whole company",
           code == 200 and "Total Air Filtration" in body, body)
     check("and remembers who connected it",
@@ -703,7 +708,7 @@ def main() -> int:
     env = dict(os.environ, SUPABASE_URL=base, SUPABASE_ANON_KEY="anon-key",
                SUPABASE_SERVICE_ROLE_KEY=SERVICE, XERO_CLIENT_ID="client",
                XERO_CLIENT_SECRET="secret",
-               XERO_REDIRECT_URI=f"http://127.0.0.1:{PORT}/?do=finish",
+               XERO_REDIRECT_URI=f"http://127.0.0.1:{PORT}/",
                XERO_API_BASE=base, XERO_IDENTITY_BASE=base,
                DENO_NO_UPDATE_CHECK="1")
     wrapper = Path(tempfile.mkdtemp(prefix="taf-xero-")) / "serve.ts"

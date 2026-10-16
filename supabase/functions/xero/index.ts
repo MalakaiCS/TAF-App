@@ -50,7 +50,7 @@
 // Deploy:
 //   supabase secrets set XERO_CLIENT_ID=...
 //   supabase secrets set XERO_CLIENT_SECRET=...
-//   supabase secrets set XERO_REDIRECT_URI=https://<project>.supabase.co/functions/v1/xero?do=finish
+//   supabase secrets set XERO_REDIRECT_URI=https://<project>.supabase.co/functions/v1/xero
 //   supabase functions deploy xero --no-verify-jwt
 //
 // --no-verify-jwt because Xero sends the person back to `finish` in a
@@ -732,7 +732,11 @@ async function sweep() {
 Deno.serve(async (req: Request) => {
   if (req.method === "OPTIONS") return new Response("ok", { headers: CORS });
   const url = new URL(req.url);
-  const action = url.searchParams.get("do") ?? "status";
+  // Xero sends the manager back with ?code=...&state=... (or ?error=... if
+  // they cancelled), so the redirect URI can be the function's plain address.
+  const back = url.searchParams.has("state") &&
+    (url.searchParams.has("code") || url.searchParams.has("error"));
+  const action = url.searchParams.get("do") ?? (back ? "finish" : "status");
 
   if (!env("XERO_CLIENT_ID") || !env("XERO_CLIENT_SECRET") || !env("XERO_REDIRECT_URI")) {
     return json({ error: "This Supabase project has no Xero app set up. Set " +
@@ -743,6 +747,10 @@ Deno.serve(async (req: Request) => {
   try {
     // Xero itself sends the person here, in a browser, with a code.
     if (action === "finish") {
+      if (url.searchParams.has("error")) {
+        return text("Xero was not connected (" + (url.searchParams.get("error") ?? "") +
+                    "). Press Connect in the app to try again.", 400);
+      }
       const code = url.searchParams.get("code") ?? "";
       const state = url.searchParams.get("state") ?? "";
       const c = await conn();

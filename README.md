@@ -686,12 +686,12 @@ ever on a PC.
    (step 38).
 2. At [developer.xero.com](https://developer.xero.com/app/manage) make a
    **Web app**. Its redirect URI is
-   `https://<your-project>.supabase.co/functions/v1/xero?do=finish`.
+   `https://<your-project>.supabase.co/functions/v1/xero`.
 3. Set its details as function secrets and deploy:
 
    ```bash
    supabase secrets set XERO_CLIENT_ID=... XERO_CLIENT_SECRET=...
-   supabase secrets set XERO_REDIRECT_URI=https://<your-project>.supabase.co/functions/v1/xero?do=finish
+   supabase secrets set XERO_REDIRECT_URI=https://<your-project>.supabase.co/functions/v1/xero
    supabase functions deploy xero --no-verify-jwt
    ```
 

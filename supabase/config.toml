@@ -11,7 +11,7 @@ verify_jwt = true
 # a function or from Storage arrives on the phone as unstyled source with every
 # script blocked. It lives on GitHub Pages instead (docs/phone/index.html).
 
-# Xero sends the manager back to ?do=finish in a browser, with no app sign-in,
+# Xero sends the manager back to this function in a browser, with no app sign-in,
 # so the gateway cannot insist on one. Every other action checks the caller
 # itself: approved staff (managers to connect), or the service role for the
 # scheduled sweep. Deploy with: supabase functions deploy xero --no-verify-jwt
