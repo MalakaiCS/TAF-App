@@ -48,6 +48,10 @@ except Exception:
 faulthandler.enable()
 faulthandler.dump_traceback_later(300, exit=True)
 
+# Each step's own limit (see _drive), and each role's (see run_all).
+STEP_LIMIT = 90
+ROLE_LIMIT = 240
+
 # Point the app's storage at a throwaway folder before anything reads it:
 # APP_DIR is decided at import time and a smoke test must not touch, or
 # inherit, a real installation's settings and orders.
@@ -418,12 +422,17 @@ def run(role: str = "manager") -> int:
         # event loop, so nothing else gets to report it — the last line in the
         # log has to be the answer to "which one?".
         if not label.startswith("banner:"):
-            print(f"  · {label}")
+            print(f"  · {label}", flush=True)
+        # Each step gets ninety seconds. One that sticks - inside a modal
+        # loop where nothing else here can fire - prints every thread's
+        # stack, naming what it was doing, and ends this role's run.
+        faulthandler.dump_traceback_later(STEP_LIMIT, exit=True)
         started = time.monotonic()
         try:
             step()
         except Exception as exc:
             _fail(label, exc)
+        faulthandler.cancel_dump_traceback_later()
         took = time.monotonic() - started
         if took > 2.0:
             print(f"    ^ took {took:.1f}s")
@@ -2105,11 +2114,24 @@ def run_all() -> int:
     keep state — so each role gets a fresh one.
     """
     import subprocess
+    # The five-minute watchdog is for one role's run. This process only
+    # waits on them, each with its own limit, so it must not be the one
+    # that gives up first - it would end the run before the stuck role
+    # could say where it was stuck.
+    faulthandler.cancel_dump_traceback_later()
     worst = 0
     for role in ROLES:
-        print(f"\n{'=' * 62}\n  smoke test — {role}\n{'=' * 62}")
-        result = subprocess.run([sys.executable, __file__, role])
-        worst = max(worst, result.returncode)
+        print(f"\n{'=' * 62}\n  smoke test — {role}\n{'=' * 62}",
+              flush=True)
+        try:
+            result = subprocess.run([sys.executable, __file__, role],
+                                    timeout=ROLE_LIMIT)
+            code = result.returncode
+        except subprocess.TimeoutExpired:
+            print(f"FAIL: the {role} run did not finish in {ROLE_LIMIT}s",
+                  flush=True)
+            code = 1
+        worst = max(worst, code)
     print("\nSmoke test failed." if worst else "\nSmoke test passed for every role.")
     return worst
 
