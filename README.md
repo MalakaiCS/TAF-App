@@ -685,12 +685,10 @@ It runs one of two ways:
   terms in Xero. **Back to trial** undoes it.
 
 After **Send to Xero & invoice customer**, one PDF is put together in the
-app's `invoices` folder and opened: the invoice as Xero prints it; its
-**packing slip**, laid out as Xero's (Xero's API cannot give its own), with
-the invoice number, reference and every line and quantity but no prices; and
-our **collection slip** for an order whose Location is *Pick Up*, or
-**delivery slip** for one going out (the docket - the customer's copy and the
-copy they sign). View Order → Actions → **Invoice & packing slip (PDF)** makes it again
+app's `invoices` folder and opened: the invoice as Xero prints it, then our
+**collection slip** for an order whose Location is *Pick Up*, or **delivery
+slip** for one going out (the docket - the customer's copy and the copy they
+sign). View Order → Actions → **Invoice & packing slip (PDF)** makes it again
 for an order already invoiced. (It opens for now, while it is being tried;
 switching `INVOICE_PAPERWORK_PRINTS` on sends it straight to the printer.)
 
@@ -1154,7 +1152,6 @@ taf_order_app/
   part_numbers.py          Part numbers, square metres, filter-type rules
   pricing.py               Price lists, quote lines, Xero export
   invoice_wording.py       What each kind of filter says on a Xero invoice
-  packing_slip.py          The packing slip that goes with an invoice
   xero.py                  Talking to the xero function; the background sync
   quote_pdf.py             The quote PDF
   stock_usage.py           What an order takes out of stock

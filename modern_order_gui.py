@@ -34,7 +34,6 @@ from taf_order_app import insights as _insights
 from taf_order_app import records as _records
 from taf_order_app import xero as _xero
 from taf_order_app import invoice_wording as _wording
-from taf_order_app import packing_slip as _packing_slip
 from taf_order_app import stock_usage as _stock_usage
 from taf_order_app import backup as _backup
 from taf_order_app import labels as _labels
@@ -22728,10 +22727,9 @@ class ModernOrderApp(tk.Frame):
     INVOICE_PAPERWORK_PRINTS = False
 
     def _invoice_paperwork(self, row, header=None, items=None):
-        """One PDF for an invoiced order: Xero's invoice, its packing slip
-        (laid out as Xero's), then our collection slip for a pick-up or
-        delivery slip for one going out (the docket - the customer's copy
-        and the one they sign). Returns (path, problem): the path is None only when neither
+        """One PDF for an invoiced order: Xero's invoice, then our collection
+        slip for a pick-up or delivery slip for one going out (the docket -
+        the customer's copy and the one they sign). Returns (path, problem): the path is None only when neither
         could be made. Not on the window's thread - Xero is asked for the
         invoice."""
         import tempfile
@@ -22748,20 +22746,6 @@ class ModernOrderApp(tk.Frame):
             parts.append(str(tmp / "invoice.pdf"))
         else:
             problems.append(f"the invoice ({got.get('error') or 'not found'})")
-        # The packing slip, laid out as Xero's is, from the same invoice.
-        customer = self._customer_record(header.get("Customer Name")
-                                         or row.get("customer", ""))
-        try:
-            prices, rates, _tier = self._prices_for_customer(customer)
-            built_inv = _xero.draft_from(header, list(items or []), customer,
-                                         prices, rates)["invoice"]
-            slip = _packing_slip.slip_from(
-                built_inv, inv_no, customer, header,
-                company_address=_calc_settings.base_address())
-            parts.append(_packing_slip.build_packing_slip_pdf(
-                tmp / "packing.pdf", slip))
-        except Exception as exc:
-            problems.append(f"the packing slip ({exc})")
         # Ours: the collection slip for a pick-up, the delivery slip for
         # anything going out on a truck - the docket, a copy each.
         try:

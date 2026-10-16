@@ -1834,14 +1834,11 @@ def _steps(app, gui, root):
             assert len(opened) == 1 and opened[0].endswith(
                 "Invoice INV-1 - 21692.pdf"), opened
             pages = PdfReader(opened[0]).pages
-            # Xero's invoice, the packing slip, then the docket (two copies).
-            assert len(pages) >= 4, len(pages)
+            # Xero's invoice, then the delivery docket (two copies).
+            assert len(pages) >= 3, len(pages)
             assert "TAX INVOICE" in pages[0].extract_text()
-            slip = pages[1].extract_text()
-            assert "PACKING SLIP" in slip and "INV-1" in slip \
-                and "21692" in slip and "$" not in slip, slip
-            rest = "".join(pg.extract_text() for pg in pages[2:])
-            assert "DOCKET" in rest and "CUSTOMER COPY" in rest, rest[:200]
+            rest = "".join(pg.extract_text() for pg in pages[1:])
+            assert "DELIVERY DOCKET" in rest and "CUSTOMER COPY" in rest, rest[:200]
         finally:
             (_x.push_draft, gui._db.set_order_status, gui.messagebox.askyesno,
              gui.messagebox.showinfo, gui.messagebox.showwarning,
