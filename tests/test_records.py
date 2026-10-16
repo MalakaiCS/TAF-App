@@ -357,11 +357,15 @@ def test_the_draft_is_dated_the_day_on_the_work_order():
     assert _draft([_item()])["invoice"]["date"] == "2026-10-14"
 
 
-def test_the_order_number_is_the_invoice_number_and_the_job_its_reference():
-    """As the CSV export has always done it."""
+def test_xero_numbers_the_invoice_and_the_purchase_order_is_its_reference():
+    """Xero's own invoice numbers carry on counting up; the customer's
+    purchase order - the order number on the worksheet - is what they look
+    for, so it is the reference."""
     inv = _draft([_item()])["invoice"]
-    assert inv["number"] == "PO-8842"
-    assert inv["reference"] == "AHU 3"
+    assert inv["number"] == ""
+    assert inv["reference"] == "PO-8842"
+    assert _draft([_item()], header={"Order Number": ""})["invoice"][
+        "reference"] == "AHU 3"
 
 
 def test_the_customer_is_looked_for_in_xero_by_every_name_it_has():

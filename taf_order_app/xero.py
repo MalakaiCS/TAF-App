@@ -264,13 +264,16 @@ def draft_from(header: Dict[str, Any], items: Iterable[Dict[str, Any]],
     if fee:
         priced.append({"description": "Delivery", "quantity": 1.0,
                        "unit_amount": fee, "item_code": _pricing.DELIVERY_CODE})
-    number = str(header.get("Order Number") or "").strip()
+    # Xero numbers the invoice itself, carrying on from its own sequence; the
+    # customer's purchase order number - the order number on the worksheet -
+    # goes in the Reference, which is what they look for.
+    po = str(header.get("Order Number") or "").strip()
     invoice = {
         "contact_id": str((customer or {}).get("xero_contact_id") or ""),
         "contact_names": contact_names(customer, header),
         "date": iso_date(header.get("Date Ordered") or ""),
-        "number": number,
-        "reference": _pricing.invoice_reference(header, number),
+        "number": "",
+        "reference": po or str(header.get("Job") or "").strip(),
         "terms": str((customer or {}).get("payment_terms") or ""),
         "lines": priced,
         "unpriced": unpriced,

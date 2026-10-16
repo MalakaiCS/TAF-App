@@ -666,11 +666,31 @@ async function emailOne(row: Row, inv: Row | null, contact: Row | null = null) {
                               claimed_until: null });
     return { state: "sent", number: row.invoice_number };
   }
-  try {
-    await xero("POST", `/api.xro/2.0/Invoices/${row.invoice_id}/Email`, {});
-  } catch (e) {
-    const error = `Approved in Xero, but Xero would not email it: ${(e as Error).message}. ` +
-      "Check the contact's email address in Xero and press Retry, or send it from Xero.";
+  // Xero's email sending fails now and then on its side ("An error occurred
+  // in Xero", a 5xx) straight after approving; another go a moment later
+  // usually sends it. A refusal about the invoice or contact (4xx) is said
+  // as Xero says it.
+  let failure: Problem | null = null;
+  for (const wait of [0, 2000, 5000]) {
+    if (wait) await sleep(wait);
+    try {
+      await xero("POST", `/api.xro/2.0/Invoices/${row.invoice_id}/Email`, {});
+      failure = null;
+      break;
+    } catch (e) {
+      failure = e as Problem;
+      if (failure.status && failure.status < 500 && failure.status !== 429) break;
+    }
+  }
+  if (failure) {
+    const theirs = !failure.status || failure.status >= 500 || failure.status === 429;
+    const error = theirs
+      ? "Approved in Xero, but Xero could not send the email just now (a " +
+        "problem on Xero's side, not the invoice). Press Retry on the Xero " +
+        "screen in a few minutes, or send it from Xero."
+      : `Approved in Xero, but Xero would not email it: ${failure.message}. ` +
+        "Check the contact's email address in Xero and press Retry, or send it " +
+        "from Xero.";
     await put(row.order_id, { error, claimed_until: null });
     return { state: "approved", error };
   }

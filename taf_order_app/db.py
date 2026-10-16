@@ -517,6 +517,22 @@ def xero_invoice_for(order_id: str) -> dict:
         return {}
 
 
+def xero_invoice_numbers() -> dict:
+    """{order id: its Xero invoice number} for every order that has one -
+    the Previous Orders list shows it beside the order number. Empty when
+    Xero has not been linked (or step 37 not run)."""
+    try:
+        rows = _page_through(
+            lambda: (get_client().table("xero_invoices")
+                     .select("order_id, invoice_number")
+                     .not_.is_("invoice_number", "null")
+                     .order("order_id")))
+    except Exception:
+        return {}
+    return {str(r["order_id"]): str(r.get("invoice_number") or "")
+            for r in rows if r.get("invoice_number")}
+
+
 def set_line_fields(order_id: str, line_id: str, fields: dict) -> list:
     """Change named fields on one line of a saved order - its packing plan,
     its calculator inputs - and nothing else.

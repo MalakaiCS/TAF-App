@@ -684,6 +684,11 @@ It runs one of two ways:
   **emailed by Xero** to the contact on file, due on that contact's payment
   terms in Xero. **Back to trial** undoes it.
 
+Xero numbers each invoice itself, carrying on from its own sequence, and the
+order number on the worksheet (the customer's purchase order) goes in the
+invoice's **Reference**. Previous Orders shows each order's Xero invoice
+number beside its order number (and finds an order by it).
+
 Each line goes across at its price on the work order (or the customer's
 tier price, for a line without one), worded with the **invoice wording**
 (Xero screen → Invoice wording…), never the worksheet's description. A part

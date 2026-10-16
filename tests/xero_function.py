@@ -85,6 +85,7 @@ class World:
         self.invoices: dict = {}
         self.idempotent: dict = {}
         self.emails: list = []
+        self.email_fail = 0          # how many sends Xero fails before one goes
         self.calls: list = []
 
 
@@ -216,6 +217,10 @@ def xero_api(method: str, path: str, query: dict, body, headers):
         return (200, {"Invoices": [invoice_out(inv)]}) if inv else (404, {})
     if len(parts) > 4 and parts[4] == "Email":
         inv = W.invoices[ident]
+        if W.email_fail > 0:
+            W.email_fail -= 1
+            return 500, {"Message": "An error occurred in Xero. Check the API "
+                                    "Status page for current service status."}
         email = W.contacts[inv["Contact"]["ContactID"]]["EmailAddress"]
         if inv["Status"] != "AUTHORISED":
             return validation("Only approved invoices can be emailed")
@@ -635,6 +640,27 @@ def run_checks() -> None:
     code, out = draft(o7, invoice(number="TAF-ON-1007"), h="h7")
     check("a draft somebody approved by hand in Xero is left to them",
           out.get("state") == "gone" and W.rows[o7]["state"] == "gone", str(out))
+
+    print("\n── Xero's email has a bad moment ──")
+    o10 = str(uuid.uuid4())
+    W.email_fail = 1
+    code, out = call("draft", {"order_id": o10, "invoice": invoice(
+        number="TAF-ON-1010"), "hash": "e1", "invoice_now": True})
+    check("a send Xero fails on its side is tried again, and goes",
+          out.get("state") == "sent" and
+          ("TAF-ON-1010", "accounts@bells.example") in W.emails, str(out))
+    o11 = str(uuid.uuid4())
+    W.email_fail = 9
+    code, out = call("draft", {"order_id": o11, "invoice": invoice(
+        number="TAF-ON-1011"), "hash": "e2", "invoice_now": True})
+    check("still failing: approved, and said to be Xero's problem, not the "
+          "contact's", out.get("state") == "approved" and
+          "Xero's side" in out.get("error", "") and
+          "email address" not in out.get("error", ""), str(out))
+    W.email_fail = 0
+    code, out = call("retry", {"order_id": o11})
+    check("and Retry sends it once Xero is right again",
+          out.get("state") == "sent", str(out))
 
     print("\n── an order deleted ──")
     o8 = str(uuid.uuid4())

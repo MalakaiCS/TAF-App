@@ -10270,7 +10270,7 @@ class ModernOrderApp(tk.Frame):
         tbl_wrap.rowconfigure(0, weight=1)
         tbl_wrap.columnconfigure(0, weight=1)
 
-        ocols = ("pick", "customer", "order_no", "date_ordered", "date_due", "status", "printed", "n_items", "created_by", "file")
+        ocols = ("pick", "customer", "order_no", "invoice_no", "date_ordered", "date_due", "status", "printed", "n_items", "created_by", "file")
         self.orders_tree = ttk.Treeview(tbl_wrap, columns=ocols,
                                          show="tree headings",
                                          style="TAF.Treeview",
@@ -10288,6 +10288,7 @@ class ModernOrderApp(tk.Frame):
             "pick":         ("",                38, "center"),
             "customer":     ("Customer Name",  200, "w"),
             "order_no":     ("Order #",        120, "w"),
+            "invoice_no":   ("Invoice #",      100, "w"),
             "date_ordered": ("Date Ordered",   126, "center"),
             "date_due":     ("Date Due",       100, "center"),
             "status":       ("Status",         120, "center"),
@@ -23273,12 +23274,14 @@ class ModernOrderApp(tk.Frame):
                 # lines, and downloading every line of every order was what
                 # made these screens slow.
                 db_rows = _db.get_order_list()
+                invoice_nos = _db.xero_invoice_numbers()
                 for r in db_rows:
                     rows.append({
                         "source":       "db",
                         "order_type":   r.get("order_type", "filter"),
                         "customer":     r.get("customer_name", ""),
                         "order_no":     r.get("order_number", ""),
+                        "invoice_no":   invoice_nos.get(str(r.get("id")), ""),
                         "date_ordered": r.get("date_ordered", ""),
                         "date_due":     r.get("date_due", ""),
                         "n_items":      (r.get("n_items")
@@ -23394,6 +23397,7 @@ class ModernOrderApp(tk.Frame):
             if q and not (
                 q in r["customer"].lower()
                 or q in r["order_no"].lower()
+                or q in (r.get("invoice_no") or "").lower()
                 or q in r.get("created_by", "").lower()
             ):
                 continue
@@ -23479,6 +23483,7 @@ class ModernOrderApp(tk.Frame):
                 TICK_FULL if self._order_key(row) in self._ticked else TICK_EMPTY,
                 cust_display,
                 row["order_no"],
+                row.get("invoice_no", "") or "",
                 row["date_ordered"],
                 due_lbl,
                 status_lbl,
@@ -25298,6 +25303,8 @@ class ModernOrderApp(tk.Frame):
                  font=F_BOLD).pack(side="right")
 
         bits = [f"O/N {order_no or '—'}"]
+        if row.get("invoice_no"):
+            bits.append(f"Invoice {row['invoice_no']}")
         for label, key in (("Ordered", "Date Ordered"), ("Due", "Date Due"),
                            ("Job", "Job"), ("Attn", "Attention")):
             if header.get(key):
