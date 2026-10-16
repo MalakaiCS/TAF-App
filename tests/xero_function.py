@@ -402,9 +402,12 @@ def run_checks() -> None:
     link = urllib.parse.urlparse(out.get("url", ""))
     params = urllib.parse.parse_qs(link.query)
     state = (params.get("state") or [""])[0]
+    scope = (params.get("scope") or [""])[0].split()
     check("a manager gets Xero's sign-in page, asking to stay connected",
-          code == 200 and state and "offline_access" in
-          (params.get("scope") or [""])[0], str(out))
+          code == 200 and state and "offline_access" in scope, str(out))
+    check("with Xero's granular scopes - a new Xero app refuses the old "
+          "broad one", "accounting.invoices" in scope and
+          "accounting.transactions" not in scope, str(scope))
     code, body = get(f"?do=finish&code=good&state={uuid.uuid4()}")
     check("Xero coming back with a state the app did not start is refused",
           code == 400, body)

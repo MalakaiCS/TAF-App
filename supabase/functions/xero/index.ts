@@ -67,16 +67,19 @@ const CORS = {
   "Access-Control-Allow-Methods": "POST, GET, OPTIONS",
 };
 
-// What the app may do in Xero, asked for once when a manager connects:
-//   accounting.transactions  invoices now; purchase orders later
-//   accounting.contacts      find customers now; create them later
-//   accounting.settings      items (made for new part numbers) and the
-//                            organisation's payment terms
+// What the app may do in Xero, asked for once when a manager connects.
+// Xero's granular scopes - an app made since 2 March 2026 is refused the old
+// broad accounting.transactions ("invalid_scope"), and older apps must move
+// by September 2027:
+//   accounting.invoices  sales invoices (make, approve, email) and, later,
+//                        purchase orders
+//   accounting.contacts  find customers now; create them later
+//   accounting.settings  items (made for new part numbers) and the
+//                        organisation's payment terms
 // Asking for all of it now means adding those later needs no reconnecting.
-// XERO_SCOPES overrides it, for a Xero app set up with Xero's newer, narrower
-// scopes.
+// XERO_SCOPES overrides it.
 const SCOPES = () => env("XERO_SCOPES",
-  "offline_access accounting.transactions accounting.contacts " +
+  "offline_access accounting.invoices accounting.contacts " +
   "accounting.settings");
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const DAY = /^\d{4}-\d{2}-\d{2}$/;

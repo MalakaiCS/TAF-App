@@ -699,17 +699,19 @@ ever on a PC.
    browser; the function checks every other request itself. Optional:
    `XERO_ACCOUNT_CODE` (default `200`, Sales), `XERO_TAX_TYPE` (default
    `OUTPUT`, GST on Income), `XERO_CREATE_ITEMS=false` to stop part numbers
-   being made items, and `XERO_SCOPES` if your Xero app was set up with
-   Xero's newer narrower scopes.
+   being made items, and `XERO_SCOPES` to ask Xero for a different set of
+   permissions.
 4. A Director or Admin switches on **Xero, connected** (Settings → Features). A
    manager opens **Xero…** (under your name → Testable Features), presses
    **Connect**, signs in to Xero (with its two-factor code) and picks the
    organisation. That is the only time.
 
 The connection asks Xero for invoices and purchase orders
-(`accounting.transactions`), contacts (`accounting.contacts`) and items and
+(`accounting.invoices`), contacts (`accounting.contacts`) and items and
 settings (`accounting.settings`) up front, so making customers and purchase
-orders in Xero later won't need connecting again.
+orders in Xero later won't need connecting again. These are Xero's granular
+scopes: an app made since March 2026 is refused the old broad
+`accounting.transactions` with `invalid_scope`.
 
 **What it needs from Xero.** Each customer must be a contact in Xero under the
 same name as in the app (its legal name, name or short name — case doesn't
