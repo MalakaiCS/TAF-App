@@ -236,6 +236,9 @@ class Stub:
             return send(AUDIT + LOGGED)
         if "/rest/v1/notifications" in url:
             return send(NOTES)
+        if "/rest/v1/suppliers" in url:
+            return send([{"id": "s-fdg", "name": "FD Greenwood"},
+                         {"id": "s-vul", "name": "Vulcan"}])
         if "/rest/v1/supply_requests" in url and req.method == "PATCH":
             # Like the real policy: a change that is not allowed is not an
             # error, it matches nothing and hands back no rows.
@@ -356,6 +359,27 @@ class Stub:
                        "created_at": "2026-09-24T01:30:00Z"}
                 SUPPLY.append(row)
                 return send(row)
+            if name == "request_supplies":
+                ref = body.get("p_client_ref")
+                if any(r.get("client_ref", "").startswith(f"{ref}-")
+                       for r in SUPPLY):
+                    return send([])
+                rows = []
+                for i, line in enumerate(body.get("p_lines") or []):
+                    rows.append({"id": f"sr{len(SUPPLY) + 10}",
+                                 "item": line.get("item"),
+                                 "detail": line.get("detail", ""),
+                                 "quantity": line.get("quantity", ""),
+                                 "supplier_id": line.get("supplier_id") or None,
+                                 "urgent": bool(body.get("p_urgent")),
+                                 "note": body.get("p_note", ""),
+                                 "status": "open", "client_ref": f"{ref}-{i}",
+                                 "requested_by": "u1",
+                                 "requested_by_name": "Kai Brown",
+                                 "handled_by_name": "",
+                                 "created_at": "2026-09-24T01:40:00Z"})
+                    SUPPLY.append(rows[-1])
+                return send(rows)
             if name == "resolve_scan":
                 code = str(body.get("p_code") or "").strip().upper()
                 hits = []
@@ -1238,7 +1262,7 @@ def run() -> int:
         page.check("#supply-urgent")
         page.click("#supply-send")
         wait_for_text(page, "#screen", "managers have been told")
-        sent = [b for u, b in stub.calls if "rpc/request_supply" in u]
+        sent = [b for u, b in stub.calls if u.split("?")[0].endswith("rpc/request_supply")]
         check("asking sends it, with a reference of its own",
               len(SUPPLY) == before + 1 and sent
               and sent[-1].get("p_client_ref")
@@ -1272,13 +1296,43 @@ def run() -> int:
         # And once more, as if the phone sent it, lost the answer, and sent
         # it again.
         queued_ref = [b for u, b in stub.calls
-                      if "rpc/request_supply" in u][-1]["p_client_ref"]
+                      if u.split("?")[0].endswith("rpc/request_supply")][-1]["p_client_ref"]
         page.evaluate(f"""TAFDATA.rpc('request_supply', {{
             p_item: 'Channel', p_detail: '50mm', p_quantity: '10',
             p_urgent: false, p_note: '', p_client_ref: '{queued_ref}' }})""")
         page.wait_for_timeout(300)
         check("when the signal is back it goes - once, even if sent again",
               sum(1 for r in SUPPLY if r.get("detail") == "50mm") == 1)
+
+        # Several things in one go, one of them from FD Greenwood.
+        page.click('#tabs button[data-tab="supplies"]')
+        page.wait_for_selector("#screen table")
+        before = len(SUPPLY)
+        page.wait_for_selector("#supply-from option[value=s-fdg]",
+                               state="attached")
+        page.select_option("#supply-item", "Channel")
+        page.fill("#supply-detail", "47mm")
+        page.fill("#supply-qty", "20 lengths")
+        page.select_option("#supply-from", "s-fdg")
+        page.click("#supply-add")
+        page.select_option("#supply-from", "")
+        page.select_option("#supply-item", "Rivets")
+        page.fill("#supply-detail", "4mm pop")
+        page.fill("#supply-qty", "2 boxes")
+        page.click("#supply-add")
+        check("each thing added goes on the list",
+              page.locator("#supply-basket li").count() == 2
+              and "from FD Greenwood" in page.locator("#supply-basket").inner_text(),
+              page.locator("#supply-basket").inner_text())
+        page.click("#supply-send")
+        wait_for_text(page, "#screen", "managers have been told")
+        many = [b for u, b in stub.calls if "rpc/request_supplies" in u]
+        check("the list goes as one request, with who it comes from",
+              len(many) == 1 and len(many[0]["p_lines"]) == 2
+              and many[0]["p_lines"][0]["supplier_id"] == "s-fdg"
+              and len(SUPPLY) == before + 2, str(many))
+        check("and the list empties",
+              page.locator("#supply-basket li").count() == 0)
 
         page.click('#tabs button[data-tab="supplies"]')
         page.wait_for_selector("#screen table")

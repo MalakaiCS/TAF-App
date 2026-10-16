@@ -2513,43 +2513,110 @@ var TAFAPP = (function () {
     item.addEventListener("change", function () {
       hint.textContent = SUPPLY_HINTS[item.value] || "";
     });
+    // Who it comes from, if somebody knows. Hidden until step 40 is run
+    // and there are suppliers to pick from.
+    var from = U.el("select", { attr: { id: "supply-from" },
+      kids: [U.el("option", { text: "", attr: { value: "" } })] });
+    var fromLabel = U.el("label", { cls: "f", attr: { style: "display:none" },
+      kids: [U.el("span", { text: "From (if you know)" }), from] });
+    var suppliers = {};
+    D.select("suppliers", { "select": "id,name", "active": "eq.true",
+                            "order": "name" }).then(function (rows) {
+      (rows || []).forEach(function (r) {
+        suppliers[r.id] = r.name;
+        from.appendChild(U.el("option", { text: r.name, attr: { value: r.id } }));
+      });
+      if ((rows || []).length) { fromLabel.style.display = ""; }
+    }).catch(function () { /* not run yet - asked for without one */ });
+
+    // Several things at once: each onto the list, then one send and one
+    // message to the managers.
+    var basket = [];
+    var basketList = U.el("ul", { attr: { id: "supply-basket" } });
+    function lineNow() {
+      var what = item.value;
+      var said = detail.value.trim();
+      if (what === "Other" && !said) {
+        U.notice(askCard, "Say what you need - \"Other\" on its own does "
+                        + "not tell anybody what to order.");
+        return null;
+      }
+      return { item: what, detail: said, quantity: qty.value.trim(),
+               supplier_id: from.value || "" };
+    }
+    function drawBasket() {
+      U.clear(basketList);
+      basket.forEach(function (l, i) {
+        var off = U.button("Take off", function () {
+          basket.splice(i, 1); drawBasket();
+        }, "quiet");
+        basketList.appendChild(U.el("li", { kids: [
+          document.createTextNode(describeRequest(l)
+            + (l.quantity ? ", " + l.quantity : "")
+            + (l.supplier_id ? " from " + (suppliers[l.supplier_id] || "") : "")
+            + "  "), off] }));
+      });
+    }
 
     var askCard = U.card("Ask for something", [
       U.el("label", { cls: "f", kids: [U.el("span", { text: "What" }), item] }),
       U.el("label", { cls: "f", kids: [hint, detail] }),
       U.el("label", { cls: "f", kids: [
         U.el("span", { text: "How many" }), qty] }),
+      fromLabel,
+      basketList,
       U.el("label", { cls: "f", kids: [
         U.el("span", { text: "Note" }), note] }),
       U.el("label", { cls: "f", attr: { style: "color:#8A2A1E" }, kids: [
         urgent, document.createTextNode("  Urgent - work has stopped")] })
     ]);
+    var add = U.button("Add to list", function () {
+      var l = lineNow();
+      if (!l) { return; }
+      basket.push(l);
+      detail.value = ""; qty.value = "";
+      drawBasket();
+    }, "quiet");
+    add.setAttribute("id", "supply-add");
     var send = U.button("Send to managers", function () {
-      var what = item.value;
-      var said = detail.value.trim();
-      if (what === "Other" && !said) {
-        U.notice(askCard, "Say what you need - \"Other\" on its own does "
-                        + "not tell anybody what to order.");
-        return;
+      var lines = basket.slice();
+      if (detail.value.trim() || qty.value.trim() || !lines.length) {
+        var l = lineNow();
+        if (!l) { return; }
+        lines.push(l);
       }
       send.disabled = true;
-      var label = what + (said ? " - " + said : "");
+      var label = lines.length === 1
+        ? describeRequest(lines[0])
+        : lines.length + " things";
+      var together = lines.length > 1 || !!lines[0].supplier_id;
       // One reference per request, so a send that lost its answer to a
       // dropout and got sent again is filed once, and managers told once.
-      S.send({
+      S.send(together ? {
+        rpc: "request_supplies",
+        label: "Supplies · " + label,
+        body: {
+          p_lines: lines, p_urgent: !!urgent.checked,
+          p_note: note.value.trim(), p_client_ref: S.newRef()
+        },
+        log: { action: "supply_requested",
+               details: lines.map(describeRequest).join("; ").slice(0, 500) }
+      } : {
         rpc: "request_supply",
         label: "Supplies · " + label,
         body: {
-          p_item: what, p_detail: said, p_quantity: qty.value.trim(),
+          p_item: lines[0].item, p_detail: lines[0].detail,
+          p_quantity: lines[0].quantity,
           p_urgent: !!urgent.checked, p_note: note.value.trim(),
           p_client_ref: S.newRef()
         },
         log: { action: "supply_requested",
-               details: label + (qty.value.trim()
-                                 ? ", " + qty.value.trim() : "") }
+               details: label + (lines[0].quantity
+                                 ? ", " + lines[0].quantity : "") }
       }).then(function (res) {
         detail.value = ""; qty.value = ""; note.value = "";
         urgent.checked = false;
+        basket = []; drawBasket();
         U.notice(askCard, res.queued
           ? "Kept on this phone. It goes when the signal is back, and the "
             + "managers are told then."
@@ -2560,7 +2627,7 @@ var TAFAPP = (function () {
       }).then(function () { send.disabled = false; });
     }, "go");
     send.setAttribute("id", "supply-send");
-    askCard.appendChild(U.el("div", { cls: "row-actions", kids: [send] }));
+    askCard.appendChild(U.el("div", { cls: "row-actions", kids: [add, send] }));
 
     // ── What has been asked for ───────────────────────────────────────
     var listCard = U.card("Asked for", []);

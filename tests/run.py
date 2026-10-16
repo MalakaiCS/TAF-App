@@ -51,7 +51,8 @@ MODULES = ["tests.test_rules", "tests.test_db_and_updates", "tests.test_orders",
            "tests.test_customer_merge",
            "tests.test_calc_parity",
            "tests.test_worksheet_blocks",
-           "tests.test_tiers_and_wording"]
+           "tests.test_tiers_and_wording",
+           "tests.test_purchasing"]
 
 
 def main() -> int:

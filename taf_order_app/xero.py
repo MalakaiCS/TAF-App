@@ -153,9 +153,8 @@ def retry(order_id: str) -> Dict[str, Any]:
     return _call("retry", {"order_id": str(order_id)})
 
 
-def invoice_pdf(order_id: str, timeout: int = 60) -> Dict[str, Any]:
-    """An order's invoice as Xero prints it: {"pdf": bytes, "number": str}
-    or {"error": str}."""
+def _pdf(action: str, body: Dict[str, Any], timeout: int = 60) -> Dict[str, Any]:
+    """A PDF as Xero prints it: {"pdf": bytes, "number": str} or {"error"}."""
     try:
         session = _db.get_client().auth.get_session()
         token = getattr(session, "access_token", "") if session else ""
@@ -164,7 +163,7 @@ def invoice_pdf(order_id: str, timeout: int = 60) -> Dict[str, Any]:
     if not token:
         return {"error": "Not signed in."}
     req = urllib.request.Request(
-        _url("pdf"), data=_json.dumps({"order_id": str(order_id)}).encode(),
+        _url(action), data=_json.dumps(body).encode(),
         method="POST", headers={"Authorization": f"Bearer {token}",
                                 "apikey": _db.current_anon_key(),
                                 "Content-Type": "application/json"})
@@ -182,6 +181,36 @@ def invoice_pdf(order_id: str, timeout: int = 60) -> Dict[str, Any]:
         return {"error": msg or f"Xero said {exc.code}."}
     except Exception as exc:
         return {"error": str(exc)}
+
+
+def invoice_pdf(order_id: str, timeout: int = 60) -> Dict[str, Any]:
+    """An order's invoice as Xero prints it: {"pdf": bytes, "number": str}
+    or {"error": str}."""
+    return _pdf("pdf", {"order_id": str(order_id)}, timeout)
+
+
+# ── Buying ───────────────────────────────────────────────────────────────────
+
+def pull_suppliers() -> Dict[str, Any]:
+    """Xero's supplier contacts into the app: {"suppliers": n}. Managers."""
+    return _call("suppliers_pull", timeout=180)
+
+
+def pull_items() -> Dict[str, Any]:
+    """Every Xero item into the app: {"items": n, "matched": n} - matched
+    being how many were put with a supplier by their code. Managers."""
+    return _call("items_pull", timeout=180)
+
+
+def send_po(po_id: str) -> Dict[str, Any]:
+    """Make the purchase order in Xero and email it to the supplier:
+    {"po_number", "emailed": bool, "emailed_to" | "error"}. Managers."""
+    return _call("po_send", {"po_id": str(po_id)}, timeout=120)
+
+
+def po_pdf(po_id: str, timeout: int = 60) -> Dict[str, Any]:
+    """A purchase order as Xero prints it: {"pdf": bytes, "number": str}."""
+    return _pdf("po_pdf", {"po_id": str(po_id)}, timeout)
 
 
 def find_contacts(term: str) -> Dict[str, Any]:

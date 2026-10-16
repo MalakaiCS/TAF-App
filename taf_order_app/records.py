@@ -311,7 +311,7 @@ def finish_stocktake(stocktake_id: str, apply: bool = False) -> Dict[str, Any]:
 def list_purchases(open_only: bool = False) -> List[Dict[str, Any]]:
     def shape(q):
         q = q.order("created_at", desc=True)
-        return q.neq("status", "received") if open_only else q
+        return q.in_("status", ["draft", "sent", "part_received"]) if open_only else q
     return _rows("purchase_orders", shape)
 
 
@@ -386,19 +386,23 @@ def quantities_on_order(rows: Sequence[Dict[str, Any]] = ()
         for line in (po.get("lines") or []):
             if not isinstance(line, dict):
                 continue
-            key = str(line.get("item_id") or "")
+            key = str(line.get("item_id") or line.get("stock_item_id") or "")
             if not key:
                 continue
             try:
-                out[key] = out.get(key, 0.0) + float(line.get("quantity") or 0)
+                # What has come in already is in stock, not on order.
+                left = (float(line.get("quantity") or 0)
+                        - float(line.get("received") or 0))
             except (TypeError, ValueError):
                 continue
+            if left > 0:
+                out[key] = out.get(key, 0.0) + left
     return out
 
 
 def mark_purchase(po_id: str, status: str) -> None:
     status = str(status or "").strip().lower()
-    if status not in ("draft", "sent", "received", "cancelled"):
+    if status not in ("draft", "sent", "part_received", "received", "cancelled"):
         raise ValueError(f"{status!r} is not a state a purchase order is in.")
     patch: Dict[str, Any] = {"status": status}
     if status == "sent":

@@ -966,7 +966,8 @@ async function sendPo(poId: string) {
                  sent_at: nowIso(), error: null });
   }
 
-  const to = String(sup.email || po.supplier_email || "").trim();
+  // The address on the order, when somebody typed one, beats the one Xero has.
+  const to = String(po.supplier_email || sup.email || "").trim();
   if (!to) {
     const error = `Purchase order ${number} is in Xero, but ${sup.name ?? po.supplier} ` +
       "has no email address to send it to. Add one in Xero (and pull suppliers again), " +
@@ -990,11 +991,11 @@ async function sendPo(poId: string) {
       from, to: [to],
       reply_to: env("MAIL_REPLY_TO") || undefined,
       subject: `Purchase order ${number} from ${company}`,
-      html: `<p>Hello ${sup.name ?? ""},</p><p>Please find attached purchase order ` +
-            `<b>${number}</b> from ${company}` +
-            (po.reference ? ` (our reference ${po.reference})` : "") +
+      html: `<p>Hello ${escapeHtml(sup.name ?? "")},</p><p>Please find attached purchase order ` +
+            `<b>${escapeHtml(number ?? "")}</b> from ${escapeHtml(company)}` +
+            (po.reference ? ` (our reference ${escapeHtml(po.reference)})` : "") +
             `.</p><p>Please reply to confirm, and let us know of any changes.</p>` +
-            `<p>Thank you,<br>${company}</p>`,
+            `<p>Thank you,<br>${escapeHtml(company)}</p>`,
       attachments: [{ filename: `Purchase order ${number}.pdf`, content: base64(pdf) }],
     }),
   });
@@ -1004,8 +1005,15 @@ async function sendPo(poId: string) {
     await note({ error });
     return { po_number: number, emailed: false, error };
   }
-  await note({ emailed_at: nowIso(), emailed_to: to, error: null, status: "sent" });
+  // Emailing again after some has arrived leaves it part received.
+  await note({ emailed_at: nowIso(), emailed_to: to, error: null,
+               ...(po.status === "draft" ? { status: "sent", sent_at: nowIso() } : {}) });
   return { po_number: number, emailed: true, emailed_to: to };
+}
+
+function escapeHtml(text: string): string {
+  return String(text).replace(/[&<>"']/g, (c) =>
+    ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]!);
 }
 
 let purchasableCache: { at: number; codes: Map<string, string> } | null = null;

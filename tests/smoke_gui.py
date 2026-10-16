@@ -333,6 +333,52 @@ def _stub_supplies():
     supplies.set_status = lambda *a, **k: None
     supplies.mark_read = lambda *a, **k: 0
 
+    # Buying: two suppliers, FD Greenwood's channel in two sizes, and one
+    # purchase order on its way.
+    from taf_order_app import purchasing
+    purchasing.ready = lambda: True
+    purchasing.list_suppliers = lambda active_only=True: [dict(r) for r in SUPPLIERS]
+    purchasing.list_items = lambda limit=0: [dict(r) for r in XERO_ITEMS]
+    purchasing.list_orders = lambda open_only=False: [
+        {**r, "lines": [dict(l) for l in r["lines"]]} for r in PURCHASE_ORDERS]
+    purchasing.request_supplies = lambda lines, urgent=False, note="", \
+        client_ref=None: SENT_SUPPLIES.append(list(lines)) or []
+    purchasing.save_order = lambda order: SAVED_POS.append(dict(order)) or \
+        {**order, "id": order.get("id") or "po-new"}
+    purchasing.receive = lambda po_id, got: RECEIVED.append((po_id, list(got))) \
+        or {"status": "part_received"}
+    purchasing.save_supplier = lambda *a, **k: None
+    purchasing.link_item = lambda *a, **k: None
+    purchasing.cancel_order = lambda *a, **k: None
+
+
+SUPPLIERS = [
+    {"id": "s-fdg", "name": "FD Greenwood", "email": "orders@fdg.example",
+     "code_prefix": "FDG", "xero_contact_id": "C-FDG", "active": True},
+    {"id": "s-vul", "name": "Vulcan", "email": "", "code_prefix": "",
+     "xero_contact_id": "C-VUL", "active": True},
+]
+XERO_ITEMS = [
+    {"code": "FDG-C45-2440", "name": "C channel 45", "purchase_price": 18.50,
+     "supplier_id": "s-fdg", "stock_item_id": "st-45"},
+    {"code": "FDG-C50-2440", "name": "C channel 50", "purchase_price": 20.90,
+     "supplier_id": "s-fdg", "stock_item_id": None},
+    {"code": "VUL-FLY-9", "name": "Flyscreen 9mm", "purchase_price": 4.10,
+     "supplier_id": "s-vul", "stock_item_id": None},
+]
+PURCHASE_ORDERS = [
+    {"id": "po-1", "po_number": "PO-0007", "supplier": "FD Greenwood",
+     "supplier_id": "s-fdg", "status": "sent", "created_at": "2026-10-10T00:00:00Z",
+     "emailed_to": "orders@fdg.example",
+     "lines": [{"item_code": "FDG-C45-2440", "description": "C channel 45",
+                "quantity": 20, "unit_price": 18.5, "received": 5},
+               {"item_code": "FDG-C50-2440", "description": "C channel 50",
+                "quantity": 10, "unit_price": 20.9, "received": 10}]},
+]
+SENT_SUPPLIES: list = []
+SAVED_POS: list = []
+RECEIVED: list = []
+
 
 def install_stubs(manager: bool = True):
     """Swap in the stand-in database and silence anything that would block."""
@@ -1967,6 +2013,130 @@ def _steps(app, gui, root):
         _press(dlg, "Link")
         assert linked and linked[0]["id"] == "x-1", linked
     add("customers: link to a Xero contact", _xero_contact_picker)
+
+    def _supplies_basket():
+        """Three things asked for in one go, one of them from a supplier."""
+        app._show_tab("supplies")
+        for _ in range(60):
+            root.update()
+            if app._suppliers is not None and app.supply_tree.get_children():
+                break
+            time.sleep(0.05)
+        assert "FD Greenwood" in app._supply_from_cb.cget("values"), \
+            app._supply_from_cb.cget("values")
+        for item, detail, qty, sup in (("Channel", "47mm", "20 lengths", "FD Greenwood"),
+                                       ("Rivets", "4mm pop", "2 boxes", "")):
+            app._supply_item.set(item)
+            app._supply_detail.set(detail)
+            app._supply_qty.set(qty)
+            app._supply_from.set(sup)
+            app._add_supply_line()
+        assert app._supply_basket_list.size() == 2
+        assert "from FD Greenwood" in app._supply_basket_list.get(0)
+        app._supply_item.set("Tape")
+        app._supply_detail.set("50mm foil")
+        app._supply_qty.set("3 rolls")
+        app._supply_from.set("")
+        SENT_SUPPLIES.clear()
+        app._send_supply_request()
+        for _ in range(60):
+            root.update()
+            if SENT_SUPPLIES:
+                break
+            time.sleep(0.05)
+        _settle(0.2)
+        assert len(SENT_SUPPLIES) == 1 and len(SENT_SUPPLIES[0]) == 3, SENT_SUPPLIES
+        first = SENT_SUPPLIES[0][0]
+        assert (first["detail"], first["supplier_id"]) == ("47mm", "s-fdg"), first
+        assert not app._supply_basket and app._supply_basket_list.size() == 0
+    add("supplies: several things in one request", _supplies_basket)
+
+    def _po_from_a_request():
+        """A request for 47mm channel from FD Greenwood becomes a purchase
+        order line, priced between the 45 and the 50."""
+        SAVED_POS.clear()
+        dlg = app._po_editor(supplier_id="s-fdg", requests=[
+            {"id": "r9", "item": "Channel", "detail": "47mm",
+             "quantity": "20 lengths", "supplier_id": "s-fdg"}])
+        tree = None
+        for _ in range(60):
+            root.update()
+            trees = [w for w in _walk(dlg) if isinstance(w, gui.ttk.Treeview)]
+            if trees and trees[0].get_children():
+                tree = trees[0]
+                break
+            time.sleep(0.05)
+        assert tree is not None, "no lines on the purchase order"
+        values = tree.item("0", "values")
+        assert values[0] == "FDG-C47-2440" and values[3] == "$19.46", values
+        assert "estimated" in values[5], values
+        words = " ".join(str(w.cget("text")) for w in _walk(dlg)
+                         if isinstance(w, tk.Label))
+        assert "estimated from the sizes either side" in words, words
+        _press(dlg, "Save draft")
+        for _ in range(60):
+            root.update()
+            if SAVED_POS:
+                break
+            time.sleep(0.05)
+        _settle(0.2)
+        po = SAVED_POS[0]
+        assert (po["supplier"], po["supplier_id"], po["supplier_email"]) == \
+            ("FD Greenwood", "s-fdg", "orders@fdg.example"), po
+        assert po["lines"][0]["request_ids"] == ["r9"], po["lines"]
+        assert not dlg.winfo_exists()
+    add("buying: a purchase order from a request, with a size estimated",
+        _po_from_a_request)
+
+    def _po_line():
+        """Typing a code Xero has fills it in; one it hasn't is estimated."""
+        got = []
+        win = app._po_line_dialog(root, {"quantity": 1}, XERO_ITEMS, got.append)
+        root.update()
+        combo = [w for w in _walk(win) if isinstance(w, gui.ttk.Combobox)][0]
+        combo.set("FDG-C55-2440")
+        combo.event_generate("<<ComboboxSelected>>")
+        root.update()
+        _press(win, "OK")
+        assert got and got[0]["unit_price"] == 23.3, got
+        assert got[0]["estimated"].startswith("estimated from"), got
+    add("buying: a line's price estimated from the sizes either side", _po_line)
+
+    def _po_receive():
+        """Five of the fifteen still to come arrive."""
+        RECEIVED.clear()
+        win = app._po_receive(dict(PURCHASE_ORDERS[0]))
+        root.update()
+        boxes = [w for w in _walk(win) if isinstance(w, tk.Entry)]
+        assert boxes[0].get() == "15" and str(boxes[1].cget("state")) == "disabled"
+        boxes[0].delete(0, "end")
+        boxes[0].insert(0, "5")
+        _press(win, "Book it in")
+        for _ in range(60):
+            root.update()
+            if RECEIVED:
+                break
+            time.sleep(0.05)
+        _settle(0.2)
+        assert RECEIVED == [("po-1", [{"line": 0, "qty": 5.0}])], RECEIVED
+    add("buying: tick off what arrived", _po_receive)
+
+    def _po_window():
+        win = app._purchase_orders()
+        trees = []
+        for _ in range(60):
+            root.update()
+            trees = [w for w in _walk(win) if isinstance(w, gui.ttk.Treeview)]
+            if trees and trees[0].get_children():
+                break
+            time.sleep(0.05)
+        orders, suppliers, items = trees[:3]
+        assert orders.item("po-1", "values")[0] == "PO-0007"
+        assert orders.item("po-1", "values")[4] == "Sent"
+        assert set(suppliers.get_children()) == {"s-fdg", "s-vul"}
+        assert len(items.get_children()) == 3
+        win.destroy()
+    add("buying: the purchase orders window", _po_window)
 
     def _cut_list():
         from taf_order_app import features as _feat

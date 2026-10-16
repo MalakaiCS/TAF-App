@@ -42,6 +42,7 @@ from taf_order_app import counter_display as _counter
 from taf_order_app import monitors as _monitors
 from taf_order_app import dockets as _dockets
 from taf_order_app import supplies as _supplies
+from taf_order_app import purchasing as _buying
 from taf_order_app import bracing as _bracing
 from taf_order_app import calc_settings as _calc_settings
 from taf_order_app import cchannel as _cchannel
@@ -15597,11 +15598,17 @@ class ModernOrderApp(tk.Frame):
         field_entry(ask, textvariable=self._supply_qty, width=14
                     ).grid(row=1, column=2, sticky="ew", padx=(0, 12))
 
-        self._supply_urgent = tk.BooleanVar(value=False)
-        tk.Checkbutton(ask, text="Urgent - work has stopped",
-                       variable=self._supply_urgent, bg=CCA, fg=CRD,
-                       activebackground=CCA, selectcolor=CCA, font=F_BODY,
-                       cursor="hand2").grid(row=1, column=3, sticky="w")
+        # Who it comes from, when somebody knows - FD Greenwood for steel,
+        # Vulcan for flyscreen. The list fills in once step 40 is run.
+        tk.Label(ask, text="FROM (IF YOU KNOW)", bg=CCA, fg=CMU,
+                 font=F_BOLD).grid(row=0, column=3, sticky="w")
+        self._supply_from = tk.StringVar(value="")
+        self._supply_from_cb = ttk.Combobox(
+            ask, textvariable=self._supply_from, values=[""],
+            state="readonly", width=20)
+        self._supply_from_cb.grid(row=1, column=3, sticky="w", padx=(0, 12))
+        flat_btn(ask, "Add to list", self._add_supply_line,
+                 variant="secondary", pady=5).grid(row=1, column=4, sticky="e")
 
         tk.Label(ask, text="NOTE (OPTIONAL)", bg=CCA, fg=CMU,
                  font=F_BOLD).grid(row=2, column=0, columnspan=3,
@@ -15610,8 +15617,29 @@ class ModernOrderApp(tk.Frame):
         field_entry(ask, textvariable=self._supply_note, width=60
                     ).grid(row=3, column=0, columnspan=3, sticky="ew",
                            padx=(0, 12))
+        self._supply_urgent = tk.BooleanVar(value=False)
+        tk.Checkbutton(ask, text="Urgent - work has stopped",
+                       variable=self._supply_urgent, bg=CCA, fg=CRD,
+                       activebackground=CCA, selectcolor=CCA, font=F_BODY,
+                       cursor="hand2").grid(row=3, column=3, sticky="w")
         flat_btn(ask, "Send to managers", self._send_supply_request,
-                 bg=CA, pady=7).grid(row=3, column=3, sticky="e")
+                 bg=CA, pady=7).grid(row=3, column=4, sticky="e")
+
+        # Several things at once: "Add to list" for each, then one send and
+        # one message to the managers, rather than the form five times.
+        self._supply_basket = []
+        self._supply_basket_box = tk.Frame(ask, bg=CCA)
+        self._supply_basket_box.columnconfigure(0, weight=1)
+        self._supply_basket_list = tk.Listbox(
+            self._supply_basket_box, height=4, font=F_BODY, bg=CRE, fg=CTX,
+            relief="flat", highlightthickness=1, highlightbackground=CBR,
+            activestyle="none")
+        self._supply_basket_list.grid(row=0, column=0, sticky="ew",
+                                      padx=(0, 12))
+        flat_btn(self._supply_basket_box, "Take off", self._drop_supply_line,
+                 variant="secondary", pady=5).grid(row=0, column=1, sticky="n")
+        self._suppliers = None
+        self._supplier_names = {}
 
         def _hint(*_):
             self._supply_hint.set(
@@ -15624,15 +15652,18 @@ class ModernOrderApp(tk.Frame):
         wrap.grid(row=2, column=0, sticky="nsew")
         wrap.rowconfigure(0, weight=1)
         wrap.columnconfigure(0, weight=1)
-        cols = ("item", "qty", "who", "when", "status")
+        cols = ("item", "qty", "from", "who", "when", "status", "po")
         self.supply_tree = ttk.Treeview(wrap, columns=cols, show="headings",
-                                        style="TAF.Treeview")
+                                        style="TAF.Treeview",
+                                        selectmode="extended")
         for col, hd, wd, anc in (
-                ("item",   "What",     330, "w"),
-                ("qty",    "How many", 110, "w"),
-                ("who",    "Asked by", 140, "w"),
-                ("when",   "When",     100, "w"),
-                ("status", "Status",   190, "w")):
+                ("item",   "What",     300, "w"),
+                ("qty",    "How many", 100, "w"),
+                ("from",   "From",     150, "w"),
+                ("who",    "Asked by", 130, "w"),
+                ("when",   "When",      90, "w"),
+                ("status", "Status",   170, "w"),
+                ("po",     "PO",        90, "w")):
             self.supply_tree.heading(col, text=hd)
             self.supply_tree.column(col, width=px(wd), anchor=anc,
                                     stretch=(col == "item"))
@@ -15664,6 +15695,11 @@ class ModernOrderApp(tk.Frame):
                      variant="secondary", pady=7).pack(side="left", padx=(0, 8))
             flat_btn(bot, "Decline", lambda: self._move_supply("declined"),
                      variant="secondary", pady=7).pack(side="left", padx=(0, 8))
+        if _db.is_ready() and _db.can_manage_prices():
+            flat_btn(bot, "Make purchase order…", self._po_from_requests,
+                     bg=CA, pady=7).pack(side="left", padx=(8, 8))
+            flat_btn(bot, "Purchase orders…", self._purchase_orders,
+                     variant="secondary", pady=7).pack(side="left", padx=(0, 8))
         flat_btn(bot, "Cancel my request", self._cancel_supply,
                  variant="secondary", pady=7).pack(side="right")
         self._supply_state = tk.StringVar(value="")
@@ -15677,6 +15713,17 @@ class ModernOrderApp(tk.Frame):
         show_done = bool(self._supply_show_done.get())
 
         def _work():
+            if self._suppliers is None:
+                try:
+                    self._suppliers = (_buying.list_suppliers()
+                                       if _buying.ready() else [])
+                except Exception:
+                    self._suppliers = []
+            try:
+                pos = ({str(p.get("id")): p for p in _buying.list_orders()}
+                       if self._suppliers else {})
+            except Exception:
+                pos = {}
             try:
                 rows, err = _supplies.list_requests(include_done=show_done), ""
             except Exception as exc:
@@ -15689,15 +15736,19 @@ class ModernOrderApp(tk.Frame):
                        if _supplies.is_missing_table(exc)
                        else "Couldn't load supply requests - check the "
                             "connection, then press Refresh.")
-            self.master.after(0, lambda: _show(rows, err))
+            self.master.after(0, lambda: _show(rows, err, pos))
 
-        def _show(rows, err):
+        def _show(rows, err, pos):
             if not tree.winfo_exists():
                 return
             for iid in tree.get_children():
                 tree.delete(iid)
             self._supply_rows = {}
             self._supply_state.set(err)
+            self._supplier_names = {str(x.get("id")): x.get("name") or ""
+                                    for x in self._suppliers or []}
+            self._supply_from_cb.configure(
+                values=[""] + [x.get("name") or "" for x in self._suppliers or []])
             for i, row in enumerate(rows):
                 status = row.get("status") or "open"
                 label = _supplies.STATUS_LABELS.get(status, status)
@@ -15714,8 +15765,12 @@ class ModernOrderApp(tk.Frame):
                     ("done" if status not in ("open", "ordered")
                      else ("even" if i % 2 == 0 else "odd")),),
                     values=(what, row.get("quantity") or "",
+                            self._supplier_names.get(
+                                str(row.get("supplier_id") or ""), ""),
                             row.get("requested_by_name") or "",
-                            _supplies.ago(row.get("created_at")), label))
+                            _supplies.ago(row.get("created_at")), label,
+                            self._po_label(pos.get(
+                                str(row.get("purchase_order_id") or "")))))
             if not err:
                 waiting = sum(1 for r in rows if r.get("status") == "open")
                 self._supply_state.set(
@@ -15723,19 +15778,78 @@ class ModernOrderApp(tk.Frame):
 
         threading.Thread(target=_work, daemon=True).start()
 
-    def _send_supply_request(self):
+    def _supply_from_id(self) -> str:
+        name = self._supply_from.get()
+        for sup in self._suppliers or []:
+            if (sup.get("name") or "") == name and name:
+                return str(sup.get("id"))
+        return ""
+
+    def _supply_line_text(self, line) -> str:
+        who = self._supplier_names.get(line.get("supplier_id") or "", "")
+        return _supplies.describe(line) + (f"   from {who}" if who else "")
+
+    def _add_supply_line(self):
+        """Onto the list, to go with the rest in one send."""
         try:
-            row = _supplies.clean_request(
-                self._supply_item.get(), self._supply_detail.get(),
-                self._supply_qty.get(), self._supply_urgent.get(),
-                self._supply_note.get())
+            row = _supplies.clean_request(self._supply_item.get(),
+                                          self._supply_detail.get(),
+                                          self._supply_qty.get())
         except _supplies.SupplyError as exc:
             messagebox.showwarning("Order Supplies", str(exc))
             return
+        row["supplier_id"] = self._supply_from_id()
+        self._supply_basket.append(row)
+        self._supply_detail.set("")
+        self._supply_qty.set("")
+        self._show_supply_basket()
+
+    def _drop_supply_line(self):
+        sel = self._supply_basket_list.curselection()
+        if not sel:
+            return
+        del self._supply_basket[sel[0]]
+        self._show_supply_basket()
+
+    def _show_supply_basket(self):
+        box = self._supply_basket_list
+        box.delete(0, "end")
+        for line in self._supply_basket:
+            box.insert("end", self._supply_line_text(line))
+        if self._supply_basket:
+            self._supply_basket_box.grid(row=4, column=0, columnspan=5,
+                                         sticky="ew", pady=(8, 0))
+        else:
+            self._supply_basket_box.grid_remove()
+
+    def _send_supply_request(self):
+        """Everything on the list, and what is in the boxes if anything is,
+        in one go - the managers are told once."""
+        lines = list(self._supply_basket)
+        if self._supply_detail.get().strip() or self._supply_qty.get().strip() \
+                or not lines:
+            try:
+                row = _supplies.clean_request(self._supply_item.get(),
+                                              self._supply_detail.get(),
+                                              self._supply_qty.get())
+            except _supplies.SupplyError as exc:
+                messagebox.showwarning("Order Supplies", str(exc))
+                return
+            row["supplier_id"] = self._supply_from_id()
+            lines.append(row)
+        urgent = bool(self._supply_urgent.get())
+        note = self._supply_note.get()
+        together = bool(self._suppliers)      # step 40 run
 
         def _work():
             try:
-                _supplies.request_supply(**row)
+                if together:
+                    _buying.request_supplies(lines, urgent, note)
+                else:
+                    for line in lines:
+                        _supplies.request_supply(
+                            line["item"], line["detail"], line["quantity"],
+                            urgent, note)
                 err = ""
             except Exception as exc:
                 err = ("Run migrate_supply_requests.sql in the Supabase SQL "
@@ -15747,22 +15861,33 @@ class ModernOrderApp(tk.Frame):
             if err:
                 messagebox.showerror("Order Supplies", err)
                 return
+            what = "; ".join(_supplies.describe(l) for l in lines)
             try:
-                _db.log_action("supply_requested", _supplies.describe(row))
+                _db.log_action("supply_requested", what[:500])
             except Exception:
                 pass
             # Emptied, so the same thing is not sent twice by somebody
             # pressing the button again to see if it worked.
+            self._supply_basket = []
+            self._show_supply_basket()
             self._supply_detail.set("")
             self._supply_qty.set("")
             self._supply_note.set("")
             self._supply_urgent.set(False)
             self.status_var.set(
-                f"Asked for {_supplies.describe(row)} - the managers have "
-                "been told.")
+                (f"Asked for {what}" if len(lines) == 1 else
+                 f"Asked for {len(lines)} things") +
+                " - the managers have been told.")
             self._refresh_supplies()
 
         threading.Thread(target=_work, daemon=True).start()
+
+    @staticmethod
+    def _po_label(po) -> str:
+        if not po:
+            return ""
+        return po.get("po_number") or ("draft" if po.get("status") == "draft"
+                                       else "on order")
 
     def _selected_supply(self):
         sel = self.supply_tree.selection()
@@ -19032,10 +19157,892 @@ class ModernOrderApp(tk.Frame):
         if _db.can_manage_prices():
             flat_btn(bottom, "Draft them all", _raise_all, bg=CA,
                      pady=px(6)).pack(side="left")
+            flat_btn(bottom, "Purchase orders…", self._purchase_orders,
+                     variant="secondary", pady=px(6)).pack(side="left",
+                                                           padx=(px(8), 0))
         else:
             tk.Label(bottom, text="Only a manager can raise a purchase "
                                   "order.", bg=CBG, fg=CMU,
                      font=F_SM).pack(side="left")
+
+    # ── Purchase orders, through Xero ─────────────────────────────────────
+    # Suppliers and what they sell come from Xero; a purchase order is made
+    # here from what the floor asked for, goes to Xero approved and is
+    # emailed to the supplier; what arrives is ticked off into stock.
+    # taf_order_app/purchasing.py has the sums, migrate_purchasing.sql the
+    # rules.
+
+    def _buy_bg(self, work, done):
+        """`work` off the main thread; `done(result, error)` back on it."""
+        def _run():
+            try:
+                out, err = work(), ""
+            except Exception as exc:
+                out, err = None, str(exc)
+            self.master.after(0, lambda: done(out, err))
+        threading.Thread(target=_run, daemon=True).start()
+
+    def _po_from_requests(self):
+        """The selected requests, as one purchase order per supplier."""
+        rows = [self._supply_rows[i] for i in self.supply_tree.selection()
+                if i in self._supply_rows]
+        rows = [r for r in rows
+                if (r.get("status") or "open") in ("open", "ordered")
+                and not r.get("purchase_order_id")]
+        if not rows:
+            messagebox.showinfo(
+                "Make purchase order",
+                "Select the requests to order - ones still waiting and not "
+                "on a purchase order yet. Ctrl-click (⌘-click on a Mac) to "
+                "pick several.")
+            return
+        if not self._suppliers:
+            messagebox.showinfo(
+                "Make purchase order",
+                "Run migrate_purchasing.sql (step 40) in the Supabase SQL "
+                "Editor, then pull the suppliers from Xero (Purchase orders… "
+                "→ Suppliers).")
+            return
+        for supplier_id, group in _buying.group_by_supplier(rows).items():
+            self._po_editor(supplier_id=supplier_id, requests=group,
+                            on_saved=self._refresh_supplies)
+
+    def _po_editor(self, po=None, supplier_id="", requests=(), on_saved=None):
+        """Make or change a draft purchase order, and send it."""
+        po = dict(po or {})
+        lines = [dict(l) for l in (po.get("lines") or [])]
+        state = {"suppliers": [], "items": [], "lines": lines}
+
+        dlg = tk.Toplevel(self.master, bg=CBG)
+        dlg.title("Purchase order")
+        dlg.transient(self.master)
+        _centre_on_parent(dlg, self.master, px(920), px(620))
+        head = tk.Frame(dlg, bg=CBG, padx=px(16), pady=px(12))
+        head.pack(fill="x")
+        tk.Label(head, text=(f"Purchase order {po.get('po_number') or ''}".strip()
+                             if po.get("id") else "New purchase order"),
+                 bg=CBG, fg=CA, font=F_TTL).pack(anchor="w")
+        tk.Label(head, text="Prices are what Xero says we pay. A size with no "
+                            "code of its own is priced from the sizes either "
+                            "side of it, and says so - check those.",
+                 bg=CBG, fg=CMU, font=F_SM, wraplength=px(860),
+                 justify="left").pack(anchor="w", pady=(px(4), 0))
+
+        form = tk.Frame(dlg, bg=CBG, padx=px(16))
+        form.pack(fill="x")
+        form.columnconfigure(1, weight=1)
+        form.columnconfigure(3, weight=1)
+        sup_var = tk.StringVar(value=po.get("supplier") or "")
+        email_var = tk.StringVar(value=po.get("supplier_email") or "")
+        ref_var = tk.StringVar(value=po.get("reference") or "")
+        note_var = tk.StringVar(value=po.get("note") or "")
+        tk.Label(form, text="Supplier", bg=CBG, fg=CTX,
+                 font=F_BODY).grid(row=0, column=0, sticky="w")
+        sup_cb = ttk.Combobox(form, textvariable=sup_var, state="readonly",
+                              width=30)
+        sup_cb.grid(row=0, column=1, sticky="ew", padx=(px(6), px(12)))
+        tk.Label(form, text="Email it to", bg=CBG, fg=CTX,
+                 font=F_BODY).grid(row=0, column=2, sticky="w")
+        field_entry(form, textvariable=email_var, width=30).grid(
+            row=0, column=3, sticky="ew", padx=(px(6), 0))
+        tk.Label(form, text="Our reference", bg=CBG, fg=CTX,
+                 font=F_BODY).grid(row=1, column=0, sticky="w", pady=(px(6), 0))
+        field_entry(form, textvariable=ref_var, width=30).grid(
+            row=1, column=1, sticky="ew", padx=(px(6), px(12)), pady=(px(6), 0))
+        tk.Label(form, text="Note (ours)", bg=CBG, fg=CTX,
+                 font=F_BODY).grid(row=1, column=2, sticky="w", pady=(px(6), 0))
+        field_entry(form, textvariable=note_var, width=30).grid(
+            row=1, column=3, sticky="ew", padx=(px(6), 0), pady=(px(6), 0))
+
+        wrap = tk.Frame(dlg, bg=CCA, highlightbackground=CBR,
+                        highlightthickness=1)
+        wrap.pack(fill="both", expand=True, padx=px(16), pady=(px(10), 0))
+        cols = (("code", "Item code", 150, "w"), ("desc", "What", 300, "w"),
+                ("qty", "How many", 80, "e"), ("price", "Each", 90, "e"),
+                ("total", "Line", 90, "e"), ("how", "", 200, "w"))
+        tree = ttk.Treeview(wrap, columns=[c[0] for c in cols],
+                            show="headings", style="TAF.Treeview",
+                            selectmode="browse")
+        for key, label, wd, anc in cols:
+            tree.heading(key, text=label)
+            tree.column(key, width=px(wd), anchor=anc, minwidth=px(50),
+                        stretch=(key == "desc"))
+        tree.tag_configure("guess", foreground="#9A5B00")
+        tree.tag_configure("nop", foreground=CRD)
+        bar = ttk.Scrollbar(wrap, orient="vertical", command=tree.yview)
+        tree.configure(yscrollcommand=bar.set)
+        bar.pack(side="right", fill="y")
+        tree.pack(fill="both", expand=True)
+
+        tools = tk.Frame(dlg, bg=CBG, padx=px(16), pady=px(6))
+        tools.pack(fill="x")
+        total_var = tk.StringVar(value="")
+        tk.Label(tools, textvariable=total_var, bg=CBG, fg=CTX,
+                 font=F_BOLD).pack(side="right")
+        msg = tk.Label(dlg, text="Loading suppliers and items…", bg=CBG,
+                       fg=CMU, font=F_SM, justify="left",
+                       wraplength=px(880))
+        msg.pack(anchor="w", padx=px(16))
+
+        def _supplier():
+            name = sup_var.get()
+            for s in state["suppliers"]:
+                if (s.get("name") or "") == name:
+                    return s
+            return {}
+
+        def _their_items():
+            sid = str(_supplier().get("id") or "")
+            mine = [it for it in state["items"]
+                    if sid and str(it.get("supplier_id") or "") == sid]
+            return mine or state["items"]
+
+        def _redraw():
+            tree.delete(*tree.get_children())
+            for i, l in enumerate(state["lines"]):
+                price = l.get("unit_price")
+                qty = float(l.get("quantity") or 0)
+                tag = ("nop",) if price in (None, "") else (
+                    ("guess",) if l.get("estimated") else ())
+                tree.insert("", "end", iid=str(i), tags=tag, values=(
+                    l.get("item_code") or "", l.get("description") or l.get("name") or "",
+                    f"{qty:g}",
+                    "" if price in (None, "") else f"${float(price):,.2f}",
+                    "" if price in (None, "") else f"${qty * float(price):,.2f}",
+                    l.get("estimated") or ("no price" if price in (None, "")
+                                           else "")))
+            total_var.set(f"Total ${_buying.po_total(state['lines']):,.2f} ex GST")
+
+        def _picked_supplier(*_):
+            sup = _supplier()
+            if sup.get("email") and not email_var.get().strip():
+                email_var.set(sup["email"])
+        sup_cb.bind("<<ComboboxSelected>>", lambda _e: (
+            email_var.set(_supplier().get("email") or email_var.get()),
+            _redraw()))
+
+        def _edit(index=None):
+            line = dict(state["lines"][index]) if index is not None else {
+                "quantity": 1, "received": 0}
+
+            def _save(new):
+                if index is None:
+                    state["lines"].append(new)
+                else:
+                    state["lines"][index] = new
+                _redraw()
+            self._po_line_dialog(dlg, line, _their_items(), _save)
+
+        def _change():
+            sel = tree.selection()
+            if sel:
+                _edit(int(sel[0]))
+
+        def _drop():
+            sel = tree.selection()
+            if sel:
+                del state["lines"][int(sel[0])]
+                _redraw()
+
+        tree.bind("<Double-1>", lambda _e: _change())
+        flat_btn(tools, "Add a line", lambda: _edit(None), bg=CA,
+                 pady=px(5)).pack(side="left")
+        flat_btn(tools, "Change line", _change, variant="secondary",
+                 pady=px(5)).pack(side="left", padx=(px(8), 0))
+        flat_btn(tools, "Take off", _drop, variant="secondary",
+                 pady=px(5)).pack(side="left", padx=(px(8), 0))
+
+        def _order():
+            sup = _supplier()
+            if not sup_var.get().strip():
+                raise ValueError("Who is it going to? Pick the supplier.")
+            if not state["lines"]:
+                raise ValueError("There is nothing on it yet.")
+            for l in state["lines"]:
+                if float(l.get("quantity") or 0) <= 0:
+                    raise ValueError(f"How many {l.get('description')}?")
+            return {"id": po.get("id"), "supplier": sup_var.get().strip(),
+                    "supplier_id": sup.get("id") or None,
+                    "supplier_email": email_var.get().strip(),
+                    "reference": ref_var.get().strip(),
+                    "note": note_var.get().strip(), "lines": state["lines"]}
+
+        def _store(send):
+            try:
+                order = _order()
+            except ValueError as exc:
+                msg.config(text=str(exc), fg=CRD)
+                return
+            if send and any(l.get("unit_price") in (None, "")
+                            for l in order["lines"]):
+                msg.config(text="Every line needs a price before it goes to "
+                                "the supplier.", fg=CRD)
+                return
+            msg.config(text="Sending to Xero…" if send else "Saving…", fg=CMU)
+
+            def _work():
+                saved = _buying.save_order(order)
+                po["id"] = saved.get("id") or po.get("id")
+                return _xero.send_po(po["id"]) if send else {}
+
+            def _done(out, err):
+                if not dlg.winfo_exists():
+                    return
+                if on_saved:
+                    on_saved()
+                if err or (out or {}).get("error") and not (out or {}).get("po_number"):
+                    msg.config(text=err or out["error"], fg=CRD)
+                    return
+                if send and not out.get("emailed"):
+                    messagebox.showwarning(
+                        "Purchase order",
+                        out.get("error") or "It is in Xero but was not emailed.",
+                        parent=dlg)
+                elif send:
+                    self.status_var.set(f"Purchase order {out.get('po_number')} "
+                                        f"sent to {out.get('emailed_to')}.")
+                else:
+                    self.status_var.set("Purchase order saved as a draft.")
+                dlg.destroy()
+            self._buy_bg(_work, _done)
+
+        foot = tk.Frame(dlg, bg=CBG, padx=px(16), pady=px(12))
+        foot.pack(fill="x")
+        flat_btn(foot, "Close", dlg.destroy, bg=CNE,
+                 pady=px(6)).pack(side="right")
+        flat_btn(foot, "Send to supplier", lambda: _store(True), bg=CGR,
+                 pady=px(6)).pack(side="left")
+        flat_btn(foot, "Save draft", lambda: _store(False), bg=CNE,
+                 variant="secondary", pady=px(6)).pack(side="left",
+                                                       padx=(px(8), 0))
+
+        def _loaded(out, err):
+            if not dlg.winfo_exists():
+                return
+            if err:
+                msg.config(text=f"Couldn't load suppliers: {err}", fg=CRD)
+                return
+            state["suppliers"], state["items"] = out
+            sup_cb.configure(values=[s.get("name") or ""
+                                     for s in state["suppliers"]])
+            want = str(supplier_id or po.get("supplier_id") or "")
+            for s in state["suppliers"]:
+                if want and str(s.get("id")) == want:
+                    sup_var.set(s.get("name") or "")
+            _picked_supplier()
+            if requests:
+                state["lines"] = _buying.lines_from_requests(
+                    requests, _their_items())
+            guesses = sum(1 for l in state["lines"] if l.get("estimated"))
+            msg.config(text=(f"{guesses} price{'s' if guesses != 1 else ''} "
+                             "estimated from the sizes either side (orange) - "
+                             "check them." if guesses else
+                             f"{len(state['items'])} items from Xero to pick "
+                             "from."), fg=CMU)
+            _redraw()
+        self._buy_bg(lambda: (_buying.list_suppliers(), _buying.list_items()),
+                     _loaded)
+        _redraw()
+        return dlg
+
+    def _po_line_dialog(self, parent, line, items, on_ok):
+        """One line: the item code (from the supplier's items, or typed), what
+        it is, how many and the price - filled in from Xero, or estimated."""
+        by_code = {str(it.get("code") or "").upper(): it for it in items}
+        prices = {it["code"]: it.get("purchase_price") for it in items
+                  if it.get("purchase_price") not in (None, "")}
+        dlg = tk.Toplevel(parent, bg=CBG)
+        dlg.title("Line")
+        dlg.transient(parent)
+        _centre_on_parent(dlg, parent, px(560), px(300))
+        body = tk.Frame(dlg, bg=CBG, padx=px(16), pady=px(14))
+        body.pack(fill="both", expand=True)
+        body.columnconfigure(1, weight=1)
+        code = tk.StringVar(value=line.get("item_code") or "")
+        desc = tk.StringVar(value=line.get("description") or "")
+        qty = tk.StringVar(value=f"{float(line.get('quantity') or 1):g}")
+        price = tk.StringVar(value="" if line.get("unit_price") in (None, "")
+                             else f"{float(line['unit_price']):.2f}")
+        how = tk.StringVar(value=line.get("estimated") or "")
+        extra = {"stock_item_id": line.get("stock_item_id")}
+        for r, (label, widget) in enumerate((
+                ("Item code", ttk.Combobox(body, textvariable=code, width=30,
+                                           values=sorted(it.get("code") or ""
+                                                         for it in items))),
+                ("What", field_entry(body, textvariable=desc, width=40)),
+                ("How many", field_entry(body, textvariable=qty, width=10)),
+                ("Each (ex GST)", field_entry(body, textvariable=price,
+                                              width=10)))):
+            tk.Label(body, text=label, bg=CBG, fg=CTX,
+                     font=F_BODY).grid(row=r, column=0, sticky="w",
+                                       pady=px(3))
+            widget.grid(row=r, column=1, sticky="ew" if r < 2 else "w",
+                        padx=(px(8), 0), pady=px(3))
+            if r == 0:
+                code_cb = widget
+        tk.Label(body, textvariable=how, bg=CBG, fg="#9A5B00", font=F_SM,
+                 wraplength=px(500), justify="left").grid(
+                     row=4, column=0, columnspan=2, sticky="w")
+
+        def _looked_up(*_):
+            c = code.get().strip().upper()
+            if not c:
+                return
+            it = by_code.get(c)
+            if it:
+                desc.set(it.get("purchase_description") or it.get("name")
+                         or desc.get())
+                if it.get("purchase_price") not in (None, ""):
+                    price.set(f"{float(it['purchase_price']):.2f}")
+                extra["stock_item_id"] = it.get("stock_item_id")
+                how.set("")
+                return
+            guess, basis = _buying.estimate_price(c, prices)
+            if guess is not None:
+                price.set(f"{guess:.2f}")
+                how.set(basis)
+            else:
+                how.set("Not a code Xero has, and nothing near it to price "
+                        "from - put the price in.")
+        code_cb.bind("<<ComboboxSelected>>", _looked_up)
+        code_cb.bind("<FocusOut>", _looked_up)
+
+        def _ok():
+            try:
+                q = float(qty.get())
+                if q <= 0:
+                    raise ValueError
+            except ValueError:
+                how.set("How many - a number above 0.")
+                return
+            p = price.get().strip().replace("$", "").replace(",", "")
+            try:
+                p_val = round(float(p), 4) if p else None
+            except ValueError:
+                how.set("The price is a number, like 18.50.")
+                return
+            new = dict(line)
+            new.update(item_code=code.get().strip().upper(),
+                       description=desc.get().strip() or code.get().strip()
+                       or "Item",
+                       quantity=q, unit_price=p_val)
+            if extra.get("stock_item_id"):
+                new["stock_item_id"] = extra["stock_item_id"]
+            if how.get() and how.get().startswith("estimated"):
+                new["estimated"] = how.get()
+            else:
+                new.pop("estimated", None)
+            new.setdefault("received", 0)
+            on_ok(new)
+            dlg.destroy()
+
+        foot = tk.Frame(dlg, bg=CBG, padx=px(16), pady=px(10))
+        foot.pack(fill="x")
+        flat_btn(foot, "OK", _ok, bg=CA, pady=px(6)).pack(side="right")
+        flat_btn(foot, "Cancel", dlg.destroy, bg=CNE, variant="secondary",
+                 pady=px(6)).pack(side="right", padx=(0, px(8)))
+        return dlg
+
+    def _po_receive(self, po, on_done=None):
+        """Tick off what came: how many of each line arrived this time. A
+        line linked to a stock item goes into stock."""
+        lines = list(po.get("lines") or [])
+        dlg = tk.Toplevel(self.master, bg=CBG)
+        dlg.title("What arrived")
+        dlg.transient(self.master)
+        _centre_on_parent(dlg, self.master, px(720), px(520))
+        tk.Label(dlg, text=f"What arrived - "
+                           f"{po.get('po_number') or po.get('supplier') or ''}",
+                 bg=CBG, fg=CA, font=F_TTL).pack(anchor="w", padx=px(16),
+                                                  pady=(px(12), 0))
+        tk.Label(dlg, text="How many of each came this time. Lines linked to "
+                           "a stock item go into stock; when everything is "
+                           "in, the order and the requests on it are "
+                           "received.", bg=CBG, fg=CMU, font=F_SM,
+                 wraplength=px(680), justify="left").pack(
+                     anchor="w", padx=px(16), pady=(px(4), px(8)))
+        grid = tk.Frame(dlg, bg=CBG, padx=px(16))
+        grid.pack(fill="both", expand=True)
+        grid.columnconfigure(0, weight=1)
+        for c, text in enumerate(("What", "Ordered", "In already", "Now")):
+            tk.Label(grid, text=text, bg=CBG, fg=CMU, font=F_BOLD).grid(
+                row=0, column=c, sticky="w" if c == 0 else "e", padx=px(4))
+        entries = []
+        for i, l in enumerate(lines):
+            left = _buying.outstanding(l)
+            tk.Label(grid, text=(f"{l.get('item_code')}  " if l.get("item_code")
+                                 else "") + str(l.get("description") or l.get("name") or ""),
+                     bg=CBG, fg=CTX if left else CMU, font=F_BODY,
+                     anchor="w").grid(row=i + 1, column=0, sticky="w",
+                                      padx=px(4))
+            for c, val in ((1, l.get("quantity")), (2, l.get("received"))):
+                tk.Label(grid, text=f"{float(val or 0):g}", bg=CBG, fg=CTX,
+                         font=F_BODY).grid(row=i + 1, column=c, sticky="e",
+                                           padx=px(4))
+            var = tk.StringVar(value=f"{left:g}" if left else "")
+            ent = field_entry(grid, textvariable=var, width=8)
+            ent.grid(row=i + 1, column=3, sticky="e", padx=px(4), pady=px(2))
+            if not left:
+                ent.configure(state="disabled")
+            entries.append(var)
+        msg = tk.Label(dlg, text="", bg=CBG, fg=CRD, font=F_SM)
+        msg.pack(anchor="w", padx=px(16))
+
+        def _ok():
+            got = []
+            for i, var in enumerate(entries):
+                text = var.get().strip()
+                if not text:
+                    continue
+                try:
+                    n = float(text)
+                except ValueError:
+                    msg.config(text=f"Line {i + 1}: a number, please.")
+                    return
+                if n > 0:
+                    got.append({"line": i, "qty": n})
+            if not got:
+                msg.config(text="Nothing entered as arrived.")
+                return
+
+            def _done(out, err):
+                if err:
+                    if dlg.winfo_exists():
+                        msg.config(text=err)
+                    return
+                status = (out or {}).get("status") or ""
+                self.status_var.set(
+                    f"{_buying.PO_STATUSES.get(status, status)}: "
+                    f"{po.get('po_number') or po.get('supplier')}.")
+                if dlg.winfo_exists():
+                    dlg.destroy()
+                if on_done:
+                    on_done()
+            self._buy_bg(lambda: _buying.receive(po["id"], got), _done)
+
+        foot = tk.Frame(dlg, bg=CBG, padx=px(16), pady=px(12))
+        foot.pack(fill="x")
+        flat_btn(foot, "Book it in", _ok, bg=CGR, pady=px(6)).pack(side="right")
+        flat_btn(foot, "Cancel", dlg.destroy, bg=CNE, variant="secondary",
+                 pady=px(6)).pack(side="right", padx=(0, px(8)))
+        return dlg
+
+    def _purchase_orders(self):
+        """Purchase orders, the suppliers they go to, and Xero's items."""
+        dlg = tk.Toplevel(self.master, bg=CBG)
+        dlg.title("Purchase orders")
+        dlg.transient(self.master)
+        _centre_on_parent(dlg, self.master, px(1040), px(660))
+        head = tk.Frame(dlg, bg=CBG, padx=px(16), pady=px(12))
+        head.pack(fill="x")
+        tk.Label(head, text="Purchase orders", bg=CBG, fg=CA,
+                 font=F_TTL).pack(side="left")
+        msg = tk.Label(dlg, text="", bg=CBG, fg=CMU, font=F_SM,
+                       justify="left", wraplength=px(1000))
+        nb = ttk.Notebook(dlg)
+        nb.pack(fill="both", expand=True, padx=px(16))
+        msg.pack(anchor="w", padx=px(16), pady=(px(6), 0))
+        manager = _db.can_manage_prices()
+        data = {"orders": [], "suppliers": [], "items": [], "stock": []}
+
+        def _table(parent, cols, mode="browse"):
+            wrap = tk.Frame(parent, bg=CCA, highlightbackground=CBR,
+                            highlightthickness=1)
+            wrap.pack(fill="both", expand=True)
+            tree = ttk.Treeview(wrap, columns=[c[0] for c in cols],
+                                show="headings", style="TAF.Treeview",
+                                selectmode=mode)
+            for key, label, wd, anc in cols:
+                tree.heading(key, text=label)
+                tree.column(key, width=px(wd), anchor=anc, minwidth=px(40))
+            sb = ttk.Scrollbar(wrap, orient="vertical", command=tree.yview)
+            tree.configure(yscrollcommand=sb.set)
+            sb.pack(side="right", fill="y")
+            tree.pack(fill="both", expand=True)
+            tree.tag_configure("even", background=CRE)
+            tree.tag_configure("odd", background=CCA)
+            tree.tag_configure("done", foreground=CMU)
+            tree.tag_configure("bad", foreground=CRD)
+            return tree
+
+        # ── Orders ──
+        tab_o = tk.Frame(nb, bg=CBG, pady=px(8))
+        nb.add(tab_o, text="  Orders  ")
+        show_done = tk.BooleanVar(value=False)
+        o_tree = _table(tab_o, (
+            ("po", "PO", 90, "w"), ("supplier", "Supplier", 200, "w"),
+            ("lines", "Lines", 60, "e"), ("total", "Total ex GST", 110, "e"),
+            ("status", "State", 110, "w"), ("got", "Arrived", 110, "w"),
+            ("when", "Made", 90, "w"), ("sent", "Emailed to", 220, "w")))
+        o_bar = tk.Frame(tab_o, bg=CBG, pady=px(8))
+        o_bar.pack(fill="x")
+
+        def _fill_orders():
+            o_tree.delete(*o_tree.get_children())
+            for i, po in enumerate(data["orders"]):
+                status = po.get("status") or "draft"
+                if not show_done.get() and status in ("received", "cancelled"):
+                    continue
+                lines = po.get("lines") or []
+                in_full = sum(1 for l in lines if not _buying.outstanding(l))
+                o_tree.insert("", "end", iid=str(po.get("id")), tags=(
+                    "bad" if po.get("error") else
+                    "done" if status in ("received", "cancelled") else
+                    ("even" if i % 2 == 0 else "odd"),),
+                    values=(po.get("po_number") or "—", po.get("supplier") or "",
+                            len(lines),
+                            f"${_buying.po_total(lines):,.2f}",
+                            _buying.PO_STATUSES.get(status, status),
+                            f"{in_full} of {len(lines)} lines"
+                            if status in ("part_received", "received") else "",
+                            str(po.get("created_at") or "")[:10],
+                            po.get("emailed_to") or (
+                                "not emailed" if po.get("po_number") else "")))
+
+        def _po():
+            sel = o_tree.selection()
+            for po in data["orders"]:
+                if sel and str(po.get("id")) == sel[0]:
+                    return po
+            msg.config(text="Pick a purchase order first.", fg=CRD)
+            return None
+
+        def _open():
+            po = _po()
+            if not po:
+                return
+            if (po.get("status") or "draft") == "draft":
+                self._po_editor(po, on_saved=_reload)
+            elif po.get("status") in ("sent", "part_received"):
+                self._po_receive(po, on_done=_reload)
+            else:
+                _pdf()
+
+        def _send():
+            po = _po()
+            if not po:
+                return
+            if po.get("status") in ("received", "cancelled"):
+                msg.config(text="That one is finished.", fg=CRD)
+                return
+            msg.config(text="Sending to Xero…", fg=CMU)
+
+            def _done(out, err):
+                out = out or {}
+                if err or (out.get("error") and not out.get("po_number")):
+                    msg.config(text=err or out["error"], fg=CRD)
+                elif not out.get("emailed"):
+                    msg.config(text=out.get("error") or "", fg=CRD)
+                else:
+                    msg.config(text=f"{out.get('po_number')} emailed to "
+                                    f"{out.get('emailed_to')}.", fg=CMU)
+                _reload()
+            self._buy_bg(lambda: _xero.send_po(po["id"]), _done)
+
+        def _receive():
+            po = _po()
+            if not po:
+                return
+            if po.get("status") not in ("sent", "part_received"):
+                msg.config(text="Only an order that has gone to the supplier "
+                                "can be received.", fg=CRD)
+                return
+            self._po_receive(po, on_done=_reload)
+
+        def _pdf():
+            po = _po()
+            if not po:
+                return
+            if not po.get("po_number"):
+                msg.config(text="It has not gone to Xero yet.", fg=CRD)
+                return
+            msg.config(text="Getting it from Xero…", fg=CMU)
+
+            def _work():
+                got = _xero.po_pdf(po["id"])
+                if got.get("error"):
+                    raise RuntimeError(got["error"])
+                safe = re.sub(r"[^A-Za-z0-9._ -]+", "_",
+                              f"Purchase order {got.get('number') or po['po_number']}")
+                path = self._invoice_dir() / f"{safe}.pdf"
+                path.write_bytes(got["pdf"])
+                return path
+
+            def _done(path, err):
+                if err:
+                    msg.config(text=err, fg=CRD)
+                    return
+                msg.config(text=f"Saved to {path}", fg=CMU)
+                try:
+                    _open_path(str(path))
+                except Exception:
+                    pass
+            self._buy_bg(_work, _done)
+
+        def _cancel():
+            po = _po()
+            if not po:
+                return
+            if po.get("status") not in ("draft", "sent"):
+                msg.config(text="Only a draft, or one nothing has arrived "
+                                "for, can be cancelled.", fg=CRD)
+                return
+            if not messagebox.askyesno(
+                    "Cancel purchase order",
+                    "Cancel this purchase order?" + (
+                        "\n\nIt is in Xero already - void it there too, and "
+                        "tell the supplier." if po.get("po_number") else ""),
+                    parent=dlg):
+                return
+            self._buy_bg(lambda: _buying.cancel_order(po["id"]),
+                         lambda _o, err: (msg.config(text=err, fg=CRD)
+                                          if err else _reload()))
+
+        o_tree.bind("<Double-1>", lambda _e: _open())
+        if manager:
+            flat_btn(o_bar, "New…", lambda: self._po_editor(on_saved=_reload),
+                     bg=CA, pady=px(5)).pack(side="left")
+            for text, fn in (("Open", _open), ("Send to supplier", _send),
+                             ("What arrived…", _receive)):
+                flat_btn(o_bar, text, fn, variant="secondary",
+                         pady=px(5)).pack(side="left", padx=(px(8), 0))
+        flat_btn(o_bar, "PDF", _pdf, variant="secondary",
+                 pady=px(5)).pack(side="left", padx=(px(8), 0))
+        if manager:
+            flat_btn(o_bar, "Cancel order", _cancel, variant="secondary",
+                     pady=px(5)).pack(side="right")
+        tk.Checkbutton(o_bar, text="Show finished", variable=show_done,
+                       bg=CBG, fg=CTX, activebackground=CBG, selectcolor=CCA,
+                       font=F_SM, command=_fill_orders,
+                       cursor="hand2").pack(side="right", padx=px(10))
+
+        # ── Suppliers ──
+        tab_s = tk.Frame(nb, bg=CBG, pady=px(8))
+        nb.add(tab_s, text="  Suppliers  ")
+        s_tree = _table(tab_s, (
+            ("name", "Supplier", 260, "w"), ("email", "Email", 240, "w"),
+            ("prefix", "Their codes start", 140, "w"),
+            ("items", "Items", 70, "e"), ("xero", "In Xero", 80, "w")))
+        s_bar = tk.Frame(tab_s, bg=CBG, pady=px(8))
+        s_bar.pack(fill="x")
+
+        def _fill_suppliers():
+            s_tree.delete(*s_tree.get_children())
+            count = {}
+            for it in data["items"]:
+                key = str(it.get("supplier_id") or "")
+                count[key] = count.get(key, 0) + 1
+            for i, s in enumerate(data["suppliers"]):
+                s_tree.insert("", "end", iid=str(s.get("id")), tags=(
+                    "even" if i % 2 == 0 else "odd",), values=(
+                    s.get("name") or "", s.get("email") or "",
+                    s.get("code_prefix") or "",
+                    count.get(str(s.get("id")), 0),
+                    "yes" if s.get("xero_contact_id") else "no"))
+
+        def _pull(what):
+            msg.config(text="Asking Xero…", fg=CMU)
+            call = _xero.pull_suppliers if what == "suppliers" else _xero.pull_items
+
+            def _done(out, err):
+                out = out or {}
+                if err or out.get("error"):
+                    msg.config(text=err or out["error"], fg=CRD)
+                    return
+                if what == "suppliers":
+                    msg.config(text=f"{out.get('suppliers', 0)} suppliers from "
+                                    "Xero.", fg=CMU)
+                else:
+                    msg.config(text=f"{out.get('items', 0)} items from Xero; "
+                                    f"{out.get('matched', 0)} put with a "
+                                    "supplier by their code.", fg=CMU)
+                self._suppliers = None      # Order Supplies reloads them
+                _reload()
+            self._buy_bg(call, _done)
+
+        def _edit_supplier():
+            sel = s_tree.selection()
+            sup = next((s for s in data["suppliers"]
+                        if sel and str(s.get("id")) == sel[0]), None)
+            if not sup:
+                msg.config(text="Pick a supplier first.", fg=CRD)
+                return
+            box = tk.Toplevel(dlg, bg=CBG)
+            box.title(sup.get("name") or "Supplier")
+            box.transient(dlg)
+            _centre_on_parent(box, dlg, px(480), px(220))
+            body = tk.Frame(box, bg=CBG, padx=px(16), pady=px(14))
+            body.pack(fill="both", expand=True)
+            body.columnconfigure(1, weight=1)
+            email = tk.StringVar(value=sup.get("email") or "")
+            prefix = tk.StringVar(value=sup.get("code_prefix") or "")
+            for r, (label, var) in enumerate((("Email POs to", email),
+                                              ("Their codes start", prefix))):
+                tk.Label(body, text=label, bg=CBG, fg=CTX,
+                         font=F_BODY).grid(row=r, column=0, sticky="w",
+                                           pady=px(3))
+                field_entry(body, textvariable=var, width=30).grid(
+                    row=r, column=1, sticky="ew", padx=(px(8), 0), pady=px(3))
+            tk.Label(body, text="FD Greenwood's start FDG - items whose codes "
+                                "start that way are put with them when items "
+                                "are pulled from Xero.", bg=CBG, fg=CMU,
+                     font=F_SM, wraplength=px(440), justify="left").grid(
+                         row=2, column=0, columnspan=2, sticky="w")
+
+            def _save():
+                patch = {"email": email.get().strip(),
+                         "code_prefix": prefix.get().strip().upper()}
+                self._buy_bg(lambda: _buying.save_supplier(sup["id"], patch),
+                             lambda _o, err: (msg.config(text=err, fg=CRD)
+                                              if err else _reload()))
+                box.destroy()
+            foot = tk.Frame(box, bg=CBG, padx=px(16), pady=px(10))
+            foot.pack(fill="x")
+            flat_btn(foot, "Save", _save, bg=CA, pady=px(6)).pack(side="right")
+            flat_btn(foot, "Cancel", box.destroy, bg=CNE, variant="secondary",
+                     pady=px(6)).pack(side="right", padx=(0, px(8)))
+
+        s_tree.bind("<Double-1>", lambda _e: _edit_supplier())
+        if manager:
+            flat_btn(s_bar, "Pull suppliers from Xero",
+                     lambda: _pull("suppliers"), bg=CA,
+                     pady=px(5)).pack(side="left")
+            flat_btn(s_bar, "Change…", _edit_supplier, variant="secondary",
+                     pady=px(5)).pack(side="left", padx=(px(8), 0))
+
+        # ── Xero items ──
+        tab_i = tk.Frame(nb, bg=CBG, pady=px(8))
+        nb.add(tab_i, text="  Xero items  ")
+        find = tk.StringVar()
+        top_i = tk.Frame(tab_i, bg=CBG, pady=px(4))
+        top_i.pack(fill="x")
+        tk.Label(top_i, text="Find", bg=CBG, fg=CTX,
+                 font=F_BODY).pack(side="left")
+        field_entry(top_i, textvariable=find, width=30).pack(
+            side="left", padx=(px(6), px(10)))
+        i_tree = _table(tab_i, (
+            ("code", "Code", 170, "w"), ("name", "Name", 300, "w"),
+            ("buy", "We pay", 90, "e"), ("supplier", "Supplier", 180, "w"),
+            ("stock", "Stock item", 200, "w")), mode="extended")
+        i_bar = tk.Frame(tab_i, bg=CBG, pady=px(8))
+        i_bar.pack(fill="x")
+
+        def _fill_items(*_):
+            i_tree.delete(*i_tree.get_children())
+            names = {str(s.get("id")): s.get("name") or ""
+                     for s in data["suppliers"]}
+            stock = {str(s.get("id")): s.get("name") or s.get("code") or ""
+                     for s in data["stock"]}
+            term = find.get().strip().lower()
+            shown = 0
+            for it in data["items"]:
+                text = f"{it.get('code')} {it.get('name')}".lower()
+                if term and term not in text:
+                    continue
+                shown += 1
+                if shown > 1500:
+                    break
+                price = it.get("purchase_price")
+                i_tree.insert("", "end", iid=str(it.get("code")), tags=(
+                    "even" if shown % 2 else "odd",), values=(
+                    it.get("code") or "", it.get("name") or "",
+                    "" if price in (None, "") else f"${float(price):,.2f}",
+                    names.get(str(it.get("supplier_id") or ""), ""),
+                    stock.get(str(it.get("stock_item_id") or ""), "")))
+        find.trace_add("write", _fill_items)
+
+        def _link(what):
+            codes = list(i_tree.selection())
+            if not codes:
+                msg.config(text="Pick the items first (Ctrl-click for "
+                                "several).", fg=CRD)
+                return
+            pool = data["suppliers"] if what == "supplier" else data["stock"]
+            choices = [""] + [(p.get("name") or p.get("code") or "")
+                              for p in pool]
+            box = tk.Toplevel(dlg, bg=CBG)
+            box.title("Supplier" if what == "supplier" else "Stock item")
+            box.transient(dlg)
+            _centre_on_parent(box, dlg, px(460), px(170))
+            body = tk.Frame(box, bg=CBG, padx=px(16), pady=px(14))
+            body.pack(fill="both", expand=True)
+            tk.Label(body, text=(f"{len(codes)} item"
+                                 f"{'s' if len(codes) != 1 else ''} - "
+                                 + ("who we buy them from"
+                                    if what == "supplier" else
+                                    "which stock item they are")),
+                     bg=CBG, fg=CTX, font=F_BODY).pack(anchor="w")
+            pick = tk.StringVar()
+            ttk.Combobox(body, textvariable=pick, values=choices,
+                         state="readonly", width=44).pack(
+                             anchor="w", pady=(px(8), 0))
+
+            def _save():
+                idx = choices.index(pick.get()) if pick.get() in choices else 0
+                value = str(pool[idx - 1].get("id")) if idx else None
+                key = "supplier_id" if what == "supplier" else "stock_item_id"
+
+                def _work():
+                    for c in codes:
+                        _buying.link_item(c, **{key: value})
+                self._buy_bg(_work, lambda _o, err: (
+                    msg.config(text=err, fg=CRD) if err else _reload()))
+                box.destroy()
+            foot = tk.Frame(box, bg=CBG, padx=px(16), pady=px(10))
+            foot.pack(fill="x")
+            flat_btn(foot, "Save", _save, bg=CA, pady=px(6)).pack(side="right")
+            flat_btn(foot, "Cancel", box.destroy, bg=CNE, variant="secondary",
+                     pady=px(6)).pack(side="right", padx=(0, px(8)))
+
+        if manager:
+            flat_btn(i_bar, "Pull items from Xero", lambda: _pull("items"),
+                     bg=CA, pady=px(5)).pack(side="left")
+            flat_btn(i_bar, "Supplier…", lambda: _link("supplier"),
+                     variant="secondary", pady=px(5)).pack(side="left",
+                                                           padx=(px(8), 0))
+            flat_btn(i_bar, "Stock item…", lambda: _link("stock"),
+                     variant="secondary", pady=px(5)).pack(side="left",
+                                                           padx=(px(8), 0))
+
+        foot = tk.Frame(dlg, bg=CBG, padx=px(16), pady=px(10))
+        foot.pack(fill="x")
+        flat_btn(foot, "Close", dlg.destroy, bg=CNE,
+                 pady=px(6)).pack(side="right")
+        flat_btn(foot, "Refresh", lambda: _reload(), bg=CNE,
+                 variant="secondary", pady=px(6)).pack(side="right",
+                                                       padx=(0, px(8)))
+
+        def _reload():
+            def _work():
+                if not _buying.ready():
+                    raise RuntimeError(
+                        "Run migrate_purchasing.sql (step 40) in the Supabase "
+                        "SQL Editor to turn purchase orders on.")
+                try:
+                    stock = _db.get_stock_items()
+                except Exception:
+                    stock = []
+                return (_buying.list_orders(), _buying.list_suppliers(False),
+                        _buying.list_items(), stock)
+
+            def _done(out, err):
+                if not dlg.winfo_exists():
+                    return
+                if err:
+                    msg.config(text=err, fg=CRD)
+                    return
+                (data["orders"], data["suppliers"], data["items"],
+                 data["stock"]) = out
+                _fill_orders()
+                _fill_suppliers()
+                _fill_items()
+                if not data["suppliers"]:
+                    msg.config(text="No suppliers yet - Suppliers → Pull "
+                                    "suppliers from Xero, then Xero items → "
+                                    "Pull items from Xero.", fg=CMU)
+            self._buy_bg(_work, _done)
+        _reload()
+        return dlg
 
     # ── What a particular customer pays ───────────────────────────────────
 

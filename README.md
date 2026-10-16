@@ -82,6 +82,10 @@ log, stock management and a customer database.
   with it. The person who asked can cancel it while it's still waiting. The
   database does the telling, so nobody can send a notification, ask as
   somebody else, or have a request filed twice when a phone loses signal.
+  Several things go in one request (**Add to list** for each, then **Send to
+  managers** — the managers are told once), each with who it comes from when
+  somebody knows. Managers turn the requests into **purchase orders** sent
+  through Xero (see *Buying through Xero*).
 - **Delivery labels** — one A4 landscape sheet per wrapped bundle, with the
   TAF logo, the company's base address as From, the delivery address, filter
   size, the quantity in that wrap (and the line's ordered quantity), the
@@ -779,6 +783,39 @@ Run `migrate_customer_xero_delivery.sql` (step 39). Then:
   customer's contact in Xero, finding and linking it by name the first time.
   When their name in Xero is different, **Link to a Xero contact…** searches
   Xero and links the one you pick; their invoices then go to that contact.
+  The customer card has the same search under **Xero**: type part of their
+  name, pick them from the list, and Save.
+
+### Buying through Xero
+
+Run `migrate_purchasing.sql` (step 40), and update the `xero` function. Then
+a manager opens **Purchase orders…** (Order Supplies, or Buying…):
+
+- **Suppliers → Pull suppliers from Xero** brings in every Xero contact
+  marked as a supplier, with their email. **Change…** sets the address
+  purchase orders go to and how their codes start (`FDG` for FD Greenwood).
+- **Xero items → Pull items from Xero** brings in every item with what we pay
+  for it. Items whose code starts with a supplier's prefix are put with that
+  supplier; **Supplier…** and **Stock item…** link the rest (select several
+  with Ctrl-click). An item linked to a stock item goes into stock when it
+  arrives.
+- **Make purchase order…** (Order Supplies, with requests selected) makes one
+  purchase order per supplier. A request's size is matched to the supplier's
+  item code (45mm channel → `FDG-C45-…`); a size with no code of its own is
+  priced from the sizes either side (a 47 between the 45 and the 50) and
+  marked *estimated* in orange to check. Prices and lines can be changed
+  before it goes.
+- **Send to supplier** makes the purchase order in Xero (approved — Xero
+  numbers it) and emails its PDF to the supplier from the app's mail
+  provider. The requests on it show the PO number.
+- **What arrived…** ticks off how many of each line came. Lines linked to a
+  stock item are booked into stock; when everything is in, the order and its
+  requests are received, otherwise it is *Part received*.
+
+Function secrets it uses: `RESEND_API_KEY` and `MAIL_FROM` (the same as
+order emails), optionally `MAIL_REPLY_TO`, `COMPANY_NAME` (default *Total
+Air Filtration*), `XERO_PURCHASE_ACCOUNT` (default `300`) and
+`XERO_PURCHASE_TAX` (default `INPUT`).
 
 ### Price tiers
 
