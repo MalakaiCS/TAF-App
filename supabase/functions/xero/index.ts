@@ -46,6 +46,11 @@
 //   retry       try one order again now                         staff
 //   list        where each order's invoice is up to             staff
 //   pdf         an order's invoice as Xero prints it            staff
+//   suppliers_pull  Xero's supplier contacts into the app       manager
+//   items_pull  every Xero item into the app                    manager
+//   po_send     make a purchase order in Xero and email it to
+//               the supplier (the app's mail provider)          manager
+//   po_pdf      a purchase order as Xero prints it              staff
 //   contacts    Xero contacts matching a search, to link a
 //               customer to theirs                              staff
 //   owing       what is outstanding in Xero                     staff
@@ -783,6 +788,248 @@ async function sweep() {
 }
 
 
+// ── Buying (migrate_purchasing.sql) ─────────────────────────────────────────
+
+/** A table, read or written as the service role. */
+async function rest(method: string, path: string, body?: unknown,
+                    prefer = ""): Promise<Any> {
+  const res = await fetch(`${SB()}/rest/v1/${path}`, {
+    method,
+    headers: {
+      apikey: SERVICE(), Authorization: `Bearer ${SERVICE()}`,
+      "Content-Type": "application/json", Accept: "application/json",
+      ...(prefer ? { Prefer: prefer } : {}),
+    },
+    body: body === undefined ? undefined : JSON.stringify(body),
+  });
+  const raw = await res.text();
+  if (!res.ok) {
+    throw new Error(`The database said ${res.status}: ${raw.slice(0, 200)}` +
+      (raw.includes("suppliers") || raw.includes("xero_items")
+        ? " - has migrate_purchasing.sql (step 40) been run?" : ""));
+  }
+  return raw ? JSON.parse(raw) : null;
+}
+
+/** Xero's supplier contacts, into the app's suppliers. Only what Xero
+ *  knows is written - a supplier's code prefix, set in the app, stays. */
+async function pullSuppliers() {
+  const rows: Row[] = [];
+  for (let page = 1; page <= 20; page++) {
+    const out = await xero("GET", "/api.xro/2.0/Contacts?where=" +
+      encodeURIComponent("IsSupplier==true") + `&page=${page}`);
+    const list = (out?.Contacts ?? []).filter((c: Row) => c?.ContactStatus !== "ARCHIVED");
+    for (const c of list) {
+      const phone = (c.Phones ?? []).find((p: Row) => p?.PhoneNumber) ?? {};
+      rows.push({ xero_contact_id: c.ContactID, name: String(c.Name ?? "").slice(0, 200),
+                  email: String(c.EmailAddress ?? ""),
+                  phone: [phone.PhoneAreaCode, phone.PhoneNumber].filter(Boolean).join(" "),
+                  updated_at: nowIso() });
+    }
+    if ((out?.Contacts ?? []).length < 100) break;
+  }
+  if (rows.length) {
+    await rest("POST", "suppliers?on_conflict=xero_contact_id", rows,
+               "resolution=merge-duplicates,return=minimal");
+  }
+  return { suppliers: rows.length };
+}
+
+/** Every item in Xero, into the app's xero_items. Which supplier and stock
+ *  item one is stays as set in the app; an item with no supplier yet is
+ *  given the one whose code prefix it starts with (FDG... is FD Greenwood). */
+async function pullItems() {
+  const out = await xero("GET", "/api.xro/2.0/Items");
+  const items = (out?.Items ?? []).filter((it: Row) => it?.Code);
+  const have = new Map<string, string | null>();
+  for (let from = 0; ; from += 1000) {
+    const got = await rest("GET", `xero_items?select=code,supplier_id&order=code&offset=${from}&limit=1000`);
+    for (const r of got ?? []) have.set(String(r.code), r.supplier_id ?? null);
+    if (!got || got.length < 1000) break;
+  }
+  const suppliers = (await rest("GET", "suppliers?select=id,code_prefix&code_prefix=neq.")) ?? [];
+  const prefixOf = (code: string) => {
+    let best: Row | null = null;
+    for (const sup of suppliers) {
+      const pre = String(sup.code_prefix ?? "").trim().toUpperCase();
+      if (pre && code.toUpperCase().startsWith(pre) &&
+          (!best || pre.length > String(best.code_prefix).length)) best = sup;
+    }
+    return best?.id ?? null;
+  };
+  const base = (it: Row) => ({
+    code: String(it.Code), xero_item_id: it.ItemID ?? null,
+    name: String(it.Name ?? ""), description: String(it.Description ?? ""),
+    purchase_description: String(it.PurchaseDescription ?? ""),
+    purchase_price: it.PurchaseDetails?.UnitPrice ?? null,
+    sales_price: it.SalesDetails?.UnitPrice ?? null,
+    tracked: !!it.IsTrackedAsInventory, updated_at: nowIso(),
+  });
+  const keep: Row[] = [], assign: Row[] = [];
+  for (const it of items) {
+    const code = String(it.Code);
+    if (have.get(code)) keep.push(base(it));
+    else assign.push({ ...base(it), supplier_id: prefixOf(code) });
+  }
+  for (const batch of [keep, assign]) {
+    for (let i = 0; i < batch.length; i += 500) {
+      await rest("POST", "xero_items?on_conflict=code", batch.slice(i, i + 500),
+                 "resolution=merge-duplicates,return=minimal");
+    }
+  }
+  return { items: items.length,
+           matched: assign.filter((r) => r.supplier_id).length };
+}
+
+async function poPdf(id: string): Promise<ArrayBuffer> {
+  let access = await token();
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const org = await tenant(access);
+    const res = await fetch(`${API()}/api.xro/2.0/PurchaseOrders/${encodeURIComponent(id)}`, {
+      headers: { Authorization: `Bearer ${access}`, "Xero-tenant-id": org,
+                 Accept: "application/pdf" },
+    });
+    if (res.status === 401 && attempt === 0) {
+      access = await token(access);
+      continue;
+    }
+    if (!res.ok) throw new Problem(`Xero would not give the purchase order (${res.status}).`, res.status);
+    return await res.arrayBuffer();
+  }
+  throw new Problem("Xero would not accept the connection's sign-in.", 401);
+}
+
+function base64(buf: ArrayBuffer): string {
+  const bytes = new Uint8Array(buf);
+  let bin = "";
+  for (let i = 0; i < bytes.length; i += 0x8000) {
+    bin += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
+  }
+  return btoa(bin);
+}
+
+/** Make the purchase order in Xero (approved, Xero's number) if it is not
+ *  there yet, then email its PDF to the supplier through the app's own mail
+ *  provider - not Xero's emailing, which an organisation can have off. */
+async function sendPo(poId: string) {
+  const pos = await rest("GET", `purchase_orders?id=eq.${poId}&select=*`);
+  const po = pos?.[0];
+  if (!po) throw new Problem("That purchase order is not there any more.", 404);
+  if (["received", "cancelled"].includes(po.status)) {
+    throw new Problem(`That purchase order is already ${po.status}.`);
+  }
+  const sups = po.supplier_id
+    ? await rest("GET", `suppliers?id=eq.${po.supplier_id}&select=*`) : [];
+  const sup: Row = sups?.[0] ?? { name: po.supplier, email: po.supplier_email ?? "" };
+  const note = async (patch: Row) =>
+    await rest("PATCH", `purchase_orders?id=eq.${poId}`, patch, "return=minimal");
+
+  let xeroId = po.xero_po_id as string | null;
+  let number = po.po_number as string | null;
+  if (!xeroId) {
+    let contactId = sup.xero_contact_id as string | undefined;
+    if (!contactId) {
+      const c = await findContact([sup.name ?? po.supplier]);
+      if (!c) {
+        throw new Problem(`Xero has no contact called "${sup.name ?? po.supplier}". ` +
+          "Pull suppliers from Xero, or add them in Xero first.");
+      }
+      contactId = c.ContactID;
+    }
+    const known = await purchasableCodes();
+    const lines = (po.lines ?? []).map((l: Row) => {
+      const item: Row = {
+        Description: String(l.description ?? l.name ?? "").slice(0, 3900) || "Item",
+        Quantity: Number(l.quantity ?? 0) || 1,
+        UnitAmount: Math.round(Number(l.unit_price ?? 0) * 10000) / 10000,
+        AccountCode: env("XERO_PURCHASE_ACCOUNT", "300"),
+        TaxType: env("XERO_PURCHASE_TAX", "INPUT"),
+      };
+      const code = known.get(String(l.item_code ?? l.sku ?? "").toUpperCase());
+      if (code) item.ItemCode = code;
+      return item;
+    });
+    if (!lines.length) throw new Problem("The purchase order has no lines.");
+    const out = await xero("POST", "/api.xro/2.0/PurchaseOrders", {
+      PurchaseOrders: [{
+        Contact: { ContactID: contactId }, Date: today(),
+        ...(po.expected ? { DeliveryDate: String(po.expected).slice(0, 10) } : {}),
+        Reference: String(po.reference ?? "").slice(0, 255),
+        Status: "AUTHORISED", LineAmountTypes: "Exclusive", LineItems: lines,
+      }],
+    }, { "Idempotency-Key": `taf-po-${poId}` });
+    const made = out?.PurchaseOrders?.[0];
+    if (!made?.PurchaseOrderID) throw new Problem("Xero did not say which purchase order it made.");
+    xeroId = made.PurchaseOrderID;
+    number = made.PurchaseOrderNumber ?? "";
+    await note({ xero_po_id: xeroId, po_number: number, status: "sent",
+                 sent_at: nowIso(), error: null });
+  }
+
+  const to = String(sup.email || po.supplier_email || "").trim();
+  if (!to) {
+    const error = `Purchase order ${number} is in Xero, but ${sup.name ?? po.supplier} ` +
+      "has no email address to send it to. Add one in Xero (and pull suppliers again), " +
+      "or send it from Xero.";
+    await note({ error });
+    return { po_number: number, emailed: false, error };
+  }
+  const key = env("RESEND_API_KEY"), from = env("MAIL_FROM");
+  if (!key || !from) {
+    const error = `Purchase order ${number} is in Xero, but no mail provider is set up ` +
+      "(RESEND_API_KEY and MAIL_FROM function secrets). Send it from Xero.";
+    await note({ error });
+    return { po_number: number, emailed: false, error };
+  }
+  const pdf = await poPdf(xeroId!);
+  const company = env("COMPANY_NAME", "Total Air Filtration");
+  const sent = await fetch(env("RESEND_API_URL", "https://api.resend.com/emails"), {
+    method: "POST",
+    headers: { Authorization: `Bearer ${key}`, "Content-Type": "application/json" },
+    body: JSON.stringify({
+      from, to: [to],
+      reply_to: env("MAIL_REPLY_TO") || undefined,
+      subject: `Purchase order ${number} from ${company}`,
+      html: `<p>Hello ${sup.name ?? ""},</p><p>Please find attached purchase order ` +
+            `<b>${number}</b> from ${company}` +
+            (po.reference ? ` (our reference ${po.reference})` : "") +
+            `.</p><p>Please reply to confirm, and let us know of any changes.</p>` +
+            `<p>Thank you,<br>${company}</p>`,
+      attachments: [{ filename: `Purchase order ${number}.pdf`, content: base64(pdf) }],
+    }),
+  });
+  if (!sent.ok) {
+    const error = `Purchase order ${number} is in Xero, but the email did not go ` +
+      `(${sent.status}: ${(await sent.text()).slice(0, 160)}). Press Send again, or send it from Xero.`;
+    await note({ error });
+    return { po_number: number, emailed: false, error };
+  }
+  await note({ emailed_at: nowIso(), emailed_to: to, error: null, status: "sent" });
+  return { po_number: number, emailed: true, emailed_to: to };
+}
+
+let purchasableCache: { at: number; codes: Map<string, string> } | null = null;
+
+/** Item codes Xero will take on a purchase order: only items marked as
+ *  bought - anything else would fail the order, so it goes without. */
+async function purchasableCodes(): Promise<Map<string, string>> {
+  if (purchasableCache && Date.now() - purchasableCache.at < 10 * MINUTE) {
+    return purchasableCache.codes;
+  }
+  const codes = new Map<string, string>();
+  try {
+    const out = await xero("GET", "/api.xro/2.0/Items");
+    for (const it of out?.Items ?? []) {
+      if (it?.Code && it?.IsPurchased) codes.set(String(it.Code).toUpperCase(), String(it.Code));
+    }
+  } catch {
+    return codes;
+  }
+  purchasableCache = { at: Date.now(), codes };
+  return codes;
+}
+
+
 // ── Requests ────────────────────────────────────────────────────────────────
 
 Deno.serve(async (req: Request) => {
@@ -955,6 +1202,28 @@ Deno.serve(async (req: Request) => {
       } catch (e) {
         return json(await failed(row, e), 422);
       }
+    }
+
+    if (["suppliers_pull", "items_pull", "po_send"].includes(action) && !who.manager) {
+      return json({ error: "Only a manager can do that." }, 403);
+    }
+    if (action === "suppliers_pull") return json(await pullSuppliers());
+    if (action === "items_pull") return json(await pullItems());
+    if (action === "po_send") {
+      const po = String(body.po_id ?? "");
+      if (!UUID.test(po)) return json({ error: "Which purchase order?" }, 400);
+      return json(await sendPo(po));
+    }
+    if (action === "po_pdf") {
+      const po = String(body.po_id ?? "");
+      if (!UUID.test(po)) return json({ error: "Which purchase order?" }, 400);
+      const rows = await rest("GET", `purchase_orders?id=eq.${po}&select=xero_po_id,po_number`);
+      const row = rows?.[0];
+      if (!row?.xero_po_id) return json({ error: "That purchase order has not gone to Xero yet." }, 404);
+      return new Response(await poPdf(String(row.xero_po_id)), { status: 200, headers: {
+        ...CORS, "Content-Type": "application/pdf",
+        "X-Invoice-Number": String(row.po_number ?? ""),
+      } });
     }
 
     if (action === "pdf") {

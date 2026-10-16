@@ -427,6 +427,7 @@ just run it — nothing is lost and nothing is duplicated.
 | 37 | `migrate_xero_link.sql` | Xero linked for good: every order becomes a draft invoice, approved and emailed when the job is complete. Keeps the Xero sign-in where no app account can read it | recommended |
 | 38 | `migrate_price_tiers.sql` | Three price tiers: each customer on Tier 1, 2 or 3, and a price per tier for every product and rate | recommended |
 | 39 | `migrate_customer_xero_delivery.sql` | A customer's Xero contact (opened from Customers → Customer ▾) and a delivery fee every order of theirs carries | recommended |
+| 40 | `migrate_purchasing.sql` | Buying through Xero: suppliers and items pulled from Xero, several items in one supply request, purchase orders received into stock (needs steps 16 and 31) | recommended |
 
 **Step 16 is the one that matters most.** Every policy in the older scripts is
 `TO authenticated USING (true)` — meaning *anyone Supabase counts as signed

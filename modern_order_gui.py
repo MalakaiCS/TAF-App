@@ -1232,6 +1232,136 @@ def _install_dropdown_rules(root) -> None:
         root.bind_class("TCombobox", seq, lambda _e: None)
 
 
+def _wheel_steps(event) -> int:
+    """How far a wheel or trackpad movement scrolls, in lines, on any system.
+
+    Windows sends multiples of 120 a notch. A Mac trackpad sends small
+    numbers - 1, 2, 3 - many times a second, which the old "delta // 120"
+    turned into nothing one way and a whole line the other (so pages crept
+    upwards and would not go down). Linux sends buttons 4 and 5."""
+    num = getattr(event, "num", None)
+    if num == 4:
+        return -1
+    if num == 5:
+        return 1
+    delta = getattr(event, "delta", 0) or 0
+    if not delta:
+        return 0
+    if sys.platform == "darwin":
+        return max(-6, min(6, -int(delta)))
+    steps = -int(delta / 120)
+    return steps or (-1 if delta > 0 else 1)
+
+
+def _wheel_scroller(canvas):
+    """A wheel handler for one scrolling area that is safe to leave bound:
+    once the area has gone (its window closed under the pointer, before
+    <Leave> could unbind it) it lets go instead of raising an error on every
+    scroll anywhere in the app."""
+    def _scroll(event):
+        try:
+            if not canvas.winfo_exists():
+                raise tk.TclError
+            canvas.yview_scroll(_wheel_steps(event), "units")
+        except tk.TclError:
+            try:
+                canvas.unbind_all("<MouseWheel>")
+            except tk.TclError:
+                pass
+        return "break"
+    return _scroll
+
+
+class FlatButton(tk.Label):
+    """A plain button that draws in the colours it is given, everywhere.
+
+    A tk.Button on a Mac is drawn by macOS itself, which ignores the
+    background colour: the app's white-on-blue buttons came out as white
+    text on Apple's grey, half unreadable. This is a Label that behaves like
+    the button - command, state, hover colours, invoke() - so it looks the
+    same on Windows and on a Mac.
+    """
+
+    def __init__(self, master=None, cnf=None, **kw):
+        self._fb_command = kw.pop("command", None)
+        self._fb_active_bg = kw.pop("activebackground", None)
+        self._fb_active_fg = kw.pop("activeforeground", None)
+        self._fb_state = kw.pop("state", "normal")
+        for unused in ("overrelief", "default", "highlightbackground",
+                       "repeatdelay", "repeatinterval"):
+            kw.pop(unused, None)
+        kw.setdefault("cursor", "hand2")
+        super().__init__(master, cnf or {}, **kw)
+        self._fb_bg = super().cget("bg")
+        self._fb_fg = super().cget("fg")
+        self.bind("<Enter>", self._fb_enter, add="+")
+        self.bind("<Leave>", self._fb_leave, add="+")
+        self.bind("<ButtonRelease-1>", self._fb_click, add="+")
+        if self._fb_state == "disabled":
+            super().configure(fg=CMU, cursor="")
+
+    def _fb_enter(self, _e=None):
+        if self._fb_state == "normal" and self._fb_active_bg:
+            super().configure(bg=self._fb_active_bg,
+                              fg=self._fb_active_fg or self._fb_fg)
+
+    def _fb_leave(self, _e=None):
+        if self._fb_state == "normal":
+            super().configure(bg=self._fb_bg, fg=self._fb_fg)
+
+    def _fb_click(self, event):
+        # Released over the button, as a real button only fires then.
+        if not (0 <= event.x < self.winfo_width()
+                and 0 <= event.y < self.winfo_height()):
+            return
+        self.invoke()
+
+    def invoke(self):
+        if self._fb_state == "normal" and self._fb_command:
+            return self._fb_command()
+
+    def configure(self, cnf=None, **kw):
+        kw = dict(cnf or {}, **kw)
+        if "command" in kw:
+            self._fb_command = kw.pop("command")
+        if "activebackground" in kw:
+            self._fb_active_bg = kw.pop("activebackground")
+        if "activeforeground" in kw:
+            self._fb_active_fg = kw.pop("activeforeground")
+        for unused in ("overrelief", "default", "highlightbackground"):
+            kw.pop(unused, None)
+        if "bg" in kw or "background" in kw:
+            self._fb_bg = kw.get("bg", kw.get("background"))
+        if "fg" in kw or "foreground" in kw:
+            self._fb_fg = kw.get("fg", kw.get("foreground"))
+        if "state" in kw:
+            self._fb_state = kw.pop("state")
+            kw.setdefault("fg", CMU if self._fb_state == "disabled"
+                          else self._fb_fg)
+            kw.setdefault("cursor", "" if self._fb_state == "disabled"
+                          else "hand2")
+        if kw:
+            return super().configure(**kw)
+        return None
+    config = configure
+
+    def cget(self, key):
+        if key == "command":
+            return self._fb_command
+        if key == "state":
+            return self._fb_state
+        if key in ("activebackground", "activeforeground"):
+            return (self._fb_active_bg if key == "activebackground"
+                    else self._fb_active_fg) or ""
+        return super().cget(key)
+
+    def __getitem__(self, key):
+        return self.cget(key)
+
+    def __setitem__(self, key, value):
+        self.configure(**{key: value})
+
+
 class PillButton(tk.Canvas):
     """Rounded (pill) button drawn on a Canvas, with hover + a config() shim
     so existing callers that do .config(text=/bg=/state=) keep working."""
@@ -1647,7 +1777,7 @@ def _make_date_entry(parent, textvariable, **kw):
     wrap = tk.Frame(parent, bg=parent.cget("bg"))
     e = field_entry(wrap, textvariable=textvariable, width=10)
     e.pack(side="left")
-    btn = tk.Button(wrap, text="📅", bg=CA, fg="white", relief="flat", bd=0,
+    btn = FlatButton(wrap, text="📅", bg=CA, fg="white", relief="flat", bd=0,
                     font=(FAM, 9), padx=5, pady=1, cursor="hand2",
                     activebackground=_dk(CA), activeforeground="white")
     btn.config(command=lambda: CalendarPicker(parent.winfo_toplevel(),
@@ -1807,7 +1937,9 @@ def _configure_ttk_style():
                         relief="flat",
                         gripcount=0,
                         arrowsize=px(1),        # 0 is rejected; 1 hides them
-                        width=px(11))
+                        # Wide enough to catch with a mouse or a trackpad
+                        # without hunting for it.
+                        width=px(16))
         style.map(f"{orient}.TScrollbar",
                   background=[("pressed", CA),
                               ("active", _blend(CMU, CBG, 0.35))])
@@ -1896,7 +2028,7 @@ class CalendarPicker(tk.Toplevel):
         nav.pack(fill="x")
 
         def _nav_btn(text, cmd):
-            b = tk.Button(nav, text=text, command=cmd,
+            b = FlatButton(nav, text=text, command=cmd,
                           bg=CA, fg="white", relief="flat", bd=0,
                           font=(FAM, 12, "bold"), padx=10,
                           cursor="hand2",
@@ -1924,7 +2056,7 @@ class CalendarPicker(tk.Toplevel):
         # ── Today shortcut ────────────────────────────────────────────────
         foot = tk.Frame(self, bg=CBG, pady=3)
         foot.pack(fill="x")
-        tk.Button(foot, text="Today", command=self._pick_today,
+        FlatButton(foot, text="Today", command=self._pick_today,
                   bg=CBG, fg=CA, relief="flat", bd=0,
                   font=(FAM, 8, "bold"), cursor="hand2",
                   activebackground=CBG, activeforeground=_dk(CA)
@@ -1950,7 +2082,7 @@ class CalendarPicker(tk.Toplevel):
                 fg_n = "white" if is_today else (CRD if is_wknd else CTX)
                 bg_h = _dk(CA) if is_today else CRE
 
-                b = tk.Button(
+                b = FlatButton(
                     self.days_f, text=str(day),
                     width=4, height=1, relief="flat", bd=0,
                     font=(FAM, 9),
@@ -2408,7 +2540,7 @@ class CompressorFilterDialog(tk.Toplevel):
                 self._gd_order_type.set(value)
                 _refresh()
                 self._gd_update_preview()
-            b = tk.Button(type_row, text=text, command=_cmd,
+            b = FlatButton(type_row, text=text, command=_cmd,
                           font=F_BOLD, relief="flat", bd=0,
                           padx=12, pady=5, cursor="hand2")
             b._bg  = bg
@@ -3781,7 +3913,7 @@ class BagLineItemDialog(tk.Toplevel):
             canvas.itemconfig(body_win, width=e.width)
         body.bind("<Configure>", _on_frame_config)
         canvas.bind("<Configure>", _on_canvas_resize)
-        self.bind("<MouseWheel>", lambda e: canvas.yview_scroll(-1*(e.delta//120), "units"))
+        self.bind("<MouseWheel>", _wheel_scroller(canvas))
 
         # ── Product type + Quantity row ────────────────────────────────────
         top_row = tk.Frame(body, bg=CBG)
@@ -5152,7 +5284,7 @@ class POReviewDialog(tk.Toplevel):
                 row_f.pack(fill="x", pady=(2, 0))
                 field_entry(row_f, textvariable=v, width=18).pack(
                     side="left", fill="x", expand=True)
-                btn = tk.Button(row_f, text="TAF #",
+                btn = FlatButton(row_f, text="TAF #",
                                 command=self._supplied_number_for_current,
                                 bg=CA, fg="white", relief="flat", bd=0,
                                 font=(FAM, 8, "bold"), padx=7, pady=2,
@@ -8299,7 +8431,7 @@ class PalletLabelsDialog(tk.Toplevel):
                 tk.Label(head, text=f"O/N {_pallets.order_number(e['order'])}"
                                     f"  ·  {who}",
                          bg=CCA, fg=CA, font=F_BOLD).pack(side="left")
-                tk.Button(head, text="Remove", font=F_SM, bg=CCA, fg=CRD,
+                FlatButton(head, text="Remove", font=F_SM, bg=CCA, fg=CRD,
                           relief="flat", bd=0, cursor="hand2",
                           activebackground=CCA,
                           command=lambda x=k: self._remove(x)
@@ -8968,13 +9100,13 @@ class ModernOrderApp(tk.Frame):
                     txt.configure(yscrollcommand=vsb.set)
                     vsb.pack(side="right", fill="y")
                     txt.pack(side="left", fill="both", expand=True)
-                    tk.Button(popup, text="Close", command=popup.destroy,
+                    FlatButton(popup, text="Close", command=popup.destroy,
                               bg="#27AE60", fg="white",
                               activebackground="#1E8449", activeforeground="white",
                               relief="flat", bd=0,
                               font=(FAM, 10, "bold"),
                               padx=20, pady=8, cursor="hand2").pack(pady=(0, 16))
-                tk.Button(note_row, text="Read more ›",
+                FlatButton(note_row, text="Read more ›",
                           command=_show_notes,
                           bg="#145A32", fg="#A9DFBF",
                           activebackground="#0E3D22", activeforeground="white",
@@ -8995,7 +9127,7 @@ class ModernOrderApp(tk.Frame):
             banner.destroy()
             self._update_banner_shown = False
 
-        tk.Button(right, text="UPDATE NOW",
+        FlatButton(right, text="UPDATE NOW",
                   command=_update_now,
                   bg="#27AE60", fg="white",
                   activebackground="#1E8449", activeforeground="white",
@@ -9003,7 +9135,7 @@ class ModernOrderApp(tk.Frame):
                   font=(FAM, 10, "bold"),
                   padx=20, pady=8, cursor="hand2").pack(side="left", padx=(0, 10))
 
-        tk.Button(right, text="Later",
+        FlatButton(right, text="Later",
                   command=_dismiss,
                   bg="#145A32", fg="#A9DFBF",
                   activebackground="#0E3D22", activeforeground="white",
@@ -9933,7 +10065,7 @@ class ModernOrderApp(tk.Frame):
                 self._hentries[key] = e
 
                 var = self.hvars[key]
-                cal_btn = tk.Button(
+                cal_btn = FlatButton(
                     wrap, text="📅",
                     command=lambda v=var, b=None: None,
                     bg=CA, fg="white", relief="flat", bd=0,
@@ -9956,7 +10088,7 @@ class ModernOrderApp(tk.Frame):
                 e = field_entry(wrap, textvariable=self.hvars[key])
                 e.grid(row=0, column=0, sticky="we")
                 self._hentries[key] = e
-                self._taf_on_btn = tk.Button(
+                self._taf_on_btn = FlatButton(
                     wrap, text="TAF #", command=self._use_supplied_order_number,
                     bg=CA, fg="white", relief="flat", bd=0,
                     font=(FAM, 8, "bold"), padx=7, pady=2, cursor="hand2",
@@ -10164,6 +10296,10 @@ class ModernOrderApp(tk.Frame):
         flat_btn(gen_row, "💲  Quote",
                  self._quote_current_order, variant="secondary",
                  pady=10, padx=18, font=F_BOLD).pack(side="right", padx=(0, 8))
+        # The order's value, beside the buttons that use it.
+        self._order_total_var = tk.StringVar(value="")
+        tk.Label(gen_row, textvariable=self._order_total_var, bg=CBG, fg=CTX,
+                 font=(FAM, 12, "bold")).pack(side="right", padx=(0, px(14)))
         flat_btn(gen_row, "📄  Import Purchase Order",
                  self._import_purchase_orders, variant="secondary",
                  pady=10, padx=18, font=F_BOLD).pack(side="left")
@@ -13716,7 +13852,7 @@ class ModernOrderApp(tk.Frame):
         _bw    = bcan.create_window((0, 0), window=body, anchor="nw")
         body.bind("<Configure>", lambda e: bcan.configure(scrollregion=bcan.bbox("all")))
         bcan.bind("<Configure>",  lambda e: bcan.itemconfig(_bw, width=e.width))
-        def _mw(e): bcan.yview_scroll(-1*(e.delta//120), "units")
+        _mw = _wheel_scroller(bcan)
         bcan.bind("<Enter>", lambda e: bcan.bind_all("<MouseWheel>", _mw))
         bcan.bind("<Leave>", lambda e: bcan.unbind_all("<MouseWheel>"))
         body.columnconfigure(1, weight=1)
@@ -13942,6 +14078,107 @@ class ModernOrderApp(tk.Frame):
             row=_row, column=1, sticky="w", pady=4)
         _row += 1
 
+        # ── Their contact in Xero ─────────────────────────────────────────
+        # Type to search Xero's contacts, as the customer name does on an
+        # order, and pick theirs; their invoices then go to it. (Customers >
+        # Customer > Link to a Xero contact... does the same from the list.)
+        xero_link = {"id": g.get("xero_contact_id") or None, "changed": False}
+        if extras_on and _features.is_on("xero_live"):
+            _sec("Xero")
+            tk.Label(body, text="Xero contact", bg=CBG, fg=CTX, font=F_BODY,
+                     width=18, anchor="nw").grid(row=_row, column=0,
+                                                 sticky="nw", pady=4)
+            xwrap = tk.Frame(body, bg=CBG)
+            xwrap.grid(row=_row, column=1, columnspan=2, sticky="ew", pady=4)
+            xwrap.columnconfigure(0, weight=1)
+            _row += 1
+            v_xterm = tk.StringVar(value="")
+            x_state = tk.Label(xwrap, bg=CBG, fg=CMU, font=F_SM, anchor="w",
+                               justify="left")
+            x_state.grid(row=0, column=0, columnspan=3, sticky="w")
+            x_ent = field_entry(xwrap, textvariable=v_xterm)
+            x_ent.grid(row=1, column=0, sticky="ew", pady=(px(4), 0))
+            x_list = tk.Listbox(xwrap, height=5, font=F_BODY, bg=CCA, fg=CTX,
+                                selectbackground=CA, selectforeground="white",
+                                activestyle="none", relief="flat",
+                                highlightthickness=1, highlightbackground=CBR,
+                                exportselection=False)
+            x_found: list = []
+
+            def _x_show():
+                if xero_link["id"]:
+                    x_state.config(text="Linked to their Xero contact"
+                                   + (" (changed - saved with the customer)"
+                                      if xero_link["changed"] else "")
+                                   + ".  Type to change it.", fg=CGR)
+                else:
+                    x_state.config(text="Not linked. Type their name to "
+                                   "find them in Xero.", fg=CMU)
+
+            def _x_pick(_e=None):
+                sel = x_list.curselection()
+                if not sel or sel[0] >= len(x_found):
+                    return
+                c = x_found[sel[0]]
+                xero_link.update(id=c["id"], changed=True, name=c["name"])
+                v_xterm.set(c["name"])
+                x_list.grid_remove()
+                _x_show()
+
+            def _x_unlink():
+                xero_link.update(id=None, changed=True)
+                _x_show()
+
+            def _x_search(term):
+                def _work():
+                    got = _xero.find_contacts(term)
+
+                    def _show():
+                        try:
+                            if not x_list.winfo_exists() or \
+                                    v_xterm.get().strip() != term:
+                                return      # typed on since; a newer search
+                        except tk.TclError:
+                            return
+                        x_found[:] = got.get("contacts") or []
+                        x_list.delete(0, "end")
+                        if got.get("error"):
+                            x_state.config(text=got["error"], fg=CRD)
+                            return
+                        for c in x_found:
+                            x_list.insert("end", f"{c['name']}   "
+                                          f"{c.get('email') or '(no email)'}")
+                        if x_found:
+                            x_list.grid(row=2, column=0, columnspan=3,
+                                        sticky="ew", pady=(px(2), 0))
+                        else:
+                            x_list.grid_remove()
+                            x_state.config(text=f"Nothing in Xero called "
+                                           f"\"{term}\".", fg=CMU)
+                    self.master.after(0, _show)
+                threading.Thread(target=_work, daemon=True).start()
+
+            x_after = {"id": None}
+
+            def _x_typed(*_):
+                term = v_xterm.get().strip()
+                if x_after["id"]:
+                    try:
+                        dlg.after_cancel(x_after["id"])
+                    except tk.TclError:
+                        pass
+                if len(term) < 2 or term == xero_link.get("name"):
+                    x_list.grid_remove()
+                    return
+                x_after["id"] = dlg.after(400, lambda: _x_search(term))
+
+            v_xterm.trace_add("write", _x_typed)
+            x_list.bind("<<ListboxSelect>>", _x_pick)
+            flat_btn(xwrap, "Unlink", _x_unlink, bg=CNE, pady=px(4),
+                     variant="secondary").grid(row=1, column=1,
+                                               padx=(px(6), 0), pady=(px(4), 0))
+            _x_show()
+
         # ── Notes ─────────────────────────────────────────────────────────
         _sec("Notes")
         tk.Label(body, text="Notes", bg=CBG, fg=CTX,
@@ -14013,6 +14250,8 @@ class ModernOrderApp(tk.Frame):
                    if tiers_on and _db.can_manage_prices() else {}),
                 **({"delivery_fee": _fee_value(v_fee.get())}
                    if extras_on and _db.can_manage_prices() else {}),
+                **({"xero_contact_id": xero_link["id"]}
+                   if extras_on and xero_link["changed"] else {}),
                 "notes":            txt_notes.get("1.0", "end").strip(),
             }
             if is_new:
@@ -14759,7 +14998,7 @@ class ModernOrderApp(tk.Frame):
         _bw  = body_cv.create_window((0, 0), window=body, anchor="nw")
         body.bind("<Configure>", lambda e: body_cv.configure(scrollregion=body_cv.bbox("all")))
         body_cv.bind("<Configure>", lambda e: body_cv.itemconfig(_bw, width=e.width))
-        def _mw(e): body_cv.yview_scroll(-1*(e.delta//120), "units")
+        _mw = _wheel_scroller(body_cv)
         body_cv.bind("<Enter>", lambda e: body_cv.bind_all("<MouseWheel>", _mw))
         body_cv.bind("<Leave>", lambda e: body_cv.unbind_all("<MouseWheel>"))
 
@@ -15701,7 +15940,7 @@ class ModernOrderApp(tk.Frame):
         _win = _cv.create_window((0, 0), window=frm, anchor="nw")
         frm.bind("<Configure>", lambda e: _cv.configure(scrollregion=_cv.bbox("all")))
         _cv.bind("<Configure>", lambda e: _cv.itemconfig(_win, width=e.width))
-        def _mw(e): _cv.yview_scroll(-1 * (e.delta // 120), "units")
+        _mw = _wheel_scroller(_cv)
         _cv.bind("<Enter>", lambda e: _cv.bind_all("<MouseWheel>", _mw))
         _cv.bind("<Leave>", lambda e: _cv.unbind_all("<MouseWheel>"))
 
@@ -20543,8 +20782,7 @@ class ModernOrderApp(tk.Frame):
                 sb.pack(side="right", fill="y")
 
                 def _wheel(e):
-                    step = -1 if (getattr(e, "num", 0) == 4
-                                  or getattr(e, "delta", 0) > 0) else 1
+                    step = _wheel_steps(e)
                     try:
                         cv.yview_scroll(step, "units")
                     except tk.TclError:
@@ -21239,6 +21477,14 @@ class ModernOrderApp(tk.Frame):
             right += f"  ·  ${total + fee:,.2f} ex GST"
             if fee:
                 right += f" (incl. ${fee:,.2f} delivery)"
+        bottom = getattr(self, "_order_total_var", None)
+        if bottom is not None:
+            if total or fee:
+                bottom.set(f"Total ${total + fee:,.2f} ex GST  ·  "
+                           f"${(total + fee) * 1.1:,.2f} inc GST"
+                           + (f"  ({unpriced} unpriced)" if unpriced else ""))
+            else:
+                bottom.set("")
         if unpriced and self.items:
             right += f"  ·  {unpriced} without a price"
         # The channel the whole order takes, pages sharing lengths where
@@ -25793,7 +26039,7 @@ class ModernOrderApp(tk.Frame):
             wrap.grid(row=r, column=1, sticky="ew", pady=4)
             field_entry(wrap, textvariable=var, width=24).pack(side="left")
             if key in ("Date Ordered", "Date Due"):
-                btn = tk.Button(wrap, text="📅", bg=CA, fg="white", relief="flat",
+                btn = FlatButton(wrap, text="📅", bg=CA, fg="white", relief="flat",
                                 bd=0, font=(FAM, 9), padx=6, pady=2,
                                 cursor="hand2")
                 btn.config(command=lambda v=var, b=btn: CalendarPicker(ed, v, anchor=b))
@@ -25917,7 +26163,7 @@ class ModernOrderApp(tk.Frame):
         win_id = canvas.create_window((0, 0), window=inner, anchor="nw")
         inner.bind("<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
         canvas.bind("<Configure>", lambda e: canvas.itemconfig(win_id, width=e.width))
-        dlg.bind("<MouseWheel>", lambda e: canvas.yview_scroll(-1*(e.delta//120), "units"))
+        dlg.bind("<MouseWheel>", _wheel_scroller(canvas))
 
         foot = tk.Frame(dlg, bg=CBG, pady=8, padx=14)
         foot.pack(fill="x")

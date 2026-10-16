@@ -1026,6 +1026,89 @@ def run_customer_extra_checks(pg: Postgres) -> None:
     check("and it is never less than nothing", not ok, err)
 
 
+def run_purchasing_checks(pg: Postgres) -> None:
+    print("\n── buying through Xero (step 40) ──")
+    ok, _o, err = pg.psql((ROOT / "migrate_purchasing.sql").read_text(
+        encoding="utf-8"), "f")
+    check("step 40 runs again cleanly", ok, err)
+    ok, out, err = as_in(pg, "f", DAVE, "INSERT INTO suppliers (name) "
+                                        "VALUES ('Vulcan') RETURNING id;")
+    check("somebody on the floor cannot add a supplier", not ok, out)
+    ok, sup, err = as_in(pg, "f", SARAH, "INSERT INTO suppliers (name, "
+                                         "code_prefix) VALUES ('FD Greenwood', "
+                                         "'FDG') RETURNING id;")
+    check("a manager can", ok and sup, err)
+    sup = (sup or "").splitlines()[0] if sup else ""
+
+    q(pg, "DELETE FROM notifications;")
+    lines = ('[{"item": "Channel", "detail": "45mm", "quantity": "20", '
+             f'"supplier_id": "{sup}", "item_code": "FDG-C45"}}, '
+             '{"item": "Rivets", "quantity": "2 boxes"}, '
+             '{"item": "Tape", "detail": "50mm foil", "quantity": "6"}]')
+    ok, out, err = as_in(pg, "f", DAVE,
+                         f"SELECT count(*) FROM request_supplies('{lines}', "
+                         "false, 'for the Batare job', 'ref-1');")
+    check("several things asked for in one go", ok and out == "3", out or err)
+    batch = q(pg, "SELECT count(DISTINCT batch_id) || '/' || "
+                  "count(*) FILTER (WHERE supplier_id IS NOT NULL) || '/' || "
+                  "min(requested_by_name) FROM supply_requests "
+                  "WHERE client_ref LIKE 'ref-1-%';")
+    check("as one batch, with its supplier, under who asked",
+          batch == "1/1/Dave Floor", batch)
+    told = q(pg, "SELECT count(*) || '/' || count(DISTINCT recipient) "
+                 "FROM notifications WHERE kind = 'supply_request';")
+    managers = q(pg, "SELECT count(*) FROM profiles WHERE approved AND "
+                     "role IN ('Director','Admin','Manager');")
+    check("each manager is told once, not once per item",
+          told == f"{managers}/{managers}", f"{told} vs {managers}")
+    ok, out, err = as_in(pg, "f", DAVE,
+                         f"SELECT count(*) FROM request_supplies('{lines}', "
+                         "false, '', 'ref-1');")
+    check("sent again after a dropped connection, it is filed once",
+          ok and out == "3" and q(pg, "SELECT count(*) FROM supply_requests "
+                                      "WHERE client_ref LIKE 'ref-1-%';") == "3",
+          out or err)
+    ok, out, err = as_in(pg, "f", STRANGER,
+                         f"SELECT count(*) FROM request_supplies('{lines}');")
+    check("an account that is not staff cannot ask", not ok, out)
+
+    item = q(pg, "INSERT INTO stock_items (name, stock_on_hand) VALUES "
+                 "('45mm channel', 4) RETURNING id;").splitlines()[0]
+    po = q(pg, "INSERT INTO purchase_orders (supplier, lines, po_number) "
+               "VALUES ('FD Greenwood', '[{\"description\": \"45mm channel\", "
+               f"\"quantity\": 20, \"stock_item_id\": \"{item}\"}}, "
+               "{\"description\": \"Rivets\", \"quantity\": 2}]', "
+               "'PO-0001') RETURNING id;").splitlines()[0]
+    q(pg, f"UPDATE supply_requests SET purchase_order_id = '{po}', "
+          f"status = 'ordered' WHERE client_ref LIKE 'ref-1-%';")
+    ok, out, err = as_in(pg, "f", DAVE, f"SELECT status FROM receive_purchase("
+                                        f"'{po}', '[{{\"line\": 0, \"qty\": 5}}]');")
+    check("somebody on the floor cannot receive an order",
+          not ok and "Only a manager" in err, out or err)
+    ok, out, err = as_in(pg, "f", SARAH, f"SELECT status FROM receive_purchase("
+                                         f"'{po}', '[{{\"line\": 0, \"qty\": 12}}]');")
+    stock = q(pg, f"SELECT stock_on_hand::int FROM stock_items WHERE id = '{item}';")
+    moved = q(pg, f"SELECT quantity_change::int || ' ' || transaction_type || ' ' "
+                  f"|| notes FROM stock_transactions WHERE stock_item_id = '{item}';")
+    check("part of an order in: part received, and into stock",
+          ok and out == "part_received" and stock == "16" and
+          moved == "12 receive PO PO-0001 from FD Greenwood",
+          f"{out} {stock} {moved} {err}")
+    ok, out, err = as_in(pg, "f", SARAH, f"SELECT status FROM receive_purchase("
+                                         f"'{po}', '[{{\"line\": 0, \"qty\": 8}}, "
+                                         f"{{\"line\": 1, \"qty\": 2}}]');")
+    reqs = q(pg, "SELECT string_agg(DISTINCT status, ',') FROM supply_requests "
+                 "WHERE client_ref LIKE 'ref-1-%';")
+    check("the rest in: received, and the requests on it with it",
+          ok and out == "received" and reqs == "received" and
+          q(pg, f"SELECT stock_on_hand::int FROM stock_items "
+                f"WHERE id = '{item}';") == "24", f"{out} {reqs} {err}")
+    ok, out, err = as_in(pg, "f", SARAH, f"SELECT status FROM receive_purchase("
+                                         f"'{po}', '[{{\"line\": 0, \"qty\": 1}}]');")
+    check("and it cannot be received twice", not ok and "already" in err,
+          out or err)
+
+
 def _skip(why: str) -> int:
     """Skipping is fine on a laptop. In CI it is not: a workflow that goes
     green having checked nothing is worse than no workflow, because it is
@@ -1050,6 +1133,7 @@ def main() -> int:
         run_xero_checks(pg)
         run_tier_checks(pg)
         run_customer_extra_checks(pg)
+        run_purchasing_checks(pg)
     finally:
         pg.stop()
     print(f"\n{len(FAILURES)} FAILED" if FAILURES

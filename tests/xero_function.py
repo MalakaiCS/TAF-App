@@ -76,12 +76,28 @@ class World:
                             "Day": 14, "Type": "DAYSAFTERBILLDATE"}}},
             "C-QUIET": {"ContactID": "C-QUIET", "Name": "Quiet Co",
                         "EmailAddress": "", "ContactStatus": "ACTIVE"},
+            "C-FDG": {"ContactID": "C-FDG", "Name": "FD Greenwood",
+                      "EmailAddress": "orders@fdg.example",
+                      "ContactStatus": "ACTIVE", "IsSupplier": True,
+                      "Phones": [{"PhoneType": "DEFAULT",
+                                  "PhoneAreaCode": "07",
+                                  "PhoneNumber": "3000 0000"}]},
+            "C-VUL": {"ContactID": "C-VUL", "Name": "Vulcan",
+                      "EmailAddress": "", "ContactStatus": "ACTIVE",
+                      "IsSupplier": True},
             "C-OLD": {"ContactID": "C-OLD", "Name": "Gone Co",
                       "EmailAddress": "x@gone.example",
                       "ContactStatus": "ARCHIVED"},
         }
         self.items = ["FPFG425-040"]
         self.item_rows: list = []
+        # Bought-in items, with what we pay for them.
+        self.buy_items = {"FDG-C45-2440": 18.50, "FDG-C50-2440": 20.90}
+        self.suppliers: dict = {}        # the app's suppliers table, by id
+        self.xero_items: dict = {}       # the app's xero_items table, by code
+        self.pos: dict = {}              # the app's purchase_orders, by id
+        self.xero_pos: dict = {}         # Xero's purchase orders, by id
+        self.mails: list = []            # what went to the mail provider
         self.invoices: dict = {}
         self.idempotent: dict = {}
         self.emails: list = []
@@ -180,6 +196,23 @@ def xero_api(method: str, path: str, query: dict, body, headers):
     parts = path.strip("/").split("/")          # api.xro 2.0 Invoices ...
     kind = parts[2] if len(parts) > 2 else ""
     ident = parts[3] if len(parts) > 3 else ""
+    if kind == "Contacts" and "IsSupplier" in q("where"):
+        page = int(q("page") or 1)
+        rows = [c for c in W.contacts.values() if c.get("IsSupplier")]
+        return 200, {"Contacts": rows if page == 1 else []}
+    if kind == "PurchaseOrders" and method == "POST" and not ident:
+        new = (body or {}).get("PurchaseOrders", [{}])[0]
+        for line in new.get("LineItems", []):
+            if "ItemCode" in line and line["ItemCode"] not in W.buy_items:
+                return validation(f"Item code '{line['ItemCode']}' is not purchased")
+        if headers.get("Idempotency-Key") in W.idempotent:
+            made = W.xero_pos[W.idempotent[headers["Idempotency-Key"]]]
+            return 200, {"PurchaseOrders": [made]}
+        made = dict(new, PurchaseOrderID=str(uuid.uuid4()),
+                    PurchaseOrderNumber=f"PO-{len(W.xero_pos) + 1:04d}")
+        W.xero_pos[made["PurchaseOrderID"]] = made
+        W.idempotent[headers.get("Idempotency-Key", "")] = made["PurchaseOrderID"]
+        return 200, {"PurchaseOrders": [made]}
     if kind == "Contacts":
         if ident:
             c = W.contacts.get(ident)
@@ -198,7 +231,13 @@ def xero_api(method: str, path: str, query: dict, body, headers):
             made.append(it)
         return 200, {"Items": made}
     if kind == "Items":
-        return 200, {"Items": [{"Code": c} for c in W.items]}
+        rows = [{"Code": c, "ItemID": f"I-{c}", "Name": c, "IsSold": True}
+                for c in W.items]
+        rows += [{"Code": c, "ItemID": f"I-{c}", "Name": f"Channel {c}",
+                  "IsPurchased": True, "PurchaseDescription": f"C channel {c}",
+                  "PurchaseDetails": {"UnitPrice": price}}
+                 for c, price in W.buy_items.items()]
+        return 200, {"Items": rows}
     if kind == "Organisation":
         return 200, {"Organisations": [{"PaymentTerms": {"Sales": {
             "Day": 20, "Type": "OFFOLLOWINGMONTH"}}}]}
@@ -261,6 +300,53 @@ class Fake(BaseHTTPRequestHandler):
     def log_message(self, *_a):
         pass
 
+    def _rest(self, method, url, body):
+        table = url.path.rsplit("/", 1)[1]
+        query = urllib.parse.parse_qs(url.query)
+        store = {"suppliers": W.suppliers, "xero_items": W.xero_items,
+                 "purchase_orders": W.pos}[table]
+        key = "code" if table == "xero_items" else "id"
+
+        def matches(row):
+            for k, v in query.items():
+                if k in ("select", "order", "offset", "limit", "on_conflict"):
+                    continue
+                v = v[0]
+                if v.startswith("eq.") and str(row.get(k)) != v[3:]:
+                    return False
+                if v.startswith("neq.") and str(row.get(k) or "") == v[4:]:
+                    return False
+            return True
+        with LOCK:
+            if method == "GET":
+                rows = [dict(r) for r in store.values() if matches(r)]
+                off = int(query.get("offset", ["0"])[0])
+                lim = int(query.get("limit", ["100000"])[0])
+                return self._send(200, rows[off:off + lim])
+            if method == "POST":
+                conflict = query.get("on_conflict", [key])[0]
+                for row in body if isinstance(body, list) else [body]:
+                    hit = next((r for r in store.values()
+                                if r.get(conflict) == row.get(conflict)), None)
+                    if hit:
+                        hit.update(row)
+                    else:
+                        row = dict(row)
+                        row.setdefault(key, str(uuid.uuid4()))
+                        row.setdefault("code_prefix", "")
+                        row.setdefault("supplier_id", None)
+                        store[row[key]] = row
+                return self._send(201, None)
+            if method == "PATCH":
+                for row in store.values():
+                    if matches(row):
+                        row.update(body or {})
+                return self._send(204, None)
+        return self._send(405, {})
+
+    def do_PATCH(self):
+        self._handle("PATCH")
+
     def _send_pdf(self, data: bytes):
         self.send_response(200)
         self.send_header("Content-Type", "application/pdf")
@@ -295,6 +381,15 @@ class Fake(BaseHTTPRequestHandler):
         if url.path == "/auth/v1/user":
             u = USERS.get(auth)
             return self._send(200, {"id": u[0]}) if u else self._send(401, {})
+        if url.path == "/resend":
+            with LOCK:
+                W.mails.append(body)
+            return self._send(200, {"id": "mail-1"})
+        if url.path in ("/rest/v1/suppliers", "/rest/v1/xero_items",
+                        "/rest/v1/purchase_orders"):
+            if auth != f"Bearer {SERVICE}":
+                return self._send(401, {"message": "service role only"})
+            return self._rest(method, url, body)
         if url.path == "/rest/v1/xero_invoices":
             if auth != f"Bearer {SERVICE}":
                 return self._send(401, {"message": "service role only"})
@@ -339,6 +434,10 @@ class Fake(BaseHTTPRequestHandler):
             ident = url.path.rstrip("/").split("/")[-1]
             with LOCK:
                 inv = W.invoices.get(ident)
+                po = W.xero_pos.get(ident)
+            if po:
+                return self._send_pdf(b"%PDF-1.4 purchase order "
+                                      + po["PurchaseOrderNumber"].encode())
             if not inv:
                 return self._send(404, {})
             return self._send_pdf(b"%PDF-1.4 invoice " + inv["InvoiceNumber"].encode())
@@ -719,6 +818,81 @@ def run_checks() -> None:
           xinv(o8)["Status"] == "DELETED" and W.rows[o8]["state"] == "deleted",
           f"{out} {xinv(o8).get('Status')}")
 
+    print("\n── buying: suppliers, items, purchase orders ──")
+    code, out = call("suppliers_pull")
+    check("somebody on the floor cannot pull suppliers", code == 403, str(out))
+    code, out = call("suppliers_pull", auth="Bearer boss")
+    names = sorted(r["name"] for r in W.suppliers.values())
+    check("Xero's supplier contacts come into the app",
+          code == 200 and out.get("suppliers") == 2 and
+          names == ["FD Greenwood", "Vulcan"], f"{out} {names}")
+    fdg = next(r for r in W.suppliers.values() if r["name"] == "FD Greenwood")
+    check("with their email and phone",
+          fdg["email"] == "orders@fdg.example" and fdg["phone"] == "07 3000 0000",
+          str(fdg))
+    fdg["code_prefix"] = "FDG"                   # set in the app
+    call("suppliers_pull", auth="Bearer boss")
+    check("pulled again, a code prefix set in the app stays",
+          fdg["code_prefix"] == "FDG" and len(W.suppliers) == 2, str(fdg))
+    code, out = call("items_pull", auth="Bearer boss")
+    chan = W.xero_items.get("FDG-C45-2440", {})
+    check("every Xero item comes in, with what we pay",
+          code == 200 and chan.get("purchase_price") == 18.5 and
+          "FPFG425-040" in W.xero_items, f"{out} {chan}")
+    check("and FDG items are FD Greenwood's, by their code prefix",
+          chan.get("supplier_id") == fdg["id"] and out.get("matched") == 2 and
+          not W.xero_items["FPFG425-040"].get("supplier_id"), f"{out} {chan}")
+    W.xero_items["FDG-C50-2440"]["supplier_id"] = "set-by-hand"
+    call("items_pull", auth="Bearer boss")
+    check("a supplier set by hand on an item is kept",
+          W.xero_items["FDG-C50-2440"]["supplier_id"] == "set-by-hand")
+
+    po_id = str(uuid.uuid4())
+    W.pos[po_id] = {"id": po_id, "supplier": "FD Greenwood",
+                    "supplier_id": fdg["id"], "status": "draft",
+                    "reference": "Batare job", "lines": [
+                        {"description": "45mm C channel", "quantity": 20,
+                         "unit_price": 18.5, "item_code": "fdg-c45-2440"},
+                        {"description": "Odd channel, estimated", "quantity": 4,
+                         "unit_price": 19.7, "item_code": "FDG-C47-2440"}]}
+    code, out = call("po_send", {"po_id": po_id})
+    check("somebody on the floor cannot send a purchase order", code == 403, str(out))
+    code, out = call("po_send", {"po_id": po_id}, auth="Bearer boss")
+    made = next(iter(W.xero_pos.values()), {})
+    check("a manager sends it: made in Xero, approved, to the supplier",
+          code == 200 and out.get("po_number") == "PO-0001" and
+          made.get("Status") == "AUTHORISED" and
+          made.get("Contact", {}).get("ContactID") == "C-FDG", f"{out} {made}")
+    lines = made.get("LineItems", [])
+    check("lines with codes Xero buys carry them; one it does not, goes without",
+          lines[0].get("ItemCode") == "FDG-C45-2440" and "ItemCode" not in lines[1]
+          and lines[1]["UnitAmount"] == 19.7, json.dumps(lines))
+    mail = W.mails[-1] if W.mails else {}
+    check("and its PDF is emailed to the supplier by the app's mail provider",
+          out.get("emailed") and mail.get("to") == ["orders@fdg.example"] and
+          mail.get("attachments", [{}])[0].get("filename") == "Purchase order PO-0001.pdf",
+          f"{out} {str(mail)[:200]}")
+    check("the order records its number, that it went, and to whom",
+          W.pos[po_id]["po_number"] == "PO-0001" and W.pos[po_id]["status"] == "sent"
+          and W.pos[po_id]["emailed_to"] == "orders@fdg.example", str(W.pos[po_id]))
+    n = len(W.xero_pos)
+    code, out = call("po_send", {"po_id": po_id}, auth="Bearer boss")
+    check("sent again: emailed again, not made twice in Xero",
+          len(W.xero_pos) == n and out.get("emailed"), str(out))
+    code, ctype, data, number = call_raw("po_pdf", {"po_id": po_id})
+    check("its PDF is there to print", code == 200 and data.startswith(b"%PDF")
+          and number == "PO-0001", f"{code} {data[:30]!r}")
+
+    vul = next(r for r in W.suppliers.values() if r["name"] == "Vulcan")
+    po2 = str(uuid.uuid4())
+    W.pos[po2] = {"id": po2, "supplier": "Vulcan", "supplier_id": vul["id"],
+                  "status": "draft", "lines": [{"description": "Flyscreen frame",
+                                                "quantity": 10, "unit_price": 4}]}
+    code, out = call("po_send", {"po_id": po2}, auth="Bearer boss")
+    check("a supplier with no email: in Xero, and said plainly why it was not sent",
+          out.get("po_number") and not out.get("emailed") and
+          "no email address" in out.get("error", ""), str(out))
+
     print("\n── staying connected ──")
     W.conn["expires_at"] = (now() - dt.timedelta(minutes=5)).isoformat()
     before = W.refreshes
@@ -808,6 +982,8 @@ def main() -> int:
                XERO_CLIENT_SECRET="secret",
                XERO_REDIRECT_URI=f"http://127.0.0.1:{PORT}/",
                XERO_API_BASE=base, XERO_IDENTITY_BASE=base,
+               RESEND_API_KEY="mail-key", MAIL_FROM="TAF <office@taf.example>",
+               RESEND_API_URL=f"{base}/resend",
                DENO_NO_UPDATE_CHECK="1")
     wrapper = Path(tempfile.mkdtemp(prefix="taf-xero-")) / "serve.ts"
     wrapper.write_text(

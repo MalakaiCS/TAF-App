@@ -165,7 +165,11 @@ WITH checks(step, file, purpose, needed, present) AS (VALUES
   (39, 'migrate_customer_xero_delivery.sql', 'A customer''s Xero contact and delivery fee', 'recommended',
       EXISTS (SELECT 1 FROM information_schema.columns
                WHERE table_schema='public' AND table_name='customers'
-                 AND column_name='delivery_fee'))
+                 AND column_name='delivery_fee')),
+
+  (40, 'migrate_purchasing.sql', 'Buying through Xero: suppliers, items, multi-item requests, receiving into stock', 'recommended',
+      to_regclass('public.suppliers') IS NOT NULL
+      AND to_regprocedure('public.receive_purchase(uuid,jsonb)') IS NOT NULL)
 )
 SELECT step,
        CASE WHEN present THEN 'already done' ELSE 'RUN THIS' END AS status,
