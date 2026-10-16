@@ -26,7 +26,7 @@ import urllib.error
 
 from . import tls as _tls          # noqa: F401  - certificates on a Mac
 
-APP_VERSION = "2.32.2"
+APP_VERSION = "2.33.0"
 
 # Public repo whose GitHub Releases drive updates.
 GITHUB_REPO = "MalakaiCS/TAF-App"
