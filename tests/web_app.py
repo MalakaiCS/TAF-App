@@ -584,10 +584,15 @@ def run() -> int:
         check("and it goes once the first screen has loaded",
               page.locator("#screen .card").count() > 0)
         page.wait_for_function(
-            "() => document.querySelectorAll('#screen .card.reveal.in').length > 0",
+            "() => document.querySelectorAll('#screen .card.reveal').length > 0",
             timeout=3000)
-        check("cards fade and rise into view",
-              page.locator("#screen .card.reveal").count() > 0)
+        rise = page.eval_on_selector(
+            "#screen .card.reveal",
+            "c => { const s = getComputedStyle(c); return {name: s.animationName,"
+            " timeline: s.animationTimeline, opacity: s.opacity}; }")
+        check("cards fade and rise into view, driven by the scroll itself",
+              rise["name"] == "taf-rise" and "view" in str(rise["timeline"])
+              and float(rise["opacity"]) > 0.9, str(rise))
         check("the badge is top left",
               page.eval_on_selector("#brand-badge",
                                     "b => { const r = b.getBoundingClientRect();"

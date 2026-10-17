@@ -2318,6 +2318,46 @@ def _steps(app, gui, root):
             gui._REDUCED_MOTION = saved
     add("header: the badge turns, and the loading screen", _badge_and_loading)
 
+    def _smooth_scrolling():
+        """A list scrolled by the wheel glides to where it is going - past
+        positions in between - and lands exactly there; with reduced motion
+        it goes straight there."""
+        saved = gui._REDUCED_MOTION
+        win = tk.Toplevel(root)
+        try:
+            cv = tk.Canvas(win, height=200, highlightthickness=0, bd=0)
+            cv.pack()
+            cv.create_rectangle(0, 0, 100, 1000)
+            cv.configure(scrollregion=(0, 0, 100, 1000))
+            root.update()
+            gui._REDUCED_MOTION = False
+            glide = gui.SmoothScroller(cv, 46)
+            glide.by(300)
+            seen = set()
+            for _ in range(60):
+                root.update()
+                time.sleep(0.01)
+                seen.add(round(cv.canvasy(0)))
+            assert round(cv.canvasy(0)) == 300, cv.canvasy(0)
+            assert len([y for y in seen if 0 < y < 300]) >= 4, sorted(seen)
+            class Notch:
+                num = 5
+                delta = 0
+            glide.wheel(Notch())
+            glide.wheel(Notch())          # two notches add up
+            _settle(0.6)
+            assert round(cv.canvasy(0)) == 300 + round(2 * 46 * 0.9), cv.canvasy(0)
+            glide.to(5000)                # never past the end
+            _settle(0.8)
+            assert round(cv.canvasy(0)) == 800, cv.canvasy(0)
+            gui._REDUCED_MOTION = True
+            glide.to(100)
+            assert round(cv.canvasy(0)) == 100, "reduced motion should jump"
+        finally:
+            gui._REDUCED_MOTION = saved
+            win.destroy()
+    add("lists: smooth scrolling", _smooth_scrolling)
+
     def _cut_list():
         from taf_order_app import features as _feat
         _feat._switches = {"channel_calculator": True}

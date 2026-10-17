@@ -285,10 +285,30 @@
   .taf-badge.spin { animation:taf-turn .7s cubic-bezier(.65, 0, .35, 1); }
 
   /* Fade and rise into view on scroll (U.reveal / U.autoReveal). Only
-     opacity and transform move, so the page is never laid out again. */
-  .reveal { opacity:0; transform:translateY(16px);
-            transition:opacity .5s ease-out, transform .5s ease-out; }
+     opacity and transform move, so the page is never laid out again and
+     the graphics chip does the work.
+
+     Where the browser can tie an animation to the scroll itself (Chrome,
+     Edge, Safari 26), the card rises exactly as far as the page has been
+     scrolled - driven by the scrolling, off the main thread, so it cannot
+     stutter or lag the finger. Elsewhere it is a timed fade on a long,
+     soft ease-out, started as the card comes into view. */
+  .reveal { opacity:0; transform:translate3d(0, 14px, 0);
+            transition:opacity .7s cubic-bezier(.16, 1, .3, 1),
+                       transform .7s cubic-bezier(.16, 1, .3, 1); }
   .reveal.in { opacity:1; transform:none; }
+  @keyframes taf-rise { from { opacity:0; transform:translate3d(0, 28px, 0); }
+                        to   { opacity:1; transform:none; } }
+  @supports (animation-timeline: view()) {
+    .reveal, .reveal.in {
+      opacity:1; transform:none; transition:none;
+      animation:taf-rise linear both;
+      animation-timing-function:cubic-bezier(.33, 1, .68, 1);
+      animation-timeline:view();
+      /* From its top edge appearing to most of it being in view. */
+      animation-range:entry 0% entry 85%;
+    }
+  }
 
   #boot { position:fixed; inset:0; z-index:1000; background:#fff;
           display:flex; align-items:center; justify-content:center;
@@ -298,7 +318,8 @@
   #boot.out { opacity:0; pointer-events:none; }
 
   @media (prefers-reduced-motion: reduce) {
-    .reveal { opacity:1; transform:none; transition:none; }
+    .reveal, .reveal.in { opacity:1; transform:none; transition:none;
+                          animation:none; }
     .taf-badge.spin, #boot img { animation:none; }
     #boot { transition:none; }
   }

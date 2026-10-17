@@ -252,8 +252,18 @@ var TAFUI = (function () {
   var REVEAL = ".card, .stock-card, .hit";
   var revealer = null;
 
+  // Can the browser drive the animation from the scroll position itself?
+  // Then the stylesheet does it all, and nothing here has to watch.
+  var SCROLL_DRIVEN = !!(window.CSS && CSS.supports &&
+                         CSS.supports("animation-timeline: view()"));
+
   function reveal(node, delay) {
-    if (!motionOK() || !("IntersectionObserver" in window)) { return; }
+    if (!motionOK()) { return; }
+    if (SCROLL_DRIVEN) {
+      node.classList.add("reveal");
+      return;
+    }
+    if (!("IntersectionObserver" in window)) { return; }
     if (!revealer) {
       revealer = new IntersectionObserver(function (seen) {
         seen.forEach(function (e) {

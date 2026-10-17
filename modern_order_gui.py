@@ -1255,6 +1255,85 @@ def _wheel_steps(event) -> int:
     return steps or (-1 if delta > 0 else 1)
 
 
+def _wheel_pixels(event, line: float) -> float:
+    """How far a wheel or trackpad movement should scroll, in pixels. A
+    wheel notch is most of a line; a trackpad's stream of small movements
+    adds up in proportion, so it follows the fingers."""
+    num = getattr(event, "num", None)
+    if num in (4, 5):
+        return (-1 if num == 4 else 1) * line * 0.9
+    delta = getattr(event, "delta", 0) or 0
+    if sys.platform == "darwin":
+        return -delta * line * 0.2
+    return -delta / 120 * line * 0.9
+
+
+class SmoothScroller:
+    """Scrolls a canvas by gliding to where it was asked to go, rather than
+    jumping a line at a time. Each wheel or trackpad movement moves the
+    destination; the view eases towards it at screen rate, quick at first
+    and settling gently, so fast flicks and slow drags both feel smooth.
+    With reduced motion it goes straight there."""
+
+    EASE = 0.24             # of the remaining distance, each frame
+    FRAME_MS = 12
+
+    def __init__(self, canvas, line: float):
+        self.cv = canvas
+        self.line = line
+        self.target = None
+        self.job = None
+
+    def _limits(self):
+        region = str(self.cv.cget("scrollregion") or "").split()
+        total = float(region[3]) if len(region) == 4 else 0.0
+        return total, max(0.0, total - self.cv.winfo_height())
+
+    def wheel(self, event):
+        try:
+            self.by(_wheel_pixels(event, self.line))
+        except tk.TclError:
+            pass                      # redrawn under the wheel
+        return "break"
+
+    def by(self, pixels: float):
+        base = self.target if self.target is not None else self.cv.canvasy(0)
+        self.to(base + pixels)
+
+    def to(self, y: float):
+        total, most = self._limits()
+        if total <= 0:
+            return
+        self.target = max(0.0, min(most, y))
+        if reduced_motion():
+            self.cv.yview_moveto(self.target / total)
+            self.target = None
+            return
+        if self.job is None:
+            self._step()
+
+    def _step(self):
+        self.job = None
+        try:
+            if self.target is None or not self.cv.winfo_exists():
+                return
+            total, _most = self._limits()
+            here = self.cv.canvasy(0)
+            gap = self.target - here
+            if abs(gap) < 0.75 or total <= 0:
+                if total > 0:
+                    self.cv.yview_moveto(self.target / total)
+                self.target = None
+                return
+            step = gap * self.EASE
+            if abs(step) < 1:           # never stall a pixel short
+                step = 1 if gap > 0 else -1
+            self.cv.yview_moveto((here + step) / total)
+            self.job = self.cv.after(self.FRAME_MS, self._step)
+        except tk.TclError:
+            self.target = None
+
+
 def _stock_numbers(item, width: int, bold, small) -> tuple:
     """"Stock 40 rolls" and "MOQ 10 rolls" for a card, shortened - units
     off the MOQ, then off both - until the two fit side by side."""
@@ -22554,6 +22633,7 @@ class ModernOrderApp(tk.Frame):
         self._ac_index = -1
         self._ac_canvas = None
         self._ac_wheel = None
+        self._ac_scroller = None
 
         hover_bg = "#E8F4FC"
         outer = tk.Frame(popup, bg=CCA)
@@ -22598,18 +22678,15 @@ class ModernOrderApp(tk.Frame):
             inner.bind("<Configure>", lambda _e: cv.configure(
                 scrollregion=cv.bbox("all")))
             cv.bind("<Configure>", lambda e: cv.itemconfig(win, width=e.width))
+            self._ac_scroller = None
             if len(matches) > shown:
                 sb = ttk.Scrollbar(box, orient="vertical", command=cv.yview)
                 cv.configure(yscrollcommand=sb.set)
                 sb.pack(side="right", fill="y")
-
-                def _wheel(e):
-                    step = _wheel_steps(e)
-                    try:
-                        cv.yview_scroll(step, "units")
-                    except tk.TclError:
-                        pass          # the list was redrawn under the wheel
-                    return "break"
+                # Glides rather than jumping a row a notch.
+                scroller = SmoothScroller(cv, row_h)
+                self._ac_scroller = scroller
+                _wheel = scroller.wheel
                 for seq in ("<MouseWheel>", "<Button-4>", "<Button-5>"):
                     popup.bind(seq, _wheel)
                     cv.bind(seq, _wheel)
@@ -22659,12 +22736,41 @@ class ModernOrderApp(tk.Frame):
         h = outer.winfo_reqheight() + 2
         popup.geometry(f"{w}x{h}+{x}+{y}")
         if popup.state() == "withdrawn":
-            popup.deiconify()
+            self._ac_open(popup, w, h, x, y)
         popup.lift()
         # The first account is what Enter picks; nothing is, when there are
         # none - Enter never makes an account by accident.
         if matches:
             self._ac_highlight(1 if can_create else 0)
+
+    def _ac_open(self, popup, w, h, x, y):
+        """Opening the list: it fades in and settles down into place over a
+        tenth of a second or so, rather than appearing with a jolt. Typing
+        afterwards redraws inside it without opening it again."""
+        if reduced_motion():
+            popup.deiconify()
+            return
+        try:
+            popup.attributes("-alpha", 0.0)
+        except tk.TclError:
+            popup.deiconify()             # no see-through windows here
+            return
+        popup.geometry(f"{w}x{h}+{x}+{y - px(6)}")
+        popup.deiconify()
+        frames = 8
+
+        def _frame(i=1):
+            if not popup.winfo_exists():
+                return
+            t = _ease_in_out(i / frames) if i < frames else 1.0
+            try:
+                popup.attributes("-alpha", t)
+                popup.geometry(f"+{x}+{y - round(px(6) * (1 - t))}")
+            except tk.TclError:
+                return
+            if i < frames:
+                popup.after(14, lambda: _frame(i + 1))
+        _frame()
 
     def _ac_highlight(self, idx: int) -> None:
         rows = getattr(self, "_ac_rows", None) or []
@@ -22689,10 +22795,17 @@ class ModernOrderApp(tk.Frame):
                 bottom = top + frame.winfo_height()
                 total = max(1, frame.master.winfo_height())
                 view0, view1 = cv.yview()
+                glide = getattr(self, "_ac_scroller", None)
                 if top < view0 * total:
-                    cv.yview_moveto(top / total)
+                    if glide:
+                        glide.to(top)
+                    else:
+                        cv.yview_moveto(top / total)
                 elif bottom > view1 * total:
-                    cv.yview_moveto((bottom - cv.winfo_height()) / total)
+                    if glide:
+                        glide.to(bottom - cv.winfo_height())
+                    else:
+                        cv.yview_moveto((bottom - cv.winfo_height()) / total)
             except Exception:
                 pass
 
@@ -22735,6 +22848,7 @@ class ModernOrderApp(tk.Frame):
         self._ac_index = -1
         self._ac_canvas = None
         self._ac_wheel = None
+        self._ac_scroller = None
 
     # ── Draft auto-save ───────────────────────────────────────────────────
 
