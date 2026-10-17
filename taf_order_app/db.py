@@ -3043,6 +3043,99 @@ def customer_orders(customer: dict, limit: int = 20) -> list:
     return list(resp.data or [])
 
 
+# ── Winning the work (step 46, migrate_sales.sql) ────────────────────────────
+
+def quotes_for_report(days: int = 365) -> list:
+    """Quotes of the last `days`, for chasing and for why they were lost."""
+    import datetime as _d
+    since = (_d.datetime.utcnow() - _d.timedelta(days=days)).isoformat()
+    resp = (get_client().table("quotes")
+            .select("id,quote_number,customer_id,customer_name,status,total,"
+                    "sent_at,viewed_at,responded_at,updated_at,created_at,"
+                    "chased_at,chase_count,lost_reason,lost_note,public_token")
+            .gte("created_at", since).order("created_at", desc=True)
+            .limit(2000).execute())
+    return list(resp.data or [])
+
+
+def quote_chased(quote_id: str) -> int:
+    resp = get_client().rpc("quote_chased", {"p_id": str(quote_id)}).execute()
+    return int(resp.data or 0)
+
+
+def set_quote_lost(quote_id: str, reason: str, note: str = "") -> None:
+    """Lost, and why. A quote still waiting becomes declined; one already
+    declined (by the customer, on their link) just gets its reason."""
+    import datetime as _d
+    now = _d.datetime.utcnow().isoformat()
+    row = get_quote(quote_id) or {}
+    patch = {"lost_reason": reason, "lost_note": note, "updated_at": now}
+    if (row.get("status") or "") not in ("declined", "expired"):
+        patch["status"] = "declined"
+        patch["responded_at"] = row.get("responded_at") or now
+    get_client().table("quotes").update(patch).eq("id", quote_id).execute()
+
+
+def customers_on_service() -> list:
+    resp = (get_client().table("customers").select("*")
+            .not_.is_("service_weeks", "null").execute())
+    return list(resp.data or [])
+
+
+def set_service_weeks(customer_id: str, weeks) -> None:
+    get_client().table("customers").update(
+        {"service_weeks": int(weeks) if weeks else None}
+    ).eq("id", customer_id).execute()
+
+
+def snooze_service(customer_id: str, until) -> None:
+    get_client().table("customers").update(
+        {"service_snoozed_until": until.isoformat() if until else None}
+    ).eq("id", customer_id).execute()
+
+
+def orders_since(day) -> list:
+    """Orders created since a day, without their lines - enough to know
+    when each customer last ordered."""
+    resp = (get_client().table("orders")
+            .select("id,customer_name,date_ordered,created_at")
+            .gte("created_at", day.isoformat())
+            .order("created_at", desc=True).limit(5000).execute())
+    return list(resp.data or [])
+
+
+def price_changes(limit: int = 50) -> list:
+    resp = (get_client().table("price_changes").select("*")
+            .order("created_at", desc=True).limit(limit).execute())
+    return list(resp.data or [])
+
+
+def add_price_change(change: dict) -> str:
+    row = {k: change.get(k) for k in ("scope", "match_text", "tiers",
+                                      "percent", "starts_on", "note")}
+    row["starts_on"] = (row["starts_on"].isoformat()
+                        if hasattr(row.get("starts_on"), "isoformat")
+                        else row.get("starts_on"))
+    row["created_by"] = current_full_name() or current_username()
+    resp = get_client().table("price_changes").insert(row).execute()
+    return str((resp.data or [{}])[0].get("id") or "")
+
+
+def apply_price_change(change_id: str) -> int:
+    resp = get_client().rpc("apply_price_change", {"p_id": change_id}).execute()
+    return int(resp.data or 0)
+
+
+def apply_due_price_changes() -> int:
+    resp = get_client().rpc("apply_due_price_changes", {}).execute()
+    return int(resp.data or 0)
+
+
+def cancel_price_change(change_id: str) -> None:
+    (get_client().table("price_changes").delete().eq("id", change_id)
+     .is_("applied_at", "null").execute())
+
+
 def _now_stamp() -> str:
     import datetime as _dt
     d = _dt.datetime.now()

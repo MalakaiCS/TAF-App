@@ -33,6 +33,7 @@ from taf_order_app import cutting as _cutting
 from taf_order_app import insights as _insights
 from taf_order_app import floor as _floor
 from taf_order_app import planning as _planning
+from taf_order_app import sales as _sales
 from taf_order_app import records as _records
 from taf_order_app import xero as _xero
 from taf_order_app import invoice_wording as _wording
@@ -10011,6 +10012,7 @@ class ModernOrderApp(tk.Frame):
             self._bell = NotificationBell(inner, command=self._open_notifications)
             self._bell.pack(side="right", padx=(px(4), px(8)))
             self.master.after(1500, self._poll_notifications)
+            self.master.after(6000, self._apply_due_price_changes)
 
         # A shortcut nobody knows about saves nobody any time, so there is a
         # way in that doesn't require already knowing the shortcut.
@@ -13706,6 +13708,24 @@ class ModernOrderApp(tk.Frame):
         if photos:
             tiles.append(("From a phone, to check", photos, CA2,
                           self._open_phone_inbox))
+        # Winning the work (step 46), when switched on and there is some.
+        if _features.is_on("quote_chase"):
+            try:
+                chase = len(_sales.to_chase(_db.quotes_for_report(120),
+                                            datetime.date.today()))
+            except Exception:
+                chase = 0
+            if chase:
+                tiles.append(("Quotes to chase", chase, "#D98C00",
+                              self._quotes_to_chase))
+        if _features.is_on("service_reminders"):
+            try:
+                due_change = len(self._service_due_rows())
+            except Exception:
+                due_change = 0
+            if due_change:
+                tiles.append(("Due a filter change", due_change, "#7B5EA7",
+                              self._service_due_window))
         if staff:
             tiles.append(("Staff to approve", staff, CRD,
                           self._open_user_management))
@@ -13931,7 +13951,9 @@ class ModernOrderApp(tk.Frame):
             return [
                 ("View their orders",     self._view_customer_orders),
             ] + ([("Order again…",       self._order_again)]
-                 if _features.is_on("order_again") else []) + [
+                 if _features.is_on("order_again") else []) + (
+                [("Filter change every…", self._set_service_weeks)]
+                if _features.is_on("service_reminders") else []) + [
                 ("Their portal link…",    self._customer_portal_link),
                 (("Turn delivery labels off" if on else
                   "Turn delivery labels on"), self._toggle_customer_labels),
@@ -18339,6 +18361,11 @@ class ModernOrderApp(tk.Frame):
         ("qc_checklist",       "QC checklists…",          "_qc_checklists"),
         ("fault_log",          "Faults and rework…",      "_fault_log"),
         ("roster",             "Staff roster and leave…", "_roster_window"),
+        ("quote_chase",        "Quotes to chase…",        "_quotes_to_chase"),
+        ("lost_reasons",       "Why quotes are lost…",    "_lost_report"),
+        ("service_reminders",  "Due for a filter change…", "_service_due_window"),
+        ("price_change",       "Change prices…",          "_price_change_tool"),
+        ("owing_view",         "Who owes what…",          "_owing_window"),
         ("customer_display",   "Enable second screen display…",
                                                          "_customer_screen_from_menu"),
     ]
@@ -19697,6 +19724,579 @@ class ModernOrderApp(tk.Frame):
         self.status_var.set(
             f"Order {row.get('order_number') or ''} for {cust.get('name', '')} is "
             "on a new order - put in their new order number and generate it.")
+
+    # ── Winning the work (step 46) ───────────────────────────────────────
+
+    def _customer_for_quote(self, q) -> dict:
+        """The customer a quote is for, for their email and first name."""
+        try:
+            if q.get("customer_id"):
+                hit = [c for c in _db.get_customers(active_only=False)
+                       if str(c.get("id")) == str(q["customer_id"])]
+                if hit:
+                    return hit[0]
+            return _db.match_customer(q.get("customer_name") or "") or {}
+        except Exception:
+            return {}
+
+    def _chase_quote(self, q, parent=None) -> str:
+        """Open an email to the customer, ready to send, with the quote's
+        link in it - and count the chase. Returns the mailto link."""
+        import webbrowser
+        try:
+            token = q.get("public_token") or _db.ensure_quote_token(q["id"])
+        except Exception as exc:
+            messagebox.showerror("Chase", f"The quote's link could not be "
+                                 f"made:\n{exc}", parent=parent)
+            return ""
+        cust = self._customer_for_quote(q)
+        mail = _sales.chase_email(q, self._quote_link(token),
+                                  contact=str(cust.get("contact_name")
+                                              or cust.get("attention") or ""))
+        link = _sales.mailto(cust.get("email") or "", mail["subject"], mail["body"])
+        try:
+            webbrowser.open(link)
+        except Exception:
+            pass
+        try:
+            _db.quote_chased(q["id"])
+            _db.log_action("quote_chased", f"{q.get('quote_number', '')} · "
+                                           f"{q.get('customer_name', '')}")
+        except Exception:
+            pass
+        self.status_var.set(f"An email chasing {q.get('quote_number', '')} is "
+                            "open - check it and press send.")
+        return link
+
+    def _mark_quote_lost(self, q, parent=None, then=None):
+        dlg = tk.Toplevel(parent or self.master, bg=CBG)
+        dlg.title("Why was it lost?")
+        dlg.transient(parent or self.master)
+        _centre_on_parent(dlg, parent or self.master, px(420), px(230))
+        body = tk.Frame(dlg, bg=CBG, padx=px(16), pady=px(12))
+        body.pack(fill="both", expand=True)
+        tk.Label(body, text=f"{q.get('quote_number', '')} · "
+                 f"{q.get('customer_name', '')}", bg=CBG, fg=CA,
+                 font=F_SEC).pack(anchor="w")
+        reason = tk.StringVar(value=q.get("lost_reason") or _sales.LOST_REASONS[0])
+        ttk.Combobox(body, textvariable=reason, state="readonly",
+                     values=_sales.LOST_REASONS).pack(fill="x", pady=(px(8), px(6)))
+        note = tk.StringVar(value=q.get("lost_note") or "")
+        field_entry(body, textvariable=note).pack(fill="x")
+        tk.Label(body, text="A note, if there is one (who they went with, "
+                 "what price they were given).", bg=CBG, fg=CMU,
+                 font=F_SM).pack(anchor="w")
+
+        def _save():
+            try:
+                _db.set_quote_lost(q["id"], reason.get(), note.get().strip())
+                _db.log_action("quote_lost", f"{q.get('quote_number', '')} · "
+                                             f"{reason.get()}")
+            except Exception as exc:
+                messagebox.showerror("Lost", f"It wasn't saved:\n{exc}",
+                                     parent=dlg)
+                return
+            dlg.destroy()
+            if then:
+                then()
+        row = tk.Frame(dlg, bg=CBG, padx=px(16), pady=px(10))
+        row.pack(fill="x")
+        flat_btn(row, "Save", _save, bg=CA, pady=px(6)).pack(side="left")
+        flat_btn(row, "Cancel", dlg.destroy, bg=CNE, variant="secondary",
+                 pady=px(6)).pack(side="right")
+        dlg.lost_vars, dlg.lost_save = (reason, note), _save
+        self._lost_dialog = dlg
+        return dlg
+
+    def _quotes_to_chase(self):
+        """Quotes with no answer after a week: chase, mark lost, or open."""
+        cache = {}
+
+        def build():
+            rows = _sales.to_chase(_db.quotes_for_report(120),
+                                   datetime.date.today())
+            cache.clear()
+            cache.update({str(r["id"]): r for r in rows})
+            out = [((r.get("quote_number") or "—", r.get("customer_name") or "",
+                     f"${float(r.get('total') or 0):,.2f}",
+                     f"{r['waited']} days",
+                     "yes" if r.get("viewed_at") else "not yet",
+                     str(r.get("chase_count") or 0)), None, str(r["id"]))
+                   for r in rows]
+            return out, ("Nothing to chase - every quote sent in the last week "
+                         "or chased lately is left alone." if not rows else
+                         "Chase opens an email to them, ready to send, with "
+                         "their quote's link in it.")
+
+        dlg, tree, foot = self._table_window(
+            "Quotes to chase",
+            "Sent a week or more ago with no answer, and not chased in the "
+            "last week. Longest waiting first.",
+            [("q", "Quote", 100, "w"), ("c", "Customer", 230, "w"),
+             ("t", "Total", 100, "e"), ("w", "Waiting", 90, "e"),
+             ("o", "Opened", 80, "w"), ("n", "Chased", 70, "e")],
+            build, width=780, on_row=lambda iid, p: self._open_quote_id(iid))
+
+        def _sel():
+            return cache.get(tree.focus() or (tree.selection() or [""])[0])
+
+        def _refresh():
+            dlg.destroy()
+            self._quotes_to_chase()
+        bottom = dlg.winfo_children()[-1]
+        flat_btn(bottom, "Chase by email", lambda: _sel() and (
+            self._chase_quote(_sel(), dlg), _refresh()), bg=CA,
+            pady=px(6)).pack(side="left")
+        flat_btn(bottom, "Mark lost…", lambda: _sel() and self._mark_quote_lost(
+            _sel(), dlg, then=_refresh), bg=CNE, variant="secondary",
+            pady=px(6)).pack(side="left", padx=(px(8), 0))
+        dlg.chase_cache = cache
+        return dlg, tree, foot
+
+    def _open_quote_id(self, quote_id):
+        try:
+            row = _db.get_quote(str(quote_id))
+        except Exception:
+            row = None
+        if row:
+            self._load_quote(row)
+
+    def _lost_report(self):
+        """Won and lost over the last year, and why the lost ones went."""
+        cache = {}
+        since = datetime.date.today() - datetime.timedelta(days=365)
+
+        def build():
+            rows = _db.quotes_for_report(365)
+            got = _sales.lost_report(rows, since=since)
+            out = [(("Why they were lost", "", ""), "head", None)]
+            for r in got["reasons"]:
+                out.append(((f"    {r['name']}", r["count"],
+                             f"${r['value']:,.2f}"), None, None))
+            blank = [r for r in rows if r.get("status") in ("declined", "expired")
+                     and not (r.get("lost_reason") or "").strip()]
+            cache.clear()
+            cache.update({str(r["id"]): r for r in blank})
+            if blank:
+                out.append((("No reason given yet - double-click to add one",
+                             "", ""), "head", None))
+                for r in blank[:60]:
+                    out.append(((f"    {r.get('quote_number') or '—'} · "
+                                 f"{r.get('customer_name') or ''}", "",
+                                 f"${float(r.get('total') or 0):,.2f}"),
+                                None, str(r["id"])))
+            rate = (f"{got['win_rate']:.0%}" if got["win_rate"] is not None
+                    else "—")
+            return out, (f"Won {got['won']} (${got['won_value']:,.2f}), lost "
+                         f"{got['lost']} (${got['lost_value']:,.2f}) in the "
+                         f"last year - a win rate of {rate}.")
+
+        def _give(iid, parent):
+            q = cache.get(str(iid))
+            if q:
+                self._mark_quote_lost(q, parent, then=lambda: (
+                    parent.destroy(), self._lost_report()))
+
+        return self._table_window(
+            "Why quotes are lost",
+            "Every quote declined or left to expire in the last year, by the "
+            "reason it went.", [("what", "Reason", 460, "w"),
+                                ("n", "Quotes", 80, "e"), ("v", "Value", 120, "e")],
+            build, width=720, on_row=_give)
+
+    def _service_due_rows(self):
+        today = datetime.date.today()
+        custs = _db.customers_on_service()
+        orders = _db.orders_since(today - datetime.timedelta(days=800))
+        return _sales.service_due(custs, orders, today)
+
+    def _service_due_window(self):
+        """Customers whose filters are due a change: quote it, order again,
+        or snooze it."""
+        cache = {}
+
+        def build():
+            rows = self._service_due_rows()
+            cache.clear()
+            cache.update({str(r["customer"]["id"]): r for r in rows})
+            out = [((r["customer"].get("name") or "",
+                     f"every {r['customer'].get('service_weeks')} weeks",
+                     r["last"].strftime("%d/%m/%Y"), r["due"].strftime("%d/%m/%Y"),
+                     f"{r['late']} days" if r["late"] else "soon"),
+                    "late" if r["late"] else None, str(r["customer"]["id"]))
+                   for r in rows]
+            return out, ("Nobody is due in the next fortnight. Set how often a "
+                         "customer's filters are changed with Customer ▾ → "
+                         "Filter change every…" if not rows else
+                         "Quote it puts their last order's lines on a quote; "
+                         "Snooze hides one for a fortnight.")
+
+        dlg, tree, foot = self._table_window(
+            "Due for a filter change",
+            "Customers on regular changes whose next one is due in the next "
+            "fortnight, or has passed.",
+            [("c", "Customer", 240, "w"), ("e", "How often", 120, "w"),
+             ("l", "Last order", 110, "w"), ("d", "Due", 110, "w"),
+             ("x", "Late", 90, "e")], build, width=760)
+
+        def _sel():
+            return cache.get(tree.focus() or (tree.selection() or [""])[0])
+
+        def _quote_it():
+            r = _sel()
+            if not r:
+                return
+            self._quote_last_order(r["customer"])
+            dlg.destroy()
+
+        def _snooze():
+            r = _sel()
+            if not r:
+                return
+            try:
+                _db.snooze_service(r["customer"]["id"], datetime.date.today()
+                                   + datetime.timedelta(days=14))
+            except Exception as exc:
+                messagebox.showerror("Snooze", str(exc), parent=dlg)
+                return
+            dlg.destroy()
+            self._service_due_window()
+        bottom = dlg.winfo_children()[-1]
+        flat_btn(bottom, "Quote it", _quote_it, bg=CA, pady=px(6)).pack(side="left")
+        if _features.is_on("order_again"):
+            flat_btn(bottom, "Order again…", lambda: _sel() and self._order_again(
+                _sel()["customer"]), bg=CNE, variant="secondary",
+                pady=px(6)).pack(side="left", padx=(px(8), 0))
+        flat_btn(bottom, "Snooze 2 weeks", _snooze, bg=CNE, variant="secondary",
+                 pady=px(6)).pack(side="left", padx=(px(8), 0))
+        dlg.service_cache = cache
+        return dlg, tree, foot
+
+    def _quote_last_order(self, cust):
+        """A customer's last order, on a quote, ready to price and send."""
+        try:
+            rows = _db.customer_orders(cust, limit=1)
+        except Exception as exc:
+            messagebox.showerror("Quote it", str(exc))
+            return
+        if not rows:
+            messagebox.showinfo("Quote it", "They have no orders to quote from.")
+            return
+        row = rows[0]
+        head = row.get("header") or {}
+        self._show_tab("quotes")
+        self.quote_customer_var.set(cust.get("name") or head.get("Customer Name", ""))
+        self.quote_number_var.set("")
+        self.quote_ref_var.set(head.get("Job", ""))
+        self.quote_location_var.set(head.get("Location", ""))
+        self.quote_items = [self._stamp_item(dict(i)) for i in
+                            _planning.repeat_items(row.get("items") or [])]
+        self._refresh_quote_lines()
+        self.status_var.set(f"{cust.get('name', '')}'s last order is on a quote "
+                            "- check the prices and send it.")
+
+    def _set_service_weeks(self):
+        cust = self._get_selected_customer()
+        if cust is None:
+            messagebox.showinfo("Filter changes", "Select a customer first.")
+            return
+        from tkinter import simpledialog
+        got = simpledialog.askstring(
+            "Filter changes", f"How many weeks between filter changes for "
+            f"{cust.get('name', '')}? Leave it empty for none.",
+            initialvalue=str(cust.get("service_weeks") or ""), parent=self.master)
+        if got is None:
+            return
+        got = got.strip()
+        try:
+            weeks = int(got) if got else None
+            if weeks is not None and not (1 <= weeks <= 104):
+                raise ValueError
+        except ValueError:
+            messagebox.showwarning("Filter changes",
+                                   "A number of weeks from 1 to 104.")
+            return
+        try:
+            _db.set_service_weeks(cust["id"], weeks)
+        except Exception as exc:
+            messagebox.showerror("Filter changes", str(exc))
+            return
+        cust["service_weeks"] = weeks
+        self.status_var.set(f"{cust.get('name', '')}: " + (
+            f"a filter change every {weeks} weeks." if weeks else
+            "no filter-change reminder."))
+
+    def _apply_due_price_changes(self):
+        """Price changes that start today, applied by a manager's PC."""
+        if not (_db.is_ready() and _features.is_on("price_change")
+                and _db.can_manage_prices()):
+            return
+
+        def _work():
+            try:
+                n = _db.apply_due_price_changes()
+            except Exception:
+                n = 0
+            if n:
+                self.master.after(0, lambda: self.status_var.set(
+                    f"Price changes due today were applied ({n} price"
+                    f"{'s' if n != 1 else ''})."))
+        threading.Thread(target=_work, daemon=True).start()
+
+    def _price_change_tool(self):
+        """Raise or cut prices by a percentage, previewed, now or from a date."""
+        can = _db.can_manage_prices()
+        dlg = tk.Toplevel(self.master, bg=CBG)
+        dlg.title("Change prices")
+        dlg.transient(self.master)
+        _centre_on_parent(dlg, self.master, px(860), px(620))
+        form = tk.Frame(dlg, bg=CBG, padx=px(16), pady=px(12))
+        form.pack(fill="x")
+        tk.Label(form, text="Change prices", bg=CBG, fg=CA, font=F_TTL).grid(
+            row=0, column=0, columnspan=6, sticky="w")
+        scope = tk.StringVar(value="all")
+        for i, (val, text) in enumerate((("all", "Everything"),
+                                         ("list", "Part numbers"),
+                                         ("rates", "Square-metre rates"))):
+            tk.Radiobutton(form, text=text, variable=scope, value=val, bg=CBG,
+                           fg=CTX, activebackground=CBG, selectcolor=CCA,
+                           font=F_BODY).grid(row=1, column=i, sticky="w",
+                                             pady=(px(8), 0))
+        match = tk.StringVar()
+        pct = tk.StringVar(value="5")
+        start = tk.StringVar(value=datetime.date.today().strftime("%d/%m/%Y"))
+        note = tk.StringVar()
+        tiers = [tk.BooleanVar(value=True) for _ in range(3)]
+        for r, (label, var, wd) in enumerate((
+                ("Only those containing (optional)", match, 24),
+                ("By what percent (−10 for a cut)", pct, 8),
+                ("From (dd/mm/yyyy)", start, 12), ("Note", note, 30)), start=2):
+            tk.Label(form, text=label, bg=CBG, fg=CTX, font=F_BODY).grid(
+                row=r, column=0, columnspan=2, sticky="w", pady=px(3))
+            field_entry(form, textvariable=var, width=wd).grid(
+                row=r, column=2, columnspan=2, sticky="w", pady=px(3))
+        tk.Label(form, text="Tiers", bg=CBG, fg=CTX, font=F_BODY).grid(
+            row=6, column=0, sticky="w")
+        for i, v in enumerate(tiers):
+            tk.Checkbutton(form, text=f"Tier {i + 1}", variable=v, bg=CBG,
+                           fg=CTX, activebackground=CBG, selectcolor=CCA,
+                           font=F_BODY).grid(row=6, column=1 + i, sticky="w")
+        wrap = tk.Frame(dlg, bg=CCA)
+        wrap.pack(fill="both", expand=True, padx=px(16))
+        tree = ttk.Treeview(wrap, columns=("what", "tier", "old", "new"),
+                            show="headings", style="TAF.Treeview")
+        for key, label, wd, anc in (("what", "What", 360, "w"),
+                                    ("tier", "Tier", 70, "center"),
+                                    ("old", "Now", 110, "e"),
+                                    ("new", "Becomes", 110, "e")):
+            tree.heading(key, text=label)
+            tree.column(key, width=px(wd), anchor=anc)
+        sb = ttk.Scrollbar(wrap, orient="vertical", command=tree.yview)
+        tree.configure(yscrollcommand=sb.set)
+        sb.pack(side="right", fill="y")
+        tree.pack(fill="both", expand=True)
+        said = tk.Label(dlg, text="Press Preview to see what would change.",
+                        bg=CBG, fg=CMU, font=F_SM, anchor="w", justify="left",
+                        wraplength=px(820))
+        said.pack(fill="x", padx=px(16), pady=(px(6), 0))
+        state = {"change": None, "rows": []}
+
+        def _change():
+            try:
+                p = float(pct.get())
+                if not (-90 < p < 500) or p == 0:
+                    raise ValueError
+            except ValueError:
+                messagebox.showwarning("Change prices", "The percent should be "
+                                       "a number like 5 or -10.", parent=dlg)
+                return None
+            day = _insights.parse_date(start.get())
+            if day is None:
+                messagebox.showwarning("Change prices", "From should be a date "
+                                       "like 01/11/2026.", parent=dlg)
+                return None
+            t = [i + 1 for i, v in enumerate(tiers) if v.get()]
+            if not t:
+                messagebox.showwarning("Change prices", "Pick at least one tier.",
+                                       parent=dlg)
+                return None
+            return {"scope": scope.get(), "match_text": match.get().strip(),
+                    "tiers": t, "percent": p, "starts_on": day,
+                    "note": note.get().strip()}
+
+        def _preview():
+            c = _change()
+            if not c:
+                return
+            try:
+                rows = _sales.price_preview(_db.get_price_rows(),
+                                            _db.get_price_rate_rows(), c)
+            except Exception as exc:
+                messagebox.showerror("Change prices", str(exc), parent=dlg)
+                return
+            tree.delete(*tree.get_children())
+            for r in rows[:500]:
+                tree.insert("", "end", values=(r["what"], r["tier"],
+                                               f"${r['old']:,.2f}",
+                                               f"${r['new']:,.2f}"))
+            state["change"], state["rows"] = c, rows
+            when = ("now" if c["starts_on"] <= datetime.date.today() else
+                    c["starts_on"].strftime("on %d/%m/%Y"))
+            said.config(text=f"{len(rows)} price{'s' if len(rows) != 1 else ''} "
+                        f"would change, {when}"
+                        + (" (the first 500 are shown)." if len(rows) > 500 else "."))
+
+        def _go():
+            c = _change()
+            if not c:
+                return
+            if state["change"] != c:
+                _preview()
+                c = state["change"]
+                if not c:
+                    return
+            if not state["rows"]:
+                messagebox.showinfo("Change prices", "Nothing would change.",
+                                    parent=dlg)
+                return
+            now = c["starts_on"] <= datetime.date.today()
+            if not messagebox.askyesno(
+                    "Change prices",
+                    f"{'Change' if now else 'Schedule'} {len(state['rows'])} "
+                    f"price{'s' if len(state['rows']) != 1 else ''} by "
+                    f"{c['percent']:+g}%"
+                    + ("" if now else c["starts_on"].strftime(" from %d/%m/%Y"))
+                    + "? Quotes already sent keep the prices they were sent "
+                    "with.", parent=dlg):
+                return
+            try:
+                cid = _db.add_price_change(c)
+                n = _db.apply_price_change(cid) if now else 0
+                _db.log_action("prices_changed",
+                               f"{c['percent']:+g}% · {c['scope']} · "
+                               f"{c['match_text'] or 'all'} · tiers "
+                               f"{','.join(map(str, c['tiers']))}"
+                               + ("" if now else f" · from {c['starts_on']}"))
+            except Exception as exc:
+                messagebox.showerror("Change prices", f"It wasn't done:\n{exc}",
+                                     parent=dlg)
+                return
+            said.config(text=(f"Done: {n} price{'s' if n != 1 else ''} changed."
+                              if now else c["starts_on"].strftime(
+                                  "Scheduled: a manager's PC applies it on "
+                                  "%d/%m/%Y.")))
+            state["change"] = None
+            _list_pending()
+
+        pend = tk.Frame(dlg, bg=CBG, padx=px(16))
+        pend.pack(fill="x")
+
+        def _list_pending():
+            for w in pend.winfo_children():
+                w.destroy()
+            try:
+                waiting = [c for c in _db.price_changes() if not c.get("applied_at")]
+            except Exception:
+                waiting = []
+            for c in waiting:
+                row = tk.Frame(pend, bg=CBG)
+                row.pack(fill="x", pady=px(2))
+                tk.Label(row, bg=CBG, fg=CTX, font=F_SM, text=(
+                    f"Waiting: {float(c['percent']):+g}% on "
+                    f"{dict(all='everything', list='part numbers', rates='rates')[c['scope']]}"
+                    + (f" containing \"{c['match_text']}\"" if c.get("match_text") else "")
+                    + f" from {c['starts_on']}")).pack(side="left")
+                flat_btn(row, "Cancel it", lambda i=c["id"]: (
+                    _db.cancel_price_change(i), _list_pending()), bg=CNE,
+                    variant="secondary", pady=px(2)).pack(side="right")
+        bottom = tk.Frame(dlg, bg=CBG, padx=px(16), pady=px(10))
+        bottom.pack(fill="x")
+        flat_btn(bottom, "Preview", _preview, bg=CNE, variant="secondary",
+                 pady=px(6)).pack(side="left")
+        if can:
+            flat_btn(bottom, "Change them", _go, bg=CA, pady=px(6)).pack(
+                side="left", padx=(px(8), 0))
+        else:
+            tk.Label(bottom, text="Only a manager can change prices - this "
+                     "shows what a change would do.", bg=CBG, fg=CMU,
+                     font=F_SM).pack(side="left", padx=(px(8), 0))
+        flat_btn(bottom, "Close", dlg.destroy, bg=CNE, variant="secondary",
+                 pady=px(6)).pack(side="right")
+        _list_pending()
+        dlg.price_vars = {"scope": scope, "match": match, "pct": pct,
+                          "start": start, "tiers": tiers}
+        dlg.price_preview, dlg.price_go, dlg.price_tree, dlg.price_said = \
+            _preview, _go, tree, said
+        return dlg
+
+    def _owing_window(self):
+        """Unpaid invoices from Xero by customer, aged; a statement for one."""
+        cache = {}
+
+        def build():
+            got = _xero.owing()
+            if got.get("error"):
+                raise RuntimeError(got["error"])
+            custs = _sales.owing_by_customer(got.get("rows") or [])
+            cache.clear()
+            out = []
+            for i, c in enumerate(custs):
+                cache[f"c{i}"] = c
+                out.append(((c["customer"], f"${c['owing']:,.2f}",
+                             *(f"${c[k]:,.2f}" if c[k] else "" for k, _ in _sales.AGES)),
+                            "late" if c["oldest"] > 30 else None, f"c{i}"))
+            total = sum(c["owing"] for c in custs)
+            return out, (f"${total:,.2f} owed by {len(custs)} customer"
+                         f"{'s' if len(custs) != 1 else ''}. Select one for a "
+                         "statement." if custs else "Nothing is owed. ")
+
+        cols = [("c", "Customer", 230, "w"), ("o", "Owing", 100, "e")] + [
+            (k, label, 90, "e") for k, label in _sales.AGES]
+        dlg, tree, foot = self._table_window(
+            "Who owes what", "Unpaid invoices from Xero, added up by customer "
+            "and by how late they are.", cols, build, width=900)
+
+        def _statement(email=False):
+            c = cache.get(tree.focus() or (tree.selection() or [""])[0])
+            if not c:
+                messagebox.showinfo("Statement", "Select a customer first.",
+                                    parent=dlg)
+                return
+            safe = re.sub(r"[^A-Za-z0-9 _-]+", "", c["customer"]).strip() or "customer"
+            out = APP_DIR / "Statements" / (
+                f"Statement - {safe} - {datetime.date.today():%Y-%m-%d}.pdf")
+            try:
+                _sales.statement_pdf(out, c)
+            except Exception as exc:
+                messagebox.showerror("Statement", str(exc), parent=dlg)
+                return
+            _open_path(out)
+            if email:
+                import webbrowser
+                cust = {}
+                try:
+                    cust = _db.match_customer(c["customer"]) or {}
+                except Exception:
+                    pass
+                body = (f"Hi,\n\nPlease find attached a statement of the "
+                        f"invoices still open on your account - "
+                        f"${c['owing']:,.2f} in all.\n\nIf you have paid "
+                        "since, thank you, and please ignore this.\n\n"
+                        "Thanks,\nTotal Air Filtration")
+                webbrowser.open(_sales.mailto(cust.get("email") or "",
+                                              "Statement from Total Air "
+                                              "Filtration", body))
+                self.status_var.set("The statement is open, and an email to "
+                                    "them - attach the PDF and send it.")
+            dlg.last_statement = str(out)
+        bottom = dlg.winfo_children()[-1]
+        flat_btn(bottom, "Statement (PDF)", _statement, bg=CA,
+                 pady=px(6)).pack(side="left")
+        flat_btn(bottom, "Email a statement…", lambda: _statement(True), bg=CNE,
+                 variant="secondary", pady=px(6)).pack(side="left",
+                                                       padx=(px(8), 0))
+        dlg.owing_cache, dlg.owing_statement = cache, _statement
+        return dlg, tree, foot
 
     def _outstanding_orders(self):
         """Every live order, with its lines. Read fresh rather than from the

@@ -323,6 +323,13 @@ class Stub:
             return send(CUSTOMERS)
         if "/rest/v1/stock_items" in url:
             return send(STOCK)
+        if "/rest/v1/quotes" in url and req.method == "PATCH":
+            qid = url.split("id=eq.", 1)[1].split("&")[0]
+            row = next((x for x in QUOTES if x["id"] == qid), None)
+            if row is None:
+                return send([])
+            row.update(body)
+            return send([row])
         if "/rest/v1/quotes" in url:
             return send(QUOTES)
         if "/rest/v1/order_files" in url and req.method == "POST":
@@ -1216,6 +1223,95 @@ def run() -> int:
               and not any("made" in (i or {}) or "line_id" in (i or {})
                           for i in RAISED[-1].get("items") or []),
               str(RAISED[-1:])[:300])
+        SWITCHES.clear()
+        page.evaluate("TAFAPP._floor.setFeatures({})")
+
+        print("\n── winning the work ──")
+        from taf_order_app import sales as _sales
+        quotes = [
+            {"id": "a", "status": "sent", "sent_at": "2026-10-01T00:00:00Z"},
+            {"id": "b", "status": "viewed", "sent_at": "2026-10-08T00:00:00Z"},
+            {"id": "c", "status": "sent", "sent_at": "2026-10-12T00:00:00Z"},
+            {"id": "e", "status": "sent", "sent_at": "2026-09-20T00:00:00Z",
+             "chased_at": "2026-10-14T00:00:00Z"},
+            {"id": "f", "status": "sent", "sent_at": "2026-09-20T00:00:00Z",
+             "chased_at": "2026-10-05T00:00:00Z"},
+            {"id": "d", "status": "accepted", "sent_at": "2026-09-01"}]
+        js = page.evaluate("(q) => TAFAPP._sales.toChase(q, '2026-10-16')", quotes)
+        py = [{"id": q["id"], "waited": q["waited"]}
+              for q in _sales.to_chase(quotes, _dt.date(2026, 10, 16))]
+        check("the phone chases the same quotes as the desktop", js == py,
+              f"{js} != {py}")
+        mail_js = page.evaluate("""() => {
+            const S = TAFAPP._sales;
+            const m = S.chaseEmail({quote_number: 'Q-1041', total: 1287.5},
+                                   'https://x/quote/?t=abc&k=1', null, 'Dave Nguyen');
+            return [m.subject, m.body, S.mailto('dave@site.com', m.subject, m.body)];
+        }""")
+        m = _sales.chase_email({"quote_number": "Q-1041", "total": 1287.5},
+                               "https://x/quote/?t=abc&k=1", contact="Dave Nguyen")
+        check("and writes the same email, to the same link",
+              mail_js == [m["subject"], m["body"],
+                          _sales.mailto("dave@site.com", m["subject"], m["body"])],
+              f"{mail_js[2][:120]} != "
+              f"{_sales.mailto('dave@site.com', m['subject'], m['body'])[:120]}")
+        custs = [{"name": "Bells Creek", "short_name": "Bells", "service_weeks": 12},
+                 {"name": "Tweed", "service_weeks": 26},
+                 {"name": "Snoozed", "service_weeks": 4,
+                  "service_snoozed_until": "2026-11-01"}]
+        olist = [{"customer_name": "Bells", "date_ordered": "20/07/2026"},
+                 {"customer_name": "Bells Creek", "date_ordered": "01/06/2026"},
+                 {"customer_name": "Tweed", "date_ordered": "01/09/2026"},
+                 {"customer_name": "Snoozed", "date_ordered": "01/01/2026"}]
+        for ahead in (14, 200):
+            js = page.evaluate("([c, o, a]) => TAFAPP._sales.serviceDue(c, o, "
+                               "'2026-10-16', a)", [custs, olist, ahead])
+            py = [{"name": r["customer"]["name"], "last": r["last"].isoformat(),
+                   "due": r["due"].isoformat(), "late": r["late"]}
+                  for r in _sales.service_due(custs, olist, _dt.date(2026, 10, 16),
+                                              ahead)]
+            check(f"and is due the same filter changes ({ahead} days ahead)",
+                  js == py, f"{js} != {py}")
+
+        on = ("quote_chase", "service_reminders", "lost_reasons", "order_again")
+        SWITCHES[:] = [{"key": k, "enabled": True} for k in on]
+        page.evaluate("(on) => TAFAPP._floor.setFeatures("
+                      "Object.fromEntries(on.map(k => [k, true])))", list(on))
+        QUOTES[0].update({"status": "sent", "sent_at": "2026-09-01T00:00:00Z",
+                          "public_token": "tok123", "customer_id": "c1"})
+        CUSTOMERS[0]["service_weeks"] = 4
+        page.evaluate("TAFAPP._sales.watchMail(l => { window.__mail = l; })")
+        page.click('#tabs button[data-tab="dashboard"]')
+        page.wait_for_selector("#chase-card .chase-row")
+        check("Today lists the quotes to chase",
+              "Q-1041" in page.locator("#chase-card").inner_text())
+        page.locator("#chase-card button", has_text="Chase").first.click()
+        page.wait_for_function("() => !!window.__mail")
+        sent = page.evaluate("window.__mail")
+        check("and Chase opens an email with their quote's link in it",
+              sent.startswith("mailto:") and "tok123" in sent
+              and "Q-1041" in sent, sent[:200])
+        check("and counts the chase",
+              any("rpc/quote_chased" in u for u, _b in stub.calls))
+        page.wait_for_selector("#service-card .chase-row")
+        check("and the customers due a filter change",
+              CUSTOMERS[0]["name"] in page.locator("#service-card").inner_text(),
+              page.locator("#service-card").inner_text())
+
+        page.click('#tabs button[data-tab="quotes"]')
+        page.wait_for_selector("#screen table")
+        page.locator("#screen tbody tr", has_text="Q-1041").first.click()
+        page.wait_for_selector("#mark-lost")
+        page.select_option("#lost-reason", "Lead time")
+        page.click("#mark-lost")
+        page.wait_for_timeout(400)
+        check("a quote marked lost says why",
+              QUOTES[0]["lost_reason"] == "Lead time"
+              and QUOTES[0]["status"] == "declined", str(QUOTES[0])[:200])
+        page.keyboard.press("Escape")
+        page.wait_for_selector("#sheet.hidden", state="attached")
+        QUOTES[0].update({"status": "sent", "lost_reason": ""})
+        CUSTOMERS[0].pop("service_weeks", None)
         SWITCHES.clear()
         page.evaluate("TAFAPP._floor.setFeatures({})")
 

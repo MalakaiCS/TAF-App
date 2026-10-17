@@ -384,6 +384,9 @@ var TAFDATA = (function () {
     select: select, rpc: rpc, insert: insert, update: update, remove: remove,
     request: request, friendly: friendly,
     upload: upload, signedUrl: signedUrl, callFunction: callFunction,
+    // The publishable key, which a customer's quote link carries (it opens
+    // nothing on its own - see the quote page).
+    anonKey: function () { return KEY; },
     // A file in a public bucket (job-photos, stock-images): no sign-in.
     publicUrl: function (bucket, path) {
       return URLBASE + "/storage/v1/object/public/" + bucket + "/"

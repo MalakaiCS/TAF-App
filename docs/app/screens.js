@@ -731,6 +731,8 @@ var TAFAPP = (function () {
       main.appendChild(U.el("h2", { text: todayLine() }));
       main.appendChild(grid);
       main.appendChild(U.card("What is late", lateList(rows)));
+      if (feature("quote_chase")) { chaseCard(main); }
+      if (feature("service_reminders")) { serviceCard(main, rows); }
     }).catch(function (err) {
       U.clear(main);
       U.notice(main, err.message);
@@ -1720,6 +1722,193 @@ var TAFAPP = (function () {
       var r = checkDue(dayText, items, got[5], got[3], got[0], got[1], got[2], ws);
       return r && r.full ? describeFull(r) : "";
     }).catch(function () { return ""; });   // never stop an order over a check
+  }
+
+  /* ── Winning the work ────────────────────────────────────────────────
+     The same rules as sales.py (to_chase, chase_email, service_due) - a
+     test holds the two together. */
+
+  var CHASE_AFTER = 7;
+  var LOST_REASONS = ["Price", "Lead time", "Went elsewhere", "No longer needed",
+                      "No reply", "Other"];
+
+  function daysBetween(a, b) {
+    return Math.round((b.getTime() - a.getTime()) / 86400000);
+  }
+
+  function toChase(quotes, today, after) {
+    after = after || CHASE_AFTER;
+    return (quotes || []).filter(function (q) {
+      if (["sent", "viewed"].indexOf(String(q.status || "")) < 0) { return false; }
+      var sent = U.parseDate(q.sent_at);
+      if (!sent || daysBetween(sent, today) < after) { return false; }
+      var chased = U.parseDate(q.chased_at);
+      return !(chased && daysBetween(chased, today) < after);
+    }).map(function (q) {
+      return Object.assign({}, q, { waited: daysBetween(U.parseDate(q.sent_at), today) });
+    }).sort(function (a, b) {
+      if (a.waited !== b.waited) { return b.waited - a.waited; }
+      var na = String(a.quote_number || ""), nb = String(b.quote_number || "");
+      return na < nb ? -1 : (na > nb ? 1 : 0);
+    });
+  }
+
+  function money2(n) {
+    return Number(n).toLocaleString("en-AU", { minimumFractionDigits: 2,
+                                               maximumFractionDigits: 2 });
+  }
+
+  function chaseEmail(q, link, company, contact) {
+    company = company || "Total Air Filtration";
+    var number = String(q.quote_number || "").trim();
+    var first = String(contact || "").trim().split(/\s+/)[0];
+    var hello = first ? "Hi " + first + "," : "Hi,";
+    var worth = Number(q.total || 0) > 0 ? " ($" + money2(q.total) + " inc GST)" : "";
+    return {
+      subject: ("Quote " + number + " from " + company).replace(/  /g, " ").trim(),
+      body: hello + "\n\nJust following up on our quote " + number + worth
+          + ". You can read it and accept it online here:\n\n" + link + "\n\n"
+          + "If anything needs changing - sizes, quantities or timing - reply "
+          + "to this email and we'll sort it out.\n\nThanks,\n" + company
+    };
+  }
+
+  function mailtoLink(to, subject, body) {
+    return "mailto:" + encodeURIComponent(String(to || "").trim())
+                         .replace(/%40/g, "@").replace(/%2C/g, ",")
+         + "?subject=" + encodeURIComponent(subject)
+         + "&body=" + encodeURIComponent(body);
+  }
+
+  function serviceDue(customers, orders, today, ahead) {
+    ahead = ahead === undefined ? 14 : ahead;
+    var last = {};
+    (orders || []).forEach(function (o) {
+      var name = String(o.customer_name || o.customer || "").trim().toLowerCase();
+      var d = U.parseDate(o.date_ordered) || U.parseDate(o.created_at);
+      if (name && d && (!last[name] || d > last[name])) { last[name] = d; }
+    });
+    var out = [];
+    (customers || []).forEach(function (c) {
+      var weeks = parseInt(c.service_weeks, 10) || 0;
+      if (weeks <= 0) { return; }
+      var snoozed = U.parseDate(c.service_snoozed_until);
+      if (snoozed && snoozed > today) { return; }
+      var seen = ["name", "short_name"].map(function (k) {
+        return last[String(c[k] || "").trim().toLowerCase()];
+      }).filter(Boolean);
+      if (!seen.length) { return; }
+      var prev = new Date(Math.max.apply(null, seen.map(function (d) { return d.getTime(); })));
+      var due = new Date(prev.getTime());
+      due.setDate(due.getDate() + 7 * weeks);
+      var limit = new Date(today.getTime());
+      limit.setDate(limit.getDate() + ahead);
+      if (due > limit) { return; }
+      out.push({ customer: c, last: prev, due: due,
+                 late: due < today ? daysBetween(due, today) : 0 });
+    });
+    return out.sort(function (a, b) {
+      if (a.due.getTime() !== b.due.getTime()) { return a.due - b.due; }
+      var na = String(a.customer.name || ""), nb = String(b.customer.name || "");
+      return na < nb ? -1 : (na > nb ? 1 : 0);
+    });
+  }
+
+  // Hands the email to the phone's mail app. A variable so a test can
+  // watch what would have been sent.
+  var openMail = function (link) { window.location.href = link; };
+
+  function quoteLinkFor(token) {
+    var base = new URL("../quote/", location.href).href;
+    return base + "?t=" + encodeURIComponent(token) + "&k="
+         + encodeURIComponent(D.anonKey());
+  }
+
+  // Today: quotes to chase, each with an email ready to send.
+  function chaseCard(main) {
+    var card = U.card("Quotes to chase", [U.el("div", { cls: "muted", text: "Loading…" })]);
+    card.setAttribute("id", "chase-card");
+    main.appendChild(card);
+    D.select("quotes", { "select": "id,quote_number,customer_id,customer_name,"
+                         + "status,total,sent_at,chased_at,public_token",
+                         "status": "in.(sent,viewed)", "limit": 300 })
+      .then(function (rows) {
+        var list = toChase(rows, U.today());
+        while (card.childNodes.length > 1) { card.removeChild(card.lastChild); }
+        if (!list.length) {
+          card.appendChild(U.empty("Nothing to chase.",
+            "Quotes with no answer after a week show here."));
+          return;
+        }
+        list.slice(0, 10).forEach(function (q) {
+          var go = U.button("Chase", function () { chase(q, go); }, "quiet");
+          card.appendChild(U.el("div", { cls: "chase-row",
+            attr: { "data-quote": q.id }, kids: [
+              U.el("div", { kids: [
+                U.el("b", { text: (q.quote_number || "Quote") + " · "
+                                  + (q.customer_name || "") }),
+                U.el("div", { cls: "muted", text: "Waiting " + q.waited + " days"
+                  + (q.total ? " · $" + money2(q.total) : "") })] }),
+              go] }));
+        });
+      }).catch(function () { card.remove(); });
+  }
+
+  function chase(q, btn) {
+    btn.disabled = true;
+    (q.customer_id
+      ? D.select("customers", { "select": "email,contact_name",
+                                "id": "eq." + q.customer_id })
+      : Promise.resolve([])).then(function (rows) {
+      var c = (rows && rows[0]) || {};
+      var mail = chaseEmail(q, quoteLinkFor(q.public_token || ""), null, c.contact_name);
+      chase._last = mailtoLink(c.email || "", mail.subject, mail.body);
+      D.rpc("quote_chased", { p_id: q.id }).catch(function () {});
+      openMail(chase._last);
+      btn.textContent = "Chased";
+    }).catch(function () { btn.disabled = false; });
+  }
+
+  // Today: customers due a filter change.
+  function serviceCard(main, orders) {
+    var card = U.card("Due for a filter change", [
+      U.el("div", { cls: "muted", text: "Loading…" })]);
+    card.setAttribute("id", "service-card");
+    main.appendChild(card);
+    D.select("customers", { "select": "*", "service_weeks": "not.is.null" })
+      .then(function (custs) {
+        var list = serviceDue(custs, orders, U.today());
+        while (card.childNodes.length > 1) { card.removeChild(card.lastChild); }
+        if (!list.length) {
+          card.appendChild(U.empty("Nobody is due in the next fortnight."));
+          return;
+        }
+        list.slice(0, 10).forEach(function (r) {
+          var kids = [U.el("div", { kids: [
+            U.el("b", { text: r.customer.name || "" }),
+            U.el("div", { cls: "muted", text: (r.late ? r.late + " days late"
+              : "Due " + pad2(r.due.getDate()) + "/" + pad2(r.due.getMonth() + 1))
+              + " · every " + r.customer.service_weeks + " weeks" })] })];
+          if (feature("order_again")) {
+            kids.push(U.button("Order again", function () {
+              var name = String(r.customer.name || "").trim().toLowerCase();
+              var short = String(r.customer.short_name || "").trim().toLowerCase();
+              var last = ORDERS.filter(function (o) {
+                var n = String(o.customer || "").trim().toLowerCase();
+                return n === name || (short && n === short);
+              })[0];
+              if (!last) { return; }
+              D.select("orders", { "id": "eq." + last.id, "select": "items,header" })
+                .then(function (rows) {
+                  var o = (rows && rows[0]) || {};
+                  orderAgain(last, o.items || [], o.header || last.header);
+                });
+            }, "quiet"));
+          }
+          card.appendChild(U.el("div", { cls: "chase-row",
+            attr: { "data-customer": r.customer.id }, kids: kids }));
+        });
+      }).catch(function () { card.remove(); });
   }
 
   /* ── Order again ─────────────────────────────────────────────────────
@@ -3023,6 +3212,34 @@ var TAFAPP = (function () {
                          text: "Total " + U.money(q.total) })]
         : [U.empty("No lines on this quote")]));
 
+      // Lost: why, so the pattern shows (sales.lost_report).
+      if (feature("lost_reasons") && (["sent", "viewed", "draft"].indexOf(q.status) >= 0
+          || (["declined", "expired"].indexOf(q.status) >= 0 && !q.lost_reason))) {
+        var why = U.el("select", { attr: { id: "lost-reason" },
+          kids: LOST_REASONS.map(function (r) {
+            return U.el("option", { text: r, attr: { value: r } }); }) });
+        var lost = U.button("Mark lost", function () {
+          lost.disabled = true;
+          var patch = { lost_reason: why.value, updated_at: new Date().toISOString() };
+          if (["declined", "expired"].indexOf(q.status) < 0) {
+            patch.status = "declined";
+            patch.responded_at = q.responded_at || patch.updated_at;
+          }
+          D.update("quotes", { "id": "eq." + q.id }, patch).then(function (rows) {
+            if (!rows || !rows.length) { throw new Error("That didn't change anything."); }
+            q.status = rows[0].status; q.lost_reason = why.value;
+            U.notice(body, "Marked lost: " + why.value + ".", "ok");
+            lost.remove(); why.remove();
+          }).catch(function (err) {
+            lost.disabled = false;
+            U.notice(body, err.message);
+          });
+        }, "quiet");
+        lost.setAttribute("id", "mark-lost");
+        body.appendChild(U.card("Lost it?", [why, U.el("div", { cls: "row-actions",
+                                                                kids: [lost] })]));
+      }
+
       if (q.unpriced_count) {
         U.notice(body, q.unpriced_count + " line"
           + (q.unpriced_count === 1 ? " has" : "s have")
@@ -4199,6 +4416,18 @@ var TAFAPP = (function () {
     _badgeText: badgeText,
     _setBell: setBell,
     _supplyItems: SUPPLY_ITEMS,
+    _sales: { toChase: function (q, today) {
+                return toChase(q, U.parseDate(today)).map(function (x) {
+                  return { id: x.id, waited: x.waited }; });
+              },
+              chaseEmail: chaseEmail, mailto: mailtoLink,
+              serviceDue: function (c, o, today, ahead) {
+                return serviceDue(c, o, U.parseDate(today), ahead).map(function (r) {
+                  return { name: r.customer.name, last: ymd(r.last),
+                           due: ymd(r.due), late: r.late }; });
+              },
+              lostReasons: LOST_REASONS,
+              watchMail: function (fn) { openMail = fn; } },
     _planning: { checkDue: function () {
                    var r = checkDue.apply(null, arguments);
                    return r && Object.assign({}, r, { day: ymd(r.day),

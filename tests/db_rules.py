@@ -1335,6 +1335,61 @@ def run_planning_checks(pg: Postgres) -> None:
     check("the minutes a filter takes until it is timed is there", got == "15", got)
 
 
+def run_sales_checks(pg: Postgres) -> None:
+    print("\n── winning the work (step 46) ──")
+    for _ in range(2):
+        ok, _o, err = pg.psql((ROOT / "migrate_sales.sql").read_text(
+            encoding="utf-8"), "f")
+        check("step 46 runs, and runs again cleanly", ok, err)
+    q(pg, "INSERT INTO price_list (part_number, unit_price, unit_price_2) "
+          "VALUES ('TAF-G4-595', 20, 18) ON CONFLICT (part_number) DO UPDATE "
+          "SET unit_price = 20, unit_price_2 = 18, unit_price_3 = NULL;")
+    q(pg, "INSERT INTO price_rates (filter_type, media_type, rate_per_sqm) "
+          "VALUES ('V-Form', 'G4', 30) ON CONFLICT (filter_type, media_type) "
+          "DO UPDATE SET rate_per_sqm = 30;")
+    ok, _o, err = as_in(pg, "f", DAVE, "INSERT INTO price_changes (percent) "
+                        "VALUES (10);")
+    check("somebody on the floor cannot put through a price change", not ok, err)
+    ok, out, err = as_in(pg, "f", SARAH, "INSERT INTO price_changes (scope, "
+                         "match_text, tiers, percent) VALUES ('list', 'G4', "
+                         "'{1,2,3}', 10) RETURNING id;")
+    change = (out or "").splitlines()[0] if ok and out else ""
+    check("a manager can", ok and change, out or err)
+    ok, out, err = as_in(pg, "f", DAVE, f"SELECT apply_price_change('{change}');")
+    check("and only a manager can apply it", not ok, out or err)
+    ok, out, err = as_in(pg, "f", SARAH, f"SELECT apply_price_change('{change}');")
+    prices = q(pg, "SELECT unit_price || '|' || unit_price_2 || '|' || "
+                   "COALESCE(unit_price_3::text, '-') FROM price_list "
+                   "WHERE part_number = 'TAF-G4-595';")
+    check("applied: 10% on each tier that has a price, to the cent",
+          ok and out == "1" and prices == "22.0000|19.8000|-", f"{out} {prices} {err}")
+    ok, out, err = as_in(pg, "f", SARAH, f"SELECT apply_price_change('{change}');")
+    again = q(pg, "SELECT unit_price FROM price_list WHERE part_number = 'TAF-G4-595';")
+    check("and never twice", ok and out == "0" and again == "22.0000", f"{out} {again}")
+    rate = q(pg, "SELECT rate_per_sqm FROM price_rates WHERE filter_type = 'V-Form';")
+    check("a change to part numbers leaves the square-metre rates alone",
+          rate == "30.0000", rate)
+    q(pg, "INSERT INTO price_changes (scope, percent, starts_on) VALUES "
+          "('rates', 5, current_date), ('rates', 5, current_date + 30);")
+    ok, out, err = as_in(pg, "f", SARAH, "SELECT apply_due_price_changes();")
+    rate = q(pg, "SELECT rate_per_sqm FROM price_rates WHERE filter_type = 'V-Form';")
+    left = q(pg, "SELECT count(*) FROM price_changes WHERE applied_at IS NULL;")
+    check("what is due by today is applied; what starts next month waits",
+          ok and rate == "31.5000" and left == "1", f"{out} {rate} {left} {err}")
+    ok, out, err = as_in(pg, "f", DAVE, "SELECT apply_due_price_changes();")
+    check("from anybody else's PC it does nothing", ok and out == "0", out or err)
+
+    quote = q(pg, "INSERT INTO quotes (quote_number, status) VALUES "
+                  "('Q-46', 'sent') RETURNING id;").splitlines()[0]
+    ok, out, err = as_in(pg, "f", DAVE, f"SELECT quote_chased('{quote}');")
+    ok2, out2, err2 = as_in(pg, "f", DAVE, f"SELECT quote_chased('{quote}');")
+    check("chasing a quote counts each chase", ok and ok2 and out2 == "2",
+          f"{out} {out2} {err or err2}")
+    ok, _o, err = as_in(pg, "f", SARAH, "UPDATE customers SET service_weeks = 0 "
+                        "WHERE true;")
+    check("a filter change every 0 weeks is refused", not ok, err)
+
+
 def _skip(why: str) -> int:
     """Skipping is fine on a laptop. In CI it is not: a workflow that goes
     green having checked nothing is worse than no workflow, because it is
@@ -1364,6 +1419,7 @@ def main() -> int:
         run_supply_bell_checks(pg)
         run_floor_checks(pg)
         run_planning_checks(pg)
+        run_sales_checks(pg)
     finally:
         pg.stop()
     print(f"\n{len(FAILURES)} FAILED" if FAILURES

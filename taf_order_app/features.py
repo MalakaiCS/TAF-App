@@ -220,6 +220,28 @@ CATALOGUE: List[Feature] = [
             "On a customer, or on any of their past orders: the same lines "
             "on a new order in one press.",
             "Admin", built=True),
+
+    # ── Winning the work (step 46) ───────────────────────────────────────
+    Feature("quote_chase", "Quotes to chase",
+            "Quotes with no answer after a week, on Today, each with an "
+            "email ready to send with their link in it.",
+            "Money", built=True),
+    Feature("lost_reasons", "Why quotes are lost",
+            "Price, lead time, went elsewhere... kept against each lost "
+            "quote, and added up so the pattern shows.",
+            "Money", built=True),
+    Feature("service_reminders", "Filter-change reminders",
+            "Customers on regular changes flagged as due, with their last "
+            "order ready to quote or order again.",
+            "Money", built=True),
+    Feature("price_change", "Change prices",
+            "Raise (or cut) a tier, the part numbers or the square-metre "
+            "rates by a percentage from a date, previewed first.",
+            "Money", built=True),
+    Feature("owing_view", "Who owes what",
+            "Unpaid invoices from Xero by customer, aged, with a statement "
+            "to print or email.",
+            "Money", built=True),
 ]
 
 BY_KEY: Dict[str, Feature] = {f.key: f for f in CATALOGUE}

@@ -133,6 +133,11 @@ CUSTOMERS = [
      "region": "Local", "active": True},
 ]
 
+# Winning the work (step 46).
+CHASED: list = []
+LOST: list = []
+PRICE_CHANGES: list = []
+
 # Planning (step 45).
 SAVED_ROSTER: list = []
 SAVED_LEAVE: list = []
@@ -174,6 +179,29 @@ OVERRIDES = {
     "remove_roster":       lambda *a, **k: None,
     "add_leave":           lambda *a, **k: SAVED_LEAVE.append(a) or {},
     "remove_leave":        lambda *a, **k: None,
+    "quotes_for_report":   lambda *a, **k: [
+        {"id": "q9", "quote_number": "Q-0009", "customer_name": "Bells Creek",
+         "status": "sent", "total": 450, "sent_at": "2026-01-02T00:00:00Z",
+         "public_token": "tok", "chase_count": 1},
+        {"id": "q8", "quote_number": "Q-0008", "customer_name": "Tweed",
+         "status": "declined", "total": 300, "responded_at":
+         __import__("datetime").date.today().isoformat(), "lost_reason": ""}],
+    "quote_chased":        lambda qid: CHASED.append(qid) or 2,
+    "set_quote_lost":      lambda qid, reason, note="": LOST.append((qid, reason)),
+    "customers_on_service": lambda *a, **k: [
+        {"id": "c-svc", "name": "Bells Creek", "short_name": "Bells",
+         "service_weeks": 4}],
+    "orders_since":        lambda *a, **k: [
+        {"customer_name": "Bells", "date_ordered": "01/01/2026"}],
+    "snooze_service":      lambda *a, **k: None,
+    "set_service_weeks":   lambda *a, **k: None,
+    "price_changes":       lambda *a, **k: [
+        {"id": "pc1", "percent": 5, "scope": "rates", "match_text": "",
+         "starts_on": "2099-01-01", "applied_at": None}],
+    "add_price_change":    lambda c: PRICE_CHANGES.append(dict(c)) or "pc2",
+    "apply_price_change":  lambda cid: 3,
+    "apply_due_price_changes": lambda: 0,
+    "cancel_price_change": lambda cid: None,
     "customer_orders":     lambda cust, limit=20: [
         {"id": "o-again", "order_number": "PO-7000", "date_ordered": "01/09/2026",
          "header": {"Job": "AHU 3"},
@@ -1852,6 +1880,91 @@ def _steps(app, gui, root):
         finally:
             _feat._switches = {}
     add("dialogs: roster, a full day, and order again", _planning_windows)
+
+    def _sales_windows():
+        """Quotes to chase, why quotes are lost, filter changes due, changing
+        prices and who owes what."""
+        import webbrowser
+        from taf_order_app import features as _feat
+        _feat._switches = {k: True for k in (
+            "quote_chase", "lost_reasons", "service_reminders", "price_change",
+            "owing_view", "order_again")}
+        opened, real = [], webbrowser.open
+        webbrowser.open = lambda url, *a, **k: opened.append(url)
+        real_open_path = gui._open_path
+        gui._open_path = lambda path: opened.append(str(path))
+        real_owing = gui._xero.owing
+        gui._xero.owing = lambda: {"rows": [
+            {"customer": "Bells Creek", "number": "INV-1", "due": "2026-08-01",
+             "total": 100, "owing": 100, "days_late": 70},
+            {"customer": "Tweed", "number": "INV-2", "due": "2026-12-01",
+             "total": 50, "owing": 50, "days_late": 0}], "owed": 150, "error": ""}
+
+        def _wait(tree):
+            for _ in range(80):
+                root.update()
+                if tree.get_children():
+                    return
+                time.sleep(0.05)
+
+        try:
+            dlg, tree, _f = app._quotes_to_chase()
+            _wait(tree)
+            assert tree.get_children() == ("q9",), tree.get_children()
+            CHASED.clear()
+            link = app._chase_quote(dlg.chase_cache["q9"], dlg)
+            assert link.startswith("mailto:") and "Q-0009" in link and CHASED == ["q9"], link
+            dlg.destroy()
+
+            dlg, tree, foot = app._lost_report()
+            _wait(tree)
+            assert "q8" in tree.get_children(), tree.get_children()
+            LOST.clear()
+            d = app._mark_quote_lost({"id": "q8", "quote_number": "Q-0008"}, dlg)
+            d.lost_vars[0].set("Price")
+            d.lost_save()
+            assert LOST == [("q8", "Price")], LOST
+            dlg.destroy()
+
+            dlg, tree, _f = app._service_due_window()
+            _wait(tree)
+            assert tree.get_children() == ("c-svc",), tree.get_children()
+            dlg.destroy()
+
+            if gui._db.can_manage_prices():
+                dlg = app._price_change_tool()
+                v = dlg.price_vars
+                v["pct"].set("10")
+                dlg.price_preview()
+                assert dlg.price_tree.get_children(), "the preview is empty"
+                assert "would change, now" in dlg.price_said.cget("text"), \
+                    dlg.price_said.cget("text")
+                PRICE_CHANGES.clear()
+                was = gui.messagebox.askyesno
+                gui.messagebox.askyesno = lambda *a, **k: True
+                try:
+                    dlg.price_go()
+                finally:
+                    gui.messagebox.askyesno = was
+                assert PRICE_CHANGES and PRICE_CHANGES[0]["percent"] == 10.0, PRICE_CHANGES
+                assert dlg.price_said.cget("text").startswith("Done: 3 prices"), \
+                    dlg.price_said.cget("text")
+                dlg.destroy()
+
+            dlg, tree, foot = app._owing_window()
+            _wait(tree)
+            rows = [tree.item(i, "values") for i in tree.get_children()]
+            assert rows[0][0] == "Bells Creek" and rows[0][1] == "$100.00", rows
+            tree.focus(tree.get_children()[0])
+            dlg.owing_statement()
+            assert os.path.exists(dlg.last_statement), dlg.last_statement
+            dlg.destroy()
+        finally:
+            webbrowser.open = real
+            gui._open_path = real_open_path
+            gui._xero.owing = real_owing
+            _feat._switches = {}
+    add("dialogs: winning the work", _sales_windows)
 
     def _answer_waiting_dialogs(before):
         """Say yes to a dialog that has stopped and asked something.

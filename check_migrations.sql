@@ -187,7 +187,13 @@ WITH checks(step, file, purpose, needed, present) AS (VALUES
 
   (45, 'migrate_planning.sql', 'Staff roster and leave, and warning when a due date is already full', 'recommended',
       to_regclass('public.staff_roster') IS NOT NULL
-      AND to_regclass('public.staff_leave') IS NOT NULL)
+      AND to_regclass('public.staff_leave') IS NOT NULL),
+
+  (46, 'migrate_sales.sql', 'Chasing quotes, why they are lost, service reminders, price changes', 'recommended',
+      to_regclass('public.price_changes') IS NOT NULL
+      AND EXISTS (SELECT 1 FROM information_schema.columns
+                   WHERE table_schema='public' AND table_name='quotes'
+                     AND column_name='lost_reason'))
 )
 SELECT step,
        CASE WHEN present THEN 'already done' ELSE 'RUN THIS' END AS status,

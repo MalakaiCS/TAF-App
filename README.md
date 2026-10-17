@@ -126,6 +126,27 @@ log, stock management and a customer database.
     again* on any order (and *Order their last one again* on a customer) on
     the phone: the same lines on a new order, nothing made, ready for a new
     order number.
+- **Winning the work** (step 46, switched on in Settings → Features):
+  - **Quotes to chase** — quotes with no answer a week after they were sent
+    (and not chased in the last week) on Today, desktop and phone. *Chase*
+    opens an email to the customer, ready to send, with the link to their
+    quote in it, and counts the chase.
+  - **Why quotes are lost** — *Mark lost…* with the reason (price, lead
+    time, went elsewhere, no longer needed, no reply, other); *Why quotes are
+    lost…* adds them up with the win rate, and lists declined quotes still
+    without a reason.
+  - **Filter-change reminders** — *Customer ▾ → Filter change every…* sets
+    how often a customer's filters are changed. Those due within a fortnight
+    (or late) show on Today and in *Due for a filter change…*, with *Quote
+    it* (their last order on a quote), *Order again* and *Snooze 2 weeks*.
+  - **Change prices** — *Change prices…*: everything, the part numbers or the
+    square-metre rates, optionally only those containing some text, chosen
+    tiers, by a percent, now or from a date. Preview first; applied once (a
+    scheduled one by the first manager's PC to start on the day). Quotes
+    already sent keep their prices.
+  - **Who owes what** — unpaid invoices from Xero by customer, aged (not
+    due, 1-30, 31-60, 61-90, over 90 days), with a statement PDF and an
+    email to send it with.
 - **Delivery labels** — one A4 landscape sheet per wrapped bundle, with the
   TAF logo, the company's base address as From, the delivery address, filter
   size, the quantity in that wrap (and the line's ordered quantity), the
@@ -492,6 +513,7 @@ just run it — nothing is lost and nothing is duplicated.
 | 43 | `migrate_supply_bell.sql` | The bell only shows supply requests still waiting: once everything on a request has been ordered, received, declined or cancelled, it comes off every manager's bell (needs steps 32 and 40) | recommended |
 | 44 | `migrate_floor.sql` | The factory floor: when an order changed status (for the TV board), a job timer, QC checklists, faults found in QC, and finished-job photos the customer sees on their portal (needs steps 16, 32 and the order-files, features and portal steps). Everything arrives switched off | recommended |
 | 45 | `migrate_planning.sql` | Staff roster and leave, so a new order due on a day that is already full says so - and names the next day with room (needs steps 16 and the features step) | recommended |
+| 46 | `migrate_sales.sql` | Winning the work: when a quote was chased and why one was lost, how often a customer's filters are changed (for reminders), and price changes previewed and applied once from a date (needs the quotes, quote portal, pricing and price tier steps) | recommended |
 
 **Step 16 is the one that matters most.** Every policy in the older scripts is
 `TO authenticated USING (true)` — meaning *anyone Supabase counts as signed
