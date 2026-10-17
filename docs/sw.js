@@ -40,7 +40,8 @@ var SHELL = [
   "app/icon-512.png",
   "company.js",
   "taf-shared.js",
-  "taf-logo.png"
+  "taf-logo.png",
+  "taf-badge.png"
 ];
 
 // The publishable key, written by CI. Always asked for over the network

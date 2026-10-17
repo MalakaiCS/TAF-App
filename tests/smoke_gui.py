@@ -2272,6 +2272,48 @@ def _steps(app, gui, root):
         _settle(0.4)
     add("stock: square cards, picked and opened", _stock_cards)
 
+    def _badge_and_loading():
+        """The header's badge turns once when clicked and lands upright; the
+        loading screen turns it until loading is done, then goes. Neither
+        moves for somebody who has asked their computer for less motion."""
+        saved = gui._REDUCED_MOTION
+        try:
+            gui._REDUCED_MOTION = False
+            assert app._badge.ok, "TAF_logo_badge.png did not load"
+            app._spin_badge(duration=0.3)
+            mid = None
+            for _ in range(40):
+                root.update()
+                time.sleep(0.01)
+                if app._badge_spin is not None:
+                    mid = str(app._badge_label.cget("image"))
+            _settle(0.4)
+            assert app._badge_spin is None, "the turn never finished"
+            assert str(app._badge_label.cget("image")) == str(app._badge.frame(0)), \
+                "it did not land upright"
+            assert mid and mid != str(app._badge.frame(0)), "it never turned"
+
+            ready = {"v": False}
+            screen = gui.LoadingScreen(root, ready=lambda: ready["v"],
+                                       shortest=0.1, longest=10)
+            _settle(0.3)
+            assert screen.winfo_exists() and screen._angle > 0, "not turning"
+            ready["v"] = True
+            _settle(0.8)
+            assert not screen.winfo_exists(), "it stayed after loading"
+
+            gui._REDUCED_MOTION = True
+            app._spin_badge()
+            assert app._badge_spin is None, "it spun with reduced motion"
+            screen = gui.LoadingScreen(root, ready=lambda: False, longest=0.3)
+            _settle(0.15)
+            assert screen._angle == 0, "the loading badge turned with reduced motion"
+            _settle(0.4)
+            assert not screen.winfo_exists(), "it outstayed its longest wait"
+        finally:
+            gui._REDUCED_MOTION = saved
+    add("header: the badge turns, and the loading screen", _badge_and_loading)
+
     def _cut_list():
         from taf_order_app import features as _feat
         _feat._switches = {"channel_calculator": True}

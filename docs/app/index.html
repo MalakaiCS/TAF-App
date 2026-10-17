@@ -46,7 +46,16 @@
   header { background:var(--navy); color:#fff; padding:14px 16px;
            padding-top:calc(14px + env(safe-area-inset-top));
            display:flex; align-items:center; gap:12px; }
-  header h1 { margin:0; font-size:17px; flex:1; }
+  header h1 { margin:0; font-size:17px; }
+  /* The badge and the name, top left. The badge is a button: a click gives
+     it a full turn. */
+  header .brand { display:flex; align-items:center; gap:10px; flex:1;
+                  min-width:0; }
+  header #brand-badge { background:none; border:0; padding:0; border-radius:50%;
+                        cursor:pointer; line-height:0; flex:0 0 auto; }
+  header #brand-badge:focus-visible { outline:2px solid #fff;
+                                      outline-offset:2px; }
+  .taf-badge { width:38px; height:38px; display:block; }
   header .who { font-size:13px; color:#A9CCE3; text-align:right;
                 background:none; border:0; padding:4px 2px; cursor:pointer;
                 font-family:inherit; }
@@ -268,12 +277,46 @@
   .stock-card .pr { font-weight:700; font-size:13px; color:var(--brand);
                     white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
   .stock-card .pr.none { color:var(--muted); font-weight:600; }
+  /* ── Motion ──────────────────────────────────────────────────────────
+     All of it is off for anybody whose device asks for reduced motion -
+     the media query at the end, and U.motionOK() in ui.js. */
+  @keyframes taf-turn { from { transform:rotate(0deg); }
+                        to { transform:rotate(360deg); } }
+  .taf-badge.spin { animation:taf-turn .7s cubic-bezier(.65, 0, .35, 1); }
+
+  /* Fade and rise into view on scroll (U.reveal / U.autoReveal). Only
+     opacity and transform move, so the page is never laid out again. */
+  .reveal { opacity:0; transform:translateY(16px);
+            transition:opacity .5s ease-out, transform .5s ease-out; }
+  .reveal.in { opacity:1; transform:none; }
+
+  #boot { position:fixed; inset:0; z-index:1000; background:#fff;
+          display:flex; align-items:center; justify-content:center;
+          transition:opacity .45s ease; }
+  #boot img { width:140px; height:140px;
+              animation:taf-turn 1.4s linear infinite; }
+  #boot.out { opacity:0; pointer-events:none; }
+
+  @media (prefers-reduced-motion: reduce) {
+    .reveal { opacity:1; transform:none; transition:none; }
+    .taf-badge.spin, #boot img { animation:none; }
+    #boot { transition:none; }
+  }
+
   .stock-photo { display:block; max-width:100%; max-height:240px;
                  object-fit:contain; margin:10px 0; border-radius:8px;
                  background:var(--tint); }
 </style>
 </head>
 <body>
+
+<!-- ── Loading, after signing in ─────────────────────────────────────────
+     White, with the badge turning, until the first screen has its data;
+     then it fades away. See showBoot / hideBoot in screens.js. -->
+<div id="boot" class="hidden" role="status" aria-label="Loading">
+  <img src="../taf-badge.png" alt="Total Air Filtration" width="140"
+       height="140">
+</div>
 
 <!-- ── Signing in ──────────────────────────────────────────────────────── -->
 <section id="signin">
@@ -299,7 +342,12 @@
 <!-- ── The app ─────────────────────────────────────────────────────────── -->
 <div id="app" class="hidden">
   <header>
-    <h1 id="app-title">Total Air Filtration</h1>
+    <div class="brand">
+      <button id="brand-badge" type="button" aria-label="Total Air Filtration">
+        <img class="taf-badge" src="../taf-badge.png" alt="" width="38"
+             height="38"></button>
+      <h1 id="app-title">Total Air Filtration</h1>
+    </div>
     <button class="bell" id="bell" type="button" aria-label="Notifications">
       <svg viewBox="0 0 24 24" aria-hidden="true">
         <path d="M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9"/>

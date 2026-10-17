@@ -237,7 +237,74 @@ var TAFUI = (function () {
     return !document.getElementById("sheet").classList.contains("hidden");
   }
 
+  /* ── Motion ─────────────────────────────────────────────────────────
+     Everything that moves goes through here, and none of it moves for
+     anybody whose phone or computer is set to reduce motion - checked each
+     time, so changing the setting takes effect without a reload. */
+
+  function motionOK() {
+    return !(window.matchMedia &&
+             window.matchMedia("(prefers-reduced-motion: reduce)").matches);
+  }
+
+  // What fades and rises into view as the page scrolls: the cards a screen
+  // is made of, and the stock cards and search results inside them.
+  var REVEAL = ".card, .stock-card, .hit";
+  var revealer = null;
+
+  function reveal(node, delay) {
+    if (!motionOK() || !("IntersectionObserver" in window)) { return; }
+    if (!revealer) {
+      revealer = new IntersectionObserver(function (seen) {
+        seen.forEach(function (e) {
+          if (e.isIntersecting) {
+            e.target.classList.add("in");
+            revealer.unobserve(e.target);
+          }
+        });
+      }, { rootMargin: "0px 0px -6% 0px" });
+    }
+    node.classList.add("reveal");
+    // A grid arriving at once comes in one after another, briefly.
+    node.style.transitionDelay = (delay || 0) + "ms";
+    revealer.observe(node);
+  }
+
+  /* Watch an area of the page: anything matching REVEAL that is put in it
+     from now on is revealed as it scrolls into view. The screens need do
+     nothing - they draw as they always have. */
+  function autoReveal(root) {
+    if (!root || !("MutationObserver" in window)) { return; }
+    new MutationObserver(function (changes) {
+      if (!motionOK()) { return; }
+      var n = 0;
+      changes.forEach(function (c) {
+        Array.prototype.forEach.call(c.addedNodes, function (added) {
+          if (added.nodeType !== 1) { return; }
+          var found = added.matches && added.matches(REVEAL) ? [added] : [];
+          found = found.concat(Array.prototype.slice.call(
+            added.querySelectorAll(REVEAL)));
+          found.forEach(function (node) {
+            if (!node.classList.contains("reveal")) {
+              reveal(node, Math.min(n++, 8) * 35);
+            }
+          });
+        });
+      });
+    }).observe(root, { childList: true, subtree: true });
+  }
+
+  /* One full turn of the TAF badge. A click while it is turning starts the
+     turn again rather than queueing another. */
+  function spin(img) {
+    if (!img || !motionOK()) { return; }
+    img.classList.remove("spin");
+    void img.offsetWidth;            // restart the animation
+    img.classList.add("spin");
+  }
+
   return {
+    motionOK: motionOK, reveal: reveal, autoReveal: autoReveal, spin: spin,
     el: el, clear: clear, onPick: onPick, card: card, table: table, cell: cell,
     button: button, pill: pill, empty: empty, notice: notice,
     parseDate: parseDate, dueBucket: dueBucket, today: today, money: money,

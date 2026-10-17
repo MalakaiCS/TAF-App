@@ -2024,6 +2024,161 @@ def _configure_ttk_style():
 
 
 # ═══════════════════════════════════════════════════════════════════════════
+# The TAF badge, turning
+# ═══════════════════════════════════════════════════════════════════════════
+
+_REDUCED_MOTION = None
+
+
+def reduced_motion() -> bool:
+    """Whether the person has asked their computer for less motion - macOS
+    "Reduce motion", or Windows with animations switched off. Asked once.
+    Nothing spins or fades for them."""
+    global _REDUCED_MOTION
+    if _REDUCED_MOTION is None:
+        _REDUCED_MOTION = False
+        try:
+            if sys.platform == "darwin":
+                out = subprocess.run(
+                    ["defaults", "read", "com.apple.universalaccess",
+                     "reduceMotion"], capture_output=True, text=True,
+                    timeout=2)
+                _REDUCED_MOTION = out.stdout.strip() == "1"
+            elif sys.platform.startswith("win"):
+                import ctypes
+                on = ctypes.c_int(1)
+                # SPI_GETCLIENTAREAANIMATION: "Animate controls and elements
+                # inside windows", the switch Windows' own "Animation
+                # effects" setting turns off.
+                if ctypes.windll.user32.SystemParametersInfoW(
+                        0x1042, 0, ctypes.byref(on), 0):
+                    _REDUCED_MOTION = not on.value
+        except Exception:
+            _REDUCED_MOTION = False
+    return _REDUCED_MOTION
+
+
+class SpinningBadge:
+    """The round TAF badge at one size, turned to any angle. Each angle is
+    drawn once and kept, so turning it again costs nothing. The badge is
+    round, so a turned copy is the same size as the original."""
+
+    STEP = 6                    # degrees between drawn angles
+
+    def __init__(self, size: int):
+        self.size = size
+        self._base = None
+        self._frames = {}
+        try:
+            from PIL import Image
+            path = RESOURCE_DIR / "TAF_logo_badge.png"
+            self._base = Image.open(path).convert("RGBA").resize(
+                (size, size), Image.LANCZOS)
+        except Exception:
+            self._base = None
+
+    @property
+    def ok(self) -> bool:
+        return self._base is not None
+
+    def frame(self, angle: float):
+        key = int(round(angle / self.STEP)) * self.STEP % 360
+        img = self._frames.get(key)
+        if img is None and self._base is not None:
+            from PIL import Image, ImageTk
+            turned = self._base.rotate(-key, resample=Image.BICUBIC)
+            img = self._frames[key] = ImageTk.PhotoImage(turned)
+        return img
+
+
+def _ease_in_out(t: float) -> float:
+    """Slow, quick, slow: a turn that starts and lands rather than jerks."""
+    return 4 * t * t * t if t < 0.5 else 1 - (-2 * t + 2) ** 3 / 2
+
+
+class LoadingScreen(tk.Toplevel):
+    """After signing in: a plain white screen over the window with the TAF
+    badge turning in the middle, until the first data has loaded (`ready()`
+    is true) - then it fades away. Shown for at least a moment so it does
+    not flash, and never longer than `longest` seconds."""
+
+    def __init__(self, root, ready=lambda: True, shortest: float = 0.8,
+                 longest: float = 12.0):
+        super().__init__(root, bg="#FFFFFF")
+        self.withdraw()
+        self.overrideredirect(True)
+        self.root = root
+        self.ready = ready
+        self._born = _time.monotonic()
+        self._shortest = shortest
+        self._longest = longest
+        self._angle = 0.0
+        self._still = reduced_motion()
+        self._badge = SpinningBadge(px(132))
+        self._label = tk.Label(self, bg="#FFFFFF", bd=0,
+                               image=self._badge.frame(0) if self._badge.ok
+                               else "",
+                               text="" if self._badge.ok else "Loading…",
+                               fg=CMU, font=F_BODY)
+        self._label.place(relx=0.5, rely=0.5, anchor="center")
+        self._cover()
+        try:
+            self.attributes("-topmost", True)
+        except tk.TclError:
+            pass
+        self.deiconify()
+        self.lift()
+        self._follow = root.bind("<Configure>", lambda _e: self._cover(), add="+")
+        self.after(16, self._tick)
+
+    def _cover(self):
+        """Sit exactly over the main window, wherever it is."""
+        try:
+            self.root.update_idletasks()
+            w = max(self.root.winfo_width(), 200)
+            h = max(self.root.winfo_height(), 200)
+            self.geometry(f"{w}x{h}+{self.root.winfo_rootx()}"
+                          f"+{self.root.winfo_rooty()}")
+        except tk.TclError:
+            pass
+
+    def _tick(self):
+        if not self.winfo_exists():
+            return
+        waited = _time.monotonic() - self._born
+        try:
+            done = bool(self.ready())
+        except Exception:
+            done = True
+        if (done and waited >= self._shortest) or waited >= self._longest:
+            self._fade(1.0)
+            return
+        if not self._still and self._badge.ok:
+            self._angle = (self._angle + 4) % 360   # a turn every 1.5 s
+            self._label.configure(image=self._badge.frame(self._angle))
+        self.after(16, self._tick)
+
+    def _fade(self, alpha: float):
+        if self._still or alpha <= 0.05:
+            self.close()
+            return
+        try:
+            self.attributes("-alpha", alpha)
+        except tk.TclError:          # no see-through windows here
+            self.close()
+            return
+        self.after(16, lambda: self._fade(alpha - 0.08))
+
+    def close(self):
+        try:
+            self.root.unbind("<Configure>", self._follow)
+        except Exception:
+            pass
+        if self.winfo_exists():
+            self.destroy()
+
+
+# ═══════════════════════════════════════════════════════════════════════════
 # Calendar Picker
 # ═══════════════════════════════════════════════════════════════════════════
 
@@ -9679,6 +9834,27 @@ class ModernOrderApp(tk.Frame):
         except Exception:
             pass
 
+    def _spin_badge(self, duration: float = 0.7):
+        """One full turn of the header badge, eased in and out. A click
+        while it is turning starts it again from where it is."""
+        label = getattr(self, "_badge_label", None)
+        if label is None or reduced_motion():
+            return
+        start = _time.monotonic()
+        token = object()
+        self._badge_spin = token
+
+        def _step():
+            if self._badge_spin is not token or not label.winfo_exists():
+                return
+            t = min(1.0, (_time.monotonic() - start) / duration)
+            label.configure(image=self._badge.frame(360 * _ease_in_out(t)))
+            if t < 1.0:
+                label.after(16, _step)
+            else:
+                self._badge_spin = None
+        _step()
+
     def _build_header(self):
         hdr = tk.Frame(self, bg=CCA, highlightbackground=CSP, highlightthickness=1)
         hdr.pack(fill="x")
@@ -9686,21 +9862,22 @@ class ModernOrderApp(tk.Frame):
         inner = tk.Frame(hdr, bg=CCA, padx=18, pady=8)
         inner.pack(fill="x")
 
-        # Horizontal logo
+        # The round badge and the name, top left. Clicking the badge gives
+        # it a turn.
         self._logo_img = None
-        # A copy made at the size it is shown: decoding the 3508px print
-        # logo just to shrink it was over half a second of every start.
-        logo_path = RESOURCE_DIR / "TAF_logo_header.png"
-        if not logo_path.exists():
-            logo_path = RESOURCE_DIR / "TAF_logo_horizontal.png"
-        if logo_path.exists():
-            try:
-                raw = tk.PhotoImage(file=str(logo_path))
-                f = max(1, raw.height() // 46)
-                self._logo_img = raw.subsample(f, f)
-                tk.Label(inner, image=self._logo_img, bg=CCA).pack(side="left")
-            except Exception:
-                self._logo_img = None
+        self._badge = SpinningBadge(px(40))
+        self._badge_spin = None
+        if self._badge.ok:
+            self._badge_label = tk.Label(inner, image=self._badge.frame(0),
+                                         bg=CCA, bd=0, cursor="hand2")
+            self._badge_label.pack(side="left")
+            self._badge_label.bind("<Button-1>", lambda _e: self._spin_badge())
+        name = tk.Frame(inner, bg=CCA)
+        name.pack(side="left", padx=(px(8), 0))
+        tk.Label(name, text="Total", bg=CCA, fg=CA, padx=0,
+                 font=(FAM, 15, "bold")).pack(side="left")
+        tk.Label(name, text="Air Filtration", bg=CCA, fg=CGR, padx=0,
+                 font=(FAM, 15, "bold")).pack(side="left", padx=(px(5), 0))
 
         # Divider + subtitle
         tk.Frame(inner, bg=CSP, width=1, height=32).pack(side="left", padx=16)
@@ -28029,7 +28206,15 @@ def _start_app():
     except Exception:
         pass
     root.deiconify()
-    ModernOrderApp(root)
+    root.update_idletasks()
+    # A white screen with the badge turning while the window is built and
+    # the Dashboard's first orders come in; it fades once they have.
+    holder = {}
+    LoadingScreen(root, ready=lambda: getattr(holder.get("app"),
+                                              "_all_orders_data", None)
+                  is not None)
+    root.update()
+    holder["app"] = ModernOrderApp(root)
     root.mainloop()
     try:
         _db.flush_audit_log(3)      # what was done just before closing

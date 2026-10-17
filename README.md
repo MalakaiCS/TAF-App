@@ -175,6 +175,14 @@ log, stock management and a customer database.
   their own order numbers.
 - **Dashboard** — orders-per-week, order-type and busiest-customer charts, low
   stock alerts, and what's due.
+- **The TAF badge** — top left of the desktop app and the phone app, with
+  the name beside it; click it and it gives a full turn. After signing in, a
+  white screen with the badge turning shows until the first screen has its
+  data, then fades away. On the phone and in a browser, cards fade and rise
+  into place as they scroll into view. None of it moves for anybody whose
+  computer or phone is set to reduce motion (macOS: Accessibility → Display
+  → Reduce motion; Windows: Accessibility → Visual effects → Animation
+  effects).
 - **Stock** — items with images, on-hand / minimum levels, adjustments &
   history, and optional automatic deduction as orders are generated. Channel
   items show what the channel on hand weighs. Shown as square cards — the item's photo

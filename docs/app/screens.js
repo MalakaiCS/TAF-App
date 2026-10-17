@@ -94,7 +94,16 @@ var TAFAPP = (function () {
         D.signOut().then(function () { location.reload(); });
       });
 
+    document.getElementById("brand-badge")
+      .addEventListener("click", function () {
+        U.spin(this.querySelector("img"));
+      });
+    U.autoReveal(document.getElementById("screen"));
+
     if (D.signedIn()) {
+      // Signed in from last time: straight to the loading screen while it
+      // checks, not a flash of the sign-in form.
+      showBoot();
       // A remembered session might have expired overnight. Ask the database
       // who we are rather than trusting what is in storage.
       D.profile(true).then(function (p) {
@@ -105,8 +114,12 @@ var TAFAPP = (function () {
       showSignIn();
     }
 
-    function showSignIn() { signin.classList.remove("hidden"); }
+    function showSignIn() {
+      hideBoot(true);
+      signin.classList.remove("hidden");
+    }
     function showApp() {
+      showBoot();
       signin.classList.add("hidden");
       app.classList.remove("hidden");
       buildTabs();
@@ -126,8 +139,51 @@ var TAFAPP = (function () {
       pollBell();
       stateBar();
       show(active);
+      hideBootWhenLoaded();
     }
     start._showApp = showApp;
+  }
+
+  /* ── The loading screen ──────────────────────────────────────────────
+     White, the badge turning, from signing in until the first screen has
+     its data - then it fades. Up for at least a moment so it never just
+     flickers, and never more than twelve seconds whatever happens. */
+
+  var bootShownAt = 0;
+
+  function showBoot() {
+    var boot = document.getElementById("boot");
+    if (!boot.classList.contains("hidden") && !boot.classList.contains("out")) {
+      return;
+    }
+    bootShownAt = Date.now();
+    boot.classList.remove("hidden", "out");
+  }
+
+  function hideBoot(now) {
+    var boot = document.getElementById("boot");
+    if (boot.classList.contains("hidden")) { return; }
+    if (now || !U.motionOK()) {
+      boot.classList.add("hidden");
+      return;
+    }
+    boot.classList.add("out");
+    setTimeout(function () {
+      if (boot.classList.contains("out")) { boot.classList.add("hidden"); }
+    }, 500);
+  }
+
+  function hideBootWhenLoaded() {
+    var main = document.getElementById("screen");
+    var timer = setInterval(function () {
+      var waited = Date.now() - bootShownAt;
+      // The screen has drawn once its "Loading…" placeholder is gone.
+      var drawn = main.firstChild && !main.querySelector(".loading-ph");
+      if ((drawn && waited >= 600) || waited >= 12000) {
+        clearInterval(timer);
+        hideBoot();
+      }
+    }, 100);
   }
 
   /* ── The bar under the tabs ──────────────────────────────────────────
@@ -433,7 +489,7 @@ var TAFAPP = (function () {
     main.classList.toggle("wide", key === "stock");
     var draw = SCREENS[key];
     if (!draw) { return; }
-    main.appendChild(U.el("div", { cls: "muted", text: "Loading…" }));
+    main.appendChild(U.el("div", { cls: "muted loading-ph", text: "Loading…" }));
     draw(main);
   }
 

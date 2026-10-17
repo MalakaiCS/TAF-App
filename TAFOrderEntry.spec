@@ -50,6 +50,7 @@ a = Analysis(
         ('TAF_logo_header.png',     '.'),       # the logos at screen size
         ('TAF_logo_login.png',      '.'),
         ('TAF_logo_circular.png',   '.'),
+        ('TAF_logo_badge.png',      '.'),       # the round badge that turns
         ('Templates.xlsx',          '.'),
         ('settings.json',           '.'),
         ('fonts',                   'fonts'),   # bundled Public Sans .ttf files

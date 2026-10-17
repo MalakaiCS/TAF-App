@@ -571,6 +571,36 @@ def run() -> int:
         check("the key is taken out of the address bar",
               "k=" not in page.url, page.url)
 
+        print("\n── loading, and the badge ──")
+        if os.environ.get("TAF_SHOTS"):
+            page.screenshot(path=os.path.join(os.environ["TAF_SHOTS"],
+                                              "web_boot.png"))
+        check("signing in shows the loading screen, the badge turning",
+              page.locator("#boot").is_visible()
+              and page.eval_on_selector("#boot img",
+                                        "i => getComputedStyle(i).animationName")
+              == "taf-turn")
+        page.wait_for_selector("#boot", state="hidden", timeout=14000)
+        check("and it goes once the first screen has loaded",
+              page.locator("#screen .card").count() > 0)
+        page.wait_for_function(
+            "() => document.querySelectorAll('#screen .card.reveal.in').length > 0",
+            timeout=3000)
+        check("cards fade and rise into view",
+              page.locator("#screen .card.reveal").count() > 0)
+        check("the badge is top left",
+              page.eval_on_selector("#brand-badge",
+                                    "b => { const r = b.getBoundingClientRect();"
+                                    " return r.left < 40 && r.top < 60; }"))
+        if os.environ.get("TAF_SHOTS"):
+            page.screenshot(path=os.path.join(os.environ["TAF_SHOTS"],
+                                              "web_header.png"))
+        page.click("#brand-badge")
+        check("clicking the badge gives it a full turn",
+              page.eval_on_selector("#brand-badge img",
+                                    "i => i.classList.contains('spin') && "
+                                    "getComputedStyle(i).animationName") == "taf-turn")
+
         print("\n── today ──")
         page.wait_for_selector("#screen .card")
         text = page.locator("#screen").inner_text()
@@ -1633,6 +1663,26 @@ def run() -> int:
             httpd.server_close()
 
         real_errors = [e for e in errors if "favicon" not in e.lower()]
+        print("\n── reduced motion ──")
+        page.emulate_media(reduced_motion="reduce")
+        page.click('#tabs button[data-tab="stock"]')
+        page.wait_for_selector("#screen .stock-card")
+        check("with reduced motion nothing fades in",
+              page.locator("#screen .reveal").count() == 0
+              and page.eval_on_selector("#screen .stock-card",
+                                        "c => getComputedStyle(c).opacity") == "1")
+        page.evaluate("document.querySelector('#brand-badge img')"
+                      ".classList.remove('spin')")
+        page.click("#brand-badge")
+        check("and the badge does not spin",
+              not page.eval_on_selector("#brand-badge img",
+                                        "i => i.classList.contains('spin')"))
+        check("nor does the loading screen's",
+              page.eval_on_selector("#boot img",
+                                    "i => getComputedStyle(i).animationName")
+              == "none")
+        page.emulate_media(reduced_motion="no-preference")
+
         check("no script errors anywhere", not real_errors,
               "\n        ".join(real_errors[:4]))
         browser.close()
