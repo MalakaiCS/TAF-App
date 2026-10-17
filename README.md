@@ -177,7 +177,14 @@ log, stock management and a customer database.
   stock alerts, and what's due.
 - **Stock** — items with images, on-hand / minimum levels, adjustments &
   history, and optional automatic deduction as orders are generated. Channel
-  items show what the channel on hand weighs.
+  items show what the channel on hand weighs. Shown as square cards — the item's photo
+  (whole, never cropped), name, a line or two of description, stock and MOQ
+  (the minimum kept on hand) in the item's units, and what we pay for one ex
+  GST (the preferred supplier's price, or Xero's) — five across on a wide
+  screen, four, three, then two and one on a phone, by the room there is.
+  Click a card to pick it for Open Item, Adjust Stock and the Item menu
+  (Ctrl/⌘-click for several); double-click to open it. The phone and browser
+  app's Stock page shows the same cards.
 - **C-channel weights** — every channel from 10 to 250 mm deep: its actual
   size (23 × centre × 23 × 2440 mm), what one length weighs and what stacks
   of 1, 2, 5, 10 or any number weigh, rounded up to the next 0.1 kg. Search,

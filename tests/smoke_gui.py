@@ -2234,6 +2234,41 @@ def _steps(app, gui, root):
         win.destroy()
     add("buying: order what is low, from where it comes from", _order_what_is_low)
 
+    def _stock_cards():
+        """Stock is square cards; a card clicked is the item the buttons
+        under it act on, and double-clicked it opens."""
+        app._show_tab("stock")
+        app._refresh_stock_list()
+        for _ in range(80):
+            root.update()
+            if len(app._stock_cards) == 2 and app._stock_layout:
+                break
+            time.sleep(0.05)
+        _settle(0.3)
+        assert len(app._stock_cards) == 2, len(app._stock_cards)
+        sizes = {(c.winfo_width(), c.winfo_height()) for c, _p, _i in app._stock_cards}
+        assert len(sizes) == 1 and all(w == h and w > 50 for w, h in sizes), sizes
+        card, parts, item = app._stock_cards[1]
+        assert "MOQ 10" in parts["moq"].cget("text"), parts["moq"].cget("text")
+        assert parts["state"] == "low"
+        card.event_generate("<Button-1>", x=5, y=5)
+        root.update()
+        assert app._get_selected_stock()["id"] == item["id"]
+        assert str(card.cget("highlightbackground")) == gui.CA
+        before = set(root.winfo_children())
+        card.event_generate("<Double-1>", x=5, y=5)
+        root.update()
+        opened = set(root.winfo_children()) - before
+        assert opened, "double-clicking a card opened nothing"
+        for w in opened:
+            w.destroy()
+        app._stock_search_var.set("bag frame")
+        _settle(0.4)
+        assert len(app._stock_cards) == 1, "search no longer narrows the cards"
+        app._stock_search_var.set("")
+        _settle(0.4)
+    add("stock: square cards, picked and opened", _stock_cards)
+
     def _cut_list():
         from taf_order_app import features as _feat
         _feat._switches = {"channel_calculator": True}

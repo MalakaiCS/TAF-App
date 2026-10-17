@@ -428,6 +428,9 @@ var TAFAPP = (function () {
     active = key;
     buildTabs();
     var main = U.clear(document.getElementById("screen"));
+    // The stock cards use the width of a wide screen; the rest read better
+    // narrower.
+    main.classList.toggle("wide", key === "stock");
     var draw = SCREENS[key];
     if (!draw) { return; }
     main.appendChild(U.el("div", { cls: "muted", text: "Loading…" }));
@@ -2203,11 +2206,91 @@ var TAFAPP = (function () {
           var min = Number(s.minimum_on_hand || 0);
           return min > 0 && Number(s.stock_on_hand || 0) <= min;
         }
+        // What we pay for each, ex GST: the preferred supplier's price, or
+        // Xero's for their code (steps 40 and 42). Cards show "No price yet"
+        // until it is known, and fill in when it is.
+        var links = [], xeroItems = [];
+        Promise.all([
+          D.select("stock_item_suppliers", { "select": "*" })
+            .catch(function () { return []; }),
+          D.select("xero_items", { "select": "code,purchase_price,stock_item_id",
+                                   "limit": 5000 })
+            .catch(function () { return []; })
+        ]).then(function (got) {
+          links = got[0] || []; xeroItems = got[1] || [];
+          if (links.length || xeroItems.length) { redraw(); }
+        });
+        function priceOf(s) {
+          var mine = links.filter(function (l) { return l.stock_item_id === s.id; })
+            .sort(function (a, b) { return (b.preferred ? 1 : 0) - (a.preferred ? 1 : 0); });
+          var i, hit;
+          for (i = 0; i < mine.length; i++) {
+            if (mine[i].unit_price !== null && mine[i].unit_price !== undefined
+                && mine[i].unit_price !== "") { return Number(mine[i].unit_price); }
+          }
+          for (i = 0; i < mine.length; i++) {
+            var code = String(mine[i].supplier_code || "").toUpperCase();
+            hit = xeroItems.filter(function (x) {
+              return code && String(x.code || "").toUpperCase() === code
+                     && x.purchase_price !== null && x.purchase_price !== undefined;
+            })[0];
+            if (hit) { return Number(hit.purchase_price); }
+          }
+          hit = xeroItems.filter(function (x) {
+            return x.stock_item_id === s.id && x.purchase_price !== null
+                   && x.purchase_price !== undefined;
+          })[0];
+          return hit ? Number(hit.purchase_price) : null;
+        }
+        function card(s) {
+          var state = Number(s.stock_on_hand || 0) <= 0 ? "out"
+                    : (isLow(s) ? "low" : "");
+          var price = priceOf(s);
+          var least = Number(s.minimum_on_hand || 0);
+          var ph = U.el("div", { cls: "ph" });
+          if (s.image_url) {
+            var img = U.el("img", { attr: { src: s.image_url, alt: s.name || "",
+                                            loading: "lazy" } });
+            img.addEventListener("error", function () {
+              U.clear(ph); ph.appendChild(U.el("span", { text: "No photo" }));
+            });
+            ph.appendChild(img);
+          } else {
+            ph.appendChild(U.el("span", { text: "No photo" }));
+          }
+          var el = U.el("div", {
+            cls: "stock-card", attr: { role: "button", tabindex: "0",
+                                       "data-stock": s.id },
+            on: { click: function () { openStock(s, rows); },
+                  keydown: function (e) {
+                    if (e.key === "Enter" || e.key === " ") {
+                      e.preventDefault(); openStock(s, rows);
+                    }
+                  } },
+            kids: [ph, U.el("div", { cls: "bd", kids: [
+              U.el("div", { cls: "nm", text: s.name || "",
+                            attr: { title: s.name || "" } }),
+              U.el("div", { cls: "ds",
+                            text: s.description || s.product_type || "" }),
+              U.el("div", { cls: "nums", kids: [
+                U.el("b", { cls: state,
+                            text: "Stock " + qtyText(s.stock_on_hand) + " "
+                                  + unitLabel(s.unit, s.stock_on_hand) }),
+                U.el("span", { text: least > 0
+                  ? "MOQ " + qtyText(least) + " " + unitLabel(s.unit, least)
+                  : "MOQ —" })] }),
+              U.el("div", { cls: price === null ? "pr none" : "pr",
+                            text: price === null ? "No price yet"
+                : "$" + price.toFixed(2) + " ex GST / " + unitLabel(s.unit, 1) })
+            ] })]
+          });
+          return el;
+        }
         function redraw() {
           var q = search.value.trim().toLowerCase();
           var list = rows.filter(function (s) {
             if (lowOnly.checked && !isLow(s)) { return false; }
-            return !q || [s.name, s.sku, s.media_type]
+            return !q || [s.name, s.sku, s.media_type, s.description]
               .join(" ").toLowerCase().indexOf(q) !== -1;
           });
           U.clear(out);
@@ -2215,20 +2298,12 @@ var TAFAPP = (function () {
             out.appendChild(U.card(null, [U.empty("Nothing matches")]));
             return;
           }
-          out.appendChild(U.card(list.length + " item"
-            + (list.length === 1 ? "" : "s"),
-            [U.table(["Item", "SKU", { text: "On hand", num: true },
-                      { text: "Minimum", num: true }],
-              list.slice(0, 400).map(function (s) {
-                return U.el("tr", {
-                  cls: "row " + (isLow(s) ? "late" : ""),
-                  on: { click: function () { openStock(s, rows); } },
-                  kids: [U.cell(s.name || ""), U.cell(s.sku || ""),
-                         U.cell(s.stock_on_hand, { num: true }),
-                         U.cell(s.minimum_on_hand || "",
-                                { num: true })]
-                });
-              }))]));
+          out.appendChild(U.el("div", { cls: "muted",
+            attr: { style: "margin:0 0 10px" },
+            text: list.length + " item" + (list.length === 1 ? "" : "s") }));
+          out.appendChild(U.el("div", { cls: "stock-wrap", kids: [
+            U.el("div", { cls: "stock-grid",
+                          kids: list.slice(0, 400).map(card) })] }));
         }
         U.onPick([search, lowOnly], redraw);
         main.appendChild(U.card(null, [
@@ -2244,6 +2319,29 @@ var TAFAPP = (function () {
       }).catch(function (err) { U.clear(main); U.notice(main, err.message); });
   };
 
+  // "rolls", "lengths", "pieces", "m²" - as taf_order_app/stock_cards.py.
+  var UNITS = { each: ["piece", "pieces"], ea: ["piece", "pieces"],
+    pc: ["piece", "pieces"], pcs: ["piece", "pieces"], piece: ["piece", "pieces"],
+    pieces: ["piece", "pieces"], m2: ["m²", "m²"], sqm: ["m²", "m²"],
+    "m²": ["m²", "m²"], "square metre": ["m²", "m²"], "square metres": ["m²", "m²"],
+    roll: ["roll", "rolls"], rolls: ["roll", "rolls"],
+    length: ["length", "lengths"], lengths: ["length", "lengths"],
+    box: ["box", "boxes"], boxes: ["box", "boxes"], m: ["m", "m"],
+    metre: ["m", "m"], metres: ["m", "m"], kg: ["kg", "kg"],
+    sheet: ["sheet", "sheets"], sheets: ["sheet", "sheets"],
+    bag: ["bag", "bags"], bags: ["bag", "bags"], pack: ["pack", "packs"],
+    packs: ["pack", "packs"] };
+  function unitLabel(unit, qty) {
+    var raw = String(unit || "").trim();
+    var pair = UNITS[raw.toLowerCase()] || [raw || "piece", raw || "pieces"];
+    return Number(qty) === 1 ? pair[0] : pair[1];
+  }
+  function qtyText(n) {
+    n = Number(n || 0);
+    return n === Math.round(n) ? String(n)
+         : n.toFixed(2).replace(/0+$/, "").replace(/\.$/, "");
+  }
+
   function openStock(item, all) {
     U.openSheet(function (body, close) {
       body.appendChild(U.el("h2", { cls: "title",
@@ -2253,6 +2351,14 @@ var TAFAPP = (function () {
                item.media_type ? "Media " + item.media_type : "",
                item.unit ? "Per " + item.unit : ""]
               .filter(Boolean).join("   ·   ") }));
+      if (item.image_url) {
+        body.appendChild(U.el("img", { cls: "stock-photo",
+          attr: { src: item.image_url, alt: item.name || "" } }));
+      }
+      if (item.description) {
+        body.appendChild(U.el("p", { text: item.description,
+                                     attr: { style: "margin:8px 0 12px" } }));
+      }
 
       var onHand = U.el("div", {
         text: String(item.stock_on_hand || 0),

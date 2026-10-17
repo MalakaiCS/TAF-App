@@ -43,6 +43,7 @@ from taf_order_app import monitors as _monitors
 from taf_order_app import dockets as _dockets
 from taf_order_app import supplies as _supplies
 from taf_order_app import purchasing as _buying
+from taf_order_app import stock_cards as _cards
 from taf_order_app import bracing as _bracing
 from taf_order_app import calc_settings as _calc_settings
 from taf_order_app import cchannel as _cchannel
@@ -1252,6 +1253,60 @@ def _wheel_steps(event) -> int:
         return max(-6, min(6, -int(delta)))
     steps = -int(delta / 120)
     return steps or (-1 if delta > 0 else 1)
+
+
+def _stock_numbers(item, width: int, bold, small) -> tuple:
+    """"Stock 40 rolls" and "MOQ 10 rolls" for a card, shortened - units
+    off the MOQ, then off both - until the two fit side by side."""
+    held = item.get("stock_on_hand")
+    least = item.get("minimum_on_hand")
+    unit = item.get("unit")
+    has_moq = float(least or 0) > 0
+    tries = [
+        (f"Stock {_cards.qty_text(held)} {_cards.unit_label(unit, held)}",
+         f"MOQ {_cards.qty_text(least)} {_cards.unit_label(unit, least)}"
+         if has_moq else "MOQ —"),
+        (f"Stock {_cards.qty_text(held)} {_cards.unit_label(unit, held)}",
+         f"MOQ {_cards.qty_text(least)}" if has_moq else "MOQ —"),
+        (f"Stock {_cards.qty_text(held)}",
+         f"MOQ {_cards.qty_text(least)}" if has_moq else "MOQ —"),
+    ]
+    for a, b in tries:
+        if bold.measure(a) + small.measure(b) + 8 <= width:
+            return a, b
+    return tries[-1]
+
+
+def _clamp_lines(text: str, font, width: int, lines: int) -> str:
+    """`text` cut to fit `lines` lines of `width` pixels, with … where it was
+    cut - so a card shows a line or two and the rest is in the item."""
+    words = str(text or "").split()
+    out, cur = [], ""
+    for i, word in enumerate(words):
+        trial = f"{cur} {word}".strip()
+        if font.measure(trial) <= width or not cur:
+            cur = trial
+            continue
+        out.append(cur)
+        cur = word
+        if len(out) == lines:
+            cur = None
+            break
+    if cur:
+        out.append(cur)
+    cut = len(out) > lines or cur is None
+    out = out[:lines]
+    if out:
+        last = out[-1]
+        while font.measure(last) > width and len(last) > 1:
+            last = last[:-1]
+            cut = True
+        if cut:
+            while font.measure(last + "…") > width and len(last) > 1:
+                last = last[:-1]
+            last = last.rstrip() + "…"
+        out[-1] = last
+    return "\n".join(out)
 
 
 def _wheel_scroller(canvas):
@@ -14574,94 +14629,115 @@ class ModernOrderApp(tk.Frame):
         self._tab_frames["stock"] = frm
 
         # ── Search / filter bar ───────────────────────────────────────────
+        # Title and search, the filters, then the buttons - the filters drop
+        # to a second row when the window is narrow, rather than off the end.
         top = tk.Frame(frm, bg=CBG)
         top.grid(row=0, column=0, sticky="ew", pady=(0, 8))
+        top.columnconfigure(2, weight=1)
 
-        tk.Label(top, text="Stock Management", bg=CBG, fg=CA,
+        find = tk.Frame(top, bg=CBG)
+        find.grid(row=0, column=0, sticky="w")
+        tk.Label(find, text="Stock Management", bg=CBG, fg=CA,
                  font=F_TTL).pack(side="left", padx=(0, 20))
 
-        tk.Label(top, text="Search:", bg=CBG, fg=CTX,
+        tk.Label(find, text="Search:", bg=CBG, fg=CTX,
                  font=F_BOLD).pack(side="left", padx=(0, 6))
         self._stock_search_var = tk.StringVar()
         self._stock_search_var.trace_add("write", _debounced(
             self.master, 180, self._filter_stock_list))
-        field_entry(top, textvariable=self._stock_search_var,
+        field_entry(find, textvariable=self._stock_search_var,
                     width=22).pack(side="left", padx=(0, 14))
 
-        tk.Label(top, text="Type:", bg=CBG, fg=CTX,
+        filters = tk.Frame(top, bg=CBG)
+        tk.Label(filters, text="Type:", bg=CBG, fg=CTX,
                  font=F_BOLD).pack(side="left", padx=(0, 6))
         self._stock_type_var = tk.StringVar(value="All")
-        type_cb = ttk.Combobox(top, textvariable=self._stock_type_var,
+        type_cb = ttk.Combobox(filters, textvariable=self._stock_type_var,
                                values=["All"] + _db.STOCK_PRODUCT_TYPES,
                                state="readonly", width=16)
         type_cb.pack(side="left", padx=(0, 14))
         self._stock_type_var.trace_add("write", lambda *_: self._filter_stock_list())
 
-        tk.Label(top, text="Show:", bg=CBG, fg=CTX,
+        tk.Label(filters, text="Show:", bg=CBG, fg=CTX,
                  font=F_BOLD).pack(side="left", padx=(0, 6))
         self._stock_show_var = tk.StringVar(value="All")
-        show_cb = ttk.Combobox(top, textvariable=self._stock_show_var,
+        show_cb = ttk.Combobox(filters, textvariable=self._stock_show_var,
                                values=["All", "Low Stock", "Out of Stock"],
                                state="readonly", width=12)
         show_cb.pack(side="left", padx=(0, 14))
         self._stock_show_var.trace_add("write", lambda *_: self._filter_stock_list())
 
-        flat_btn(top, "↻ Refresh", self._refresh_stock_list,
+        acts = tk.Frame(top, bg=CBG)
+        acts.grid(row=0, column=3, sticky="e")
+        flat_btn(acts, "↻ Refresh", self._refresh_stock_list,
                  bg=CNE, pady=5, padx=10, font=F_BODY).pack(side="right", padx=(8, 0))
         if _db.is_ready() and _db.can_manage_stock():
-            flat_btn(top, "+ Add Item", lambda: self._open_stock_item_dialog(),
+            flat_btn(acts, "+ Add Item", lambda: self._open_stock_item_dialog(),
                      bg=CA, pady=5, padx=12, font=F_BOLD).pack(side="right")
 
-        # ── Treeview ──────────────────────────────────────────────────────
-        tbl_wrap = tk.Frame(frm, bg=CCA,
-                            highlightbackground=CSP, highlightthickness=1)
+        def _wrap_bar(_e=None):
+            need = (find.winfo_reqwidth() + filters.winfo_reqwidth()
+                    + acts.winfo_reqwidth())
+            if top.winfo_width() >= need:
+                filters.grid(row=0, column=1, sticky="w")
+            else:
+                filters.grid(row=1, column=0, columnspan=4, sticky="w",
+                             pady=(px(6), 0))
+        top.bind("<Configure>", _wrap_bar)
+        _wrap_bar()
+
+        # ── Cards ─────────────────────────────────────────────────────────
+        # A grid of square cards, as many across as the room allows (see
+        # taf_order_app/stock_cards.py). The table underneath is kept but
+        # not shown: it is what is selected, so Open Item, Adjust Stock,
+        # labels, history and delete work exactly as they did.
+        tbl_wrap = tk.Frame(frm, bg=CBG)
         tbl_wrap.grid(row=1, column=0, sticky="nsew")
         tbl_wrap.rowconfigure(0, weight=1)
         tbl_wrap.columnconfigure(0, weight=1)
 
         scols = ("img", "name", "sku", "type", "unit", "on_hand", "minimum",
                  "status", "weight", "location")
-        self._stock_tree = ttk.Treeview(tbl_wrap, columns=scols,
+        unshown = tk.Frame(tbl_wrap)          # never gridded
+        self._stock_tree = ttk.Treeview(unshown, columns=scols,
                                         show="headings",
                                         style="TAF.Treeview",
-                                        selectmode="browse")
-        self._stock_tree.grid(row=0, column=0, sticky="nsew")
+                                        selectmode="extended")
         attach_empty_state(
                     self._stock_tree,
                     "No stock items",
                     "Add the media, frames and parts you keep on hand,\n"
                     "and orders can take them off automatically.")
 
-        s_col_defs = {
-            "img":      ("📷",         36,  "center"),
-            "name":     ("Name",       200, "w"),
-            "sku":      ("SKU",         90, "w"),
-            "type":     ("Type",       130, "w"),
-            "unit":     ("Unit",        60, "center"),
-            "on_hand":  ("On Hand",     80, "center"),
-            "minimum":  ("Minimum",     80, "center"),
-            "status":   ("Status",      90, "center"),
-            "weight":   ("Weight",      80, "center"),
-            "location": ("Location",   999, "w"),
-        }
-        for col, (hd, wd, anc) in s_col_defs.items():
-            self._stock_tree.heading(col, text=hd,
-                                     anchor="center" if anc == "center" else "w")
-            self._stock_tree.column(col, width=px(wd), anchor=anc, minwidth=px(30),
-                                    stretch=(col == "location"))
-
-        self._stock_tree.tag_configure("ok",    background="#D4EDDA", foreground="#155724")
-        self._stock_tree.tag_configure("low",   background="#FFF3CD", foreground="#856404")
-        self._stock_tree.tag_configure("out",   background="#FDECEA", foreground="#B71C1C")
-        self._stock_tree.tag_configure("even",  background=CRE)
-        self._stock_tree.tag_configure("odd",   background=CCA)
-
-        svsb = ttk.Scrollbar(tbl_wrap, orient="vertical",
-                              command=self._stock_tree.yview)
+        canvas = tk.Canvas(tbl_wrap, bg=CBG, highlightthickness=0, bd=0)
+        canvas.grid(row=0, column=0, sticky="nsew")
+        svsb = ttk.Scrollbar(tbl_wrap, orient="vertical", command=canvas.yview)
         svsb.grid(row=0, column=1, sticky="ns")
-        self._stock_tree.configure(yscrollcommand=svsb.set)
-        self._stock_tree.bind("<Double-1>",
-                              lambda e: self._open_stock_item_dialog(edit=True))
+        canvas.configure(yscrollcommand=svsb.set)
+        grid = tk.Frame(canvas, bg=CBG)
+        win = canvas.create_window((0, 0), window=grid, anchor="nw")
+        grid.bind("<Configure>",
+                  lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
+
+        def _resized(e):
+            canvas.itemconfigure(win, width=e.width)
+            self._layout_stock_cards_soon()
+        canvas.bind("<Configure>", _resized)
+        _mw = _wheel_scroller(canvas)
+        canvas.bind("<Enter>", lambda e: canvas.bind_all("<MouseWheel>", _mw))
+        canvas.bind("<Leave>", lambda e: canvas.unbind_all("<MouseWheel>"))
+        self._stock_canvas = canvas
+        self._stock_grid = grid
+        self._stock_cards = []          # [(card frame, parts dict, item)]
+        self._stock_layout = None       # (width, columns, side) last drawn
+        self._stock_layout_job = None
+        self._stock_photos = {}         # url -> PIL image, or None if it failed
+        self._stock_photo_wanted = set()
+        self._stock_prices = {}         # stock item id -> what we pay, ex GST
+        self._stock_empty = tk.Label(grid, text="", bg=CBG, fg=CMU,
+                                     font=F_BODY, justify="center")
+        self._stock_tree.bind("<<TreeviewSelect>>",
+                              lambda e: self._paint_stock_selection())
 
         # ── Bottom actions ────────────────────────────────────────────────
         bot = tk.Frame(frm, bg=CBG, pady=8)
@@ -14699,9 +14775,25 @@ class ModernOrderApp(tk.Frame):
         def _work():
             try:
                 items = _db.get_stock_items()
-                q.put(("ok", items))
             except Exception as exc:
                 q.put(("err", str(exc)))
+                return
+            # What we pay for each, for the cards: the preferred supplier's
+            # price, or Xero's. Nothing to show before steps 40 and 42.
+            prices = {}
+            try:
+                if _buying.ready():
+                    links = (_buying.list_stock_links()
+                             if _buying.stock_links_ready() else [])
+                    xero_items = _buying.list_items()
+                    for it in items:
+                        price = _cards.price_for(it, links, xero_items)
+                        if price is not None:
+                            prices[str(it.get("id"))] = price
+            except Exception:
+                prices = {}
+            self._stock_prices = prices
+            q.put(("ok", items))
 
         def _poll():
             try:
@@ -14777,6 +14869,8 @@ class ModernOrderApp(tk.Frame):
                 item.get("location", "") or "—",
             ))
 
+        self._draw_stock_cards(shown)
+
         n_low = sum(1 for it in self._stock_data
                     if float(it.get("minimum_on_hand", 0) or 0) > 0
                     and float(it.get("stock_on_hand", 0) or 0) <
@@ -14784,6 +14878,212 @@ class ModernOrderApp(tk.Frame):
         self.status_var.set(
             f"{len(shown)} item{'s' if len(shown) != 1 else ''} shown"
             + (f"  ·  {n_low} low/out" if n_low else ""))
+
+    # ── Stock cards ───────────────────────────────────────────────────────
+
+    def _draw_stock_cards(self, shown):
+        """One square card per stock item listed, in the table's order -
+        card i is row i, so selecting one selects the other."""
+        grid = getattr(self, "_stock_grid", None)
+        if grid is None:
+            return
+        for card, _parts, _item in self._stock_cards:
+            card.destroy()
+        self._stock_cards = []
+        self._stock_layout = None
+        if not shown:
+            self._stock_empty.config(
+                text=("No stock items match." if self._stock_data else
+                      "No stock items yet.\nAdd the media, frames and parts "
+                      "you keep on hand, and orders can take them off "
+                      "automatically."))
+            self._stock_empty.grid(row=0, column=0, padx=px(20), pady=px(40))
+        else:
+            self._stock_empty.grid_forget()
+        for i, item in enumerate(shown):
+            self._stock_cards.append(self._make_stock_card(grid, i, item))
+        self._layout_stock_cards()
+        self._paint_stock_selection()
+        self._fetch_stock_photos([it for it in shown if it.get("image_url")])
+
+    def _make_stock_card(self, grid, i, item):
+        state = _cards.stock_state(item)
+        card = tk.Frame(grid, bg=CCA, highlightthickness=px(2),
+                        highlightbackground=CBR, cursor="hand2")
+        card.grid_propagate(False)
+        card.pack_propagate(False)
+        photo_box = tk.Frame(card, bg=CRE)
+        photo_box.pack_propagate(False)
+        photo_box.pack(side="top", fill="x")
+        photo = tk.Label(photo_box, bg=CRE, fg=CMU, font=F_SM,
+                         text="📷\nNo photo", justify="center")
+        photo.pack(fill="both", expand=True)
+        name = tk.Label(card, text="", bg=CCA, fg=CTX, font=F_BOLD,
+                        anchor="w", justify="left", height=1)
+        name.pack(side="top", fill="x", padx=px(10), pady=(px(6), 0))
+        desc = tk.Label(card, text="", bg=CCA, fg=CMU, font=F_SM,
+                        anchor="nw", justify="left", height=2)
+        desc.pack(side="top", fill="x", padx=px(10))
+        cost = self._stock_prices.get(str(item.get("id")))
+        price = tk.Label(card, text=_cards.price_text(cost, item.get("unit")),
+                         bg=CCA, fg=CA if cost is not None else CMU,
+                         font=F_BOLD, anchor="w")
+        price.pack(side="bottom", fill="x", padx=px(10), pady=(0, px(8)))
+        nums = tk.Frame(card, bg=CCA)
+        nums.pack(side="bottom", fill="x", padx=px(10), pady=(0, px(2)))
+        held_lbl = tk.Label(nums, text="", bg=CCA, font=F_BOLD,
+                            fg={"out": CRD, "low": "#B7791F"}.get(state, CTX))
+        held_lbl.pack(side="left")
+        moq_lbl = tk.Label(nums, text="", bg=CCA, fg=CMU, font=F_SM)
+        moq_lbl.pack(side="right")
+        parts = {"photo_box": photo_box, "photo": photo, "name": name,
+                 "desc": desc, "price": price, "state": state,
+                 "held": held_lbl, "moq": moq_lbl}
+
+        def _pick(e, iid=str(i)):
+            tree = self._stock_tree
+            if e.state & 0x0004 or e.state & 0x0008:     # Ctrl / Cmd: add
+                if iid in tree.selection():
+                    tree.selection_remove(iid)
+                else:
+                    tree.selection_add(iid)
+            else:
+                tree.selection_set(iid)
+            tree.see(iid)
+
+        def _open(_e, iid=str(i)):
+            self._stock_tree.selection_set(iid)
+            self._open_stock_item_dialog(edit=True)
+
+        def _bind(w):
+            w.bind("<Button-1>", _pick)
+            w.bind("<Double-1>", _open)
+            for kid in w.winfo_children():
+                _bind(kid)
+        _bind(card)
+        return card, parts, item
+
+    def _layout_stock_cards_soon(self):
+        if self._stock_layout_job is not None:
+            try:
+                self.master.after_cancel(self._stock_layout_job)
+            except Exception:
+                pass
+        self._stock_layout_job = self.master.after(80, self._layout_stock_cards)
+
+    def _layout_stock_cards(self):
+        """Square cards, the same size, as many across as fit: 5 wide, 4,
+        3, then 2 and 1 as the room gets narrower."""
+        self._stock_layout_job = None
+        canvas = getattr(self, "_stock_canvas", None)
+        if canvas is None or not canvas.winfo_exists():
+            return
+        width = max(canvas.winfo_width(), 1)
+        if width < 50:              # not drawn yet
+            width = px(1100)
+        cols = _cards.columns_for(width, UI_SCALE)
+        gap = px(_cards.GAP)
+        side = _cards.card_size(width, cols, gap)
+        key = (width, cols, side, len(self._stock_cards))
+        if key == self._stock_layout:
+            return
+        self._stock_layout = key
+        self._stock_grid.configure(padx=gap // 2, pady=gap // 2)
+        name_font = _tkfont.Font(font=F_BOLD)
+        desc_font = _tkfont.Font(font=F_SM)
+        text_w = side - px(24)
+        # The photo gets what the writing under it leaves - up to just over
+        # half the card - so the price is never pushed off the bottom.
+        line_b = name_font.metrics("linespace")
+        line_s = desc_font.metrics("linespace")
+        words_h = 3 * line_b + 2 * line_s + px(30)
+        photo_h = int(min(side * 0.55, max(side * 0.3, side - words_h)))
+        for idx, (card, parts, item) in enumerate(self._stock_cards):
+            card.configure(width=side, height=side)
+            card.grid(row=idx // cols, column=idx % cols,
+                      padx=gap // 2, pady=gap // 2, sticky="nw")
+            parts["photo_box"].configure(height=photo_h)
+            parts["photo_h"] = photo_h
+            parts["name"].configure(text=_clamp_lines(
+                item.get("name") or "", name_font, text_w, 1))
+            parts["desc"].configure(text=_clamp_lines(
+                item.get("description") or item.get("product_type") or "",
+                desc_font, text_w, 2), wraplength=text_w)
+            held, moq = _stock_numbers(item, text_w, name_font, desc_font)
+            parts["held"].configure(text=held)
+            parts["moq"].configure(text=moq)
+            self._show_stock_photo(card, parts, item, side)
+
+    def _paint_stock_selection(self):
+        picked = set(self._stock_tree.selection())
+        for i, (card, _parts, _item) in enumerate(self._stock_cards):
+            card.configure(highlightbackground=CA if str(i) in picked else CBR)
+
+    def _fetch_stock_photos(self, items):
+        """The photos attached to the items, fetched once each, off the main
+        thread; each card shows its photo as it arrives."""
+        urls = [str(it.get("image_url")).strip() for it in items]
+        urls = [u for u in dict.fromkeys(urls)
+                if u and u not in self._stock_photos
+                and u not in self._stock_photo_wanted]
+        if not urls:
+            return
+        self._stock_photo_wanted.update(urls)
+
+        def _work():
+            for url in urls:
+                img = None
+                try:
+                    from PIL import Image as _PILImg
+                    import io
+                    if url.startswith("http"):
+                        import urllib.request as _ur
+                        with _ur.urlopen(url, timeout=20) as resp:
+                            data = resp.read()
+                        img = _PILImg.open(io.BytesIO(data))
+                    else:
+                        img = _PILImg.open(url)
+                    img.load()
+                except Exception:
+                    img = None
+                self.master.after(0, lambda u=url, im=img: _arrived(u, im))
+
+        def _arrived(url, img):
+            self._stock_photos[url] = img
+            self._stock_photo_wanted.discard(url)
+            side = (self._stock_layout or (0, 0, 0))[2]
+            for card, parts, item in self._stock_cards:
+                if str(item.get("image_url") or "").strip() == url and side:
+                    self._show_stock_photo(card, parts, item, side)
+        threading.Thread(target=_work, daemon=True).start()
+
+    def _show_stock_photo(self, card, parts, item, side):
+        """The whole photo, shrunk to fit its box - never stretched or
+        cropped - or the placeholder."""
+        url = str(item.get("image_url") or "").strip()
+        img = self._stock_photos.get(url) if url else None
+        label = parts["photo"]
+        if img is None:
+            label.configure(image="", text=("📷\nNo photo" if not url or
+                                            url in self._stock_photos
+                                            else "Loading…"))
+            label._photo = None
+            return
+        box_w = side - px(16)
+        box_h = parts.get("photo_h", int(side * 0.5)) - px(12)
+        if parts.get("photo_size") == (box_w, box_h):
+            return
+        try:
+            from PIL import ImageTk as _PILITk
+            fit = img.copy()
+            fit.thumbnail((max(box_w, 8), max(box_h, 8)))
+            photo = _PILITk.PhotoImage(fit)
+        except Exception:
+            label.configure(image="", text="📷\nNo photo")
+            return
+        label.configure(image=photo, text="")
+        label._photo = photo
+        parts["photo_size"] = (box_w, box_h)
 
     def _stock_weight_text(self, item) -> str:
         """What the channel on hand weighs, from the C-channel calculator.

@@ -18,6 +18,7 @@ from __future__ import annotations
 import functools
 import http.server
 import json
+import os
 import socketserver
 import sys
 import threading
@@ -98,7 +99,11 @@ CUSTOMERS = [
 STOCK = [
     {"id": "s1", "name": "G4 media roll 1m", "sku": "MED-G4-1M",
      "media_type": "G4", "unit": "m", "stock_on_hand": 42,
-     "minimum_on_hand": 20},
+     "minimum_on_hand": 20,
+     "description": "Pleatable G4 synthetic media on a 20 m roll, one metre "
+                    "wide, grey both sides, for panel and pleated filters",
+     "image_url": "https://example.supabase.co/storage/v1/object/public/"
+                  "stock-images/s1.png"},
     {"id": "s2", "name": "F5 media roll 1m", "sku": "MED-F5-1M",
      "media_type": "F5", "unit": "m", "stock_on_hand": 6,
      "minimum_on_hand": 25},          # low
@@ -171,6 +176,22 @@ BELL = {"override": None}    # a count to report instead, e.g. 150
 REFUSE_MOVE = {"on": False}  # row-level security matching nothing
 
 
+
+def _png(width: int, height: int) -> bytes:
+    """A plain, wide photo - wider than a card, to show it is shrunk to fit
+    rather than cropped."""
+    import struct
+    import zlib
+    row = b"\x00" + b"\x1d\xa1\xe6" * width
+    raw = zlib.compress(row * height)
+
+    def chunk(kind, data):
+        return (struct.pack(">I", len(data)) + kind + data
+                + struct.pack(">I", zlib.crc32(kind + data) & 0xffffffff))
+    return (b"\x89PNG\r\n\x1a\n"
+            + chunk(b"IHDR", struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0))
+            + chunk(b"IDAT", raw) + chunk(b"IEND", b""))
+
 class Stub:
     """Answers what the page asks for, and remembers what it was asked."""
 
@@ -178,7 +199,7 @@ class Stub:
         self.calls: list = []
         self.refuse: dict = {}      # rpc name -> message
 
-    def route(self, route):
+    def route(self, route):  # noqa: C901
         req = route.request
         url = req.url
         # post_data itself throws on a binary body — an uploaded photo is not
@@ -282,6 +303,9 @@ class Stub:
                 if part.startswith("order_id=eq."):
                     oid = part.split("eq.", 1)[1]
             return send([f for f in FILES if f["order_id"] == oid])
+        if "/storage/v1/object/public/stock-images/" in url:
+            return route.fulfill(status=200, content_type="image/png",
+                                 body=_png(400, 150))
         if "/storage/v1/object/sign/" in url:
             return send({"signedURL": "/object/signed/fake.png?token=x"})
         if "/storage/v1/object/" in url:
@@ -900,16 +924,71 @@ def run() -> int:
 
         print("\n── stock ──")
         page.click('#tabs button[data-tab="stock"]')
-        page.wait_for_selector("#screen table")
-        check("stock is listed", page.locator("#screen tbody tr").count() == 2)
+        page.wait_for_selector("#screen .stock-card")
+        check("stock is shown as cards", page.locator("#screen .stock-card").count() == 2)
         check("what is low is flagged",
-              page.locator("#screen tbody tr.late").count() == 1)
+              page.locator("#screen .stock-card .nums b.low").count() == 1)
+        g4 = page.locator('#screen .stock-card[data-stock="s1"]')
+        check("each card has its name, stock and MOQ in its units",
+              "G4 media roll 1m" in g4.inner_text()
+              and "Stock 42 m" in g4.inner_text()
+              and "MOQ 20 m" in g4.inner_text(), g4.inner_text())
+        page.wait_for_function(
+            "() => { const i = document.querySelector("
+            "'.stock-card[data-stock=s1] img'); return i && i.complete "
+            "&& i.naturalWidth > 0; }", timeout=5000)
+        fit = page.eval_on_selector(
+            ".stock-card[data-stock=s1] img",
+            "i => getComputedStyle(i).objectFit")
+        check("its photo loads, whole - shrunk to fit, not cropped",
+              fit == "contain", fit)
+        check("one with no photo says so",
+              "No photo" in page.locator(
+                  '#screen .stock-card[data-stock="s2"] .ph').inner_text())
+
+        def _layout(width):
+            page.set_viewport_size({"width": width, "height": 900})
+            page.wait_for_timeout(150)
+            return page.evaluate("""() => {
+              const cards = [...document.querySelectorAll('.stock-card')];
+              const boxes = cards.map(c => c.getBoundingClientRect());
+              const tops = boxes.map(b => Math.round(b.top));
+              const firstRow = boxes.filter(b => Math.round(b.top) === tops[0]);
+              const overlaps = cards.some(c => [...c.querySelectorAll('.nm,.ds,.nums,.pr')]
+                .some(el => el.getBoundingClientRect().bottom
+                            > c.getBoundingClientRect().bottom + 0.5));
+              const grid = document.querySelector('.stock-grid');
+              const cols = getComputedStyle(grid).gridTemplateColumns.split(' ').length;
+              return {square: boxes.every(b => Math.abs(b.width - b.height) < 1.5),
+                      same: new Set(boxes.map(b => Math.round(b.width))).size === 1,
+                      perRow: firstRow.length, cols: cols, overlaps: overlaps,
+                      sideways: document.documentElement.scrollWidth
+                                > window.innerWidth};
+            }""")
+        for width, want in ((375, 1), (480, 2), (768, 3), (1024, 4), (1440, 5)):
+            got = _layout(width)
+            if os.environ.get("TAF_SHOTS"):
+                page.screenshot(path=os.path.join(os.environ["TAF_SHOTS"],
+                                                  f"web_{width}.png"))
+            check(f"at {width}px: {want} across, square, same size, nothing "
+                  "spilling, no sideways scrolling",
+                  got["cols"] == want and got["square"] and got["same"]
+                  and not got["overlaps"] and not got["sideways"], str(got))
+        page.set_viewport_size({"width": 900, "height": 900})
+
         page.check('#screen input[type="checkbox"]')
         page.wait_for_timeout(150)
-        check("and can be shown on its own",
-              page.locator("#screen tbody tr").count() == 1)
+        check("what is low can be shown on its own",
+              page.locator("#screen .stock-card").count() == 1)
+        page.uncheck('#screen input[type="checkbox"]')
+        page.fill('#screen input[type="search"]', "pleatable")
+        page.wait_for_timeout(250)
+        check("search finds by description too",
+              page.locator("#screen .stock-card").count() == 1)
+        page.fill('#screen input[type="search"]', "")
+        page.wait_for_timeout(250)
 
-        page.locator("#screen tbody tr").first.click()
+        page.locator('#screen .stock-card[data-stock="s2"]').click()
         page.wait_for_selector("#sheet:not(.hidden)")
         ssheet = page.locator("#sheet-body")
         before = STOCK[1]["stock_on_hand"]
