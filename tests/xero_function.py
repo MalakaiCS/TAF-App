@@ -459,6 +459,12 @@ class Fake(BaseHTTPRequestHandler):
 PORT = 0
 
 
+def set_secret(**values):
+    req = urllib.request.Request(f"http://127.0.0.1:{PORT}/__env",
+                                 data=json.dumps(values).encode(), method="POST")
+    urllib.request.urlopen(req, timeout=10).read()
+
+
 def call(action: str, body=None, auth: str = "Bearer staff", query=""):
     url = f"http://127.0.0.1:{PORT}/?do={action}{query}"
     data = json.dumps(body or {}).encode()
@@ -857,8 +863,18 @@ def run_checks() -> None:
                          "unit_price": 19.7, "item_code": "FDG-C47-2440"}]}
     code, out = call("po_send", {"po_id": po_id})
     check("somebody on the floor cannot send a purchase order", code == 403, str(out))
+    mails_before = len(W.mails)
     code, out = call("po_send", {"po_id": po_id}, auth="Bearer boss")
     made = next(iter(W.xero_pos.values()), {})
+    check("by default it is left for Xero to email, and the app opens it there",
+          code == 200 and out.get("send_in_xero") and not out.get("emailed")
+          and out.get("xero_po_id") == made.get("PurchaseOrderID")
+          and len(W.mails) == mails_before and not W.pos[po_id].get("error"),
+          str(out))
+    set_secret(PO_EMAIL_VIA="app")
+    code, out = call("po_send", {"po_id": po_id}, auth="Bearer boss")
+    check("asked to, the app's own mail provider sends it instead, "
+          "without making it twice", len(W.xero_pos) == 1, str(out))
     check("a manager sends it: made in Xero, approved, to the supplier",
           code == 200 and out.get("po_number") == "PO-0001" and
           made.get("Status") == "AUTHORISED" and
@@ -990,7 +1006,16 @@ def main() -> int:
         "const serve = Deno.serve;\n"
         "// deno-lint-ignore no-explicit-any\n"
         "(Deno as any).serve = (h: any) => serve({ port: "
-        f"{PORT}, onListen() {{}} }}, h);\n"
+        f"{PORT}, onListen() {{}} }}, async (req: Request) => {{\n"
+        "  // The test changes a secret between checks, as setting one in\n"
+        "  // Supabase would.\n"
+        "  if (new URL(req.url).pathname === '/__env') {\n"
+        "    for (const [k, v] of Object.entries(await req.json())) "
+        "Deno.env.set(k, String(v));\n"
+        "    return new Response('{}');\n"
+        "  }\n"
+        "  return h(req);\n"
+        "});\n"
         f"await import({json.dumps(FUNCTION.as_uri())});\n",
         encoding="utf-8")
     proc = subprocess.Popen(

@@ -807,16 +807,18 @@ a manager opens **Purchase orders…** (Order Supplies, or Buying…):
   marked *estimated* in orange to check. Prices and lines can be changed
   before it goes.
 - **Send to supplier** makes the purchase order in Xero (approved — Xero
-  numbers it) and emails its PDF to the supplier from the app's mail
-  provider. The requests on it show the PO number.
+  numbers it) and opens it in Xero, where you press **Email** to send it to
+  the supplier: Xero's API can email an invoice but not a purchase order.
+  **Open in Xero** opens one again later. The requests on it show the PO
+  number.
 - **What arrived…** ticks off how many of each line came. Lines linked to a
   stock item are booked into stock; when everything is in, the order and its
   requests are received, otherwise it is *Part received*.
 
-Function secrets it uses: `RESEND_API_KEY` and `MAIL_FROM` (the same as
-order emails), optionally `MAIL_REPLY_TO`, `COMPANY_NAME` (default *Total
-Air Filtration*), `XERO_PURCHASE_ACCOUNT` (default `300`) and
-`XERO_PURCHASE_TAX` (default `INPUT`).
+Optional function secrets: `XERO_PURCHASE_ACCOUNT` (default `300`) and
+`XERO_PURCHASE_TAX` (default `INPUT`). To have the app email purchase orders
+itself instead of Xero, set `PO_EMAIL_VIA=app` with `RESEND_API_KEY` and
+`MAIL_FROM` (optionally `MAIL_REPLY_TO` and `COMPANY_NAME`).
 
 ### Price tiers
 

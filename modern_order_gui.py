@@ -19189,6 +19189,20 @@ class ModernOrderApp(tk.Frame):
             self.master.after(0, lambda: done(out, err))
         threading.Thread(target=_run, daemon=True).start()
 
+    def _po_in_xero(self, out) -> str:
+        """It is in Xero, approved; open it there to press Email - Xero's API
+        cannot email a purchase order itself."""
+        text = (f"Purchase order {out.get('po_number')} is in Xero, approved. "
+                "Press Email on it in Xero to send it to the supplier.")
+        self.status_var.set(text)
+        if out.get("xero_po_id"):
+            try:
+                import webbrowser
+                webbrowser.open(_xero.po_url(out["xero_po_id"]))
+            except Exception:
+                pass
+        return text
+
     def _po_from_requests(self):
         """The selected requests, as one purchase order per supplier."""
         rows = [self._supply_rows[i] for i in self.supply_tree.selection()
@@ -19400,7 +19414,9 @@ class ModernOrderApp(tk.Frame):
                 if err or (out or {}).get("error") and not (out or {}).get("po_number"):
                     msg.config(text=err or out["error"], fg=CRD)
                     return
-                if send and not out.get("emailed"):
+                if send and out.get("send_in_xero"):
+                    self._po_in_xero(out)
+                elif send and not out.get("emailed"):
                     messagebox.showwarning(
                         "Purchase order",
                         out.get("error") or "It is in Xero but was not emailed.",
@@ -19704,7 +19720,8 @@ class ModernOrderApp(tk.Frame):
                             if status in ("part_received", "received") else "",
                             str(po.get("created_at") or "")[:10],
                             po.get("emailed_to") or (
-                                "not emailed" if po.get("po_number") else "")))
+                                "email it from Xero" if po.get("po_number")
+                                else "")))
 
         def _po():
             sel = o_tree.selection()
@@ -19738,6 +19755,8 @@ class ModernOrderApp(tk.Frame):
                 out = out or {}
                 if err or (out.get("error") and not out.get("po_number")):
                     msg.config(text=err or out["error"], fg=CRD)
+                elif out.get("send_in_xero"):
+                    msg.config(text=self._po_in_xero(out), fg=CMU)
                 elif not out.get("emailed"):
                     msg.config(text=out.get("error") or "", fg=CRD)
                 else:
@@ -19745,6 +19764,17 @@ class ModernOrderApp(tk.Frame):
                                     f"{out.get('emailed_to')}.", fg=CMU)
                 _reload()
             self._buy_bg(lambda: _xero.send_po(po["id"]), _done)
+
+        def _in_xero():
+            po = _po()
+            if not po:
+                return
+            if not po.get("xero_po_id"):
+                msg.config(text="It has not gone to Xero yet - Send to "
+                                "supplier puts it there.", fg=CRD)
+                return
+            import webbrowser
+            webbrowser.open(_xero.po_url(po["xero_po_id"]))
 
         def _receive():
             po = _po()
@@ -19813,6 +19843,8 @@ class ModernOrderApp(tk.Frame):
                              ("What arrived…", _receive)):
                 flat_btn(o_bar, text, fn, variant="secondary",
                          pady=px(5)).pack(side="left", padx=(px(8), 0))
+        flat_btn(o_bar, "Open in Xero", _in_xero, variant="secondary",
+                 pady=px(5)).pack(side="left", padx=(px(8), 0))
         flat_btn(o_bar, "PDF", _pdf, variant="secondary",
                  pady=px(5)).pack(side="left", padx=(px(8), 0))
         if manager:

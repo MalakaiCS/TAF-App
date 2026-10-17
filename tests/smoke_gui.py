@@ -2138,6 +2138,21 @@ def _steps(app, gui, root):
         win.destroy()
     add("buying: the purchase orders window", _po_window)
 
+    def _po_sent_in_xero():
+        """Xero cannot email a purchase order through its API, so it is
+        opened in Xero to be emailed from there."""
+        import webbrowser
+        opened, real = [], webbrowser.open
+        webbrowser.open = lambda url, *a, **k: opened.append(url)
+        try:
+            text = app._po_in_xero({"po_number": "PO-0008", "send_in_xero": True,
+                                    "xero_po_id": "x-po-8"})
+        finally:
+            webbrowser.open = real
+        assert opened == ["https://go.xero.com/Accounts/Payable/PurchaseOrders/View/x-po-8"], opened
+        assert "PO-0008" in text and "Email" in text, text
+    add("buying: a purchase order is opened in Xero to email", _po_sent_in_xero)
+
     def _cut_list():
         from taf_order_app import features as _feat
         _feat._switches = {"channel_calculator": True}

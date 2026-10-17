@@ -218,6 +218,12 @@ def find_contacts(term: str) -> Dict[str, Any]:
     return _call("contacts", {"term": str(term or "")})
 
 
+def po_url(xero_po_id: str) -> str:
+    """A purchase order's page in Xero, where it is emailed from: Xero's API
+    cannot email a purchase order, only an invoice."""
+    return f"https://go.xero.com/Accounts/Payable/PurchaseOrders/View/{xero_po_id}"
+
+
 def contact_url(contact_id: str) -> str:
     """The contact's page in Xero, for whoever is signed in to Xero."""
     return f"https://go.xero.com/Contacts/View/{contact_id}"

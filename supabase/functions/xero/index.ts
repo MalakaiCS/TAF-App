@@ -48,8 +48,10 @@
 //   pdf         an order's invoice as Xero prints it            staff
 //   suppliers_pull  Xero's supplier contacts into the app       manager
 //   items_pull  every Xero item into the app                    manager
-//   po_send     make a purchase order in Xero and email it to
-//               the supplier (the app's mail provider)          manager
+//   po_send     make a purchase order in Xero, approved; it is
+//               emailed from Xero by a person (Xero's API cannot
+//               email one), or by the app's mail provider when
+//               PO_EMAIL_VIA=app                                 manager
 //   po_pdf      a purchase order as Xero prints it              staff
 //   contacts    Xero contacts matching a search, to link a
 //               customer to theirs                              staff
@@ -964,6 +966,14 @@ async function sendPo(poId: string) {
     number = made.PurchaseOrderNumber ?? "";
     await note({ xero_po_id: xeroId, po_number: number, status: "sent",
                  sent_at: nowIso(), error: null });
+  }
+
+  // Xero's API cannot email a purchase order - only invoices. So unless the
+  // app's own mail provider is asked to (PO_EMAIL_VIA=app), the order is
+  // made in Xero and a person presses Email on it there, which the app opens.
+  if (env("PO_EMAIL_VIA", "xero").trim().toLowerCase() !== "app") {
+    await note({ error: null });
+    return { po_number: number, emailed: false, send_in_xero: true, xero_po_id: xeroId };
   }
 
   // The address on the order, when somebody typed one, beats the one Xero has.
