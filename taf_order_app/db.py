@@ -2039,23 +2039,63 @@ def get_low_stock_items() -> list:
         return []
 
 
+STOCK_IMAGE_TYPES = (".jpg", ".jpeg", ".png", ".webp", ".gif", ".heic")
+
+
 def upload_stock_image(item_id: str, image_path: str) -> str:
-    """Upload a local image to the stock-images bucket. Returns the public URL."""
+    """Upload a stock item's photo, shrunk to a sensible size first (see
+    photos.py). Returns its public address, made its own with ?v= so it can
+    be kept by browsers and PCs for a year without ever showing an old one."""
     import mimetypes
+    import time as _t
     from pathlib import Path as _P
-    p    = _P(image_path)
-    ext  = p.suffix.lower()
+    from . import photos as _photos
+    p = _P(image_path)
+    data, mime, ext = _photos.shrink(p.read_bytes())
+    if not ext:                   # not a picture PIL can read: as it is
+        ext = p.suffix.lower()
+        mime = mimetypes.guess_type(str(p))[0] or "image/jpeg"
     name = f"{item_id}{ext}"
-    mime = mimetypes.guess_type(str(p))[0] or "image/jpeg"
-    data = p.read_bytes()
+    store = get_client().storage.from_("stock-images")
     try:
-        get_client().storage.from_("stock-images").remove([name])
+        # Any earlier photo of it, whatever it was saved as.
+        store.remove([f"{item_id}{e}" for e in STOCK_IMAGE_TYPES])
     except Exception:
         pass
-    get_client().storage.from_("stock-images").upload(
-        name, data,
-        file_options={"content-type": mime, "upsert": "true"})
-    return f"{SUPABASE_URL}/storage/v1/object/public/stock-images/{name}"
+    store.upload(name, data, file_options={
+        "content-type": mime, "upsert": "true",
+        "cache-control": "31536000"})
+    return _photos.versioned(
+        f"{SUPABASE_URL}/storage/v1/object/public/stock-images/{name}",
+        _t.time())
+
+
+def shrink_stock_photo(item: dict, fetch=None) -> str:
+    """A photo uploaded before photos were shrunk on the way up, shrunk now
+    and put back, and the stock item pointed at it. Returns the new address,
+    or "" when there was nothing to do: no photo, one somewhere else, one
+    already done (its address has ?v=), or one small already."""
+    import tempfile
+    import urllib.request
+    from pathlib import Path as _P
+    from . import photos as _photos
+    url = str(item.get("image_url") or "").strip()
+    if not url or "/stock-images/" not in url or "?v=" in url:
+        return ""
+    if fetch is None:
+        def fetch(u):
+            with urllib.request.urlopen(u, timeout=30) as resp:
+                return resp.read()
+    data = fetch(url)
+    small, _mime, ext = _photos.shrink(data)
+    if not ext:
+        return ""
+    with tempfile.TemporaryDirectory() as tmp:
+        path = _P(tmp) / "photo.jpg"
+        path.write_bytes(small)
+        new = upload_stock_image(str(item["id"]), str(path))
+    update_stock_item(str(item["id"]), {"image_url": new})
+    return new
 
 
 # ── Profile pictures ─────────────────────────────────────────────────────────

@@ -15023,6 +15023,8 @@ class ModernOrderApp(tk.Frame):
             return [
                 ("Transaction history",   self._view_stock_history),
                 ("Print barcode labels…", self._print_stock_labels),
+                ("Make the photos load faster…",
+                 self._shrink_stock_photos if can else None),
                 None,
                 ("Delete this item…",     self._delete_stock_item if can else None),
             ]
@@ -15035,6 +15037,54 @@ class ModernOrderApp(tk.Frame):
 
         # Cache for the full stock list
         self._stock_data: list = []
+
+    def _shrink_stock_photos(self):
+        """Photos uploaded straight off a phone - megabytes each - shrunk and
+        put back, once. New ones are shrunk as they go up; this is for the
+        ones from before."""
+        todo = [it for it in self._stock_data or []
+                if "/stock-images/" in str(it.get("image_url") or "")
+                and "?v=" not in str(it.get("image_url") or "")]
+        if not todo:
+            messagebox.showinfo("Stock photos",
+                                "Every photo is quick to load already.")
+            return
+        if not messagebox.askyesno(
+                "Stock photos",
+                f"{len(todo)} photo{'s' if len(todo) != 1 else ''} went up "
+                "before photos were shrunk on the way up.\n\nShrink "
+                f"{'them' if len(todo) != 1 else 'it'} now? Each looks the "
+                "same on the Stock page and loads in a fraction of the time, "
+                "on the PCs and the phones. It takes a minute or so."):
+            return
+
+        def _work():
+            done = failed = 0
+            for i, item in enumerate(todo, start=1):
+                self.master.after(0, lambda i=i: self.status_var.set(
+                    f"Shrinking stock photos… {i} of {len(todo)}"))
+                try:
+                    if _db.shrink_stock_photo(item):
+                        done += 1
+                except Exception:
+                    failed += 1
+            self.master.after(0, lambda: _done(done, failed))
+
+        def _done(done, failed):
+            self.status_var.set(
+                f"Shrunk {done} stock photo{'s' if done != 1 else ''}.")
+            if failed:
+                messagebox.showwarning(
+                    "Stock photos",
+                    f"Shrunk {done}. {failed} couldn't be - check the "
+                    "connection and try again; the rest are done.")
+            try:
+                _db.log_action("stock_photos_shrunk", f"{done} photos")
+            except Exception:
+                pass
+            self._refresh_stock_list()
+
+        threading.Thread(target=_work, daemon=True).start()
 
     def _refresh_stock_list(self):
         """Fetch all stock items from DB and rebuild the list."""
@@ -15290,8 +15340,9 @@ class ModernOrderApp(tk.Frame):
             card.configure(highlightbackground=CA if str(i) in picked else CBR)
 
     def _fetch_stock_photos(self, items):
-        """The photos attached to the items, fetched once each, off the main
-        thread; each card shows its photo as it arrives."""
+        """The photos attached to the items, off the main thread and several
+        at a time, from this PC's small copies once it has them (photos.py);
+        each card shows its photo as it arrives."""
         urls = [str(it.get("image_url")).strip() for it in items]
         urls = [u for u in dict.fromkeys(urls)
                 if u and u not in self._stock_photos
@@ -15300,23 +15351,11 @@ class ModernOrderApp(tk.Frame):
             return
         self._stock_photo_wanted.update(urls)
 
-        def _work():
-            for url in urls:
-                img = None
-                try:
-                    from PIL import Image as _PILImg
-                    import io
-                    if url.startswith("http"):
-                        import urllib.request as _ur
-                        with _ur.urlopen(url, timeout=20) as resp:
-                            data = resp.read()
-                        img = _PILImg.open(io.BytesIO(data))
-                    else:
-                        img = _PILImg.open(url)
-                    img.load()
-                except Exception:
-                    img = None
-                self.master.after(0, lambda u=url, im=img: _arrived(u, im))
+        def _came(url, img):
+            try:
+                self.master.after(0, lambda: _arrived(url, img))
+            except Exception:
+                pass             # the window has closed
 
         def _arrived(url, img):
             self._stock_photos[url] = img
@@ -15325,7 +15364,8 @@ class ModernOrderApp(tk.Frame):
             for card, parts, item in self._stock_cards:
                 if str(item.get("image_url") or "").strip() == url and side:
                     self._show_stock_photo(card, parts, item, side)
-        threading.Thread(target=_work, daemon=True).start()
+        from taf_order_app import photos as _photos
+        _photos.fetch_all(urls, _came)
 
     def _show_stock_photo(self, card, parts, item, side):
         """The whole photo, shrunk to fit its box - never stretched or
@@ -16138,6 +16178,11 @@ class ModernOrderApp(tk.Frame):
                  bg=CBG, fg=CMU, font=F_SM).pack(side="left", padx=(12, 0))
         flat_btn(hdr, "Refresh", self._refresh_supplies,
                  bg=CNE, pady=5, padx=10, font=F_BODY).pack(side="right")
+        # The stock items on a list of their own, picked and sent together.
+        self._supply_new_btn = flat_btn(
+            hdr, "+  New order", self._new_supply_order, bg=CA, pady=5,
+            padx=12, font=F_BOLD)
+        self._supply_new_btn.pack(side="right", padx=(0, 10))
         self._supply_show_done = tk.BooleanVar(value=False)
         tk.Checkbutton(hdr, text="Show finished", bg=CBG, fg=CTX,
                        variable=self._supply_show_done,
@@ -16342,6 +16387,7 @@ class ModernOrderApp(tk.Frame):
             self._supply_state.set(err)
             self._supplier_names = {str(x.get("id")): x.get("name") or ""
                                     for x in self._suppliers or []}
+            self._supply_pos = pos
             self._offer_supply_stock()
             self._offer_supply_from()
             for i, row in enumerate(rows):
@@ -16513,6 +16559,348 @@ class ModernOrderApp(tk.Frame):
             self._refresh_supplies()
 
         threading.Thread(target=_work, daemon=True).start()
+
+    def _new_supply_order(self):
+        """A New order: the stock items picked from a list - searched, or
+        everything low at once - each with how many and who from, sent to
+        the managers in one go. Opened again, it comes back to the front."""
+        win = getattr(self, "_supply_order_win", None)
+        if win is not None and win.winfo_exists():
+            win.deiconify()
+            win.lift()
+            win.focus_force()
+            return
+        win = tk.Toplevel(self.master, bg=CBG)
+        self._supply_order_win = win
+        win.title("New supply order")
+        win.transient(self.master)
+        _centre_on_parent(win, self.master, px(1040), px(640))
+        win.minsize(px(760), px(460))
+        win.columnconfigure(1, weight=1)
+        win.rowconfigure(1, weight=1)
+        win.bind("<Escape>", lambda e: win.destroy())
+
+        top = tk.Frame(win, bg=CBG, padx=px(16), pady=px(12))
+        top.grid(row=0, column=0, columnspan=2, sticky="ew")
+        tk.Label(top, text="New order", bg=CBG, fg=CA,
+                 font=F_TTL).pack(side="left")
+        tk.Label(top, text="Pick from the stock list - how many and who from "
+                 "are filled in where we know.", bg=CBG, fg=CMU,
+                 font=F_SM).pack(side="left", padx=(px(12), 0))
+
+        # ── The stock list ────────────────────────────────────────────────
+        left = tk.Frame(win, bg=CCA, highlightbackground=CSP,
+                        highlightthickness=1, padx=px(10), pady=px(10))
+        left.grid(row=1, column=0, sticky="nsew", padx=(px(16), px(8)))
+        left.rowconfigure(2, weight=1)
+        left.columnconfigure(0, weight=1)
+        tk.Label(left, text="STOCK", bg=CCA, fg=CMU,
+                 font=F_BOLD).grid(row=0, column=0, sticky="w")
+        find = tk.StringVar()
+        find_e = field_entry(left, textvariable=find, width=32)
+        find_e.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(px(4), px(6)))
+        lst = ttk.Treeview(left, columns=("name", "held"), show="headings",
+                           style="TAF.Treeview", selectmode="extended",
+                           height=14)
+        lst.heading("name", text="Item", anchor="w")
+        lst.heading("held", text="Stock / min")
+        lst.column("name", width=px(230), anchor="w", stretch=True)
+        lst.column("held", width=px(110), anchor="e", stretch=False)
+        lst.tag_configure("out", foreground=CRD)
+        lst.tag_configure("low", foreground="#B7791F")
+        lst.tag_configure("added", foreground=CMU)
+        lst.grid(row=2, column=0, sticky="nsew")
+        lsb = ttk.Scrollbar(left, orient="vertical", command=lst.yview)
+        lsb.grid(row=2, column=1, sticky="ns")
+        lst.configure(yscrollcommand=lsb.set)
+        shown = {}
+        btns = tk.Frame(left, bg=CCA)
+        btns.grid(row=3, column=0, columnspan=2, sticky="ew", pady=(px(8), 0))
+
+        # ── The order ─────────────────────────────────────────────────────
+        right = tk.Frame(win, bg=CCA, highlightbackground=CSP,
+                         highlightthickness=1, padx=px(10), pady=px(10))
+        right.grid(row=1, column=1, sticky="nsew", padx=(px(8), px(16)))
+        right.rowconfigure(2, weight=1)
+        right.columnconfigure(0, weight=1)
+        count = tk.StringVar(value="THE ORDER")
+        tk.Label(right, textvariable=count, bg=CCA, fg=CMU,
+                 font=F_BOLD).grid(row=0, column=0, sticky="w")
+        cv = tk.Canvas(right, bg=CCA, highlightthickness=0)
+        cv.grid(row=2, column=0, sticky="nsew")
+        rsb = ttk.Scrollbar(right, orient="vertical", command=cv.yview)
+        rsb.grid(row=2, column=1, sticky="ns")
+        cv.configure(yscrollcommand=rsb.set)
+        rows_box = tk.Frame(cv, bg=CCA)
+        rows_box.columnconfigure(0, weight=1)
+        holder = cv.create_window((0, 0), window=rows_box, anchor="nw")
+        rows_box.bind("<Configure>", lambda e: cv.configure(
+            scrollregion=(0, 0, e.width, e.height)))
+        cv.bind("<Configure>", lambda e: cv.itemconfigure(holder, width=e.width))
+        scroller = SmoothScroller(cv, px(44))
+        empty = tk.Label(rows_box, text="Nothing on it yet.\nDouble-click "
+                         "stock on the left, or Add everything low.",
+                         bg=CCA, fg=CMU, font=F_BODY, justify="center")
+
+        foot = tk.Frame(win, bg=CBG, padx=px(16), pady=px(12))
+        foot.grid(row=2, column=0, columnspan=2, sticky="ew")
+        foot.columnconfigure(1, weight=1)
+        tk.Label(foot, text="Note", bg=CBG, fg=CTX,
+                 font=F_BODY).grid(row=0, column=0, sticky="w")
+        note = tk.StringVar()
+        field_entry(foot, textvariable=note, width=40).grid(
+            row=0, column=1, sticky="ew", padx=(px(8), px(12)))
+        urgent = tk.BooleanVar(value=False)
+        tk.Checkbutton(foot, text="Urgent - work has stopped", variable=urgent,
+                       bg=CBG, fg=CRD, activebackground=CBG, selectcolor=CCA,
+                       font=F_BODY, cursor="hand2").grid(row=0, column=2,
+                                                         sticky="w")
+        flat_btn(foot, "Cancel", win.destroy, bg=CNE, variant="secondary",
+                 pady=px(7)).grid(row=0, column=3, padx=(px(12), px(8)))
+        send_btn = flat_btn(foot, "Send to managers", lambda: _send(), bg=CA,
+                            pady=px(7))
+        send_btn.grid(row=0, column=4)
+
+        lines = []         # {"stock", "qty" var, "sup" var, "entry"}
+        names = {}         # supplier name -> id
+
+        def _stock():
+            return self._supply_stock or []
+
+        def _on_order():
+            pos = [p for p in (getattr(self, "_supply_pos", None) or {}).values()
+                   if p.get("status") in ("draft", "sent", "part_received")]
+            try:
+                return _records.quantities_on_order(
+                    pos or [{"status": "draft", "lines": []}])
+            except Exception:
+                return {}
+
+        def _offer(stock):
+            """Who it comes from first, then everybody else."""
+            theirs = [str(l.get("supplier_id")) for l in
+                      _buying.suppliers_for(str(stock.get("id")),
+                                            self._supply_links or [])]
+            by_id = {v: k for k, v in names.items()}
+            first = [by_id[s] for s in theirs if s in by_id]
+            rest = sorted(n for n in names if n not in first)
+            return [""] + first + rest
+
+        def _fill_list(*_):
+            lst.delete(*lst.get_children())
+            shown.clear()
+            have = {str(l["stock"].get("id")) for l in lines}
+            for stock in _buying.search_stock(_stock(), find.get()):
+                sid = str(stock.get("id"))
+                state = _cards.stock_state(stock)
+                held = _cards.qty_text(stock.get("stock_on_hand"))
+                least = float(stock.get("minimum_on_hand") or 0)
+                tags = [state] if state != "ok" else []
+                if sid in have:
+                    tags.append("added")
+                iid = lst.insert("", "end", values=(
+                    ("✓ " if sid in have else "") + str(stock.get("name") or ""),
+                    f"{held} / {_cards.qty_text(least)}" if least else held),
+                    tags=tags)
+                shown[iid] = stock
+            if not shown:
+                lst.insert("", "end", values=(
+                    "No stock items yet" if not _stock() else "Nothing matches", ""))
+
+        def _show_lines():
+            # One grid for the headings and every line, so they line up.
+            for child in rows_box.winfo_children():
+                if child is not empty:
+                    child.destroy()
+            if not lines:
+                empty.grid(row=0, column=0, columnspan=4, pady=px(40))
+            else:
+                empty.grid_forget()
+                for c, text in enumerate(("Item", "How many", "From", "")):
+                    tk.Label(rows_box, text=text.upper(), bg=CCA, fg=CMU,
+                             font=F_SM, anchor="w").grid(
+                                 row=0, column=c, sticky="w",
+                                 padx=(px(4), px(6)), pady=(0, px(4)))
+            for i, line in enumerate(lines, start=1):
+                stock = line["stock"]
+                tk.Label(rows_box, text=str(stock.get("name") or ""), bg=CCA,
+                         fg=CTX, font=F_BODY, anchor="w").grid(
+                             row=i, column=0, sticky="ew",
+                             padx=(px(4), px(6)), pady=px(3))
+                qbox = tk.Frame(rows_box, bg=CCA)
+                qbox.grid(row=i, column=1, sticky="w", padx=(px(4), px(6)))
+                q = field_entry(qbox, textvariable=line["qty"], width=6)
+                q.pack(side="left")
+                line["entry"] = q
+                tk.Label(qbox, text=_cards.unit_label(stock.get("unit"), 2),
+                         bg=CCA, fg=CMU, font=F_SM, width=7,
+                         anchor="w").pack(side="left", padx=(px(4), 0))
+                cb = ttk.Combobox(rows_box, textvariable=line["sup"],
+                                  values=_offer(stock), state="readonly",
+                                  width=20)
+                cb.grid(row=i, column=2, sticky="w", padx=(px(4), px(6)))
+                flat_btn(rows_box, "✕", lambda l=line: _drop(l), bg=CNE,
+                         variant="secondary", pady=px(2), padx=px(6)
+                         ).grid(row=i, column=3, padx=(0, px(4)))
+            for w in (rows_box, *rows_box.winfo_children()):
+                for seq in ("<MouseWheel>", "<Button-4>", "<Button-5>"):
+                    w.bind(seq, scroller.wheel)
+            n = len(lines)
+            count.set("THE ORDER" + (f" - {n} ITEM{'S' if n != 1 else ''}"
+                                     if n else ""))
+            _fill_list()
+
+        def _add(picks, focus=True):
+            have = {str(l["stock"].get("id")) for l in lines}
+            by_id = {v: k for k, v in names.items()}
+            added = []
+            for pick in picks:
+                sid = str(pick["stock"].get("id"))
+                if sid in have:
+                    continue
+                have.add(sid)
+                line = {"stock": pick["stock"],
+                        "qty": tk.StringVar(value=pick["quantity"]),
+                        "sup": tk.StringVar(
+                            value=by_id.get(pick["supplier_id"], ""))}
+                lines.append(line)
+                added.append(line)
+            _show_lines()
+            if added and focus:
+                # The first one with no number yet is the one to type into.
+                want = next((l for l in added if not l["qty"].get()), added[-1])
+                win.after(50, lambda: (want["entry"].focus_set(),
+                                       want["entry"].select_range(0, "end")))
+                win.after(80, lambda: cv.yview_moveto(1.0))
+            return added
+
+        def _add_selected(*_):
+            coming = _on_order()
+            picks = [_buying.new_order_pick(
+                shown[iid], self._supply_links or [],
+                coming.get(str(shown[iid].get("id")), 0.0))
+                for iid in lst.selection() if iid in shown]
+            if picks:
+                _add(picks)
+
+        def _add_low():
+            picks = _buying.low_picks(_stock(), self._supply_links or [],
+                                      _on_order())
+            if not _add(picks, focus=False):
+                messagebox.showinfo(
+                    "New order", "Nothing more is below its minimum." if picks
+                    or not _stock() else
+                    "Nothing is below its minimum - or it is already coming.",
+                    parent=win)
+
+        def _drop(line):
+            lines.remove(line)
+            _show_lines()
+
+        def _send():
+            if not lines:
+                messagebox.showinfo("New order", "Put something on it first.",
+                                    parent=win)
+                return
+            missing = [l for l in lines if not l["qty"].get().strip()]
+            if missing:
+                messagebox.showwarning(
+                    "New order", "Say how many " +
+                    str(missing[0]["stock"].get("name") or "of it") + ".",
+                    parent=win)
+                missing[0]["entry"].focus_set()
+                return
+            out = [_buying.stock_request_line(
+                l["stock"], l["qty"].get(), names.get(l["sup"].get(), ""),
+                self._supply_links or []) for l in lines]
+            together = bool(self._suppliers)
+            send_btn.configure(state="disabled")
+
+            def _work():
+                try:
+                    if together:
+                        _buying.request_supplies(out, bool(urgent.get()),
+                                                 note.get())
+                    else:
+                        for line in out:
+                            _supplies.request_supply(
+                                line["item"], line["detail"], line["quantity"],
+                                bool(urgent.get()), note.get())
+                    err = ""
+                except Exception as exc:
+                    err = ("Run migrate_supply_requests.sql in the Supabase "
+                           "SQL Editor first." if _supplies.is_missing_table(exc)
+                           else f"It wasn't sent:\n{exc}")
+                self.master.after(0, lambda: _sent(err))
+
+            def _sent(err):
+                if err:
+                    if win.winfo_exists():
+                        send_btn.configure(state="normal")
+                    messagebox.showerror("New order", err,
+                                         parent=win if win.winfo_exists()
+                                         else self.master)
+                    return
+                try:
+                    _db.log_action("supply_requested", "; ".join(
+                        _supplies.describe(l) for l in out)[:500])
+                except Exception:
+                    pass
+                if win.winfo_exists():
+                    win.destroy()
+                self.status_var.set(
+                    f"Ordered {len(out)} thing{'s' if len(out) != 1 else ''} "
+                    "from stock - the managers have been told.")
+                self._refresh_supplies()
+
+            threading.Thread(target=_work, daemon=True).start()
+
+        flat_btn(btns, "Add  ▸", _add_selected, bg=CA, pady=px(5)
+                 ).pack(side="left")
+        flat_btn(btns, "Add everything low", _add_low, bg=CNE,
+                 variant="secondary", pady=px(5)).pack(side="left",
+                                                       padx=(px(8), 0))
+        lst.bind("<Double-Button-1>", _add_selected)
+        lst.bind("<Return>", _add_selected)
+        find.trace_add("write", _fill_list)
+        find_e.bind("<Down>", lambda e: (lst.focus_set(), lst.selection_set(
+            lst.get_children()[:1]), lst.focus(
+                (lst.get_children() or ("",))[0])))
+        for seq in ("<MouseWheel>", "<Button-4>", "<Button-5>"):
+            cv.bind(seq, scroller.wheel)
+
+        def _ready():
+            names.clear()
+            names.update({x.get("name") or "": str(x.get("id"))
+                          for x in self._suppliers or [] if x.get("name")})
+            _show_lines()
+        # Open on whatever has been loaded; load it first if nothing has.
+        win.add_selected, win.add_low, win.send = _add_selected, _add_low, _send
+        win.lines, win.stock_list, win.find = lines, lst, find
+        if self._suppliers is None and not self._supply_stock:
+            lst.insert("", "end", values=("Loading stock…", ""))
+
+            def _load():
+                try:
+                    self._suppliers = (_buying.list_suppliers()
+                                       if _buying.ready() else [])
+                except Exception:
+                    self._suppliers = []
+                try:
+                    self._supply_stock = _db.get_stock_items() or []
+                except Exception:
+                    self._supply_stock = []
+                try:
+                    self._supply_links = (_buying.list_stock_links()
+                                          if self._suppliers
+                                          and _buying.stock_links_ready() else [])
+                except Exception:
+                    self._supply_links = []
+                self.master.after(0, lambda: win.winfo_exists() and _ready())
+            threading.Thread(target=_load, daemon=True).start()
+        else:
+            _ready()
+        find_e.focus_set()
 
     @staticmethod
     def _po_label(po) -> str:

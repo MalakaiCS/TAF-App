@@ -2383,7 +2383,7 @@ var TAFAPP = (function () {
           var ph = U.el("div", { cls: "ph" });
           if (s.image_url) {
             var img = U.el("img", { attr: { src: s.image_url, alt: s.name || "",
-                                            loading: "lazy" } });
+                                            loading: "lazy", decoding: "async" } });
             img.addEventListener("error", function () {
               U.clear(ph); ph.appendChild(U.el("span", { text: "No photo" }));
             });
@@ -2473,6 +2473,342 @@ var TAFAPP = (function () {
     n = Number(n || 0);
     return n === Math.round(n) ? String(n)
          : n.toFixed(2).replace(/0+$/, "").replace(/\.$/, "");
+  }
+
+  /* ── New order (Order Supplies) ──────────────────────────────────────
+     Stock items picked from a list, each with how many and who from, sent
+     to the managers in one go. The same rules as purchasing.py's
+     search_stock, new_order_pick, low_picks and stock_request_line - a
+     test holds the two together. */
+
+  function stockState(s) {
+    var held = Number(s.stock_on_hand || 0), least = Number(s.minimum_on_hand || 0);
+    if (held <= 0) { return "out"; }
+    return least > 0 && held < least ? "low" : "ok";
+  }
+
+  function searchStock(rows, text) {
+    var words = String(text || "").toLowerCase().split(/\s+/).filter(Boolean);
+    var rank = { out: 0, low: 1 };
+    return (rows || []).filter(function (r) {
+      var hay = [r.name, r.product_type, r.description].map(function (v) {
+        return String(v || "");
+      }).join(" ").toLowerCase();
+      return words.every(function (w) { return hay.indexOf(w) >= 0; });
+    }).sort(function (a, b) {
+      var ra = rank[stockState(a)], rb = rank[stockState(b)];
+      ra = ra === undefined ? 2 : ra; rb = rb === undefined ? 2 : rb;
+      if (ra !== rb) { return ra - rb; }
+      var na = String(a.name || "").toLowerCase(), nb = String(b.name || "").toLowerCase();
+      return na < nb ? -1 : (na > nb ? 1 : 0);
+    });
+  }
+
+  function suppliersOf(id, links) {
+    return (links || []).filter(function (l) {
+      return String(l.stock_item_id) === String(id);
+    }).sort(function (a, b) {
+      if (!!a.preferred !== !!b.preferred) { return a.preferred ? -1 : 1; }
+      var ca = String(a.supplier_code || ""), cb = String(b.supplier_code || "");
+      return ca < cb ? -1 : (ca > cb ? 1 : 0);
+    });
+  }
+
+  function shortfallOf(s, onOrder) {
+    var want = Number(s.minimum_on_hand || 0), held = Number(s.stock_on_hand || 0);
+    if (!(want > 0)) { return 0; }
+    return Math.max(0, Math.ceil(want - held - (Number(onOrder) || 0)));
+  }
+
+  function newOrderPick(s, links, onOrder) {
+    var need = shortfallOf(s, onOrder);
+    var theirs = suppliersOf(s.id, links);
+    return { stock: s, quantity: need > 0 ? qtyText(need) : "",
+             supplier_id: theirs.length ? String(theirs[0].supplier_id || "") : "" };
+  }
+
+  function lowPicks(rows, links, onOrder) {
+    onOrder = onOrder || {};
+    return searchStock(rows, "").map(function (s) {
+      return newOrderPick(s, links, onOrder[String(s.id)] || 0);
+    }).filter(function (p) { return !!p.quantity; });
+  }
+
+  function supplyItemFor(s) {
+    var words = (String(s.product_type || "") + " " + String(s.name || "")).toLowerCase();
+    var kinds = SUPPLY_ITEMS.filter(function (k) { return k !== "Other"; });
+    for (var i = 0; i < kinds.length; i++) {
+      var key = kinds[i].toLowerCase();
+      if (words.indexOf(key) >= 0 || words.indexOf(key.replace(/s+$/, "")) >= 0
+          || words.indexOf(key.split(" ")[0]) >= 0) { return kinds[i]; }
+    }
+    return "Other";
+  }
+
+  function stockRequestLine(s, quantity, supplierId, links) {
+    var qty = String(quantity || "").trim();
+    if (/^\d+(\.\d+)?$/.test(qty)) { qty = qty + " " + unitLabel(s.unit, qty); }
+    var link = supplierId ? (links || []).filter(function (l) {
+      return String(l.stock_item_id) === String(s.id)
+             && String(l.supplier_id) === String(supplierId);
+    })[0] : null;
+    return { item: supplyItemFor(s),
+             detail: String(s.name || "").trim().slice(0, 200),
+             quantity: qty.slice(0, 60), supplier_id: supplierId || "",
+             item_code: link ? String(link.supplier_code || "") : "",
+             stock_item_id: String(s.id || "") };
+  }
+
+  // What is on a purchase order and not yet here, by stock item - the same
+  // as records.quantities_on_order.
+  function onOrderOf(pos) {
+    var out = {};
+    (pos || []).forEach(function (po) {
+      if (po.status === "received" || po.status === "cancelled") { return; }
+      (po.lines || []).forEach(function (l) {
+        var key = String((l && (l.item_id || l.stock_item_id)) || "");
+        if (!key) { return; }
+        var left = Number(l.quantity || 0) - Number(l.received || 0);
+        if (left > 0) { out[key] = (out[key] || 0) + left; }
+      });
+    });
+    return out;
+  }
+
+  // One New order at a time, kept while it is open: a stock photo looked
+  // at from it, or the phone turned, comes back to the same list.
+  var NEW_ORDER = null;
+
+  function openNewOrder(done) {
+    if (!NEW_ORDER) {
+      NEW_ORDER = { lines: [], find: "", note: "", urgent: false,
+                    stock: null, links: [], suppliers: [], onOrder: {},
+                    stale: 0, error: "" };
+      var o = NEW_ORDER;
+      Promise.all([
+        loadKept("stock", function () {
+          return D.select("stock_items", { "select": "*", "order": "name",
+                                           "limit": 2000 });
+        }).catch(function (err) { o.error = err.message; return { rows: [], at: 0 }; }),
+        D.select("stock_item_suppliers", { "select": "*" })
+          .catch(function () { return []; }),
+        D.select("suppliers", { "select": "id,name", "active": "eq.true",
+                                "order": "name" }).catch(function () { return []; }),
+        D.select("purchase_orders", { "select": "status,lines",
+                                      "status": "in.(draft,sent,part_received)" })
+          .catch(function () { return []; })
+      ]).then(function (got) {
+        if (NEW_ORDER !== o) { return; }
+        o.stock = got[0].rows || []; o.stale = got[0].at;
+        o.links = got[1] || []; o.suppliers = got[2] || [];
+        o.onOrder = onOrderOf(got[3]);
+        if (o.redraw) { o.redraw(); }
+      });
+    }
+    U.openSheet(function (body, close) {
+      var o = NEW_ORDER;
+      if (!o) { close(); return; }
+      var names = {};
+      o.suppliers.forEach(function (s) { names[s.id] = s.name; });
+
+      body.appendChild(U.el("h2", { cls: "title", text: "New order" }));
+      body.appendChild(U.el("div", { cls: "muted",
+        text: "Pick from the stock list - how many and who from are filled "
+            + "in where we know." }));
+
+      var find = U.el("input", { attr: { type: "search", id: "no-find",
+        placeholder: "Search stock", value: o.find, autocomplete: "off" } });
+      var low = U.button("Add everything low", function () {
+        var picks = lowPicks(o.stock || [], o.links, o.onOrder);
+        if (!add(picks)) {
+          U.notice(pickCard, picks.length ? "Everything low is on it already."
+            : "Nothing is below its minimum - or it is already coming.", "ok");
+        }
+      }, "quiet");
+      low.setAttribute("id", "no-low");
+      var results = U.el("div", { cls: "no-results", attr: { id: "no-results" } });
+      var pickCard = U.card("Stock", [find, U.el("div", { cls: "row-actions",
+                                                           kids: [low] }), results]);
+
+      var linesBox = U.el("div", { cls: "no-lines", attr: { id: "no-lines" } });
+      var orderCard = U.card("The order", [linesBox]);
+      var note = U.el("input", { attr: { type: "text", id: "no-note",
+        maxlength: "500", placeholder: "Optional", value: o.note } });
+      note.addEventListener("input", function () { o.note = note.value; });
+      var urgent = U.el("input", { attr: { type: "checkbox", id: "no-urgent" } });
+      urgent.checked = o.urgent;
+      urgent.addEventListener("change", function () { o.urgent = urgent.checked; });
+      orderCard.appendChild(U.el("label", { cls: "f", kids: [
+        U.el("span", { text: "Note" }), note] }));
+      orderCard.appendChild(U.el("label", { cls: "f",
+        attr: { style: "color:#8A2A1E" }, kids: [
+          urgent, document.createTextNode("  Urgent - work has stopped")] }));
+      var send = U.button("Send to managers", function () { sendIt(); }, "go");
+      send.setAttribute("id", "no-send");
+      var cancel = U.button("Cancel", function () { NEW_ORDER = null; close(); },
+                            "quiet");
+      orderCard.appendChild(U.el("div", { cls: "row-actions",
+                                          kids: [cancel, send] }));
+      body.appendChild(pickCard);
+      body.appendChild(orderCard);
+
+      function have(id) {
+        return o.lines.some(function (l) { return String(l.stock.id) === String(id); });
+      }
+
+      function add(picks) {
+        var added = 0;
+        picks.forEach(function (p) {
+          if (have(p.stock.id)) { return; }
+          o.lines.push({ stock: p.stock, qty: p.quantity, sup: p.supplier_id });
+          added++;
+        });
+        if (added) { drawLines(); drawResults(); }
+        return added;
+      }
+
+      function drawResults() {
+        U.clear(results);
+        if (o.stock === null) {
+          results.appendChild(U.el("div", { cls: "muted", text: "Loading stock…" }));
+          return;
+        }
+        if (o.stale) { results.appendChild(staleNote(o.stale)); }
+        var hits = searchStock(o.stock, o.find);
+        if (!hits.length) {
+          results.appendChild(U.el("div", { cls: "muted", text: o.error
+            || (o.stock.length ? "Nothing matches." : "No stock items yet.") }));
+          return;
+        }
+        hits.slice(0, 60).forEach(function (s) {
+          var state = stockState(s);
+          var on = have(s.id);
+          var least = Number(s.minimum_on_hand || 0);
+          var ph = U.el("div", { cls: "ph" });
+          if (s.image_url) {
+            ph.appendChild(U.el("img", { attr: { src: s.image_url, alt: "",
+              loading: "lazy", decoding: "async", width: "44", height: "44" } }));
+          }
+          var row = U.el("button", {
+            cls: "no-pick" + (on ? " on" : ""),
+            attr: { type: "button", "data-stock": s.id,
+                    "aria-label": (on ? "On the order: " : "Add ") + (s.name || "") },
+            on: { click: function () {
+              if (have(s.id)) { return; }
+              add([newOrderPick(s, o.links, o.onOrder[String(s.id)] || 0)]);
+              var input = linesBox.querySelector('[data-line="' + s.id + '"] input');
+              if (input && !input.value) { input.focus(); }
+            } },
+            kids: [ph, U.el("span", { cls: "nm", text: s.name || "" }),
+                   U.el("span", { cls: "held st-" + state,
+                     text: qtyText(s.stock_on_hand) + (least ? " / " + qtyText(least) : "")
+                           + " " + unitLabel(s.unit, s.stock_on_hand) }),
+                   U.el("span", { cls: "plus", text: on ? "✓" : "+" })]
+          });
+          results.appendChild(row);
+        });
+      }
+
+      function drawLines() {
+        U.clear(linesBox);
+        if (!o.lines.length) {
+          linesBox.appendChild(U.empty("Nothing on it yet.",
+            "Tap stock above, or Add everything low."));
+          return;
+        }
+        o.lines.forEach(function (l, i) {
+          var qty = U.el("input", { attr: { type: "text", inputmode: "decimal",
+            maxlength: "20", value: l.qty, "aria-label": "How many " + (l.stock.name || "") } });
+          qty.addEventListener("input", function () { l.qty = qty.value; });
+          var sup = U.el("select", { attr: { "aria-label": "From" },
+            kids: [U.el("option", { text: "Supplier - not sure", attr: { value: "" } })] });
+          var theirs = suppliersOf(l.stock.id, o.links).map(function (k) {
+            return String(k.supplier_id);
+          }).filter(function (id) { return names[id]; });
+          var rest = o.suppliers.map(function (s) { return String(s.id); })
+            .filter(function (id) { return theirs.indexOf(id) < 0; });
+          theirs.concat(rest).forEach(function (id) {
+            sup.appendChild(U.el("option", { text: names[id], attr: { value: id } }));
+          });
+          sup.value = l.sup || "";
+          sup.addEventListener("change", function () { l.sup = sup.value; });
+          var off = U.button("✕", function () {
+            o.lines.splice(i, 1); drawLines(); drawResults();
+          }, "quiet");
+          off.setAttribute("aria-label", "Take off " + (l.stock.name || ""));
+          linesBox.appendChild(U.el("div", { cls: "no-line",
+            attr: { "data-line": l.stock.id }, kids: [
+              U.el("div", { cls: "nm", text: l.stock.name || "" }),
+              U.el("div", { cls: "q", kids: [qty, U.el("span", {
+                text: unitLabel(l.stock.unit, 2) })] }),
+              o.suppliers.length ? sup : U.el("span"),
+              off] }));
+        });
+      }
+
+      function sendIt() {
+        if (!o.lines.length) {
+          U.notice(orderCard, "Put something on it first.");
+          return;
+        }
+        var missing = o.lines.filter(function (l) { return !String(l.qty).trim(); })[0];
+        if (missing) {
+          U.notice(orderCard, "Say how many " + (missing.stock.name || "of it") + ".");
+          var input = linesBox.querySelector('[data-line="' + missing.stock.id + '"] input');
+          if (input) { input.focus(); }
+          return;
+        }
+        var lines = o.lines.map(function (l) {
+          return stockRequestLine(l.stock, l.qty, l.sup, o.links);
+        });
+        var label = lines.length === 1 ? describeRequest(lines[0])
+                                       : lines.length + " things";
+        var details = lines.map(function (l) {
+          return describeRequest(l) + ", " + l.quantity;
+        }).join("; ").slice(0, 500);
+        send.disabled = true;
+        // The step 40 way files the supplier and stock item and tells the
+        // managers once. Before step 40, one request each.
+        var sending = o.suppliers.length ? S.send({
+          rpc: "request_supplies", label: "New order · " + label,
+          body: { p_lines: lines, p_urgent: !!o.urgent, p_note: o.note.trim(),
+                  p_client_ref: S.newRef() },
+          log: { action: "supply_requested", details: details }
+        }) : lines.reduce(function (prev, l) {
+          return prev.then(function (res) {
+            return S.send({
+              rpc: "request_supply", label: "New order · " + describeRequest(l),
+              body: { p_item: l.item, p_detail: l.detail, p_quantity: l.quantity,
+                      p_urgent: !!o.urgent, p_note: o.note.trim(),
+                      p_client_ref: S.newRef() },
+              log: { action: "supply_requested",
+                     details: describeRequest(l) + ", " + l.quantity }
+            }).then(function (r) { return { queued: (res && res.queued) || r.queued }; });
+          });
+        }, Promise.resolve(null));
+        sending.then(function (res) {
+          NEW_ORDER = null;
+          close();
+          if (done) { done(res || {}); }
+        }).catch(function (err) {
+          send.disabled = false;
+          U.notice(orderCard, notSetUp(err) ? NOT_SET_UP : err.message);
+        });
+      }
+
+      find.addEventListener("input", function () {
+        o.find = find.value; drawResults();
+      });
+      o.redraw = function () {
+        if (document.body.contains(results)) {
+          names = {};
+          o.suppliers.forEach(function (s) { names[s.id] = s.name; });
+          drawResults(); drawLines();
+        }
+      };
+      drawResults();
+      drawLines();
+    });
   }
 
   function openStock(item, all) {
@@ -2930,7 +3266,26 @@ var TAFAPP = (function () {
     listCard.appendChild(listBody);
     listCard.appendChild(U.el("div", { cls: "row-actions", kids: [toggle] }));
 
+    // ── New order: the stock list, picked from ────────────────────────
+    var newOrder = U.button("+  New order", function () {
+      openNewOrder(function (res) {
+        U.notice(listCard, res.queued
+          ? "Kept on this phone. It goes when the signal is back, and the "
+            + "managers are told then."
+          : "Sent - the managers have been told.", "ok");
+        if (!res.queued) { loadList(); }
+      });
+    }, "go");
+    newOrder.setAttribute("id", "supply-new-order");
+    var top = U.el("div", { cls: "supply-top", kids: [
+      U.el("div", { kids: [
+        U.el("b", { text: "Ordering stock?" }),
+        U.el("div", { cls: "muted",
+          text: "Pick from the stock list, with how many and who from." })] }),
+      newOrder] });
+
     U.clear(main);
+    main.appendChild(top);
     main.appendChild(askCard);
     main.appendChild(listCard);
 
@@ -3035,6 +3390,10 @@ var TAFAPP = (function () {
     _badgeText: badgeText,
     _setBell: setBell,
     _supplyItems: SUPPLY_ITEMS,
+    _newOrder: { searchStock: searchStock, newOrderPick: newOrderPick,
+                 lowPicks: lowPicks, supplyItemFor: supplyItemFor,
+                 stockRequestLine: stockRequestLine, onOrderOf: onOrderOf,
+                 open: openNewOrder, reset: function () { NEW_ORDER = null; } },
     _sortRequests: sortRequests,
     _stateBar: stateBar,
     _lookUp: lookUp,

@@ -2195,6 +2195,86 @@ def _steps(app, gui, root):
     add("supplies: ask for a stock item, from where it comes from",
         _ask_for_a_stock_item)
 
+    def _new_order_from_stock():
+        """New order: everything low goes on with how many and who from,
+        a stock item is searched for and added, and it all goes in one."""
+        app._show_tab("supplies")
+        app._new_supply_order()
+        win = app._supply_order_win
+        for _ in range(60):
+            root.update()
+            if len(win.stock_list.get_children()) == 2:
+                break
+            time.sleep(0.05)
+        assert win.stock_list.set(win.stock_list.get_children()[0], "name") \
+            == "Bag frame 592", "the low one should be first"
+        win.add_low()
+        root.update()
+        assert [(l["stock"]["id"], l["qty"].get(), l["sup"].get())
+                for l in win.lines] == [("s2", "6", "Vulcan")], win.lines
+        win.find.set("g4 med")
+        root.update()
+        rows = win.stock_list.get_children()
+        assert len(rows) == 1, rows
+        win.stock_list.selection_set(rows[0])
+        win.add_selected()
+        root.update()
+        assert [(l["qty"].get(), l["sup"].get()) for l in win.lines[1:]] == \
+            [("", "FD Greenwood")], win.lines
+        # Twice is still once.
+        win.add_selected()
+        assert len(win.lines) == 2
+        SENT_SUPPLIES.clear()
+        win.send()                     # no number for the media: not sent
+        _settle(0.2)
+        assert not SENT_SUPPLIES and win.winfo_exists()
+        win.lines[1]["qty"].set("2")
+        win.send()
+        for _ in range(60):
+            root.update()
+            if SENT_SUPPLIES:
+                break
+            time.sleep(0.05)
+        _settle(0.2)
+        assert SENT_SUPPLIES == [[
+            {"item": "Other", "detail": "Bag frame 592", "quantity": "6 pieces",
+             "supplier_id": "s-vul", "item_code": "VUL-BF592",
+             "stock_item_id": "s2"},
+            {"item": "Media", "detail": "G4 media roll", "quantity": "2 m²",
+             "supplier_id": "s-fdg", "item_code": "FDG-G4",
+             "stock_item_id": "s1"}]], SENT_SUPPLIES
+        assert not win.winfo_exists()
+    add("supplies: New order from the stock list", _new_order_from_stock)
+
+    def _shrink_old_photos():
+        """A manager can shrink the photos from before, once each."""
+        if not gui._db.can_manage_stock():
+            return
+        shrunk = []
+        cache = object.__getattribute__(gui._db, "_cache")
+        cache["shrink_stock_photo"] = lambda item: shrunk.append(item["id"]) or "new"
+        old = "https://x.supabase.co/storage/v1/object/public/stock-images/"
+        saved = app._stock_data
+        app._stock_data = [{"id": "p1", "image_url": old + "p1.png"},
+                           {"id": "p2", "image_url": old + "p2.jpg?v=1"},
+                           {"id": "p3", "image_url": ""}]
+        was = gui.messagebox.askyesno
+        gui.messagebox.askyesno = lambda *a, **k: True
+        try:
+            app._shrink_stock_photos()
+            for _ in range(60):
+                root.update()
+                if "Shrunk" in app.status_var.get():
+                    break
+                time.sleep(0.05)
+        finally:
+            gui.messagebox.askyesno = was
+            app._stock_data = saved
+            cache.pop("shrink_stock_photo", None)
+        assert shrunk == ["p1"], shrunk
+        assert app.status_var.get() == "Shrunk 1 stock photo.", app.status_var.get()
+    add("stock: shrink the photos from before", _shrink_old_photos)
+
     def _order_what_is_low():
         """The bag frame is short: a purchase order to Vulcan, at the agreed
         price, for what gets it back to its minimum."""

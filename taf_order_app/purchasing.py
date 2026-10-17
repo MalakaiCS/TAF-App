@@ -199,6 +199,80 @@ def stock_for(category: str, stock_items: Sequence[Dict[str, Any]]
     return hits or rows
 
 
+def supply_item_for(stock: Dict[str, Any], items: Sequence[str] = ()) -> str:
+    """Which of Order Supplies' kinds a stock item is - "Channel", "Tape",
+    and so on - by its product type or its name; "Other" when none fits.
+    The request still names the item itself, and links to it."""
+    from . import supplies as _supplies
+    kinds = [k for k in (items or _supplies.ITEMS) if k != "Other"]
+    words = (str(stock.get("product_type") or "") + " " +
+             str(stock.get("name") or "")).lower()
+    for kind in kinds:
+        key = kind.lower()
+        if key in words or key.rstrip("s") in words or key.split()[0] in words:
+            return kind
+    return "Other"
+
+
+def stock_request_line(stock: Dict[str, Any], quantity: Any = "",
+                       supplier_id: str = "",
+                       links: Sequence[Dict[str, Any]] = ()) -> Dict[str, Any]:
+    """A supply request for a stock item picked from the list: its kind, its
+    name, how many in its own units, who from and their code for it - and
+    which stock item, so the purchase order knows where it goes into stock."""
+    from . import stock_cards as _cards
+    qty = str(quantity or "").strip()
+    if qty and re.fullmatch(r"\d+(?:\.\d+)?", qty):
+        qty = f"{qty} {_cards.unit_label(stock.get('unit'), qty)}"
+    return {"item": supply_item_for(stock),
+            "detail": str(stock.get("name") or "").strip()[:200],
+            "quantity": qty[:60], "supplier_id": supplier_id or "",
+            "item_code": str((link_for(str(stock.get("id") or ""),
+                                       supplier_id, links) or {}
+                              ).get("supplier_code") or "") if supplier_id else "",
+            "stock_item_id": str(stock.get("id") or "")}
+
+
+def search_stock(stock_items: Sequence[Dict[str, Any]], text: str = ""
+                 ) -> List[Dict[str, Any]]:
+    """The stock items a New order search finds: every word typed somewhere
+    in the name, type or description - "45 chan" finds 45mm channel. Those
+    running low first, then by name."""
+    words = str(text or "").lower().split()
+    order = {"out": 0, "low": 1}
+
+    def _hay(r):
+        return " ".join(str(r.get(k) or "") for k in
+                        ("name", "product_type", "description")).lower()
+    from . import stock_cards as _cards
+    hits = [r for r in stock_items or [] if all(w in _hay(r) for w in words)]
+    return sorted(hits, key=lambda r: (order.get(_cards.stock_state(r), 2),
+                                       str(r.get("name") or "").lower()))
+
+
+def new_order_pick(stock: Dict[str, Any], links: Sequence[Dict[str, Any]],
+                   on_order: float = 0.0) -> Dict[str, Any]:
+    """A stock item put on a New order: how many to get it back to its
+    minimum (blank when it is not low - somebody says), and its preferred
+    supplier, or the only one."""
+    need = shortfall(stock, on_order)
+    theirs = suppliers_for(str(stock.get("id") or ""), links)
+    from . import stock_cards as _cards
+    return {"stock": stock,
+            "quantity": _cards.qty_text(need) if need > 0 else "",
+            "supplier_id": str(theirs[0].get("supplier_id") or "") if theirs else ""}
+
+
+def low_picks(stock_items: Sequence[Dict[str, Any]],
+              links: Sequence[Dict[str, Any]],
+              on_order: Optional[Dict[str, float]] = None) -> List[Dict[str, Any]]:
+    """"Add everything low": each stock item below its minimum, as a pick."""
+    on_order = on_order or {}
+    picks = [new_order_pick(s, links, on_order.get(str(s.get("id")), 0.0))
+             for s in search_stock(stock_items)]
+    return [p for p in picks if p["quantity"]]
+
+
 def suppliers_for(stock_item_id: str, links: Sequence[Dict[str, Any]]
                   ) -> List[Dict[str, Any]]:
     """Who a stock item comes from, the preferred one first."""

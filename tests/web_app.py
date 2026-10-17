@@ -259,7 +259,7 @@ class Stub:
             return send(NOTES)
         if "/rest/v1/stock_item_suppliers" in url:
             return send([{"stock_item_id": "s2", "supplier_id": "s-vul",
-                          "preferred": True}])
+                          "supplier_code": "VUL-F5", "preferred": True}])
         if "/rest/v1/suppliers" in url:
             return send([{"id": "s-fdg", "name": "FD Greenwood"},
                          {"id": "s-vul", "name": "Vulcan"}])
@@ -1486,6 +1486,126 @@ def run() -> int:
               many and many[-1]["p_lines"][0].get("stock_item_id") == "s2"
               and many[-1]["p_lines"][0].get("supplier_id") == "s-vul",
               str(many[-1:]))
+
+        print("\n── New order, from the stock list ──")
+        STOCK[1]["stock_on_hand"] = 6          # the F5 roll, low again
+        page.click('#tabs button[data-tab="supplies"]')
+        page.wait_for_selector("#screen table")
+        if os.environ.get("TAF_SHOTS"):
+            page.set_viewport_size({"width": 390, "height": 860})
+            page.wait_for_timeout(150)
+            page.screenshot(path=os.path.join(os.environ["TAF_SHOTS"],
+                                              "web_supplies_390.png"))
+            page.set_viewport_size({"width": 900, "height": 900})
+        page.click("#supply-new-order")
+        page.wait_for_selector("#no-results .no-pick")
+        picks = page.eval_on_selector_all("#no-results .no-pick",
+                                          "bs => bs.map(b => b.dataset.stock)")
+        check("New order lists the stock, the low one first", picks == ["s2", "s1"],
+              str(picks))
+        page.click("#no-low")
+        line = '#no-lines [data-line="s2"]'
+        check("Add everything low puts on what gets it back to its minimum, "
+              "from where it comes from",
+              page.locator("#no-lines .no-line").count() == 1
+              and page.input_value(line + " input") == "19"
+              and page.input_value(line + " select") == "s-vul",
+              page.locator("#no-lines").inner_text())
+        page.fill("#no-find", "g4")
+        found = page.eval_on_selector_all("#no-results .no-pick",
+                                          "bs => bs.map(b => b.dataset.stock)")
+        check("searching narrows the list", found == ["s1"], str(found))
+        page.click('#no-results .no-pick[data-stock="s1"]')
+        check("tapping one puts it on, waiting for how many",
+              page.locator("#no-lines .no-line").count() == 2
+              and page.input_value('#no-lines [data-line="s1"] input') == ""
+              and page.evaluate("document.activeElement.closest('[data-line]')"
+                                " && document.activeElement.closest('[data-line]')"
+                                ".dataset.line") == "s1")
+        before = len([u for u, _b in stub.calls if "rpc/request_supplies" in u])
+        page.click("#no-send")
+        check("it is not sent while one says no number",
+              "Say how many G4" in page.locator("#sheet-body").inner_text()
+              and len([u for u, _b in stub.calls
+                       if "rpc/request_supplies" in u]) == before)
+        page.fill('#no-lines [data-line="s1"] input', "40")
+        if os.environ.get("TAF_SHOTS"):
+            page.fill("#no-find", "")
+            for width in (390, 1200):
+                page.set_viewport_size({"width": width, "height": 860})
+                page.wait_for_timeout(150)
+                page.screenshot(path=os.path.join(os.environ["TAF_SHOTS"],
+                                                  f"web_new_order_{width}.png"))
+            page.set_viewport_size({"width": 900, "height": 900})
+        page.click("#no-send")
+        wait_for_text(page, "#screen", "managers have been told")
+        many = [b for u, b in stub.calls if "rpc/request_supplies" in u]
+        check("the order goes as one request: each stock item, in its own "
+              "units, with the supplier's code",
+              len(many) == before + 1 and many[-1]["p_lines"] == [
+                  {"item": "Media", "detail": "F5 media roll 1m",
+                   "quantity": "19 m", "supplier_id": "s-vul",
+                   "item_code": "VUL-F5", "stock_item_id": "s2"},
+                  {"item": "Media", "detail": "G4 media roll 1m",
+                   "quantity": "40 m", "supplier_id": "", "item_code": "",
+                   "stock_item_id": "s1"}], str(many[-1:]))
+        check("and the sheet closes", page.locator("#sheet.hidden").count() == 1)
+
+        # The phone's rules are the desktop's (purchasing.py).
+        sys.path.insert(0, str(ROOT))
+        from taf_order_app import purchasing as _buy
+        sample = [
+            {"id": "a", "name": "C Channel 45mm", "product_type": "Channel",
+             "stock_on_hand": 4, "minimum_on_hand": 20, "unit": "lengths"},
+            {"id": "b", "name": "Foil tape 48mm", "product_type": "Tape",
+             "stock_on_hand": 30, "minimum_on_hand": 10, "unit": "rolls"},
+            {"id": "c", "name": "C Channel 25mm", "stock_on_hand": 0,
+             "minimum_on_hand": 0, "unit": "lengths"},
+            {"id": "d", "name": "G4 media", "description": "Pleated",
+             "stock_on_hand": 2, "minimum_on_hand": 5.5, "unit": "rolls"},
+            {"id": "e", "name": "Pop rivet 4mm", "stock_on_hand": 1,
+             "minimum_on_hand": 3, "unit": "each"},
+            {"id": "f", "name": "Galv mesh 6mm", "stock_on_hand": 9,
+             "minimum_on_hand": 0, "unit": "m2"}]
+        links = [{"stock_item_id": "a", "supplier_id": "s-vul", "supplier_code": "V45"},
+                 {"stock_item_id": "a", "supplier_id": "s-fdg",
+                  "supplier_code": "CC45", "preferred": True},
+                 {"stock_item_id": "d", "supplier_id": "s-vul", "supplier_code": "G4"}]
+        js = page.evaluate("""([rows, links]) => {
+            const N = TAFAPP._newOrder;
+            return {
+              search: ['', 'chan', '45 chan', 'pleated', 'zzz'].map(
+                t => N.searchStock(rows, t).map(r => r.id)),
+              low: N.lowPicks(rows, links, {a: 3}).map(p => [p.stock.id, p.quantity, p.supplier_id]),
+              kinds: rows.map(r => N.supplyItemFor(r)),
+              lines: rows.map(r => N.stockRequestLine(r, '3', r.id === 'a' ? 's-fdg' : '', links)),
+              onOrder: N.onOrderOf([{status: 'sent', lines: [
+                  {stock_item_id: 'a', quantity: 10, received: 4},
+                  {item_id: 'd', quantity: 2}]},
+                {status: 'received', lines: [{stock_item_id: 'a', quantity: 9}]}])
+            }; }""", [sample, links])
+        from taf_order_app import records as _rec
+        py = {
+            "search": [[r["id"] for r in _buy.search_stock(sample, t)]
+                       for t in ("", "chan", "45 chan", "pleated", "zzz")],
+            "low": [[p["stock"]["id"], p["quantity"], p["supplier_id"]]
+                    for p in _buy.low_picks(sample, links, {"a": 3})],
+            "kinds": [_buy.supply_item_for(r) for r in sample],
+            "lines": [_buy.stock_request_line(r, "3", "s-fdg" if r["id"] == "a" else "",
+                                              links) for r in sample],
+            "onOrder": _rec.quantities_on_order([
+                {"status": "sent", "lines": [
+                    {"stock_item_id": "a", "quantity": 10, "received": 4},
+                    {"item_id": "d", "quantity": 2}]},
+                {"status": "received", "lines": [{"stock_item_id": "a", "quantity": 9}]}]),
+        }
+        # 6 in JavaScript is 6.0 in Python: the amounts, as numbers.
+        js["onOrder"] = {k: float(v) for k, v in js["onOrder"].items()}
+        py["onOrder"] = {k: float(v) for k, v in py["onOrder"].items()}
+        for key in py:
+            check(f"New order on the phone works out {key} as the desktop does",
+                  json.dumps(js[key], sort_keys=True) == json.dumps(py[key], sort_keys=True),
+                  f"{js[key]} != {py[key]}")
 
         page.click('#tabs button[data-tab="supplies"]')
         page.wait_for_selector("#screen table")

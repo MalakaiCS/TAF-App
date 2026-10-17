@@ -173,3 +173,87 @@ def test_a_request_for_a_stock_item_uses_that_suppliers_code():
     assert (line["item_code"], line["unit_price"], line["quantity"],
             line["stock_item_id"], line["request_ids"]) == \
         ("AD-C45", 17.0, 12.0, "st-45", ["r1"])
+
+
+# ── A supply order picked from the stock list ────────────────────────────────
+
+def test_a_stock_item_is_the_kind_of_supply_it_sounds_like():
+    assert purchasing.supply_item_for({"name": "C Channel 45mm",
+                                       "product_type": "Other"}) == "Channel"
+    assert purchasing.supply_item_for({"name": "Foil tape 50mm"}) == "Tape"
+    assert purchasing.supply_item_for({"name": "G4 roll",
+                                       "product_type": "Media"}) == "Media"
+    assert purchasing.supply_item_for({"name": "Pop rivet 4mm"}) == "Rivets"
+    assert purchasing.supply_item_for({"name": "Galv mesh 6mm"}) == "Mesh Wire"
+    assert purchasing.supply_item_for({"name": "Glue"}) == "Other"
+
+
+def test_a_line_names_the_stock_item_in_its_own_units():
+    line = purchasing.stock_request_line(
+        {"id": "st-45", "name": "C Channel 45mm", "unit": "lengths"}, "20",
+        "s-fdg")
+    assert line == {"item": "Channel", "detail": "C Channel 45mm",
+                    "quantity": "20 lengths", "supplier_id": "s-fdg",
+                    "item_code": "", "stock_item_id": "st-45"}
+    assert purchasing.stock_request_line({"id": "g", "name": "Glue"},
+                                         "2 tubs")["quantity"] == "2 tubs"
+    assert purchasing.stock_request_line({"id": "g", "name": "Glue",
+                                          "unit": "each"}, "1")["quantity"] == "1 piece"
+
+
+_NEW_STOCK = [
+    {"id": "a", "name": "C Channel 45mm", "product_type": "Channel",
+     "stock_on_hand": 4, "minimum_on_hand": 20, "unit": "lengths"},
+    {"id": "b", "name": "Foil tape 48mm", "product_type": "Tape",
+     "stock_on_hand": 30, "minimum_on_hand": 10, "unit": "rolls"},
+    {"id": "c", "name": "C Channel 25mm", "product_type": "Channel",
+     "stock_on_hand": 0, "minimum_on_hand": 0, "unit": "lengths"},
+    {"id": "d", "name": "G4 media", "description": "Pleated, 25mm",
+     "stock_on_hand": 2, "minimum_on_hand": 5.5, "unit": "rolls"},
+]
+_NEW_LINKS = [
+    {"stock_item_id": "a", "supplier_id": "s-vul", "supplier_code": "V45"},
+    {"stock_item_id": "a", "supplier_id": "s-fdg", "supplier_code": "CC45",
+     "preferred": True},
+    {"stock_item_id": "d", "supplier_id": "s-vul", "supplier_code": "G4"},
+]
+
+
+def test_a_new_order_line_carries_the_suppliers_code():
+    line = purchasing.stock_request_line(_NEW_STOCK[0], "16", "s-fdg", _NEW_LINKS)
+    assert line["item_code"] == "CC45"
+    assert purchasing.stock_request_line(_NEW_STOCK[0], "16", "s-x",
+                                         _NEW_LINKS)["item_code"] == ""
+    assert purchasing.stock_request_line(_NEW_STOCK[0], "16", "",
+                                         _NEW_LINKS)["item_code"] == ""
+
+
+def test_searching_stock_matches_every_word_low_ones_first():
+    names = lambda rows: [r["id"] for r in rows]
+    # Out (c), then low (a, d), then the rest - each by name.
+    assert names(purchasing.search_stock(_NEW_STOCK)) == ["c", "a", "d", "b"]
+    assert names(purchasing.search_stock(_NEW_STOCK, "45 chan")) == ["a"]
+    assert names(purchasing.search_stock(_NEW_STOCK, "CHANNEL")) == ["c", "a"]
+    assert names(purchasing.search_stock(_NEW_STOCK, "pleated")) == ["d"]
+    assert purchasing.search_stock(_NEW_STOCK, "nothing like it") == []
+
+
+def test_a_picked_item_comes_with_what_it_is_short_and_its_supplier():
+    pick = purchasing.new_order_pick(_NEW_STOCK[0], _NEW_LINKS)
+    assert (pick["quantity"], pick["supplier_id"]) == ("16", "s-fdg")
+    assert purchasing.new_order_pick(_NEW_STOCK[0], _NEW_LINKS,
+                                     on_order=10)["quantity"] == "6"
+    # Not low: somebody says how many. Nowhere to buy it: no supplier.
+    plenty = purchasing.new_order_pick(_NEW_STOCK[1], _NEW_LINKS)
+    assert (plenty["quantity"], plenty["supplier_id"]) == ("", "")
+    assert purchasing.new_order_pick(_NEW_STOCK[3], _NEW_LINKS) == {
+        "stock": _NEW_STOCK[3], "quantity": "4", "supplier_id": "s-vul"}
+
+
+def test_add_everything_low_puts_on_each_item_below_its_minimum():
+    picks = purchasing.low_picks(_NEW_STOCK, _NEW_LINKS)
+    assert [(p["stock"]["id"], p["quantity"]) for p in picks] == \
+        [("a", "16"), ("d", "4")]
+    # What is already on order counts.
+    assert [p["stock"]["id"] for p in purchasing.low_picks(
+        _NEW_STOCK, _NEW_LINKS, {"a": 16})] == ["d"]
