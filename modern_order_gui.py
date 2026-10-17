@@ -14961,6 +14961,7 @@ class ModernOrderApp(tk.Frame):
             for kid in w.winfo_children():
                 _bind(kid)
         _bind(card)
+        card.open_item = _open          # what a double-click does
         return card, parts, item
 
     def _layout_stock_cards_soon(self):

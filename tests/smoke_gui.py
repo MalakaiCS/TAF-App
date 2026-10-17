@@ -2256,7 +2256,10 @@ def _steps(app, gui, root):
         assert app._get_selected_stock()["id"] == item["id"]
         assert str(card.cget("highlightbackground")) == gui.CA
         before = set(root.winfo_children())
-        card.event_generate("<Double-1>", x=5, y=5)
+        # Tk cannot be sent a double-click, so the card's own double-click
+        # action is run - the one bound to <Double-1> on it.
+        assert "<Double-1>" in card.bind()
+        card.open_item(None)
         root.update()
         opened = set(root.winfo_children()) - before
         assert opened, "double-clicking a card opened nothing"
