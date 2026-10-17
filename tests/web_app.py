@@ -179,6 +179,10 @@ SWITCHES: list = []
 QC_LISTS = [{"filter_type": "*", "checks": ["Size checked", "Label on"]}]
 TIMERS: list = []
 FAULTS: list = []
+# Planning (step 45): one person in for a few minutes a day, so any order
+# fills it.
+ROSTER = [{"person": "Dave", "days": [1, 2, 3, 4, 5, 6, 7], "hours": 0.1,
+           "makes": True, "active": True}]
 REFUSE_MOVE = {"on": False}  # row-level security matching nothing
 
 
@@ -267,6 +271,15 @@ class Stub:
             return send(SWITCHES)
         if "/rest/v1/qc_checklists" in url:
             return send(QC_LISTS)
+        if "/rest/v1/staff_roster" in url:
+            return send(ROSTER)
+        if "/rest/v1/staff_leave" in url or "/rest/v1/shutdown_days" in url:
+            return send([])
+        if "/rest/v1/job_rates" in url:
+            return send([{"filter_type": "V-form", "minutes_each": 20}])
+        if "/rest/v1/workshop_settings" in url:
+            return send([{"key": "minutes_per_filter", "value": 15},
+                         {"key": "making_share", "value": 1}])
         if "/rest/v1/job_times" in url:
             return send([t for t in TIMERS if not t.get("stopped_at")])
         if "/rest/v1/returns" in url and req.method == "POST":
@@ -1133,6 +1146,78 @@ def run() -> int:
         # Line 3 back as it was, for what follows.
         ITEMS["o1"][2]["made"] = False
         ITEMS["o1"][2].pop("qc", None)
+
+        print("\n── order again, and whether a day is full ──")
+        on = ("order_again", "capacity_check")
+        SWITCHES[:] = [{"key": k, "enabled": True} for k in on]
+        page.evaluate("(on) => TAFAPP._floor.setFeatures("
+                      "Object.fromEntries(on.map(k => [k, true])))", list(on))
+        from taf_order_app import planning as _plan
+        roster = [{"person": "Dave", "days": [1, 2, 3, 4, 5], "hours": 8},
+                  {"person": "Amy", "days": [1, 2, 3, 4, 5], "hours": 8}]
+        orders = [{"id": "x", "date_due": "16/10/2026", "header": {},
+                   "items": [{"Filter Type": "V-Form", "Quantity": 22}]}]
+        leave = [{"person": "Amy", "first_day": "2026-10-19",
+                  "last_day": "2026-10-19"}]
+        rates = [{"filter_type": "V-Form", "minutes_each": 20}]
+        ws = {"minutes_per_filter": 15, "making_share": 0.5}
+        for due, new in (("16/10/2026", [{"Filter Type": "Flat Panel", "Quantity": 4}]),
+                         ("16/10/2026", [{"Filter Type": "V-Form", "Quantity": 2}]),
+                         ("19/10/2026", [{"Filter Type": "V-Form", "Quantity": 13}]),
+                         ("ASAP", [])):
+            js = page.evaluate("""([d, n, o, r, ro, l, w]) =>
+                TAFAPP._planning.checkDue(d, n, o, r, ro, l, [], w)""",
+                [due, new, orders, rates, roster, leave, ws])
+            py = _plan.check_due(due, new, orders, rates, roster, leave, [], ws)
+            if py:
+                py = dict(py, day=py["day"].isoformat(),
+                          next_free=py["next_free"].isoformat()
+                          if py["next_free"] else None)
+                # 60 in JavaScript is 60.0 in Python.
+                for k in ("need", "booked", "minutes"):
+                    py[k], js[k] = float(py[k]), float(js[k])
+            check(f"the phone and the desktop agree on {due} "
+                  f"({'full' if py and py['full'] else 'room'})",
+                  json.dumps(js, sort_keys=True) == json.dumps(py, sort_keys=True),
+                  f"{js} != {py}")
+            if py and py["full"]:
+                said = page.evaluate("(r) => TAFAPP._planning.describeFull(r)", js)
+                want = _plan.check_due(due, new, orders, rates, roster, leave, [], ws)
+                check("and say it the same way", said == _plan.describe(want),
+                      f"{said!r} != {_plan.describe(want)!r}")
+
+        # Order again, from a past order.
+        page.click('#tabs button[data-tab="orders"]')
+        page.wait_for_selector("#screen table")
+        page.locator("#screen tbody tr", has_text="Bells Creek").first.click()
+        page.wait_for_selector("#order-again")
+        page.click("#order-again")
+        page.wait_for_selector('#tabs button[data-tab="new"][aria-selected="true"]')
+        check("Order again puts the same lines on a new order",
+              page.locator("#screen input").first.input_value() == "Bells Creek"
+              and page.locator("#screen tbody tr").count() == 3,
+              page.locator("#screen").inner_text()[:300])
+        # Due on a day the one person in cannot make it all.
+        import datetime as _dt2
+        day = _dt2.date.today().strftime("%d/%m/%Y")
+        page.locator("#screen input").nth(2).fill(day)
+        asked = []
+        page.once("dialog", lambda d: (asked.append(d.message), d.dismiss()))
+        before = len(RAISED)
+        page.locator("#screen button", has_text="Save the order").click()
+        page.wait_for_timeout(600)
+        check("a day that is already full says so before it is saved",
+              asked and "is already full" in asked[0] and len(RAISED) == before,
+              str(asked))
+        page.once("dialog", lambda d: d.accept())
+        page.locator("#screen button", has_text="Save the order").click()
+        page.wait_for_timeout(600)
+        check("and saying save anyway saves it", len(RAISED) == before + 1
+              and not any("made" in (i or {}) or "line_id" in (i or {})
+                          for i in RAISED[-1].get("items") or []),
+              str(RAISED[-1:])[:300])
+        SWITCHES.clear()
+        page.evaluate("TAFAPP._floor.setFeatures({})")
 
         print("\n── delivery ──")
         page.click('#tabs button[data-tab="delivery"]')

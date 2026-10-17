@@ -109,6 +109,23 @@ log, stock management and a customer database.
     phone app. With the switch on, the database will not let an order be
     marked Complete (or go out) without one, from any screen; the customer
     sees it on their portal.
+- **Planning** (step 45, switched on in Settings → Features):
+  - **Staff roster and leave** — *Staff roster and leave…*: who makes
+    filters on which days and for how many hours, who is away and when, and
+    *the next fortnight*: who is in and away each day, what the day can take
+    and what is already booked (red when it is over).
+  - **Warn when a day is full** — on the desktop and the phone, a new order
+    due on a day that cannot take it says so before it is saved ("Friday
+    16/10 is already full: 7.3 h booked, and this order adds 1 h, against
+    8 h with 2 in. Monday 19/10 has room."). Booked is what is still to make
+    on the orders due that day, at the job timer's minutes a filter (15 until
+    a type has been timed); a day can take the rostered hours of those in,
+    times the share of a day spent making (80%), and nothing on a shutdown
+    day.
+  - **Order again** — *Customer ▾ → Order again…* on the desktop, or *Order
+    again* on any order (and *Order their last one again* on a customer) on
+    the phone: the same lines on a new order, nothing made, ready for a new
+    order number.
 - **Delivery labels** — one A4 landscape sheet per wrapped bundle, with the
   TAF logo, the company's base address as From, the delivery address, filter
   size, the quantity in that wrap (and the line's ordered quantity), the
@@ -474,6 +491,7 @@ just run it — nothing is lost and nothing is duplicated.
 | 42 | `migrate_stock_suppliers.sql` | Where each stock item comes from: its suppliers, their codes and prices, so Order Supplies offers stock items and low stock becomes purchase orders (needs step 40) | recommended |
 | 43 | `migrate_supply_bell.sql` | The bell only shows supply requests still waiting: once everything on a request has been ordered, received, declined or cancelled, it comes off every manager's bell (needs steps 32 and 40) | recommended |
 | 44 | `migrate_floor.sql` | The factory floor: when an order changed status (for the TV board), a job timer, QC checklists, faults found in QC, and finished-job photos the customer sees on their portal (needs steps 16, 32 and the order-files, features and portal steps). Everything arrives switched off | recommended |
+| 45 | `migrate_planning.sql` | Staff roster and leave, so a new order due on a day that is already full says so - and names the next day with room (needs steps 16 and the features step) | recommended |
 
 **Step 16 is the one that matters most.** Every policy in the older scripts is
 `TO authenticated USING (true)` — meaning *anyone Supabase counts as signed

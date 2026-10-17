@@ -1305,6 +1305,36 @@ def run_floor_checks(pg: Postgres) -> None:
     q(pg, "UPDATE feature_switches SET enabled = false WHERE key = 'finished_photo';")
 
 
+def run_planning_checks(pg: Postgres) -> None:
+    print("\n── the roster and leave (step 45) ──")
+    for _ in range(2):
+        ok, _o, err = pg.psql((ROOT / "migrate_planning.sql").read_text(
+            encoding="utf-8"), "f")
+        check("step 45 runs, and runs again cleanly", ok, err)
+    ok, _o, err = as_in(pg, "f", DAVE, "INSERT INTO staff_roster (person) "
+                        "VALUES ('Dave');")
+    check("somebody on the floor cannot change the roster", not ok, err)
+    ok, _o, err = as_in(pg, "f", SARAH, "INSERT INTO staff_roster (person, "
+                        "days, hours) VALUES ('Dave', '{1,2,3,4,5}', 7.6);")
+    check("a manager can", ok, err)
+    ok, _o, err = as_in(pg, "f", SARAH, "INSERT INTO staff_roster (person, "
+                        "days) VALUES ('Nobody', '{0,8}');")
+    check("days are Monday 1 to Sunday 7", not ok, err)
+    ok, _o, err = as_in(pg, "f", SARAH, "INSERT INTO staff_leave (person, "
+                        "first_day, last_day) VALUES ('Dave', '2026-10-20', "
+                        "'2026-10-19');")
+    check("leave cannot end before it starts", not ok, err)
+    ok, _o, err = as_in(pg, "f", SARAH, "INSERT INTO staff_leave (person, "
+                        "first_day, last_day, kind) VALUES ('Dave', "
+                        "'2026-10-19', '2026-10-23', 'annual');")
+    check("a week of leave is kept", ok, err)
+    ok, out, err = as_in(pg, "f", DAVE, "SELECT count(*) FROM staff_leave;")
+    check("and everybody can see who is away", ok and out == "1", out or err)
+    got = q(pg, "SELECT value FROM workshop_settings "
+                "WHERE key = 'minutes_per_filter';")
+    check("the minutes a filter takes until it is timed is there", got == "15", got)
+
+
 def _skip(why: str) -> int:
     """Skipping is fine on a laptop. In CI it is not: a workflow that goes
     green having checked nothing is worse than no workflow, because it is
@@ -1333,6 +1363,7 @@ def main() -> int:
         run_stock_supplier_checks(pg)
         run_supply_bell_checks(pg)
         run_floor_checks(pg)
+        run_planning_checks(pg)
     finally:
         pg.stop()
     print(f"\n{len(FAILURES)} FAILED" if FAILURES

@@ -206,6 +206,20 @@ CATALOGUE: List[Feature] = [
             "A photo before an order can be marked Complete. The customer "
             "sees it on their portal.",
             "The floor", built=True),
+
+    # ── Planning (step 45) ───────────────────────────────────────────────
+    Feature("roster", "Staff roster and leave",
+            "Who works which days and hours, and who is away - and how the "
+            "next fortnight looks against what is booked.",
+            "Knowing where you stand", built=True),
+    Feature("capacity_check", "Warn when a day is full",
+            "A new order due on a day that is already full says so before "
+            "it is saved, and names the next day with room.",
+            "Knowing where you stand", built=True),
+    Feature("order_again", "Order again",
+            "On a customer, or on any of their past orders: the same lines "
+            "on a new order in one press.",
+            "Admin", built=True),
 ]
 
 BY_KEY: Dict[str, Feature] = {f.key: f for f in CATALOGUE}

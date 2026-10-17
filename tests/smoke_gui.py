@@ -133,6 +133,10 @@ CUSTOMERS = [
      "region": "Local", "active": True},
 ]
 
+# Planning (step 45).
+SAVED_ROSTER: list = []
+SAVED_LEAVE: list = []
+
 # The factory floor (step 44).
 SAVED_QC: list = []
 ADDED_FAULTS: list = []
@@ -157,6 +161,24 @@ OVERRIDES = {
     "add_fault":           lambda row, photo="": ADDED_FAULTS.append(dict(row))
                                                  or row,
     "orders_with_finished_photo": lambda ids: set(),
+    "staff_roster":        lambda *a, **k: [
+        {"person": "Dave Floor", "days": [1, 2, 3, 4, 5], "hours": 1,
+         "makes": True, "active": True}],
+    "staff_leave":         lambda *a, **k: [
+        {"id": "lv1", "person": "Dave Floor", "first_day": "2026-12-24",
+         "last_day": "2027-01-05", "kind": "annual", "note": "Christmas"}],
+    "shutdown_days":       lambda *a, **k: [],
+    "planning_settings":   lambda *a, **k: {"minutes_per_filter": 15,
+                                            "making_share": 1},
+    "save_roster":         lambda *a, **k: SAVED_ROSTER.append((a, k)),
+    "remove_roster":       lambda *a, **k: None,
+    "add_leave":           lambda *a, **k: SAVED_LEAVE.append(a) or {},
+    "remove_leave":        lambda *a, **k: None,
+    "customer_orders":     lambda cust, limit=20: [
+        {"id": "o-again", "order_number": "PO-7000", "date_ordered": "01/09/2026",
+         "header": {"Job": "AHU 3"},
+         "items": [{"Filter Type": "V-Form", "Quantity": 4, "made": True,
+                    "line_id": "L9", "Short": 500, "Long": 600, "Channel": 45}]}],
     "is_ready":            lambda *a, **k: True,
     "is_configured":       lambda *a, **k: True,
     "current_user":        lambda *a, **k: {"id": "u1", "email": "smoke@taf.local",
@@ -1761,6 +1783,75 @@ def _steps(app, gui, root):
         finally:
             _feat._switches = {}
     add("dialogs: the factory floor", _floor_windows)
+
+    def _planning_windows():
+        """The roster window, the full-day warning, and Order again."""
+        from taf_order_app import features as _feat
+        _feat._switches = {k: True for k in ("roster", "capacity_check",
+                                             "order_again")}
+        try:
+            dlg = app._roster_window()
+            ahead, roster_t, leave_t = dlg.roster_trees
+            for _ in range(80):
+                root.update()
+                if ahead.get_children():
+                    break
+                time.sleep(0.05)
+            assert len(ahead.get_children()) == 10, len(ahead.get_children())
+            assert roster_t.item(roster_t.get_children()[0], "values")[:3] == \
+                ("Dave Floor", "Mon-Fri", "1"), roster_t.item(roster_t.get_children()[0], "values")
+            assert leave_t.get_children()
+            if gui._db.can_handle_supplies():
+                p = dlg.add_person()
+                name, days, hrs, makes, active = p.person_vars
+                name.set("  Amy   Admin ")
+                days.set("mon wed fri")
+                hrs.set("6")
+                SAVED_ROSTER.clear()
+                p.person_save()
+                assert SAVED_ROSTER and SAVED_ROSTER[0][0][:3] == \
+                    ("Amy Admin", [1, 3, 5], 6.0), SAVED_ROSTER
+                lv = dlg.add_leave()
+                who, first, last, kind, note = lv.leave_vars
+                who.set("Dave Floor")
+                first.set("20/10/2026")
+                last.set("19/10/2026")        # before the first: refused
+                SAVED_LEAVE.clear()
+                lv.leave_save()
+                assert not SAVED_LEAVE and lv.winfo_exists()
+                last.set("21/10/2026")
+                lv.leave_save()
+                assert SAVED_LEAVE and SAVED_LEAVE[0][0] == "Dave Floor", SAVED_LEAVE
+            dlg.destroy()
+
+            import datetime as _d
+            day = _d.date.today()
+            while day.isoweekday() > 5:
+                day += _d.timedelta(days=1)
+            warn = app._capacity_warning(day.strftime("%d/%m/%Y"),
+                                         [{"Filter Type": "V-Form", "Quantity": 40}])
+            assert "is already full" in warn, warn
+            assert app._capacity_warning("ASAP", [{"Quantity": 40}]) == ""
+
+            dlg, tree, _foot = app._order_again(
+                {"name": "Bells Creek", "short_name": "Bells"})
+            for _ in range(60):
+                root.update()
+                if tree.get_children():
+                    break
+                time.sleep(0.05)
+            iid = tree.get_children()[0]
+            app._order_again_pick({"name": "Bells Creek", "short_name": "Bells"},
+                                  iid, dlg)
+            root.update()
+            assert len(app.items) == 1 and not app.items[0].get("made") \
+                and app.items[0].get("line_id") != "L9", app.items
+            assert app.hvars["Job"].get() == "AHU 3", app.hvars["Job"].get()
+            app.items = []
+            app._refresh_items_tree()
+        finally:
+            _feat._switches = {}
+    add("dialogs: roster, a full day, and order again", _planning_windows)
 
     def _answer_waiting_dialogs(before):
         """Say yes to a dialog that has stopped and asked something.

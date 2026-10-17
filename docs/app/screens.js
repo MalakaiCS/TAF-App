@@ -1551,6 +1551,206 @@ var TAFAPP = (function () {
       .catch(function () { return RUNNING; });
   }
 
+  /* ── Is there room on the day it is due? ─────────────────────────────
+     The same rules as planning.py (check_due and describe) - a test holds
+     the two together. */
+
+  var DONE_STATUSES = ["Complete", "Dispatched", "Delivered", "Collected"];
+  var DAY_LONG = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday",
+                  "Friday", "Saturday"];
+
+  function num(v, d) {
+    var n = parseFloat(String(v === undefined || v === null ? "" : v)
+                       .replace(/,/g, "").trim());
+    return isFinite(n) ? n : (d || 0);
+  }
+
+  function rateMap(rates) {
+    var out = {};
+    (rates || []).forEach(function (r) {
+      var m = num(r.minutes_each);
+      if (m > 0) { out[String(r.filter_type || "").trim().toLowerCase()] = m; }
+    });
+    return out;
+  }
+
+  function lineMinutes(it, rates, def) {
+    if (it.made) { return 0; }
+    if (String(it.item_kind || "filter") === "catalogue") { return 0; }
+    var qty = num(it.Quantity !== undefined ? it.Quantity : it.quantity);
+    var kind = String(it["Filter Type"] || it.product_type || "").trim().toLowerCase();
+    return Math.max(0, qty) * (rates[kind] !== undefined ? rates[kind] : def);
+  }
+
+  function orderMinutes(items, rates, def) {
+    return (items || []).reduce(function (t, it) {
+      return t + (it && typeof it === "object" ? lineMinutes(it, rates, def) : 0);
+    }, 0);
+  }
+
+  function sameDay(a, b) { return !!(a && b) && ymd(a) === ymd(b); }
+
+  function asDay(v) {
+    if (v instanceof Date) { return v; }
+    return U.parseDate(v);
+  }
+
+  function bookedMinutes(orders, day, rates, def, skipId) {
+    return (orders || []).reduce(function (t, o) {
+      var h = o.header || {};
+      var status = String(h.status || o.status || "Pending");
+      if (DONE_STATUSES.indexOf(status) >= 0 || o.archived) { return t; }
+      if (skipId !== undefined && skipId !== null && String(o.id) === String(skipId)) {
+        return t;
+      }
+      if (!sameDay(asDay(o.date_due), day)) { return t; }
+      return t + orderMinutes(o.items || [], rates, def);
+    }, 0);
+  }
+
+  function onLeave(person, day, leave) {
+    return (leave || []).some(function (l) {
+      if (String(l.person || "").trim().toLowerCase()
+          !== String(person).trim().toLowerCase()) { return false; }
+      var a = asDay(l.first_day), b = asDay(l.last_day);
+      return !!(a && b && a <= day && day <= b);
+    });
+  }
+
+  function shutOn(day, shutdowns) {
+    var hit = (shutdowns || []).filter(function (s) { return sameDay(asDay(s.day), day); })[0];
+    return hit ? String(hit.name || "Shut") : "";
+  }
+
+  function availableOn(day, roster, leave, shutdowns, share) {
+    var shut = shutOn(day, shutdowns), inn = [], away = [], minutes = 0;
+    var iso = day.getDay() === 0 ? 7 : day.getDay();
+    (roster || []).forEach(function (r) {
+      if (r.makes === false || r.active === false) { return; }
+      var days = (r.days || []).map(function (d) { return parseInt(d, 10); });
+      if (days.indexOf(iso) < 0) { return; }
+      var name = String(r.person || "");
+      if (onLeave(name, day, leave)) { away.push(name); return; }
+      inn.push(name);
+      minutes += num(r.hours) * 60 * share;
+    });
+    if (shut) { minutes = 0; }
+    return { minutes: minutes, "in": inn, away: away, shut: shut };
+  }
+
+  function checkDue(dayText, items, orders, rates, roster, leave, shutdowns,
+                    workshop, skipId, lookAhead) {
+    var due = asDay(dayText);
+    roster = (roster || []).filter(function (r) {
+      return r.makes !== false && r.active !== false;
+    });
+    if (!due || !roster.length) { return null; }
+    var byType = rateMap(rates);
+    var def = num((workshop || {}).minutes_per_filter, 15) || 15;
+    var share = num((workshop || {}).making_share, 0.8) || 0.8;
+    var need = orderMinutes(items, byType, def);
+    function on(d) {
+      var room = availableOn(d, roster, leave, shutdowns, share);
+      room.booked = bookedMinutes(orders, d, byType, def, skipId);
+      return room;
+    }
+    var here = on(due);
+    var full = here.booked + need > here.minutes;
+    var next = null;
+    if (full) {
+      var d = new Date(due.getTime());
+      for (var i = 0; i < (lookAhead || 15); i++) {
+        d.setDate(d.getDate() + 1);
+        var room = on(d);
+        if (room.minutes && room.booked + need <= room.minutes) {
+          next = new Date(d.getTime());
+          break;
+        }
+      }
+    }
+    return { day: due, need: need, booked: here.booked, minutes: here.minutes,
+             "in": here["in"], away: here.away, shut: here.shut, full: full,
+             next_free: next };
+  }
+
+  function hrs(m) { return String(Math.round(m / 60 * 10) / 10) + " h"; }
+  function dayName(d) {
+    return DAY_LONG[d.getDay()] + " " + pad2(d.getDate()) + "/" + pad2(d.getMonth() + 1);
+  }
+
+  function describeFull(r) {
+    var name = dayName(r.day), head;
+    if (r.shut) {
+      head = name + " is a shutdown day (" + r.shut + ").";
+    } else if (!r.minutes) {
+      head = "Nobody is rostered to make filters on " + name + ".";
+    } else {
+      head = name + " is already full: " + hrs(r.booked) + " booked, and this "
+           + "order adds " + hrs(r.need) + ", against " + hrs(r.minutes)
+           + " with " + r["in"].length + " in"
+           + (r.away.length ? " (" + r.away.join(", ") + " away)." : ".");
+    }
+    if (r.next_free) { head += " " + dayName(r.next_free) + " has room."; }
+    return head;
+  }
+
+  // Everything check_due needs, fetched together. Resolves with "" when the
+  // day fits or there is nothing to measure against.
+  function capacityWarning(dayText, items) {
+    if (!feature("capacity_check") || !U.parseDate(dayText)) {
+      return Promise.resolve("");
+    }
+    var keys = ["minutes_per_filter", "making_share"];
+    return Promise.all([
+      D.select("staff_roster", { "select": "*" }),
+      D.select("staff_leave", { "select": "*" }),
+      D.select("shutdown_days", { "select": "day,name" }).catch(function () { return []; }),
+      D.select("job_rates", { "select": "*" }).catch(function () { return []; }),
+      D.select("workshop_settings", { "select": "key,value",
+                                      "key": "in.(" + keys.join(",") + ")" })
+        .catch(function () { return []; }),
+      // Only what is still to make: no status yet, or one not finished.
+      D.select("orders", { "select": "id,date_due,header,items,archived",
+                           "archived": "eq.false", "limit": 1000,
+                           "or": "(header->>status.is.null,header->>status.not.in.("
+                                 + DONE_STATUSES.join(",") + "))" })
+    ]).then(function (got) {
+      var ws = {};
+      (got[4] || []).forEach(function (r) { ws[r.key] = r.value; });
+      var r = checkDue(dayText, items, got[5], got[3], got[0], got[1], got[2], ws);
+      return r && r.full ? describeFull(r) : "";
+    }).catch(function () { return ""; });   // never stop an order over a check
+  }
+
+  /* ── Order again ─────────────────────────────────────────────────────
+     The same lines on a new order: nothing made or checked, no old line
+     ids (planning.repeat_items). */
+
+  function repeatItems(items) {
+    return (items || []).filter(function (it) { return it && typeof it === "object"; })
+      .map(function (it) {
+        var out = {};
+        Object.keys(it).forEach(function (k) {
+          if (k.indexOf("made") === 0 || k === "qc" || k === "line_id") { return; }
+          out[k] = it[k];
+        });
+        return out;
+      });
+  }
+
+  function orderAgain(row, items, header) {
+    var h = header || row.header || {};
+    DRAFT = { header: { "Customer Name": row.customer || "",
+                        "Job": h.Job || "", "Attention": h.Attention || "",
+                        "Location": h.Location || "", "Date Due": "ASAP" },
+              items: repeatItems(items) };
+    U.closeAllSheets();
+    show("new");
+    U.notice(document.getElementById("screen"),
+      "The lines from " + (row.order_no ? "order " + row.order_no : "their last order")
+      + " are on a new order - put in their order number and save it.", "ok");
+  }
+
   /* ── Photos, and proof that it arrived ───────────────────────────────
      The same shape for both: a file against the order, with who and when.
      A photo of the plant room and a signature at the drop are the same
@@ -1869,6 +2069,13 @@ var TAFAPP = (function () {
       actions.appendChild(U.button("⚠  Record a fault", function () {
         reportFault(row, null, row._items || []);
       }, "quiet"));
+    }
+    if (feature("order_again") && (row._items || []).length) {
+      var again = U.button("↻  Order again", function () {
+        orderAgain(row, row._items, row.header);
+      }, "quiet");
+      again.setAttribute("id", "order-again");
+      actions.appendChild(again);
     }
     ["In Production", "Complete", "Dispatched"].forEach(function (want) {
       if (row.status === want) { return; }
@@ -2568,6 +2775,20 @@ var TAFAPP = (function () {
     }
     var btn = SCREENS["new"]._save;
     btn.disabled = true;
+    // Is there room on the day it is due? Asked once; saying save anyway
+    // saves it.
+    if (feature("capacity_check") && !saveDraft._asked) {
+      capacityWarning(h["Date Due"], DRAFT.items).then(function (warn) {
+        btn.disabled = false;
+        if (warn && !window.confirm(warn + "\n\nSave it for that day anyway?")) {
+          U.notice(main, warn + " Change the due date, or save it anyway.");
+          return;
+        }
+        saveDraft._asked = true;
+        try { saveDraft(main); } finally { saveDraft._asked = false; }
+      });
+      return;
+    }
     var count = DRAFT.items.length;      // DRAFT is emptied on the way back
     var now = new Date();
     function two(n) { return (n < 10 ? "0" : "") + n; }
@@ -2901,8 +3122,20 @@ var TAFAPP = (function () {
               });
             }))]
           : [U.empty("No orders loaded for them.")]));
-      body.appendChild(U.el("div", { cls: "row-actions",
-        kids: [U.button("Close", close, "quiet")] }));
+      var acts = [U.button("Close", close, "quiet")];
+      if (feature("order_again") && theirs.length) {
+        var again = U.button("↻  Order their last one again", function () {
+          var last = theirs[0];
+          D.select("orders", { "id": "eq." + last.id, "select": "items,header" })
+            .then(function (rows) {
+              var o = (rows && rows[0]) || {};
+              orderAgain(last, o.items || [], o.header || last.header);
+            }).catch(function (err) { U.notice(body, err.message); });
+        }, "go");
+        again.setAttribute("id", "customer-again");
+        acts.unshift(again);
+      }
+      body.appendChild(U.el("div", { cls: "row-actions", kids: acts }));
     });
   }
 
@@ -3966,6 +4199,17 @@ var TAFAPP = (function () {
     _badgeText: badgeText,
     _setBell: setBell,
     _supplyItems: SUPPLY_ITEMS,
+    _planning: { checkDue: function () {
+                   var r = checkDue.apply(null, arguments);
+                   return r && Object.assign({}, r, { day: ymd(r.day),
+                     next_free: r.next_free ? ymd(r.next_free) : null });
+                 },
+                 describeFull: function (r) {
+                   return describeFull(Object.assign({}, r, {
+                     day: U.parseDate(r.day),
+                     next_free: r.next_free ? U.parseDate(r.next_free) : null }));
+                 },
+                 repeatItems: repeatItems },
     _floor: { boardColumn: boardColumn, productionBoard: productionBoard,
               checksFor: checksFor, workingDaysOn: workingDaysOn,
               faultReasons: FAULT_REASONS, feature: feature,

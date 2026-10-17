@@ -2945,6 +2945,104 @@ def orders_with_finished_photo(order_ids) -> set:
     return {str(r.get("order_id")) for r in (resp.data or [])}
 
 
+# ── Who is in (step 45, migrate_planning.sql) ────────────────────────────────
+
+def staff_roster() -> list:
+    resp = (get_client().table("staff_roster").select("*")
+            .order("person").execute())
+    return list(resp.data or [])
+
+
+def save_roster(person: str, days: list, hours: float, makes: bool = True,
+                active: bool = True, was: str = "") -> None:
+    """One person's days and hours. Renaming someone moves their row."""
+    row = {"person": person.strip(), "days": sorted({int(d) for d in days}),
+           "hours": float(hours), "makes": bool(makes), "active": bool(active),
+           "updated_by": current_full_name() or current_username()}
+    if was and was.strip() != row["person"]:
+        get_client().table("staff_roster").delete().eq("person", was).execute()
+    get_client().table("staff_roster").upsert(
+        row, on_conflict="person").execute()
+
+
+def remove_roster(person: str) -> None:
+    get_client().table("staff_roster").delete().eq("person", person).execute()
+
+
+def staff_leave(since=None) -> list:
+    import datetime as _d
+    since = since or (_d.date.today() - _d.timedelta(days=30))
+    resp = (get_client().table("staff_leave").select("*")
+            .gte("last_day", since.isoformat())
+            .order("first_day").execute())
+    return list(resp.data or [])
+
+
+def add_leave(person: str, first_day, last_day, kind: str = "annual",
+              note: str = "") -> dict:
+    resp = get_client().table("staff_leave").insert({
+        "person": person.strip(), "first_day": first_day.isoformat(),
+        "last_day": last_day.isoformat(), "kind": kind, "note": note,
+        "created_by": current_full_name() or current_username()}).execute()
+    return (resp.data or [{}])[0]
+
+
+def remove_leave(leave_id: str) -> None:
+    get_client().table("staff_leave").delete().eq("id", leave_id).execute()
+
+
+def shutdown_days() -> list:
+    resp = get_client().table("shutdown_days").select("day,name").execute()
+    return list(resp.data or [])
+
+
+def planning_settings() -> dict:
+    """The minutes a filter takes until timed, and the share of a day spent
+    making - with their defaults when step 45 has not been run."""
+    from . import planning as _planning
+    out = dict(_planning.SETTINGS)
+    try:
+        resp = (get_client().table("workshop_settings").select("key,value")
+                .in_("key", list(out)).execute())
+        for r in resp.data or []:
+            try:
+                out[str(r["key"])] = float(r["value"])
+            except (KeyError, TypeError, ValueError):
+                pass
+    except Exception:
+        pass
+    return out
+
+
+def set_planning_setting(key: str, value: float) -> None:
+    get_client().table("workshop_settings").upsert(
+        {"key": key, "value": float(value)}, on_conflict="key").execute()
+
+
+def orders_due_on(day) -> list:
+    """Orders due on a day, with their lines - the day's dates as people
+    write them (16/10/2026, 16/10/26)."""
+    forms = [day.strftime("%d/%m/%Y"), day.strftime("%d/%m/%y"),
+             day.isoformat()]
+    resp = (get_client().table("orders")
+            .select("id,date_due,header,items,archived")
+            .in_("date_due", forms).execute())
+    return list(resp.data or [])
+
+
+def customer_orders(customer: dict, limit: int = 20) -> list:
+    """A customer's orders, newest first, with their lines."""
+    names = [n for n in {str(customer.get("short_name") or "").strip(),
+                         str(customer.get("name") or "").strip()} if n]
+    if not names:
+        return []
+    resp = (get_client().table("orders")
+            .select("id,order_number,date_ordered,date_due,header,items,created_at")
+            .in_("customer_name", names)
+            .order("created_at", desc=True).limit(limit).execute())
+    return list(resp.data or [])
+
+
 def _now_stamp() -> str:
     import datetime as _dt
     d = _dt.datetime.now()

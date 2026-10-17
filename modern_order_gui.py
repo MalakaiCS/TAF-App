@@ -32,6 +32,7 @@ from taf_order_app import features as _features
 from taf_order_app import cutting as _cutting
 from taf_order_app import insights as _insights
 from taf_order_app import floor as _floor
+from taf_order_app import planning as _planning
 from taf_order_app import records as _records
 from taf_order_app import xero as _xero
 from taf_order_app import invoice_wording as _wording
@@ -13929,6 +13930,8 @@ class ModernOrderApp(tk.Frame):
             on = _db.customer_wants_labels(cust)
             return [
                 ("View their orders",     self._view_customer_orders),
+            ] + ([("Order again…",       self._order_again)]
+                 if _features.is_on("order_again") else []) + [
                 ("Their portal link…",    self._customer_portal_link),
                 (("Turn delivery labels off" if on else
                   "Turn delivery labels on"), self._toggle_customer_labels),
@@ -14841,6 +14844,9 @@ class ModernOrderApp(tk.Frame):
         if cust is None:
             messagebox.showinfo("New Order", "Select a customer first.")
             return
+        self._new_order_for_customer_dict(cust)
+
+    def _new_order_for_customer_dict(self, cust):
         # Clear the form, then populate with customer data
         for v in self.hvars.values():
             v.set("")
@@ -18332,6 +18338,7 @@ class ModernOrderApp(tk.Frame):
         ("job_timer",          "How long things take…",   "_job_rates_window"),
         ("qc_checklist",       "QC checklists…",          "_qc_checklists"),
         ("fault_log",          "Faults and rework…",      "_fault_log"),
+        ("roster",             "Staff roster and leave…", "_roster_window"),
         ("customer_display",   "Enable second screen display…",
                                                          "_customer_screen_from_menu"),
     ]
@@ -19327,6 +19334,369 @@ class ModernOrderApp(tk.Frame):
         dlg.fault_vars, dlg.fault_save, dlg.fault_photo = v, _save, photo
         self._fault_dialog = dlg
         return dlg
+
+    # ── Planning (step 45) ───────────────────────────────────────────────
+
+    def _capacity_warning(self, due_text, items, skip_id=None) -> str:
+        """What to say when the day an order is due is already full, or ""
+        when it fits (or there is nothing to measure it against)."""
+        try:
+            roster = _db.staff_roster()
+            if not roster:
+                return ""
+            res = _planning.check_due(
+                due_text, items, _db.get_all_orders(), _db.job_rates(),
+                roster, _db.staff_leave(), _db.shutdown_days(),
+                _db.planning_settings(), skip_id=skip_id)
+        except Exception:
+            return ""          # never stop an order going in over a check
+        return _planning.describe(res) if res and res["full"] else ""
+
+    def _roster_window(self):
+        """Who works when, who is away, and how the next fortnight looks."""
+        import datetime as _d
+        can = _db.is_ready() and _db.can_handle_supplies()
+        dlg = tk.Toplevel(self.master, bg=CBG)
+        dlg.title("Staff roster and leave")
+        dlg.transient(self.master)
+        _centre_on_parent(dlg, self.master, px(920), px(600))
+        head = tk.Frame(dlg, bg=CBG, padx=px(16), pady=px(12))
+        head.pack(fill="x")
+        tk.Label(head, text="Staff roster and leave", bg=CBG, fg=CA,
+                 font=F_TTL).pack(side="left")
+        tk.Label(head, text="What a day can take: the hours of those in "
+                 "making filters, less leave and shutdown days.", bg=CBG,
+                 fg=CMU, font=F_SM).pack(side="left", padx=(px(12), 0))
+        book = ttk.Notebook(dlg)
+        book.pack(fill="both", expand=True, padx=px(16))
+
+        def _tree(parent, cols):
+            wrap = tk.Frame(parent, bg=CCA)
+            wrap.pack(fill="both", expand=True)
+            t = ttk.Treeview(wrap, columns=[c[0] for c in cols],
+                             show="headings", style="TAF.Treeview",
+                             selectmode="browse")
+            for key, label, wd, anc in cols:
+                t.heading(key, text=label)
+                t.column(key, width=px(wd), anchor=anc)
+            sb = ttk.Scrollbar(wrap, orient="vertical", command=t.yview)
+            t.configure(yscrollcommand=sb.set)
+            sb.pack(side="right", fill="y")
+            t.pack(fill="both", expand=True)
+            t.tag_configure("full", background="#FCE9E6")
+            t.tag_configure("shut", foreground=CMU)
+            return t
+
+        tab_ahead = tk.Frame(book, bg=CBG)
+        tab_roster = tk.Frame(book, bg=CBG)
+        tab_leave = tk.Frame(book, bg=CBG)
+        book.add(tab_ahead, text="  The next fortnight  ")
+        book.add(tab_roster, text="  Roster  ")
+        book.add(tab_leave, text="  Leave  ")
+        ahead = _tree(tab_ahead, [("day", "Day", 150, "w"),
+                                  ("in", "In", 300, "w"),
+                                  ("away", "Away", 170, "w"),
+                                  ("avail", "Can take", 90, "e"),
+                                  ("booked", "Booked", 90, "e")])
+        roster_t = _tree(tab_roster, [("person", "Person", 220, "w"),
+                                      ("days", "Days", 200, "w"),
+                                      ("hours", "Hours a day", 110, "e"),
+                                      ("makes", "Makes filters", 120, "w")])
+        leave_t = _tree(tab_leave, [("person", "Person", 200, "w"),
+                                    ("from", "From", 120, "w"),
+                                    ("to", "To", 120, "w"),
+                                    ("kind", "What", 120, "w"),
+                                    ("note", "Note", 260, "w")])
+        data = {"roster": [], "leave": [], "settings": {}}
+        foot = tk.Label(dlg, text="Loading…", bg=CBG, fg=CMU, font=F_SM,
+                        anchor="w", justify="left", wraplength=px(880))
+        foot.pack(fill="x", padx=px(16), pady=(px(6), 0))
+
+        def _load():
+            try:
+                got = {"roster": _db.staff_roster(), "leave": _db.staff_leave(),
+                       "shut": _db.shutdown_days(), "rates": _db.job_rates(),
+                       "settings": _db.planning_settings(),
+                       "orders": _db.get_all_orders()}
+                err = ""
+            except Exception as exc:
+                got, err = {}, str(exc)
+            self.master.after(0, lambda: _show(got, err))
+
+        def _show(got, err):
+            if not dlg.winfo_exists():
+                return
+            if err:
+                foot.config(text=("Run migrate_planning.sql (step 45) in the "
+                                  "Supabase SQL Editor first."
+                                  if "staff_" in err else
+                                  f"Couldn't load the roster: {err}"))
+                return
+            data.update(got)
+            for t in (ahead, roster_t, leave_t):
+                t.delete(*t.get_children())
+            for r in data["roster"]:
+                roster_t.insert("", "end", iid="r:" + r["person"], values=(
+                    r["person"], _planning.days_text(r.get("days") or []),
+                    f"{float(r.get('hours') or 0):g}",
+                    ("Yes" if r.get("makes", True) else "No")
+                    + ("" if r.get("active", True) else " (not active)")))
+            kinds = dict(_planning.LEAVE_KINDS)
+            for l in data["leave"]:
+                f, t_ = (_insights.parse_date(l.get("first_day")),
+                         _insights.parse_date(l.get("last_day")))
+                leave_t.insert("", "end", iid="l:" + str(l["id"]), values=(
+                    l.get("person"), f.strftime("%a %d/%m/%Y") if f else "",
+                    t_.strftime("%a %d/%m/%Y") if t_ else "",
+                    kinds.get(l.get("kind"), l.get("kind")), l.get("note") or ""))
+            view = _planning.week_view(_d.date.today(), data["orders"],
+                                       data["rates"], data["roster"],
+                                       data["leave"], data["shut"],
+                                       data["settings"], days=10)
+            for v in view:
+                full = v["booked"] > v["minutes"]
+                ahead.insert("", "end", tags=("shut" if v["shut"] else
+                                              ("full" if full else ""),),
+                             values=(v["day"].strftime("%a %d/%m"),
+                                     v["shut"] or ", ".join(v["in"]) or "—",
+                                     ", ".join(v["away"]),
+                                     _planning.hours(v["minutes"]),
+                                     _planning.hours(v["booked"])))
+            s = data["settings"]
+            foot.config(text=(
+                "Booked is what is still to make on the orders due that day, "
+                "at the minutes the job timer has learned for each type "
+                f"({s.get('minutes_per_filter', 15):g} min a filter until "
+                "then). Can take is the hours of those in making, times "
+                f"{s.get('making_share', 0.8):.0%} for the rest of the day's "
+                "jobs. A red day is already over."
+                if data["roster"] else
+                "Nobody is on the roster yet - add the people who make "
+                "filters on the Roster tab."))
+
+        def _person(existing=None):
+            if not can:
+                return
+            d = tk.Toplevel(dlg, bg=CBG)
+            d.title("Person")
+            d.transient(dlg)
+            _centre_on_parent(d, dlg, px(420), px(260))
+            body = tk.Frame(d, bg=CBG, padx=px(16), pady=px(12))
+            body.pack(fill="both", expand=True)
+            body.columnconfigure(1, weight=1)
+            e = existing or {}
+            name = tk.StringVar(value=e.get("person", ""))
+            days = tk.StringVar(value=_planning.days_text(e.get("days") or [1, 2, 3, 4, 5]))
+            hrs = tk.StringVar(value=f"{float(e.get('hours', 7.6)):g}")
+            makes = tk.BooleanVar(value=bool(e.get("makes", True)))
+            active = tk.BooleanVar(value=bool(e.get("active", True)))
+            for r, (lbl, var) in enumerate((("Name", name),
+                                            ("Days (e.g. Mon-Fri)", days),
+                                            ("Hours a day", hrs))):
+                tk.Label(body, text=lbl, bg=CBG, fg=CTX, font=F_BODY).grid(
+                    row=r, column=0, sticky="w", pady=px(3))
+                field_entry(body, textvariable=var).grid(
+                    row=r, column=1, sticky="ew", padx=(px(8), 0), pady=px(3))
+            tk.Checkbutton(body, text="Makes filters (counts towards what a day "
+                           "can take)", variable=makes, bg=CBG, fg=CTX,
+                           activebackground=CBG, selectcolor=CCA,
+                           font=F_BODY).grid(row=3, column=0, columnspan=2,
+                                             sticky="w", pady=(px(6), 0))
+            tk.Checkbutton(body, text="Still working here", variable=active,
+                           bg=CBG, fg=CTX, activebackground=CBG,
+                           selectcolor=CCA, font=F_BODY).grid(
+                               row=4, column=0, columnspan=2, sticky="w")
+
+            def _save():
+                who = " ".join(name.get().split())
+                ds = _planning.parse_days(days.get())
+                try:
+                    h = float(hrs.get())
+                    if not (0 <= h <= 24):
+                        raise ValueError
+                except ValueError:
+                    messagebox.showwarning("Person", "Hours a day should be "
+                                           "a number up to 24.", parent=d)
+                    return
+                if not who or not ds:
+                    messagebox.showwarning("Person", "Give a name and the days "
+                                           "they work, e.g. Mon-Fri.", parent=d)
+                    return
+                try:
+                    _db.save_roster(who, ds, h, makes.get(), active.get(),
+                                    was=e.get("person", ""))
+                except Exception as exc:
+                    messagebox.showerror("Person", f"It wasn't saved:\n{exc}",
+                                         parent=d)
+                    return
+                d.destroy()
+                threading.Thread(target=_load, daemon=True).start()
+            row = tk.Frame(d, bg=CBG, padx=px(16), pady=px(10))
+            row.pack(fill="x")
+            flat_btn(row, "Save", _save, bg=CA, pady=px(6)).pack(side="left")
+            flat_btn(row, "Cancel", d.destroy, bg=CNE, variant="secondary",
+                     pady=px(6)).pack(side="right")
+            d.person_vars, d.person_save = (name, days, hrs, makes, active), _save
+            self._person_dialog = d
+            return d
+
+        def _leave():
+            if not can:
+                return
+            d = tk.Toplevel(dlg, bg=CBG)
+            d.title("Leave")
+            d.transient(dlg)
+            _centre_on_parent(d, dlg, px(440), px(290))
+            body = tk.Frame(d, bg=CBG, padx=px(16), pady=px(12))
+            body.pack(fill="both", expand=True)
+            body.columnconfigure(1, weight=1)
+            who = tk.StringVar()
+            first = tk.StringVar(value=_d.date.today().strftime("%d/%m/%Y"))
+            last = tk.StringVar(value=_d.date.today().strftime("%d/%m/%Y"))
+            kinds = dict(_planning.LEAVE_KINDS)
+            kind = tk.StringVar(value=kinds["annual"])
+            note = tk.StringVar()
+            widgets = (
+                ("Who", ttk.Combobox(body, textvariable=who, values=[
+                    r["person"] for r in data["roster"]])),
+                ("First day away", field_entry(body, textvariable=first)),
+                ("Last day away", field_entry(body, textvariable=last)),
+                ("What", ttk.Combobox(body, textvariable=kind, state="readonly",
+                                      values=list(kinds.values()))),
+                ("Note", field_entry(body, textvariable=note)))
+            for r, (lbl, w) in enumerate(widgets):
+                tk.Label(body, text=lbl, bg=CBG, fg=CTX, font=F_BODY).grid(
+                    row=r, column=0, sticky="w", pady=px(3))
+                w.grid(row=r, column=1, sticky="ew", padx=(px(8), 0), pady=px(3))
+
+            def _save():
+                a = _insights.parse_date(first.get())
+                b = _insights.parse_date(last.get())
+                if not who.get().strip() or not a or not b or b < a:
+                    messagebox.showwarning(
+                        "Leave", "Who, and the first and last day away "
+                        "(dd/mm/yyyy, the last not before the first).",
+                        parent=d)
+                    return
+                code = next((k for k, v in kinds.items() if v == kind.get()),
+                            "other")
+                try:
+                    _db.add_leave(who.get(), a, b, code, note.get().strip())
+                except Exception as exc:
+                    messagebox.showerror("Leave", f"It wasn't saved:\n{exc}",
+                                         parent=d)
+                    return
+                d.destroy()
+                threading.Thread(target=_load, daemon=True).start()
+            row = tk.Frame(d, bg=CBG, padx=px(16), pady=px(10))
+            row.pack(fill="x")
+            flat_btn(row, "Save", _save, bg=CA, pady=px(6)).pack(side="left")
+            flat_btn(row, "Cancel", d.destroy, bg=CNE, variant="secondary",
+                     pady=px(6)).pack(side="right")
+            d.leave_vars, d.leave_save = (who, first, last, kind, note), _save
+            self._leave_dialog = d
+            return d
+
+        def _edit_person(_e=None):
+            sel = roster_t.selection()
+            if sel:
+                p = sel[0][2:]
+                _person(next((r for r in data["roster"] if r["person"] == p), None))
+
+        def _remove(kind):
+            t = roster_t if kind == "r" else leave_t
+            sel = t.selection()
+            if not sel or not can:
+                return
+            what = sel[0][2:]
+            if not messagebox.askyesno("Remove", "Take this off?", parent=dlg):
+                return
+            try:
+                (_db.remove_roster if kind == "r" else _db.remove_leave)(what)
+            except Exception as exc:
+                messagebox.showerror("Remove", str(exc), parent=dlg)
+                return
+            threading.Thread(target=_load, daemon=True).start()
+
+        if can:
+            rb = tk.Frame(tab_roster, bg=CBG, pady=px(8))
+            rb.pack(fill="x")
+            flat_btn(rb, "Add a person…", _person, bg=CA, pady=px(5)).pack(side="left")
+            flat_btn(rb, "Change…", _edit_person, bg=CNE, variant="secondary",
+                     pady=px(5)).pack(side="left", padx=(px(8), 0))
+            flat_btn(rb, "Remove", lambda: _remove("r"), bg=CNE,
+                     variant="secondary", pady=px(5)).pack(side="left",
+                                                          padx=(px(8), 0))
+            lb = tk.Frame(tab_leave, bg=CBG, pady=px(8))
+            lb.pack(fill="x")
+            flat_btn(lb, "Add leave…", _leave, bg=CA, pady=px(5)).pack(side="left")
+            flat_btn(lb, "Remove", lambda: _remove("l"), bg=CNE,
+                     variant="secondary", pady=px(5)).pack(side="left",
+                                                          padx=(px(8), 0))
+            roster_t.bind("<Double-1>", _edit_person)
+        bottom = tk.Frame(dlg, bg=CBG, padx=px(16), pady=px(10))
+        bottom.pack(fill="x")
+        flat_btn(bottom, "Close", dlg.destroy, bg=CNE, variant="secondary",
+                 pady=px(6)).pack(side="right")
+        threading.Thread(target=_load, daemon=True).start()
+        dlg.roster_trees = (ahead, roster_t, leave_t)
+        dlg.add_person, dlg.add_leave, dlg.reload = _person, _leave, \
+            (lambda: threading.Thread(target=_load, daemon=True).start())
+        return dlg
+
+    def _order_again(self, cust=None):
+        """A customer's past orders; the one picked goes on a new order -
+        same lines, nothing made, a new number and date."""
+        cust = cust or self._get_selected_customer()
+        if cust is None:
+            messagebox.showinfo("Order again", "Select a customer first.")
+            return
+        dlg, tree, foot = self._table_window(
+            f"Order again: {cust.get('name') or ''}",
+            "Double-click the order to put its lines on a new order - "
+            "nothing made, ready for a new order number.",
+            [("when", "Ordered", 110, "w"), ("no", "Order #", 140, "w"),
+             ("lines", "Lines", 70, "e"), ("what", "What", 420, "w")],
+            lambda: self._order_again_rows(cust), width=820, height=520,
+            on_row=lambda iid, parent: self._order_again_pick(cust, iid, parent))
+        return dlg, tree, foot
+
+    def _order_again_rows(self, cust):
+        rows = _db.customer_orders(cust)
+        self._order_again_cache = {str(r["id"]): r for r in rows}
+        out = []
+        for r in rows:
+            items = [i for i in (r.get("items") or []) if isinstance(i, dict)]
+            what = ", ".join(
+                f"{i.get('Quantity', '')} x {i.get('Filter Type') or i.get('product_type') or i.get('Description') or 'item'}"
+                for i in items[:3]) + (" …" if len(items) > 3 else "")
+            out.append(((r.get("date_ordered") or str(r.get("created_at") or "")[:10],
+                         r.get("order_number") or "—", len(items), what),
+                        None, str(r["id"])))
+        return out, ("No orders of theirs yet." if not rows else
+                     f"Their last {len(rows)} order(s), newest first.")
+
+    def _order_again_pick(self, cust, iid, parent):
+        row = (getattr(self, "_order_again_cache", {}) or {}).get(str(iid))
+        if not row:
+            return
+        self._new_order_for_customer_dict(cust)
+        head = row.get("header") or {}
+        for key in ("Job", "Attention", "Location"):
+            if key in self.hvars and head.get(key):
+                self.hvars[key].set(str(head.get(key)))
+        self.items = _db.with_line_ids(_planning.repeat_items(row.get("items") or []))
+        for it in self.items:
+            if "item_kind" not in it:
+                it["item_kind"] = "bag" if "product_type" in it else "filter"
+        self._refresh_items_tree()
+        try:
+            parent.destroy()
+        except Exception:
+            pass
+        self.status_var.set(
+            f"Order {row.get('order_number') or ''} for {cust.get('name', '')} is "
+            "on a new order - put in their new order number and generate it.")
 
     def _outstanding_orders(self):
         """Every live order, with its lines. Read fresh rather than from the
@@ -25842,6 +26212,20 @@ class ModernOrderApp(tk.Frame):
                     self.status_var.set("Order not generated — flagged as possible duplicate.")
                     _bail()
                     return
+
+        # ── Is there room on the day it is due? ─────────────────────────
+        if _db.is_ready() and _features.is_on("capacity_check"):
+            self.status_var.set("Checking the day it is due…")
+            self.master.update_idletasks()
+            warn = self._capacity_warning(header.get("Date Due", ""), self.items)
+            if warn and not messagebox.askyesno(
+                    "Is there room that day?",
+                    warn + "\n\nSave it for that day anyway?",
+                    icon="warning", default="no"):
+                self.status_var.set("Not saved - change the due date and "
+                                    "generate it again.")
+                _bail()
+                return
 
         ORDERS_DIR.mkdir(parents=True, exist_ok=True)
 

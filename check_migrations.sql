@@ -183,7 +183,11 @@ WITH checks(step, file, purpose, needed, present) AS (VALUES
 
   (44, 'migrate_floor.sql', 'The factory floor: TV board, job timer, QC checks, faults, finished-job photos', 'recommended',
       to_regclass('public.job_times') IS NOT NULL
-      AND to_regclass('public.qc_checklists') IS NOT NULL)
+      AND to_regclass('public.qc_checklists') IS NOT NULL),
+
+  (45, 'migrate_planning.sql', 'Staff roster and leave, and warning when a due date is already full', 'recommended',
+      to_regclass('public.staff_roster') IS NOT NULL
+      AND to_regclass('public.staff_leave') IS NOT NULL)
 )
 SELECT step,
        CASE WHEN present THEN 'already done' ELSE 'RUN THIS' END AS status,
