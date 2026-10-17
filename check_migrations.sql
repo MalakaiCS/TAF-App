@@ -175,7 +175,11 @@ WITH checks(step, file, purpose, needed, present) AS (VALUES
       EXISTS (SELECT 1 FROM storage.buckets WHERE id = 'stock-images')),
 
   (42, 'migrate_stock_suppliers.sql', 'Where each stock item comes from: suppliers, their codes and prices', 'recommended',
-      to_regclass('public.stock_item_suppliers') IS NOT NULL)
+      to_regclass('public.stock_item_suppliers') IS NOT NULL),
+
+  (43, 'migrate_supply_bell.sql', 'The bell only shows supply requests still waiting', 'recommended',
+      COALESCE(pg_get_functiondef(to_regprocedure('public.settle_supply_notifications()'))
+               LIKE '%DELETE FROM public.notifications%', false))
 )
 SELECT step,
        CASE WHEN present THEN 'already done' ELSE 'RUN THIS' END AS status,

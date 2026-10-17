@@ -2559,6 +2559,14 @@ var TAFAPP = (function () {
              stock_item_id: String(s.id || "") };
   }
 
+  // Something not on the stock list, as purchasing.other_request_line.
+  function otherRequestLine(text, quantity, supplierId) {
+    var said = String(text || "").split(/\s+/).filter(Boolean).join(" ").slice(0, 200);
+    return { item: supplyItemFor({ name: said }), detail: said,
+             quantity: String(quantity || "").trim().slice(0, 60),
+             supplier_id: supplierId || "", item_code: "", stock_item_id: "" };
+  }
+
   // What is on a purchase order and not yet here, by stock item - the same
   // as records.quantities_on_order.
   function onOrderOf(pos) {
@@ -2613,8 +2621,8 @@ var TAFAPP = (function () {
 
       body.appendChild(U.el("h2", { cls: "title", text: "New order" }));
       body.appendChild(U.el("div", { cls: "muted",
-        text: "Pick from the stock list - how many and who from are filled "
-            + "in where we know." }));
+        text: "Pick from the stock list, or type what isn't on it - how many "
+            + "and who from are filled in where we know." }));
 
       var find = U.el("input", { attr: { type: "search", id: "no-find",
         placeholder: "Search stock", value: o.find, autocomplete: "off" } });
@@ -2627,8 +2635,20 @@ var TAFAPP = (function () {
       }, "quiet");
       low.setAttribute("id", "no-low");
       var results = U.el("div", { cls: "no-results", attr: { id: "no-results" } });
+      // Anything that is not a stock item - spray paint, a drill bit.
+      var other = U.el("input", { attr: { type: "text", id: "no-other",
+        maxlength: "200", placeholder: "e.g. white spray paint",
+        autocomplete: "off" } });
+      var otherAdd = U.button("Add", function () { addOther(); }, "quiet");
+      otherAdd.setAttribute("id", "no-other-add");
+      other.addEventListener("keydown", function (e) {
+        if (e.key === "Enter") { e.preventDefault(); addOther(); }
+      });
       var pickCard = U.card("Stock", [find, U.el("div", { cls: "row-actions",
-                                                           kids: [low] }), results]);
+                                                           kids: [low] }), results,
+        U.el("label", { cls: "f no-other", kids: [
+          U.el("span", { text: "Not on the stock list?" }),
+          U.el("div", { cls: "no-other-row", kids: [other, otherAdd] })] })]);
 
       var linesBox = U.el("div", { cls: "no-lines", attr: { id: "no-lines" } });
       var orderCard = U.card("The order", [linesBox]);
@@ -2653,7 +2673,22 @@ var TAFAPP = (function () {
       body.appendChild(orderCard);
 
       function have(id) {
-        return o.lines.some(function (l) { return String(l.stock.id) === String(id); });
+        return o.lines.some(function (l) {
+          return l.stock && String(l.stock.id) === String(id);
+        });
+      }
+
+      function lineKey(l, i) { return l.stock ? String(l.stock.id) : "other-" + i; }
+
+      function addOther() {
+        var said = other.value.split(/\s+/).filter(Boolean).join(" ");
+        if (!said) { other.focus(); return; }
+        o.lines.push({ stock: null, text: said, qty: "", sup: "" });
+        other.value = "";
+        drawLines();
+        var input = linesBox.querySelector('[data-line="other-'
+                                           + (o.lines.length - 1) + '"] input');
+        if (input) { input.focus(); }
       }
 
       function add(picks) {
@@ -2717,14 +2752,19 @@ var TAFAPP = (function () {
           return;
         }
         o.lines.forEach(function (l, i) {
-          var qty = U.el("input", { attr: { type: "text", inputmode: "decimal",
-            maxlength: "20", value: l.qty, "aria-label": "How many " + (l.stock.name || "") } });
+          var name = l.stock ? (l.stock.name || "") : l.text;
+          // A stock item: a number, in its own unit. Typed: "3 rolls".
+          var qty = U.el("input", { attr: { type: "text",
+            inputmode: l.stock ? "decimal" : "text",
+            placeholder: l.stock ? "" : "e.g. 3 cans",
+            maxlength: l.stock ? "20" : "60", value: l.qty,
+            "aria-label": "How many " + name } });
           qty.addEventListener("input", function () { l.qty = qty.value; });
           var sup = U.el("select", { attr: { "aria-label": "From" },
             kids: [U.el("option", { text: "Supplier - not sure", attr: { value: "" } })] });
-          var theirs = suppliersOf(l.stock.id, o.links).map(function (k) {
-            return String(k.supplier_id);
-          }).filter(function (id) { return names[id]; });
+          var theirs = (l.stock ? suppliersOf(l.stock.id, o.links) : [])
+            .map(function (k) { return String(k.supplier_id); })
+            .filter(function (id) { return names[id]; });
           var rest = o.suppliers.map(function (s) { return String(s.id); })
             .filter(function (id) { return theirs.indexOf(id) < 0; });
           theirs.concat(rest).forEach(function (id) {
@@ -2735,12 +2775,12 @@ var TAFAPP = (function () {
           var off = U.button("✕", function () {
             o.lines.splice(i, 1); drawLines(); drawResults();
           }, "quiet");
-          off.setAttribute("aria-label", "Take off " + (l.stock.name || ""));
-          linesBox.appendChild(U.el("div", { cls: "no-line",
-            attr: { "data-line": l.stock.id }, kids: [
-              U.el("div", { cls: "nm", text: l.stock.name || "" }),
-              U.el("div", { cls: "q", kids: [qty, U.el("span", {
-                text: unitLabel(l.stock.unit, 2) })] }),
+          off.setAttribute("aria-label", "Take off " + name);
+          linesBox.appendChild(U.el("div", { cls: "no-line" + (l.stock ? "" : " typed"),
+            attr: { "data-line": lineKey(l, i) }, kids: [
+              U.el("div", { cls: "nm", text: name }),
+              U.el("div", { cls: "q", kids: l.stock ? [qty, U.el("span", {
+                text: unitLabel(l.stock.unit, 2) })] : [qty] }),
               o.suppliers.length ? sup : U.el("span"),
               off] }));
         });
@@ -2751,15 +2791,22 @@ var TAFAPP = (function () {
           U.notice(orderCard, "Put something on it first.");
           return;
         }
-        var missing = o.lines.filter(function (l) { return !String(l.qty).trim(); })[0];
-        if (missing) {
-          U.notice(orderCard, "Say how many " + (missing.stock.name || "of it") + ".");
-          var input = linesBox.querySelector('[data-line="' + missing.stock.id + '"] input');
+        var at = -1;
+        o.lines.forEach(function (l, i) {
+          if (at < 0 && !String(l.qty).trim()) { at = i; }
+        });
+        if (at >= 0) {
+          var missing = o.lines[at];
+          U.notice(orderCard, "Say how many "
+            + (missing.stock ? (missing.stock.name || "of it") : missing.text) + ".");
+          var input = linesBox.querySelector('[data-line="' + lineKey(missing, at)
+                                             + '"] input');
           if (input) { input.focus(); }
           return;
         }
         var lines = o.lines.map(function (l) {
-          return stockRequestLine(l.stock, l.qty, l.sup, o.links);
+          return l.stock ? stockRequestLine(l.stock, l.qty, l.sup, o.links)
+                         : otherRequestLine(l.text, l.qty, l.sup);
         });
         var label = lines.length === 1 ? describeRequest(lines[0])
                                        : lines.length + " things";
@@ -3066,193 +3113,119 @@ var TAFAPP = (function () {
     return text;
   }
 
+  /* Everything asked for in one New order is one order on the list, the
+     way Orders shows a job: one card, its lines in it, moved along all at
+     once. The same rules as supplies.py's group_requests, order_label and
+     lines_to_move - a test holds the two together. */
+
+  function orderStatus(lines) {
+    var have = {};
+    lines.forEach(function (l) { have[l.status || "open"] = true; });
+    var order = ["open", "ordered", "received", "declined"];
+    for (var i = 0; i < order.length; i++) {
+      if (have[order[i]]) { return order[i]; }
+    }
+    return "cancelled";
+  }
+
+  function groupRequests(rows) {
+    var byKey = {}, keys = [];
+    (rows || []).forEach(function (r) {
+      var key = String(r.batch_id || r.id || "");
+      if (!byKey[key]) { byKey[key] = []; keys.push(key); }
+      byKey[key].push(r);
+    });
+    return sortRequests(keys.map(function (key) {
+      var lines = byKey[key].slice().sort(function (a, b) {
+        var ka = String(a.client_ref || "") + "|" + String(a.created_at || "");
+        var kb = String(b.client_ref || "") + "|" + String(b.created_at || "");
+        return ka < kb ? -1 : (ka > kb ? 1 : 0);
+      });
+      var first = lines[0];
+      var handled = lines.filter(function (l) { return l.handled_by_name; })[0];
+      return {
+        key: key, lines: lines, status: orderStatus(lines),
+        urgent: lines.some(function (l) {
+          return !!l.urgent && (l.status || "open") === "open";
+        }),
+        created_at: lines.map(function (l) { return String(l.created_at || ""); })
+                         .sort()[0],
+        requested_by: first.requested_by,
+        requested_by_name: first.requested_by_name || "",
+        handled_by_name: handled ? handled.handled_by_name : "",
+        note: first.note || ""
+      };
+    }));
+  }
+
+  function orderLabel(order) {
+    var lines = order.lines, status = order.status;
+    var label = SUPPLY_STATUS[status] || status;
+    var moved = lines.filter(function (l) { return (l.status || "open") !== status; });
+    if (moved.length && lines.length > 1) {
+      if (status === "open") {
+        label += " - " + moved.length + " of " + lines.length + " dealt with";
+      } else if (status === "ordered") {
+        var here = lines.filter(function (l) { return l.status === "received"; }).length;
+        if (here) { label += " - " + here + " of " + lines.length + " here"; }
+      }
+    } else if (status !== "open" && order.handled_by_name) {
+      label += " - " + order.handled_by_name;
+    }
+    return label;
+  }
+
+  function orderSummary(order, most) {
+    most = most || 2;
+    var names = order.lines.map(describeRequest);
+    var text = names.slice(0, most).join(", ");
+    if (names.length > most) { text += " + " + (names.length - most) + " more"; }
+    return text;
+  }
+
+  function linesToMove(lines, to) {
+    return lines.filter(function (l) {
+      return (SUPPLY_NEXT[l.status || "open"] || []).indexOf(to) >= 0;
+    });
+  }
+
+  function linesToCancel(lines, me) {
+    return lines.filter(function (l) {
+      return (l.status || "open") === "open"
+             && String(l.requested_by || "") === String(me || "");
+    });
+  }
+
   SCREENS.supplies = function (main) {
     var showDone = !!SCREENS.supplies._showDone;
 
-    // ── Asking ────────────────────────────────────────────────────────
-    var item = U.el("select", { attr: { id: "supply-item" },
-      kids: SUPPLY_ITEMS.map(function (s) {
-        return U.el("option", { text: s, attr: { value: s } });
-      }) });
-    var hint = U.el("span", { text: SUPPLY_HINTS[SUPPLY_ITEMS[0]] });
-    // Type it, or pick one of the stock items of that kind.
-    var stockList = U.el("datalist", { attr: { id: "supply-stock" } });
-    var detail = U.el("input", { attr: { type: "text", id: "supply-detail",
-                                         maxlength: "200",
-                                         list: "supply-stock" } });
-    var qty = U.el("input", { attr: { type: "text", id: "supply-qty",
-                                      maxlength: "60",
-                                      placeholder: "e.g. 3 rolls" } });
-    var urgent = U.el("input", { attr: { type: "checkbox",
-                                         id: "supply-urgent" } });
-    var note = U.el("input", { attr: { type: "text", id: "supply-note",
-                                       maxlength: "500",
-                                       placeholder: "Optional" } });
-    item.addEventListener("change", function () {
-      hint.textContent = SUPPLY_HINTS[item.value] || "";
-    });
-    // Who it comes from, if somebody knows. Hidden until step 40 is run
-    // and there are suppliers to pick from.
-    var from = U.el("select", { attr: { id: "supply-from" },
-      kids: [U.el("option", { text: "", attr: { value: "" } })] });
-    var fromLabel = U.el("label", { cls: "f", attr: { style: "display:none" },
-      kids: [U.el("span", { text: "From (if you know)" }), from] });
+    // Who each line comes from, by name.
     var suppliers = {};
     D.select("suppliers", { "select": "id,name", "active": "eq.true",
                             "order": "name" }).then(function (rows) {
-      (rows || []).forEach(function (r) {
-        suppliers[r.id] = r.name;
-        from.appendChild(U.el("option", { text: r.name, attr: { value: r.id } }));
-      });
-      if ((rows || []).length) { fromLabel.style.display = ""; }
-    }).catch(function () { /* not run yet - asked for without one */ });
+      (rows || []).forEach(function (r) { suppliers[r.id] = r.name; });
+      if ((rows || []).length && lastRows) { draw(lastRows); }
+    }).catch(function () { /* step 40 not run */ });
+    var lastRows = null;
 
-    // The stock items, and who each comes from (step 42).
-    var stock = [], links = [];
-    D.select("stock_items", { "select": "id,name,product_type",
-                              "order": "name" }).then(function (rows) {
-      stock = rows || []; offerStock();
-    }).catch(function () {});
-    D.select("stock_item_suppliers", { "select": "stock_item_id,supplier_id,preferred" })
-      .then(function (rows) { links = rows || []; })
-      .catch(function () { /* step 42 not run */ });
-    function offerStock() {
-      var word = item.value.toLowerCase();
-      var hits = stock.filter(function (s) {
-        var name = String(s.name || "").toLowerCase();
-        return word === "other" ||
-               String(s.product_type || "").toLowerCase() === word ||
-               name.indexOf(word) >= 0 ||
-               name.indexOf(word.replace(/s$/, "")) >= 0;
-      });
-      if (!hits.length) { hits = stock; }
-      U.clear(stockList);
-      hits.forEach(function (s) {
-        stockList.appendChild(U.el("option", { attr: { value: s.name } }));
-      });
-    }
-    function stockId() {
-      var said = detail.value.trim().toLowerCase();
-      var hit = stock.filter(function (s) {
-        return said && String(s.name || "").trim().toLowerCase() === said;
-      })[0];
-      return hit ? hit.id : "";
-    }
-    item.addEventListener("change", offerStock);
-    // A stock item picked: its preferred supplier, if it has one.
-    detail.addEventListener("change", function () {
-      var id = stockId();
-      var mine = links.filter(function (l) { return l.stock_item_id === id; });
-      mine.sort(function (a, b) { return (b.preferred ? 1 : 0) - (a.preferred ? 1 : 0); });
-      if (mine.length && suppliers[mine[0].supplier_id]) {
-        from.value = mine[0].supplier_id;
-      }
-    });
-
-    // Several things at once: each onto the list, then one send and one
-    // message to the managers.
-    var basket = [];
-    var basketList = U.el("ul", { attr: { id: "supply-basket" } });
-    function lineNow() {
-      var what = item.value;
-      var said = detail.value.trim();
-      if (what === "Other" && !said) {
-        U.notice(askCard, "Say what you need - \"Other\" on its own does "
-                        + "not tell anybody what to order.");
-        return null;
-      }
-      return { item: what, detail: said, quantity: qty.value.trim(),
-               supplier_id: from.value || "", stock_item_id: stockId() };
-    }
-    function drawBasket() {
-      U.clear(basketList);
-      basket.forEach(function (l, i) {
-        var off = U.button("Take off", function () {
-          basket.splice(i, 1); drawBasket();
-        }, "quiet");
-        basketList.appendChild(U.el("li", { kids: [
-          document.createTextNode(describeRequest(l)
-            + (l.quantity ? ", " + l.quantity : "")
-            + (l.supplier_id ? " from " + (suppliers[l.supplier_id] || "") : "")
-            + "  "), off] }));
-      });
-    }
-
-    var askCard = U.card("Ask for something", [
-      U.el("label", { cls: "f", kids: [U.el("span", { text: "What" }), item] }),
-      U.el("label", { cls: "f", kids: [hint, detail, stockList] }),
-      U.el("label", { cls: "f", kids: [
-        U.el("span", { text: "How many" }), qty] }),
-      fromLabel,
-      basketList,
-      U.el("label", { cls: "f", kids: [
-        U.el("span", { text: "Note" }), note] }),
-      U.el("label", { cls: "f", attr: { style: "color:#8A2A1E" }, kids: [
-        urgent, document.createTextNode("  Urgent - work has stopped")] })
-    ]);
-    var add = U.button("Add to list", function () {
-      var l = lineNow();
-      if (!l) { return; }
-      basket.push(l);
-      detail.value = ""; qty.value = "";
-      drawBasket();
-    }, "quiet");
-    add.setAttribute("id", "supply-add");
-    var send = U.button("Send to managers", function () {
-      var lines = basket.slice();
-      if (detail.value.trim() || qty.value.trim() || !lines.length) {
-        var l = lineNow();
-        if (!l) { return; }
-        lines.push(l);
-      }
-      send.disabled = true;
-      var label = lines.length === 1
-        ? describeRequest(lines[0])
-        : lines.length + " things";
-      // Several, or one naming a supplier or stock item: the step 40 way,
-      // which files all of that. Before step 40, the one-at-a-time way.
-      var together = lines.length > 1 || !!lines[0].supplier_id
-                     || (!!lines[0].stock_item_id
-                         && Object.keys(suppliers).length > 0);
-      // One reference per request, so a send that lost its answer to a
-      // dropout and got sent again is filed once, and managers told once.
-      var sending = together ? S.send({
-        rpc: "request_supplies",
-        label: "Supplies · " + label,
-        body: {
-          p_lines: lines, p_urgent: !!urgent.checked,
-          p_note: note.value.trim(), p_client_ref: S.newRef()
-        },
-        log: { action: "supply_requested",
-               details: lines.map(describeRequest).join("; ").slice(0, 500) }
-      }) : S.send({
-        rpc: "request_supply",
-        label: "Supplies · " + label,
-        body: {
-          p_item: lines[0].item, p_detail: lines[0].detail,
-          p_quantity: lines[0].quantity,
-          p_urgent: !!urgent.checked, p_note: note.value.trim(),
-          p_client_ref: S.newRef()
-        },
-        log: { action: "supply_requested",
-               details: label + (lines[0].quantity
-                                 ? ", " + lines[0].quantity : "") }
-      });
-      sending.then(function (res) {
-        detail.value = ""; qty.value = ""; note.value = "";
-        urgent.checked = false;
-        basket = []; drawBasket();
-        U.notice(askCard, res.queued
+    // ── Asking: New order, from the stock list or typed ───────────────
+    var newOrder = U.button("+  New order", function () {
+      openNewOrder(function (res) {
+        U.notice(listCard, res.queued
           ? "Kept on this phone. It goes when the signal is back, and the "
             + "managers are told then."
           : "Sent - the managers have been told.", "ok");
         if (!res.queued) { loadList(); }
-      }).catch(function (err) {
-        U.notice(askCard, notSetUp(err) ? NOT_SET_UP : err.message);
-      }).then(function () { send.disabled = false; });
+      });
     }, "go");
-    send.setAttribute("id", "supply-send");
-    askCard.appendChild(U.el("div", { cls: "row-actions", kids: [add, send] }));
+    newOrder.setAttribute("id", "supply-new-order");
+    var top = U.el("div", { cls: "supply-top", kids: [
+      U.el("div", { kids: [
+        U.el("b", { text: "Need something?" }),
+        U.el("div", { cls: "muted",
+          text: "Pick from the stock list, or type what isn't on it. "
+              + "Every manager is told." })] }),
+      newOrder] });
 
     // ── What has been asked for ───────────────────────────────────────
     var listCard = U.card("Asked for", []);
@@ -3266,27 +3239,8 @@ var TAFAPP = (function () {
     listCard.appendChild(listBody);
     listCard.appendChild(U.el("div", { cls: "row-actions", kids: [toggle] }));
 
-    // ── New order: the stock list, picked from ────────────────────────
-    var newOrder = U.button("+  New order", function () {
-      openNewOrder(function (res) {
-        U.notice(listCard, res.queued
-          ? "Kept on this phone. It goes when the signal is back, and the "
-            + "managers are told then."
-          : "Sent - the managers have been told.", "ok");
-        if (!res.queued) { loadList(); }
-      });
-    }, "go");
-    newOrder.setAttribute("id", "supply-new-order");
-    var top = U.el("div", { cls: "supply-top", kids: [
-      U.el("div", { kids: [
-        U.el("b", { text: "Ordering stock?" }),
-        U.el("div", { cls: "muted",
-          text: "Pick from the stock list, with how many and who from." })] }),
-      newOrder] });
-
     U.clear(main);
     main.appendChild(top);
-    main.appendChild(askCard);
     main.appendChild(listCard);
 
     function loadList() {
@@ -3294,7 +3248,8 @@ var TAFAPP = (function () {
                      "limit": 200 };
       if (!showDone) { params.status = "in.(open,ordered)"; }
       D.select("supply_requests", params).then(function (rows) {
-        draw(sortRequests(rows));
+        lastRows = rows || [];
+        draw(lastRows);
       }).catch(function (err) {
         U.clear(listBody);
         U.notice(listCard, notSetUp(err) ? NOT_SET_UP : err.message);
@@ -3303,81 +3258,110 @@ var TAFAPP = (function () {
 
     function draw(rows) {
       U.clear(listBody);
-      if (!rows.length) {
+      var orders = groupRequests(rows);
+      if (!orders.length) {
         listBody.appendChild(U.empty("Nothing waiting.",
-          "Anything asked for shows here until it has arrived."));
+          "Press New order to ask for anything - it shows here until it "
+          + "has arrived."));
         return;
       }
       var me = (D.whoami() || {}).id;
       var manager = D.roleLevel() >= 3;
-      listBody.appendChild(U.table(
-        ["What", "How many", "Asked by", "When", "Status", ""],
-        rows.map(function (r) {
-          var status = r.status || "open";
-          var waiting = status === "open";
-          var label = SUPPLY_STATUS[status] || status;
-          var acts = U.el("div", { cls: "acts" });
-          // The buttons are a courtesy. The database refuses anybody who
-          // is not a manager, and anybody cancelling what is not theirs.
-          if (manager) {
-            (SUPPLY_NEXT[status] || []).forEach(function (to) {
-              acts.appendChild(U.button(
-                { ordered: "Ordered", received: "Received",
-                  declined: "Decline" }[to],
-                function () { move(r, to); }, "quiet"));
-            });
-          }
-          if (waiting && r.requested_by === me) {
-            acts.appendChild(U.button("Cancel", function () {
-              if (window.confirm("Cancel the request for "
-                                 + describeRequest(r) + "?")) {
-                move(r, "cancelled");
-              }
-            }, "quiet"));
-          }
-          var tr = U.el("tr", {
-            cls: (waiting && r.urgent) ? "urgent"
-               : (waiting || status === "ordered" ? "" : "done"),
-            attr: { "data-request": r.id },
-            kids: [
-              U.cell((waiting && r.urgent ? "URGENT  " : "")
-                     + describeRequest(r)),
-              U.cell(r.quantity || ""),
-              U.cell(r.requested_by_name || ""),
-              U.cell(ago(r.created_at)),
-              U.cell("", { node: U.el("span", {
-                cls: "pill s-" + label,
-                text: label + (status !== "open" && r.handled_by_name
-                               ? " · " + r.handled_by_name : "") }) }),
-              U.cell("", { node: acts })
-            ]
+      orders.forEach(function (order) {
+        var status = order.status;
+        var waiting = status === "open";
+        var acts = U.el("div", { cls: "acts" });
+        // The buttons are a courtesy. The database refuses anybody who is
+        // not a manager, and anybody cancelling what is not theirs.
+        if (manager) {
+          ["ordered", "received", "declined"].forEach(function (to) {
+            if (!linesToMove(order.lines, to).length) { return; }
+            acts.appendChild(U.button(
+              { ordered: "Ordered", received: "Received",
+                declined: "Decline" }[to],
+              function () { move(order, linesToMove(order.lines, to), to); },
+              "quiet"));
           });
-          return tr;
-        })));
+        }
+        var mine = linesToCancel(order.lines, me);
+        if (mine.length) {
+          acts.appendChild(U.button("Cancel", function () {
+            if (window.confirm("Cancel the request for "
+                               + (mine.length === 1 ? describeRequest(mine[0])
+                                  : "these " + mine.length + " things") + "?")) {
+              move(order, mine, "cancelled");
+            }
+          }, "quiet"));
+        }
+        var label = orderLabel(order);
+        var one = order.lines.length === 1;
+        var lines = U.el("ul", { cls: "sup-lines" });
+        order.lines.forEach(function (l) {
+          var st = l.status || "open";
+          lines.appendChild(U.el("li", {
+            cls: st === "open" || st === "ordered" ? "" : "done",
+            attr: { "data-request": l.id },
+            kids: [U.el("span", { cls: "nm", text: describeRequest(l) }),
+                   U.el("span", { cls: "q", text: l.quantity || "" }),
+                   U.el("span", { cls: "from",
+                                  text: suppliers[l.supplier_id] || "" }),
+                   // Only where a line is somewhere other than its order.
+                   st !== status
+                     ? U.el("span", { cls: "pill s-" + (SUPPLY_STATUS[st] || st),
+                                      text: SUPPLY_STATUS[st] || st })
+                     : U.el("span")]
+          }));
+        });
+        listBody.appendChild(U.el("div", {
+          cls: "sup-order" + (order.urgent ? " urgent"
+                              : (waiting || status === "ordered" ? "" : " done")),
+          attr: { "data-order": order.key },
+          kids: [
+            U.el("div", { cls: "hd", kids: [
+              U.el("b", { text: (order.urgent ? "URGENT  " : "")
+                + (order.lines.length > 1
+                   ? order.lines.length + " items" : orderSummary(order)) }),
+              U.el("span", { cls: "pill s-" + (SUPPLY_STATUS[status] || status),
+                             text: label })] }),
+            // One thing on it: how many and who from go up here rather
+            // than under the same words again.
+            one ? U.el("div", { cls: "qty", text: [order.lines[0].quantity,
+              suppliers[order.lines[0].supplier_id]
+                ? "from " + suppliers[order.lines[0].supplier_id] : ""]
+              .filter(Boolean).join("  ·  ") }) : U.el("span"),
+            U.el("div", { cls: "meta", text: [order.requested_by_name,
+              ago(order.created_at), order.note].filter(Boolean).join(" · ") }),
+            one ? U.el("span") : lines,
+            acts.childNodes.length ? acts : U.el("span")
+          ] }));
+      });
     }
 
-    function move(r, to) {
+    function move(order, lines, to) {
       // No row back means nothing changed - row-level security refuses by
       // matching nothing, not by raising. Said, rather than shown as done.
-      D.update("supply_requests", { "id": "eq." + r.id }, { status: to })
-        .then(function (rows) {
-          if (!rows || !rows.length) {
-            throw new Error("That didn't change anything - it may have "
-                          + "been dealt with already, or it isn't yours "
-                          + "to change.");
-          }
-          D.insert("audit_log", {
-            user_id: (D.whoami() || {}).id,
-            username: D.cachedProfile().username
-                   || D.cachedProfile().full_name || "",
-            action: "supply_" + to,
-            details: describeRequest(r)
-          }, true).catch(function () {});
-          loadList();
-          pollBell();
-        }).catch(function (err) {
-          U.notice(listCard, err.message);
-        });
+      Promise.all(lines.map(function (l) {
+        return D.update("supply_requests", { "id": "eq." + l.id }, { status: to });
+      })).then(function (got) {
+        var changed = got.filter(function (rows) { return rows && rows.length; });
+        if (!changed.length) {
+          throw new Error("That didn't change anything - it may have "
+                        + "been dealt with already, or it isn't yours "
+                        + "to change.");
+        }
+        D.insert("audit_log", {
+          user_id: (D.whoami() || {}).id,
+          username: D.cachedProfile().username
+                 || D.cachedProfile().full_name || "",
+          action: "supply_" + to,
+          details: lines.map(describeRequest).join("; ").slice(0, 500)
+        }, true).catch(function () {});
+        loadList();
+        pollBell();
+      }).catch(function (err) {
+        U.notice(listCard, err.message);
+        loadList();
+      });
     }
 
     loadList();
@@ -3390,9 +3374,13 @@ var TAFAPP = (function () {
     _badgeText: badgeText,
     _setBell: setBell,
     _supplyItems: SUPPLY_ITEMS,
+    _supplyOrders: { group: groupRequests, label: orderLabel,
+                     summary: orderSummary, status: orderStatus,
+                     toMove: linesToMove, toCancel: linesToCancel },
     _newOrder: { searchStock: searchStock, newOrderPick: newOrderPick,
                  lowPicks: lowPicks, supplyItemFor: supplyItemFor,
                  stockRequestLine: stockRequestLine, onOrderOf: onOrderOf,
+                 otherRequestLine: otherRequestLine,
                  open: openNewOrder, reset: function () { NEW_ORDER = null; } },
     _sortRequests: sortRequests,
     _stateBar: stateBar,

@@ -235,7 +235,10 @@ def test_a_change_that_matched_nothing_is_not_reported_as_done():
         raise AssertionError("a refused change was reported as done")
     finally:
         _sup._db.get_client = was
-    assert "if (!rows || !rows.length)" in WEB, "the phone does not check"
+    # The phone moves an order a line at a time, and counts only the lines
+    # that came back changed.
+    assert "rows && rows.length" in WEB and "if (!changed.length)" in WEB, \
+        "the phone does not check"
 
 
 def test_only_a_manager_is_offered_the_buttons():
@@ -329,3 +332,69 @@ def test_it_is_checked_against_a_real_database():
         encoding="utf-8")
     assert "python tests/db_rules.py" in wf
     assert 'REQUIRE_POSTGRES: "1"' in wf
+
+
+_ORDER_ROWS = [
+    {"id": "r1", "batch_id": "b1", "client_ref": "x-1", "item": "Tape",
+     "detail": "foil", "quantity": "3 rolls", "status": "open",
+     "requested_by": "dave", "requested_by_name": "Dave Floor",
+     "created_at": "2026-10-10T01:00:00Z", "note": "bench 2"},
+    {"id": "r2", "batch_id": "b1", "client_ref": "x-2", "item": "Rivets",
+     "detail": "4mm", "quantity": "2 boxes", "status": "ordered",
+     "handled_by_name": "Sarah Boss", "requested_by": "dave",
+     "requested_by_name": "Dave Floor", "created_at": "2026-10-10T01:00:00Z"},
+    {"id": "r3", "batch_id": "b1", "client_ref": "x-3", "item": "Media",
+     "detail": "G4", "quantity": "1 roll", "status": "open",
+     "requested_by": "dave", "requested_by_name": "Dave Floor",
+     "created_at": "2026-10-10T01:00:00Z"},
+    {"id": "r4", "batch_id": None, "item": "Channel", "detail": "45mm",
+     "quantity": "20", "status": "open", "urgent": True,
+     "requested_by": "amy", "requested_by_name": "Amy Admin",
+     "created_at": "2026-10-12T01:00:00Z"},
+    {"id": "r5", "batch_id": "b2", "client_ref": "y-1", "item": "Tape",
+     "detail": "duct", "quantity": "1", "status": "received",
+     "handled_by_name": "Kai Brown", "requested_by": "amy",
+     "requested_by_name": "Amy Admin", "created_at": "2026-10-11T01:00:00Z"},
+]
+
+
+def test_requests_sent_together_are_one_order():
+    orders = _sup.group_requests(_ORDER_ROWS)
+    assert [o["key"] for o in orders] == ["r4", "b1", "b2"]   # urgent first
+    batch = orders[1]
+    assert [l["id"] for l in batch["lines"]] == ["r1", "r2", "r3"]
+    assert (batch["status"], batch["requested_by_name"], batch["note"]) == \
+        ("open", "Dave Floor", "bench 2")
+    assert orders[0]["urgent"] and not batch["urgent"]
+
+
+def test_an_order_says_where_it_has_got_to():
+    orders = {o["key"]: o for o in _sup.group_requests(_ORDER_ROWS)}
+    assert _sup.order_label(orders["b1"]) == "Waiting - 1 of 3 dealt with"
+    assert _sup.order_label(orders["r4"]) == "Waiting"
+    assert _sup.order_label(orders["b2"]) == "Received - Kai Brown"
+    part = _sup.group_requests([
+        {**_ORDER_ROWS[0], "status": "received"},
+        {**_ORDER_ROWS[1]}])[0]
+    assert _sup.order_label(part) == "Ordered - 1 of 2 here"
+    assert _sup.order_status([{"status": "declined"},
+                                  {"status": "cancelled"}]) == "declined"
+    assert _sup.order_status([{"status": "cancelled"}]) == "cancelled"
+
+
+def test_an_order_is_summed_up_in_one_line():
+    orders = {o["key"]: o for o in _sup.group_requests(_ORDER_ROWS)}
+    assert _sup.order_summary(orders["b1"]) == \
+        "Tape - foil, Rivets - 4mm + 1 more"
+    assert _sup.order_summary(orders["r4"]) == "Channel - 45mm"
+
+
+def test_moving_an_order_moves_the_lines_that_can_move():
+    orders = {o["key"]: o for o in _sup.group_requests(_ORDER_ROWS)}
+    ids = lambda rows: [r["id"] for r in rows]
+    assert ids(_sup.lines_to_move(orders["b1"], "ordered")) == ["r1", "r3"]
+    assert ids(_sup.lines_to_move(orders["b1"], "received")) == ["r1", "r2", "r3"]
+    assert ids(_sup.lines_to_move(orders["b1"], "declined")) == ["r1", "r3"]
+    assert _sup.lines_to_move(orders["b2"], "received") == []
+    assert ids(_sup.lines_to_cancel(orders["b1"], "dave")) == ["r1", "r3"]
+    assert _sup.lines_to_cancel(orders["b1"], "amy") == []

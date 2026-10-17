@@ -233,6 +233,18 @@ def stock_request_line(stock: Dict[str, Any], quantity: Any = "",
             "stock_item_id": str(stock.get("id") or "")}
 
 
+def other_request_line(text: str, quantity: Any = "",
+                       supplier_id: str = "") -> Dict[str, Any]:
+    """Something on a New order that is not on the stock list - "pop
+    rivets 4mm", "white spray paint" - as a request: its kind worked out
+    from the words where it can be, "Other" otherwise."""
+    said = " ".join(str(text or "").split())[:200]
+    return {"item": supply_item_for({"name": said}), "detail": said,
+            "quantity": str(quantity or "").strip()[:60],
+            "supplier_id": supplier_id or "", "item_code": "",
+            "stock_item_id": ""}
+
+
 def search_stock(stock_items: Sequence[Dict[str, Any]], text: str = ""
                  ) -> List[Dict[str, Any]]:
     """The stock items a New order search finds: every word typed somewhere

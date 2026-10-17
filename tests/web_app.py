@@ -272,11 +272,16 @@ class Stub:
             row = next((r for r in SUPPLY if r["id"] == rid), None)
             if row is None:
                 return send([])
+            was = row["status"]
             row["status"] = body.get("status", row["status"])
             row["handled_by_name"] = "Kai Brown"
-            for n in NOTES:          # the settle trigger
-                if n["ref_id"] == rid and not n["read_at"]:
-                    n["read_at"] = "2026-09-24T01:00:00Z"
+            # The settle trigger (step 43): once nothing on the request is
+            # waiting, its notification comes off every bell.
+            key = row.get("batch_id") or row["id"]
+            mates = [r for r in SUPPLY if (r.get("batch_id") or r["id"]) == key]
+            if was == "open" and not any(r["status"] == "open" for r in mates):
+                ids = {r["id"] for r in mates}
+                NOTES[:] = [n for n in NOTES if n["ref_id"] not in ids]
             return send([row])
         if "/rest/v1/supply_requests" in url:
             rows = list(SUPPLY)
@@ -401,6 +406,7 @@ class Stub:
                                  "urgent": bool(body.get("p_urgent")),
                                  "note": body.get("p_note", ""),
                                  "status": "open", "client_ref": f"{ref}-{i}",
+                                 "batch_id": f"b-{ref}",
                                  "requested_by": "u1",
                                  "requested_by_name": "Kai Brown",
                                  "handled_by_name": "",
@@ -1361,9 +1367,13 @@ def run() -> int:
         check("tapping one opens Supplies and counts it read",
               badge.inner_text() == "2")
 
-        print("\n── asking for supplies ──")
-        page.wait_for_selector("#screen table")
-        first = page.locator("#screen tbody tr").first.inner_text()
+        print("\n── supplies, as orders ──")
+        page.wait_for_selector("#screen .sup-order")
+        check("there is no Ask for something form - New order is the way in",
+              page.locator("#supply-item").count() == 0
+              and "Ask for something" not in page.locator("#screen").inner_text()
+              and page.locator("#supply-new-order").count() == 1)
+        first = page.locator("#screen .sup-order").first.inner_text()
         check("the urgent one waiting is at the top",
               first.startswith("URGENT") and "Rivets" in first, first)
         check("what is already on order says who ordered it",
@@ -1372,125 +1382,56 @@ def run() -> int:
               page.locator("#screen button", has_text="Ordered").count() >= 1
               and page.locator("#screen button", has_text="Decline").count() >= 1)
 
-        page.select_option("#supply-item", "Other")
-        page.fill("#supply-detail", "")
-        page.click("#supply-send")
-        page.wait_for_timeout(200)
-        check("\"Other\" with nothing said is stopped before it is sent",
-              "does not tell anybody" in page.locator("#screen").inner_text()
-              and not any("request_supply" in u for u, _b in stub.calls))
-
-        before = len(SUPPLY)
-        page.select_option("#supply-item", "Tape")
-        check("the hint follows what is being asked for",
-              "Which tape" in page.locator("#screen").inner_text())
-        page.fill("#supply-detail", "duct 48mm")
-        page.fill("#supply-qty", "2 rolls")
-        page.check("#supply-urgent")
-        page.click("#supply-send")
-        wait_for_text(page, "#screen", "managers have been told")
-        sent = [b for u, b in stub.calls if u.split("?")[0].endswith("rpc/request_supply")]
-        check("asking sends it, with a reference of its own",
-              len(SUPPLY) == before + 1 and sent
-              and sent[-1].get("p_client_ref")
-              and sent[-1].get("p_urgent") is True, str(sent[-1:]))
-        check("never who is asking - the database writes that",
-              "requested_by" not in json.dumps(sent[-1])
-              and "requested_by_name" not in json.dumps(sent[-1]))
-        check("the form empties so it is not sent twice by accident",
-              page.input_value("#supply-detail") == ""
-              and not page.is_checked("#supply-urgent"))
-        check("and says the managers have been told",
-              "managers have been told" in page.locator("#screen").inner_text())
-        check("and it is logged, without asking to read the log back",
-              any(e.get("action") == "supply_requested" for e in LOGGED))
-
-        # Out of signal at the back of the factory.
-        page.route("**/rest/v1/rpc/request_supply*",
+        # Something not on the stock list, out of signal at the back of the
+        # factory.
+        page.route("**/rest/v1/rpc/request_supplies*",
                    lambda r: r.abort("internetdisconnected"))
         before = len(SUPPLY)
-        page.select_option("#supply-item", "Channel")
-        page.fill("#supply-detail", "50mm")
-        page.fill("#supply-qty", "10")
-        page.click("#supply-send")
+        page.click("#supply-new-order")
+        page.wait_for_selector("#no-results .no-pick")
+        page.fill("#no-other", "duct tape 48mm")
+        page.click("#no-other-add")
+        typed = '#no-lines [data-line="other-0"] input'
+        check("something typed that is not on the stock list goes on, "
+              "waiting for how many",
+              page.locator("#no-lines .no-line.typed").count() == 1
+              and page.evaluate("document.activeElement === "
+                                f"document.querySelector('{typed}')"))
+        page.fill(typed, "2 rolls")
+        page.check("#no-urgent")
+        page.click("#no-send")
         wait_for_text(page, "#screen", "Kept on this phone")
         check("with no signal it is kept on the phone, and says so",
-              "Kept on this phone" in page.locator("#screen").inner_text()
-              and len(SUPPLY) == before)
-        page.unroute("**/rest/v1/rpc/request_supply*")
+              len(SUPPLY) == before)
+        page.unroute("**/rest/v1/rpc/request_supplies*")
         page.evaluate("TAFSYNC.flush()")
         page.wait_for_timeout(500)
-        # And once more, as if the phone sent it, lost the answer, and sent
-        # it again.
-        queued_ref = [b for u, b in stub.calls
-                      if u.split("?")[0].endswith("rpc/request_supply")][-1]["p_client_ref"]
-        page.evaluate(f"""TAFDATA.rpc('request_supply', {{
-            p_item: 'Channel', p_detail: '50mm', p_quantity: '10',
-            p_urgent: false, p_note: '', p_client_ref: '{queued_ref}' }})""")
+        sent = [b for u, b in stub.calls if "rpc/request_supplies" in u]
+        check("when the signal is back it goes, as its kind, urgent, with a "
+              "reference of its own",
+              sent and sent[-1]["p_lines"] == [
+                  {"item": "Tape", "detail": "duct tape 48mm",
+                   "quantity": "2 rolls", "supplier_id": "", "item_code": "",
+                   "stock_item_id": ""}]
+              and sent[-1]["p_urgent"] is True and sent[-1].get("p_client_ref")
+              and sum(1 for r in SUPPLY if r["detail"] == "duct tape 48mm") == 1,
+              str(sent[-1:]))
+        check("never who is asking - the database writes that",
+              "requested_by" not in json.dumps(sent[-1]))
+        page.evaluate("""(ref) => TAFDATA.rpc('request_supplies', {
+            p_lines: [{item: 'Tape', detail: 'duct tape 48mm', quantity: '2 rolls'}],
+            p_urgent: true, p_note: '', p_client_ref: ref })""",
+                      sent[-1]["p_client_ref"])
         page.wait_for_timeout(300)
-        check("when the signal is back it goes - once, even if sent again",
-              sum(1 for r in SUPPLY if r.get("detail") == "50mm") == 1)
-
-        # Several things in one go, one of them from FD Greenwood.
-        page.click('#tabs button[data-tab="supplies"]')
-        page.wait_for_selector("#screen table")
-        before = len(SUPPLY)
-        page.wait_for_selector("#supply-from option[value=s-fdg]",
-                               state="attached")
-        page.select_option("#supply-item", "Channel")
-        page.fill("#supply-detail", "47mm")
-        page.fill("#supply-qty", "20 lengths")
-        page.select_option("#supply-from", "s-fdg")
-        page.click("#supply-add")
-        page.select_option("#supply-from", "")
-        page.select_option("#supply-item", "Rivets")
-        page.fill("#supply-detail", "4mm pop")
-        page.fill("#supply-qty", "2 boxes")
-        page.click("#supply-add")
-        check("each thing added goes on the list",
-              page.locator("#supply-basket li").count() == 2
-              and "from FD Greenwood" in page.locator("#supply-basket").inner_text(),
-              page.locator("#supply-basket").inner_text())
-        page.click("#supply-send")
-        wait_for_text(page, "#screen", "managers have been told")
-        many = [b for u, b in stub.calls if "rpc/request_supplies" in u]
-        check("the list goes as one request, with who it comes from",
-              len(many) == 1 and len(many[0]["p_lines"]) == 2
-              and many[0]["p_lines"][0]["supplier_id"] == "s-fdg"
-              and len(SUPPLY) == before + 2, str(many))
-        check("and the list empties",
-              page.locator("#supply-basket li").count() == 0)
-
-        # A stock item, picked from the list: where it comes from follows.
-        page.click('#tabs button[data-tab="supplies"]')
-        page.wait_for_selector("#screen table")
-        page.wait_for_selector("#supply-from option[value=s-vul]",
-                               state="attached")
-        page.select_option("#supply-item", "Media")
-        check("the stock items of that kind are offered",
-              sorted(page.eval_on_selector_all("#supply-stock option",
-                                               "os => os.map(o => o.value)"))
-              == ["F5 media roll 1m", "G4 media roll 1m"],
-              str(page.eval_on_selector_all("#supply-stock option",
-                                            "os => os.map(o => o.value)")))
-        page.fill("#supply-detail", "F5 media roll 1m")
-        page.dispatch_event("#supply-detail", "change")
-        check("picking one chooses the supplier it comes from",
-              page.input_value("#supply-from") == "s-vul",
-              page.input_value("#supply-from"))
-        page.fill("#supply-qty", "2 rolls")
-        page.click("#supply-send")
-        wait_for_text(page, "#screen", "managers have been told")
-        many = [b for u, b in stub.calls if "rpc/request_supplies" in u]
-        check("and the request names the stock item",
-              many and many[-1]["p_lines"][0].get("stock_item_id") == "s2"
-              and many[-1]["p_lines"][0].get("supplier_id") == "s-vul",
-              str(many[-1:]))
+        check("sent again after a dropout, it is still filed once",
+              sum(1 for r in SUPPLY if r["detail"] == "duct tape 48mm") == 1)
+        check("and it is logged, without asking to read the log back",
+              any(e.get("action") == "supply_requested" for e in LOGGED))
 
         print("\n── New order, from the stock list ──")
         STOCK[1]["stock_on_hand"] = 6          # the F5 roll, low again
         page.click('#tabs button[data-tab="supplies"]')
-        page.wait_for_selector("#screen table")
+        page.wait_for_selector("#screen .sup-order")
         if os.environ.get("TAF_SHOTS"):
             page.set_viewport_size({"width": 390, "height": 860})
             page.wait_for_timeout(150)
@@ -1599,6 +1540,48 @@ def run() -> int:
                     {"item_id": "d", "quantity": 2}]},
                 {"status": "received", "lines": [{"stock_item_id": "a", "quantity": 9}]}]),
         }
+        js["other"] = page.evaluate("TAFAPP._newOrder.otherRequestLine("
+                                    "'  pop rivets  4mm ', '2 boxes', 's-x')")
+        py["other"] = _buy.other_request_line("  pop rivets  4mm ", "2 boxes", "s-x")
+        from taf_order_app import supplies as _sup
+        rows = [
+            {"id": "r1", "batch_id": "b1", "client_ref": "x-1", "item": "Tape",
+             "detail": "foil", "quantity": "3", "status": "open",
+             "requested_by": "dave", "requested_by_name": "Dave",
+             "created_at": "2026-10-10T01:00:00Z", "note": "bench 2"},
+            {"id": "r2", "batch_id": "b1", "client_ref": "x-2", "item": "Rivets",
+             "detail": "4mm", "status": "ordered", "handled_by_name": "Sarah",
+             "requested_by": "dave", "created_at": "2026-10-10T01:00:00Z"},
+            {"id": "r3", "batch_id": "b1", "client_ref": "x-3", "item": "Media",
+             "detail": "G4", "status": "open", "requested_by": "dave",
+             "created_at": "2026-10-10T01:00:00Z"},
+            {"id": "r4", "item": "Channel", "detail": "45mm", "status": "open",
+             "urgent": True, "requested_by": "amy",
+             "created_at": "2026-10-12T01:00:00Z"},
+            {"id": "r5", "batch_id": "b2", "client_ref": "y-1", "item": "Tape",
+             "status": "received", "handled_by_name": "Kai",
+             "created_at": "2026-10-11T01:00:00Z"},
+            {"id": "r6", "batch_id": "b3", "client_ref": "z-1", "item": "Tape",
+             "status": "received", "created_at": "2026-10-09T01:00:00Z"},
+            {"id": "r7", "batch_id": "b3", "client_ref": "z-2", "item": "Mesh Wire",
+             "status": "ordered", "created_at": "2026-10-09T01:00:00Z"}]
+        js_orders = page.evaluate("""(rows) => {
+            const O = TAFAPP._supplyOrders;
+            return O.group(rows).map(o => ({
+              key: o.key, ids: o.lines.map(l => l.id), status: o.status,
+              urgent: o.urgent, label: O.label(o), summary: O.summary(o),
+              move: ['ordered', 'received', 'declined'].map(
+                to => O.toMove(o.lines, to).map(l => l.id)),
+              cancel: O.toCancel(o.lines, 'dave').map(l => l.id)})); }""", rows)
+        js["orders"] = js_orders
+        py["orders"] = [{
+            "key": o["key"], "ids": [l["id"] for l in o["lines"]],
+            "status": o["status"], "urgent": o["urgent"],
+            "label": _sup.order_label(o), "summary": _sup.order_summary(o),
+            "move": [[l["id"] for l in _sup.lines_to_move(o, to)]
+                     for to in ("ordered", "received", "declined")],
+            "cancel": [l["id"] for l in _sup.lines_to_cancel(o, "dave")]}
+            for o in _sup.group_requests(rows)]
         # 6 in JavaScript is 6.0 in Python: the amounts, as numbers.
         js["onOrder"] = {k: float(v) for k, v in js["onOrder"].items()}
         py["onOrder"] = {k: float(v) for k, v in py["onOrder"].items()}
@@ -1608,8 +1591,22 @@ def run() -> int:
                   f"{js[key]} != {py[key]}")
 
         page.click('#tabs button[data-tab="supplies"]')
-        page.wait_for_selector("#screen table")
-        page.locator('#screen tr[data-request="sr1"] button',
+        page.wait_for_selector("#screen .sup-order")
+        batch = many[-1]["p_client_ref"]
+        card = f'#screen .sup-order[data-order="b-{batch}"]'
+        check("what was sent together is one order, its lines in it",
+              page.locator(card).count() == 1
+              and page.locator(card + " li").count() == 2
+              and page.locator(card + " .hd b").inner_text() == "2 items",
+              page.locator("#screen").inner_text()[:400])
+        if os.environ.get("TAF_SHOTS"):
+            page.set_viewport_size({"width": 390, "height": 860})
+            page.locator(card).scroll_into_view_if_needed()
+            page.wait_for_timeout(300)
+            page.screenshot(path=os.path.join(os.environ["TAF_SHOTS"],
+                                              "web_supply_orders_390.png"))
+            page.set_viewport_size({"width": 900, "height": 900})
+        page.locator('#screen .sup-order[data-order="sr1"] button',
                      has_text="Ordered").click()
         page.wait_for_timeout(400)
         check("marking one ordered moves it along",
@@ -1618,8 +1615,30 @@ def run() -> int:
               page.locator("#bell-badge").inner_text() == "1",
               page.locator("#bell-badge").inner_text())
 
+        # A New order on the bell: off it once the whole order is dealt with.
+        first_line = next(r for r in SUPPLY if r.get("batch_id") == f"b-{batch}")
+        NOTES.append({"id": "n9", "kind": "supply_request",
+                      "ref_id": first_line["id"], "title": "2 supplies asked for",
+                      "body": "Dave Floor asked for 2 things", "read_at": None,
+                      "created_at": "2026-09-24T02:00:00Z"})
+        page.evaluate("document.dispatchEvent(new Event('visibilitychange'))")
+        page.wait_for_function(
+            "() => document.getElementById('bell-badge').textContent === '2'")
+        page.locator(card + " button", has_text="Ordered").click()
+        page.wait_for_function(
+            "() => document.getElementById('bell-badge').textContent === '1'")
+        check("Ordered on an order moves every line on it",
+              {r["status"] for r in SUPPLY if r.get("batch_id") == f"b-{batch}"}
+              == {"ordered"})
+        page.click("#bell")
+        page.wait_for_selector("#sheet-body .note-row", state="attached")
+        check("and it is gone from the bell, not just marked read",
+              "2 supplies asked for" not in page.locator("#sheet-body").inner_text())
+        page.keyboard.press("Escape")
+        page.wait_for_selector("#sheet.hidden", state="attached")
+
         REFUSE_MOVE["on"] = True
-        page.locator('#screen tr[data-request="sr2"] button',
+        page.locator('#screen .sup-order[data-order="sr2"] button',
                      has_text="Ordered").click()
         # Waited for briefly and then judged, rather than waited for forever:
         # if the page wrongly treats the refusal as done, there is no message
@@ -1713,15 +1732,15 @@ def run() -> int:
                        "handled_by_name": "",
                        "created_at": "2026-09-24T02:00:00Z"})
         page.click('#tabs button[data-tab="supplies"]')
-        page.wait_for_selector("#screen table")
+        page.wait_for_selector("#screen .sup-order")
         check("an employee is not offered Ordered, Received or Decline",
               page.locator("#screen button", has_text="Received").count() == 0
               and page.locator("#screen button", has_text="Decline").count() == 0)
         check("but can cancel a request of their own that is still waiting",
-              page.locator('#screen tr[data-request="mine"] button',
+              page.locator('#screen .sup-order[data-order="mine"] button',
                            has_text="Cancel").count() == 1)
         check("and nobody else's",
-              page.locator('#screen tr[data-request="sr2"] button',
+              page.locator('#screen .sup-order[data-order="sr2"] button',
                            has_text="Cancel").count() == 0)
         PROFILE["role"] = "Manager"
 

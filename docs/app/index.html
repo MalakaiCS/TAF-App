@@ -483,6 +483,35 @@
                    align-items:center; justify-content:center; font-weight:700;
                    background:var(--brand); color:#fff; }
   .no-pick.on .plus { background:var(--green-soft); color:var(--green); }
+  .no-other { margin-top:12px; }
+  .no-other-row { display:flex; gap:8px; }
+  .no-other-row input { flex:1 1 auto; min-width:0; }
+  .no-line.typed .q input { width:120px; }
+  /* What has been asked for: one card an order, its lines in it. */
+  .sup-order { border:1px solid var(--line); border-radius:12px;
+               padding:10px 12px; margin-bottom:10px; background:var(--card); }
+  .sup-order.urgent { border-color:#F3B4B6; background:var(--red-soft); }
+  .sup-order.done { opacity:.7; }
+  .sup-order .hd { display:flex; justify-content:space-between;
+                   align-items:center; gap:10px; }
+  .sup-order .hd b { min-width:0; overflow-wrap:anywhere; }
+  .sup-order.urgent .hd b { color:#8A2A1E; }
+  .sup-order .qty { font-weight:600; font-size:14px; margin-top:2px; }
+  .sup-order .meta { color:var(--muted); font-size:13px; margin:2px 0 6px; }
+  .sup-lines { list-style:none; margin:0; padding:0; }
+  .sup-lines li { display:grid; gap:8px; align-items:center; padding:6px 0;
+                  grid-template-columns:minmax(0, 1fr) auto minmax(0, auto) auto;
+                  border-top:1px solid var(--line); font-size:14px; }
+  .sup-lines li.done { color:var(--muted); }
+  .sup-lines .nm { min-width:0; overflow-wrap:anywhere; }
+  .sup-lines .q { white-space:nowrap; font-weight:600; }
+  .sup-lines .from { color:var(--muted); font-size:13px; white-space:nowrap;
+                     overflow:hidden; text-overflow:ellipsis; }
+  .sup-order .acts { display:flex; flex-wrap:wrap; gap:8px; padding-top:8px; }
+  @media (max-width:600px) {
+    .sup-lines li { grid-template-columns:minmax(0, 1fr) auto; }
+    .sup-lines .from, .sup-lines .pill { grid-column:1 / -1; justify-self:start; }
+  }
   .no-lines { display:flex; flex-direction:column; gap:8px; margin-bottom:10px; }
   .no-line { display:grid; align-items:center; gap:8px;
              grid-template-columns:minmax(0, 1fr) 130px minmax(0, 190px) auto;

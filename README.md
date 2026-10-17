@@ -73,19 +73,21 @@ log, stock management and a customer database.
   COLLECTION docket asking who collected it, a drop as a DELIVERY docket
   asking who received it. Prints the selected orders, or the whole run when
   nothing is selected.
-- **Order Supplies** and the **bell** — anyone on the floor can ask for
-  rivets, tape, media, mesh wire, channel or anything else, with how many, a
-  note and an "urgent" tick, from the desktop or a phone. Every manager is
-  told straight away: the bell next to the profile picture turns red with the
-  number waiting (1, 2, 3 … and 99+ past ninety-nine). Managers mark a request
-  Ordered, Received or Declined, and the bells clear once somebody has dealt
-  with it. The person who asked can cancel it while it's still waiting. The
-  database does the telling, so nobody can send a notification, ask as
-  somebody else, or have a request filed twice when a phone loses signal.
-  Several things go in one request (**Add to list** for each, then **Send to
-  managers** — the managers are told once), each with who it comes from when
-  somebody knows. Managers turn the requests into **purchase orders** sent
-  through Xero (see *Buying through Xero*).
+- **Order Supplies** and the **bell** — anyone on the floor presses **New
+  order**, on the desktop or a phone, and picks from the stock list (searched,
+  or **Add everything low** at once) or types something that isn't on it.
+  Each line comes with how many gets it back to its minimum and its preferred
+  supplier; there is a note and an "urgent" tick. It goes as one order and
+  every manager is told once: the bell next to the profile picture turns red
+  with the number waiting (1, 2, 3 … and 99+ past ninety-nine). The list
+  shows one row per order, opened to see its lines, the way Previous Orders
+  shows a job. Managers mark an order (or one line of it) Ordered, Received
+  or Declined; the person who asked can cancel it while it's still waiting.
+  Once nothing on an order is waiting it comes off every manager's bell
+  (step 43). The database does the telling, so nobody can send a
+  notification, ask as somebody else, or have a request filed twice when a
+  phone loses signal. Managers turn the requests into **purchase orders**
+  sent through Xero (see *Buying through Xero*).
 - **Delivery labels** — one A4 landscape sheet per wrapped bundle, with the
   TAF logo, the company's base address as From, the delivery address, filter
   size, the quantity in that wrap (and the line's ordered quantity), the
@@ -449,6 +451,7 @@ just run it — nothing is lost and nothing is duplicated.
 | 40 | `migrate_purchasing.sql` | Buying through Xero: suppliers and items pulled from Xero, several items in one supply request, purchase orders received into stock (needs steps 16 and 31) | recommended |
 | 41 | `migrate_stock_images.sql` | The storage bucket for pictures of stock items (stock_schema.sql only said to make it by hand) | recommended |
 | 42 | `migrate_stock_suppliers.sql` | Where each stock item comes from: its suppliers, their codes and prices, so Order Supplies offers stock items and low stock becomes purchase orders (needs step 40) | recommended |
+| 43 | `migrate_supply_bell.sql` | The bell only shows supply requests still waiting: once everything on a request has been ordered, received, declined or cancelled, it comes off every manager's bell (needs steps 32 and 40) | recommended |
 
 **Step 16 is the one that matters most.** Every policy in the older scripts is
 `TO authenticated USING (true)` — meaning *anyone Supabase counts as signed
@@ -822,8 +825,8 @@ a manager opens **Purchase orders…** (Order Supplies, or Buying…):
   says we pay for that code); one of them can be preferred (★). Channel from
   FD Greenwood and from Air Diffusion is two suppliers on the one stock item.
   Linking a Xero item to a stock item does this for you. On Order Supplies,
-  the "which one" box then offers the stock items of that kind, and picking
-  one offers only its suppliers, the preferred one chosen.
+  New order then fills in each stock item's preferred supplier and their
+  code for it.
 - **Order what is low…** makes a purchase order for everything below its
   minimum — what is already on order counted — to each item's preferred
   supplier, with their codes and prices filled in, ready to check and send.

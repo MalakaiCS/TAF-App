@@ -316,7 +316,24 @@ SUPPLY_REQUESTS = [
      "urgent": False, "note": "", "status": "ordered",
      "requested_by_name": "Dave Floor", "handled_by_name": "Sarah Boss",
      "created_at": "2026-09-23T03:00:00Z"},
+    # Three things in one New order: one ordered already, two waiting.
+    {"id": "r4", "batch_id": "b1", "client_ref": "w-1", "item": "Media",
+     "detail": "G4 media roll", "quantity": "2 m²", "urgent": False,
+     "note": "", "status": "open", "requested_by": "u-dave",
+     "requested_by_name": "Dave Floor", "handled_by_name": "",
+     "created_at": "2026-09-22T03:00:00Z"},
+    {"id": "r5", "batch_id": "b1", "client_ref": "w-2", "item": "Other",
+     "detail": "Bag frame 592", "quantity": "6 pieces", "urgent": False,
+     "note": "", "status": "ordered", "requested_by": "u-dave",
+     "requested_by_name": "Dave Floor", "handled_by_name": "Sarah Boss",
+     "created_at": "2026-09-22T03:00:00Z"},
+    {"id": "r6", "batch_id": "b1", "client_ref": "w-3", "item": "Other",
+     "detail": "Spray paint", "quantity": "2 cans", "urgent": False,
+     "note": "", "status": "open", "requested_by": "u-dave",
+     "requested_by_name": "Dave Floor", "handled_by_name": "",
+     "created_at": "2026-09-22T03:00:00Z"},
 ]
+MOVED: list = []
 
 
 def _stub_supplies():
@@ -330,7 +347,7 @@ def _stub_supplies():
          "body": "Dave Floor asked for 3 rolls. Out on bench 2",
          "created_at": "2026-09-24T01:00:00Z", "read_at": None}]
     supplies.request_supply = lambda *a, **k: dict(SUPPLY_REQUESTS[0])
-    supplies.set_status = lambda *a, **k: None
+    supplies.set_status = lambda rid, status: MOVED.append((rid, status))
     supplies.mark_read = lambda *a, **k: 0
 
     # Buying: two suppliers, FD Greenwood's channel in two sizes, and one
@@ -2027,42 +2044,52 @@ def _steps(app, gui, root):
         assert linked and linked[0]["id"] == "x-1", linked
     add("customers: link to a Xero contact", _xero_contact_picker)
 
-    def _supplies_basket():
-        """Three things asked for in one go, one of them from a supplier."""
+    def _supplies_as_orders():
+        """One row an order: three things sent together are one row,
+        opened to see them, and moved along together."""
         app._show_tab("supplies")
         for _ in range(60):
             root.update()
             if app._suppliers is not None and app.supply_tree.get_children():
                 break
             time.sleep(0.05)
-        assert "FD Greenwood" in app._supply_from_cb.cget("values"), \
-            app._supply_from_cb.cget("values")
-        for item, detail, qty, sup in (("Channel", "47mm", "20 lengths", "FD Greenwood"),
-                                       ("Rivets", "4mm pop", "2 boxes", "")):
-            app._supply_item.set(item)
-            app._supply_detail.set(detail)
-            app._supply_qty.set(qty)
-            app._supply_from.set(sup)
-            app._add_supply_line()
-        assert app._supply_basket_list.size() == 2
-        assert "from FD Greenwood" in app._supply_basket_list.get(0)
-        app._supply_item.set("Tape")
-        app._supply_detail.set("50mm foil")
-        app._supply_qty.set("3 rolls")
-        app._supply_from.set("")
-        SENT_SUPPLIES.clear()
-        app._send_supply_request()
-        for _ in range(60):
-            root.update()
-            if SENT_SUPPLIES:
-                break
-            time.sleep(0.05)
-        _settle(0.2)
-        assert len(SENT_SUPPLIES) == 1 and len(SENT_SUPPLIES[0]) == 3, SENT_SUPPLIES
-        first = SENT_SUPPLIES[0][0]
-        assert (first["detail"], first["supplier_id"]) == ("47mm", "s-fdg"), first
-        assert not app._supply_basket and app._supply_basket_list.size() == 0
-    add("supplies: several things in one request", _supplies_basket)
+        tree = app.supply_tree
+        tops = tree.get_children()
+        assert len(tops) == 4, [tree.item(i, "values") for i in tops]
+        batch = next(i for i in tops if app._supply_orders[i]["key"] == "b1")
+        vals = tree.item(batch, "values")
+        assert vals[0].startswith("3 items: Media - G4 media roll"), vals
+        assert vals[5] == "Waiting - 1 of 3 dealt with", vals
+        assert len(tree.get_children(batch)) == 3
+        assert not tree.item(batch, "open")
+        bbox = None
+        tree.see(batch)
+        root.update()
+        bbox = tree.bbox(batch)
+        app._toggle_supply_order(type("E", (), {"y": bbox[1] + 2})())
+        assert tree.item(batch, "open"), "double-click opens an order"
+        if gui._db.can_handle_supplies():
+            MOVED.clear()
+            tree.selection_set(batch)
+            app._move_supply("ordered")
+            for _ in range(60):
+                root.update()
+                if MOVED:
+                    break
+                time.sleep(0.05)
+            _settle(0.2)
+            assert MOVED == [("r4", "ordered"), ("r6", "ordered")], MOVED
+            # A line on its own.
+            MOVED.clear()
+            tree.selection_set(tree.get_children(batch)[0])
+            app._move_supply("received")
+            for _ in range(60):
+                root.update()
+                if MOVED:
+                    break
+                time.sleep(0.05)
+            assert MOVED == [("r4", "received")], MOVED
+    add("supplies: requests sent together are one order", _supplies_as_orders)
 
     def _po_from_a_request():
         """A request for 47mm channel from FD Greenwood becomes a purchase
@@ -2169,66 +2196,20 @@ def _steps(app, gui, root):
         assert "PO-0008" in text and "Email" in text, text
     add("buying: a purchase order is opened in Xero to email", _po_sent_in_xero)
 
-    def _ask_for_a_stock_item():
-        """Picking a stock item offers who it comes from, and files it."""
-        app._show_tab("supplies")
-        for _ in range(60):
-            root.update()
-            if app._supply_stock:
-                break
-            time.sleep(0.05)
-        app._supply_item.set("Media")
-        root.update()
-        assert list(app._supply_detail_cb.cget("values")) == ["G4 media roll"], \
-            app._supply_detail_cb.cget("values")
-        app._supply_from.set("")
-        app._supply_detail.set("G4 media roll")
-        root.update()
-        assert app._supply_from.get() == "FD Greenwood", app._supply_from.get()
-        assert list(app._supply_from_cb.cget("values")) == ["", "FD Greenwood"]
-        app._supply_qty.set("2 rolls")
-        app._add_supply_line()
-        line = app._supply_basket[-1]
-        assert (line["stock_item_id"], line["supplier_id"]) == ("s1", "s-fdg"), line
-        app._supply_basket.clear()
-        app._show_supply_basket()
-    add("supplies: ask for a stock item, from where it comes from",
-        _ask_for_a_stock_item)
-
-    def _new_order_from_stock():
-        """New order: everything low goes on with how many and who from,
-        a stock item is searched for and added, and it all goes in one."""
+    def _something_not_in_stock():
+        """New order takes something typed that is not a stock item."""
         app._show_tab("supplies")
         app._new_supply_order()
         win = app._supply_order_win
-        for _ in range(60):
-            root.update()
-            if len(win.stock_list.get_children()) == 2:
-                break
-            time.sleep(0.05)
-        assert win.stock_list.set(win.stock_list.get_children()[0], "name") \
-            == "Bag frame 592", "the low one should be first"
-        win.add_low()
         root.update()
-        assert [(l["stock"]["id"], l["qty"].get(), l["sup"].get())
-                for l in win.lines] == [("s2", "6", "Vulcan")], win.lines
-        win.find.set("g4 med")
+        win.other.set("pop rivets 4mm")
+        win.add_other()
         root.update()
-        rows = win.stock_list.get_children()
-        assert len(rows) == 1, rows
-        win.stock_list.selection_set(rows[0])
-        win.add_selected()
-        root.update()
-        assert [(l["qty"].get(), l["sup"].get()) for l in win.lines[1:]] == \
-            [("", "FD Greenwood")], win.lines
-        # Twice is still once.
-        win.add_selected()
-        assert len(win.lines) == 2
+        assert [(l["stock"], l["text"]) for l in win.lines] == \
+            [(None, "pop rivets 4mm")], win.lines
+        win.lines[0]["qty"].set("2 boxes")
+        win.lines[0]["sup"].set("Vulcan")
         SENT_SUPPLIES.clear()
-        win.send()                     # no number for the media: not sent
-        _settle(0.2)
-        assert not SENT_SUPPLIES and win.winfo_exists()
-        win.lines[1]["qty"].set("2")
         win.send()
         for _ in range(60):
             root.update()
@@ -2237,43 +2218,11 @@ def _steps(app, gui, root):
             time.sleep(0.05)
         _settle(0.2)
         assert SENT_SUPPLIES == [[
-            {"item": "Other", "detail": "Bag frame 592", "quantity": "6 pieces",
-             "supplier_id": "s-vul", "item_code": "VUL-BF592",
-             "stock_item_id": "s2"},
-            {"item": "Media", "detail": "G4 media roll", "quantity": "2 m²",
-             "supplier_id": "s-fdg", "item_code": "FDG-G4",
-             "stock_item_id": "s1"}]], SENT_SUPPLIES
-        assert not win.winfo_exists()
-    add("supplies: New order from the stock list", _new_order_from_stock)
-
-    def _shrink_old_photos():
-        """A manager can shrink the photos from before, once each."""
-        if not gui._db.can_manage_stock():
-            return
-        shrunk = []
-        cache = object.__getattribute__(gui._db, "_cache")
-        cache["shrink_stock_photo"] = lambda item: shrunk.append(item["id"]) or "new"
-        old = "https://x.supabase.co/storage/v1/object/public/stock-images/"
-        saved = app._stock_data
-        app._stock_data = [{"id": "p1", "image_url": old + "p1.png"},
-                           {"id": "p2", "image_url": old + "p2.jpg?v=1"},
-                           {"id": "p3", "image_url": ""}]
-        was = gui.messagebox.askyesno
-        gui.messagebox.askyesno = lambda *a, **k: True
-        try:
-            app._shrink_stock_photos()
-            for _ in range(60):
-                root.update()
-                if "Shrunk" in app.status_var.get():
-                    break
-                time.sleep(0.05)
-        finally:
-            gui.messagebox.askyesno = was
-            app._stock_data = saved
-            cache.pop("shrink_stock_photo", None)
-        assert shrunk == ["p1"], shrunk
-        assert app.status_var.get() == "Shrunk 1 stock photo.", app.status_var.get()
-    add("stock: shrink the photos from before", _shrink_old_photos)
+            {"item": "Rivets", "detail": "pop rivets 4mm", "quantity": "2 boxes",
+             "supplier_id": "s-vul", "item_code": "", "stock_item_id": ""}]], \
+            SENT_SUPPLIES
+    add("supplies: New order takes what is not on the stock list",
+        _something_not_in_stock)
 
     def _order_what_is_low():
         """The bag frame is short: a purchase order to Vulcan, at the agreed

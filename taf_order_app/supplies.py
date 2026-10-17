@@ -196,6 +196,98 @@ def sort_requests(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     return sorted(rows, key=key)
 
 
+# ── Orders ───────────────────────────────────────────────────────────────────
+# Everything asked for in one New order is one order on the list, the way
+# Previous Orders shows a job rather than its lines: one row, opened to see
+# what is on it, moved along all at once. The same rules are in
+# docs/app/screens.js; a test holds the two together.
+
+def order_status(lines: List[Dict[str, Any]]) -> str:
+    """Where an order is: waiting while anything on it is, then on order
+    while anything is, then received, declined or cancelled."""
+    have = {str(l.get("status") or "open") for l in lines}
+    for status in ("open", "ordered", "received", "declined"):
+        if status in have:
+            return status
+    return "cancelled"
+
+
+def group_requests(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """The requests as orders - those sent together (one batch) as one,
+    a request on its own as an order of one - in the order sort_requests
+    puts requests: urgent and waiting first, waiting oldest first, the
+    rest newest first."""
+    by_key: Dict[str, Dict[str, Any]] = {}
+    for row in rows or []:
+        key = str(row.get("batch_id") or row.get("id") or "")
+        order = by_key.setdefault(key, {"key": key, "lines": []})
+        order["lines"].append(row)
+    out = []
+    for order in by_key.values():
+        lines = sorted(order["lines"], key=lambda r: (
+            str(r.get("client_ref") or ""), str(r.get("created_at") or "")))
+        first = lines[0]
+        status = order_status(lines)
+        out.append({
+            "key": order["key"], "lines": lines, "status": status,
+            "urgent": any(l.get("urgent") and (l.get("status") or "open") == "open"
+                          for l in lines),
+            "created_at": min(str(l.get("created_at") or "") for l in lines),
+            "requested_by": first.get("requested_by"),
+            "requested_by_name": first.get("requested_by_name") or "",
+            "handled_by_name": next((l.get("handled_by_name") for l in lines
+                                     if l.get("handled_by_name")), "") or "",
+            "note": first.get("note") or "",
+        })
+    return sort_requests(out)
+
+
+def order_label(order: Dict[str, Any]) -> str:
+    """"Waiting", "Ordered - Sarah Boss", or how far it has got when its
+    lines are in different places: "Waiting - 1 of 3 ordered"."""
+    lines = order["lines"]
+    status = order["status"]
+    label = STATUS_LABELS.get(status, status)
+    moved = [l for l in lines if (l.get("status") or "open") != status]
+    if moved and len(lines) > 1:
+        if status == "open":
+            label += f" - {len(moved)} of {len(lines)} dealt with"
+        elif status == "ordered":
+            here = sum(1 for l in lines if l.get("status") == "received")
+            if here:
+                label += f" - {here} of {len(lines)} here"
+    elif status != "open" and order.get("handled_by_name"):
+        label += f" - {order['handled_by_name']}"
+    return label
+
+
+def order_summary(order: Dict[str, Any], most: int = 2) -> str:
+    """What is on it, for the one row: "Tape - foil", or "Tape - foil,
+    Rivets - 4mm + 1 more"."""
+    names = [describe({**l, "quantity": ""}) for l in order["lines"]]
+    text = ", ".join(names[:most])
+    if len(names) > most:
+        text += f" + {len(names) - most} more"
+    return text
+
+
+def lines_to_move(order_or_lines, status: str) -> List[Dict[str, Any]]:
+    """The lines a manager's "Ordered", "Received" or "Decline" moves -
+    those that can go there from where they are."""
+    lines = (order_or_lines.get("lines") if isinstance(order_or_lines, dict)
+             else order_or_lines) or []
+    return [l for l in lines
+            if status in NEXT.get(str(l.get("status") or "open"), [])]
+
+
+def lines_to_cancel(order_or_lines, me: str) -> List[Dict[str, Any]]:
+    """The lines somebody can take back: their own, still waiting."""
+    lines = (order_or_lines.get("lines") if isinstance(order_or_lines, dict)
+             else order_or_lines) or []
+    return [l for l in lines if (l.get("status") or "open") == "open"
+            and str(l.get("requested_by") or "") == str(me or "")]
+
+
 def _invert(stamp: str) -> str:
     """Newest-first ordering of an ISO timestamp inside an ascending sort."""
     return "".join(chr(0x10FFFF - ord(c)) for c in stamp)

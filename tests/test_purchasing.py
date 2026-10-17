@@ -257,3 +257,10 @@ def test_add_everything_low_puts_on_each_item_below_its_minimum():
     # What is already on order counts.
     assert [p["stock"]["id"] for p in purchasing.low_picks(
         _NEW_STOCK, _NEW_LINKS, {"a": 16})] == ["d"]
+
+
+def test_something_not_on_the_stock_list_goes_as_its_kind():
+    assert purchasing.other_request_line("  pop rivets   4mm ", "2 boxes", "s-x") == {
+        "item": "Rivets", "detail": "pop rivets 4mm", "quantity": "2 boxes",
+        "supplier_id": "s-x", "item_code": "", "stock_item_id": ""}
+    assert purchasing.other_request_line("White spray paint", "3")["item"] == "Other"

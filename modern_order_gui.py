@@ -16168,14 +16168,15 @@ class ModernOrderApp(tk.Frame):
         frm.rowconfigure(2, weight=1)
         frm.columnconfigure(0, weight=1)
         self._tab_frames["supplies"] = frm
-        self._supply_rows = {}
+        self._supply_rows = {}          # tree row -> request (a line)
 
         hdr = tk.Frame(frm, bg=CBG)
         hdr.grid(row=0, column=0, sticky="ew", pady=(0, 8))
         tk.Label(hdr, text="Order Supplies", bg=CBG, fg=CA,
                  font=F_TTL).pack(side="left")
-        tk.Label(hdr, text="Ask here and every manager is told.",
-                 bg=CBG, fg=CMU, font=F_SM).pack(side="left", padx=(12, 0))
+        tk.Label(hdr, text="New order to ask for anything - every manager "
+                 "is told.", bg=CBG, fg=CMU, font=F_SM).pack(side="left",
+                                                           padx=(12, 0))
         flat_btn(hdr, "Refresh", self._refresh_supplies,
                  bg=CNE, pady=5, padx=10, font=F_BODY).pack(side="right")
         # The stock items on a list of their own, picked and sent together.
@@ -16190,90 +16191,13 @@ class ModernOrderApp(tk.Frame):
                        command=self._refresh_supplies,
                        cursor="hand2").pack(side="right", padx=(0, 10))
 
-        # ── Asking ────────────────────────────────────────────────────────
-        ask = tk.Frame(frm, bg=CCA, highlightbackground=CSP,
-                       highlightthickness=1, padx=14, pady=10)
-        ask.grid(row=1, column=0, sticky="ew", pady=(0, 10))
-        for c in (1, 2):
-            ask.columnconfigure(c, weight=1)
-
-        tk.Label(ask, text="WHAT", bg=CCA, fg=CMU,
-                 font=F_BOLD).grid(row=0, column=0, sticky="w")
-        self._supply_item = tk.StringVar(value=_supplies.ITEMS[0])
-        item_cb = ttk.Combobox(ask, textvariable=self._supply_item,
-                               values=_supplies.ITEMS, state="readonly",
-                               width=14)
-        item_cb.grid(row=1, column=0, sticky="w", padx=(0, 12))
-
-        self._supply_hint = tk.StringVar(
-            value=_supplies.DETAIL_HINTS[_supplies.ITEMS[0]].upper())
-        tk.Label(ask, textvariable=self._supply_hint, bg=CCA, fg=CMU,
-                 font=F_BOLD).grid(row=0, column=1, sticky="w")
-        self._supply_detail = tk.StringVar()
-        # Type it, or pick one of the stock items of that kind - a stock item
-        # picked carries its suppliers, codes and prices onto the order.
-        self._supply_detail_cb = ttk.Combobox(
-            ask, textvariable=self._supply_detail, values=[], width=28)
-        self._supply_detail_cb.grid(row=1, column=1, sticky="ew", padx=(0, 12))
-
-        tk.Label(ask, text="HOW MANY", bg=CCA, fg=CMU,
-                 font=F_BOLD).grid(row=0, column=2, sticky="w")
-        self._supply_qty = tk.StringVar()
-        field_entry(ask, textvariable=self._supply_qty, width=14
-                    ).grid(row=1, column=2, sticky="ew", padx=(0, 12))
-
-        # Who it comes from, when somebody knows - FD Greenwood for steel,
-        # Vulcan for flyscreen. The list fills in once step 40 is run.
-        tk.Label(ask, text="FROM (IF YOU KNOW)", bg=CCA, fg=CMU,
-                 font=F_BOLD).grid(row=0, column=3, sticky="w")
-        self._supply_from = tk.StringVar(value="")
-        self._supply_from_cb = ttk.Combobox(
-            ask, textvariable=self._supply_from, values=[""],
-            state="readonly", width=20)
-        self._supply_from_cb.grid(row=1, column=3, sticky="w", padx=(0, 12))
-        flat_btn(ask, "Add to list", self._add_supply_line,
-                 variant="secondary", pady=5).grid(row=1, column=4, sticky="e")
-
-        tk.Label(ask, text="NOTE (OPTIONAL)", bg=CCA, fg=CMU,
-                 font=F_BOLD).grid(row=2, column=0, columnspan=3,
-                                   sticky="w", pady=(8, 0))
-        self._supply_note = tk.StringVar()
-        field_entry(ask, textvariable=self._supply_note, width=60
-                    ).grid(row=3, column=0, columnspan=3, sticky="ew",
-                           padx=(0, 12))
-        self._supply_urgent = tk.BooleanVar(value=False)
-        tk.Checkbutton(ask, text="Urgent - work has stopped",
-                       variable=self._supply_urgent, bg=CCA, fg=CRD,
-                       activebackground=CCA, selectcolor=CCA, font=F_BODY,
-                       cursor="hand2").grid(row=3, column=3, sticky="w")
-        flat_btn(ask, "Send to managers", self._send_supply_request,
-                 bg=CA, pady=7).grid(row=3, column=4, sticky="e")
-
-        # Several things at once: "Add to list" for each, then one send and
-        # one message to the managers, rather than the form five times.
-        self._supply_basket = []
-        self._supply_basket_box = tk.Frame(ask, bg=CCA)
-        self._supply_basket_box.columnconfigure(0, weight=1)
-        self._supply_basket_list = tk.Listbox(
-            self._supply_basket_box, height=4, font=F_BODY, bg=CRE, fg=CTX,
-            relief="flat", highlightthickness=1, highlightbackground=CBR,
-            activestyle="none")
-        self._supply_basket_list.grid(row=0, column=0, sticky="ew",
-                                      padx=(0, 12))
-        flat_btn(self._supply_basket_box, "Take off", self._drop_supply_line,
-                 variant="secondary", pady=5).grid(row=0, column=1, sticky="n")
+        # Asking is New order: the stock list, or anything typed that is
+        # not on it. What has been asked for is below, one row an order.
         self._suppliers = None
         self._supplier_names = {}
-
-        def _hint(*_):
-            self._supply_hint.set(
-                _supplies.DETAIL_HINTS.get(self._supply_item.get(), "").upper())
-            self._offer_supply_stock()
-        self._supply_item.trace_add("write", _hint)
-        self._supply_detail.trace_add("write",
-                                      lambda *_: self._offer_supply_from())
         self._supply_stock = []
         self._supply_links = []
+        self._supply_orders = {}
 
         # ── What has been asked for ───────────────────────────────────────
         wrap = tk.Frame(frm, bg=CCA, highlightbackground=CSP,
@@ -16281,17 +16205,22 @@ class ModernOrderApp(tk.Frame):
         wrap.grid(row=2, column=0, sticky="nsew")
         wrap.rowconfigure(0, weight=1)
         wrap.columnconfigure(0, weight=1)
+        # One row an order - everything sent in one New order together, the
+        # way Previous Orders shows a job - opened (▸) to see its lines.
         cols = ("item", "qty", "from", "who", "when", "status", "po")
-        self.supply_tree = ttk.Treeview(wrap, columns=cols, show="headings",
+        self.supply_tree = ttk.Treeview(wrap, columns=cols,
+                                        show="tree headings",
                                         style="TAF.Treeview",
                                         selectmode="extended")
+        self.supply_tree.column("#0", width=px(34), minwidth=px(34),
+                                stretch=False)
         for col, hd, wd, anc in (
                 ("item",   "What",     300, "w"),
                 ("qty",    "How many", 100, "w"),
                 ("from",   "From",     150, "w"),
                 ("who",    "Asked by", 130, "w"),
                 ("when",   "When",      90, "w"),
-                ("status", "Status",   170, "w"),
+                ("status", "Status",   230, "w"),
                 ("po",     "PO",        90, "w")):
             self.supply_tree.heading(col, text=hd)
             self.supply_tree.column(col, width=px(wd), anchor=anc,
@@ -16301,10 +16230,12 @@ class ModernOrderApp(tk.Frame):
         self.supply_tree.tag_configure("urgent", background="#FADBD8",
                                        foreground="#922B21")
         self.supply_tree.tag_configure("done", foreground=CMU)
+        self.supply_tree.tag_configure("line", foreground=CTX)
         self.supply_tree.grid(row=0, column=0, sticky="nsew")
+        self.supply_tree.bind("<Double-Button-1>", self._toggle_supply_order)
         attach_empty_state(self.supply_tree, "Nothing waiting",
-                           "Anything asked for shows here until it has "
-                           "arrived.")
+                           "Press New order to ask for anything - it shows "
+                           "here until it has arrived.")
         sb = ttk.Scrollbar(wrap, orient="vertical",
                            command=self.supply_tree.yview)
         sb.grid(row=0, column=1, sticky="ns")
@@ -16388,175 +16319,68 @@ class ModernOrderApp(tk.Frame):
             self._supplier_names = {str(x.get("id")): x.get("name") or ""
                                     for x in self._suppliers or []}
             self._supply_pos = pos
-            self._offer_supply_stock()
-            self._offer_supply_from()
-            for i, row in enumerate(rows):
-                status = row.get("status") or "open"
-                label = _supplies.STATUS_LABELS.get(status, status)
-                if status != "open" and row.get("handled_by_name"):
-                    label += f" - {row['handled_by_name']}"
-                urgent = bool(row.get("urgent")) and status == "open"
-                what = (_supplies.describe({**row, "quantity": ""}))
+            # Opened orders stay open across a refresh.
+            was_open = {self._supply_orders[i]["key"]
+                        for i in self._supply_orders if tree.exists(i)
+                        and tree.item(i, "open")}
+            self._supply_orders = {}
+
+            def _from(line):
+                return self._supplier_names.get(
+                    str(line.get("supplier_id") or ""), "")
+
+            def _po(line):
+                return self._po_label(pos.get(
+                    str(line.get("purchase_order_id") or "")))
+
+            orders = _supplies.group_requests(rows)
+            for i, order in enumerate(orders):
+                lines = order["lines"]
+                status = order["status"]
+                urgent = order["urgent"]
+                one = len(lines) == 1
+                what = (_supplies.order_summary(order) if one else
+                        f"{len(lines)} items: " + _supplies.order_summary(order))
                 if urgent:
                     what = "URGENT  " + what
-                iid = f"s{i}"
-                self._supply_rows[iid] = row
-                tree.insert("", "end", iid=iid, tags=(
-                    "urgent" if urgent else
-                    ("done" if status not in ("open", "ordered")
-                     else ("even" if i % 2 == 0 else "odd")),),
-                    values=(what, row.get("quantity") or "",
-                            self._supplier_names.get(
-                                str(row.get("supplier_id") or ""), ""),
-                            row.get("requested_by_name") or "",
-                            _supplies.ago(row.get("created_at")), label,
-                            self._po_label(pos.get(
-                                str(row.get("purchase_order_id") or "")))))
+                froms = sorted({_from(l) for l in lines} - {""})
+                pos_on = sorted({_po(l) for l in lines} - {""})
+                iid = f"o{i}"
+                self._supply_orders[iid] = order
+                tag = ("urgent" if urgent else
+                       ("done" if status not in ("open", "ordered")
+                        else ("even" if i % 2 == 0 else "odd")))
+                tree.insert("", "end", iid=iid, tags=(tag,),
+                            open=order["key"] in was_open,
+                            values=(what,
+                                    lines[0].get("quantity") or "" if one else "",
+                                    ", ".join(froms),
+                                    order["requested_by_name"],
+                                    _supplies.ago(order["created_at"]),
+                                    _supplies.order_label(order),
+                                    ", ".join(pos_on)))
+                if one:
+                    self._supply_rows[iid] = lines[0]
+                    continue
+                for j, line in enumerate(lines):
+                    st = line.get("status") or "open"
+                    label = _supplies.STATUS_LABELS.get(st, st)
+                    if st != "open" and line.get("handled_by_name"):
+                        label += f" - {line['handled_by_name']}"
+                    cid = f"{iid}.{j}"
+                    self._supply_rows[cid] = line
+                    tree.insert(iid, "end", iid=cid,
+                                tags=("done" if st not in ("open", "ordered")
+                                      else "line",),
+                                values=(_supplies.describe(
+                                            {**line, "quantity": ""}),
+                                        line.get("quantity") or "",
+                                        _from(line), "", "", label, _po(line)))
             if not err:
-                waiting = sum(1 for r in rows if r.get("status") == "open")
+                waiting = sum(1 for o in orders if o["status"] == "open")
                 self._supply_state.set(
-                    f"{waiting} waiting" if waiting else "Nothing waiting.")
-
-        threading.Thread(target=_work, daemon=True).start()
-
-    def _supply_stock_id(self) -> str:
-        """The stock item the "which one" box names, if it names one."""
-        text = self._supply_detail.get().strip().lower()
-        for st in self._supply_stock or []:
-            if text and str(st.get("name") or "").strip().lower() == text:
-                return str(st.get("id"))
-        return ""
-
-    def _offer_supply_stock(self):
-        """The stock items of the kind picked, in the "which one" box."""
-        cb = getattr(self, "_supply_detail_cb", None)
-        if cb is None:
-            return
-        cb.configure(values=[st.get("name") or "" for st in _buying.stock_for(
-            self._supply_item.get(), self._supply_stock or [])])
-
-    def _offer_supply_from(self):
-        """Who it can come from: the suppliers of the stock item picked,
-        preferred one first and chosen; otherwise every supplier."""
-        cb = getattr(self, "_supply_from_cb", None)
-        if cb is None:
-            return
-        names = {str(x.get("id")): x.get("name") or ""
-                 for x in self._suppliers or []}
-        theirs = _buying.suppliers_for(self._supply_stock_id(),
-                                       self._supply_links or [])
-        if theirs:
-            offer = [names.get(str(l.get("supplier_id")), "") for l in theirs]
-            offer = [n for n in offer if n]
-            cb.configure(values=[""] + offer)
-            if self._supply_from.get() not in offer and offer:
-                self._supply_from.set(offer[0])
-        else:
-            cb.configure(values=[""] + [n for n in names.values() if n])
-
-    def _supply_from_id(self) -> str:
-        name = self._supply_from.get()
-        for sup in self._suppliers or []:
-            if (sup.get("name") or "") == name and name:
-                return str(sup.get("id"))
-        return ""
-
-    def _supply_line_text(self, line) -> str:
-        who = self._supplier_names.get(line.get("supplier_id") or "", "")
-        return _supplies.describe(line) + (f"   from {who}" if who else "")
-
-    def _add_supply_line(self):
-        """Onto the list, to go with the rest in one send."""
-        try:
-            row = _supplies.clean_request(self._supply_item.get(),
-                                          self._supply_detail.get(),
-                                          self._supply_qty.get())
-        except _supplies.SupplyError as exc:
-            messagebox.showwarning("Order Supplies", str(exc))
-            return
-        row["supplier_id"] = self._supply_from_id()
-        row["stock_item_id"] = self._supply_stock_id()
-        self._supply_basket.append(row)
-        self._supply_detail.set("")
-        self._supply_qty.set("")
-        self._show_supply_basket()
-
-    def _drop_supply_line(self):
-        sel = self._supply_basket_list.curselection()
-        if not sel:
-            return
-        del self._supply_basket[sel[0]]
-        self._show_supply_basket()
-
-    def _show_supply_basket(self):
-        box = self._supply_basket_list
-        box.delete(0, "end")
-        for line in self._supply_basket:
-            box.insert("end", self._supply_line_text(line))
-        if self._supply_basket:
-            self._supply_basket_box.grid(row=4, column=0, columnspan=5,
-                                         sticky="ew", pady=(8, 0))
-        else:
-            self._supply_basket_box.grid_remove()
-
-    def _send_supply_request(self):
-        """Everything on the list, and what is in the boxes if anything is,
-        in one go - the managers are told once."""
-        lines = list(self._supply_basket)
-        if self._supply_detail.get().strip() or self._supply_qty.get().strip() \
-                or not lines:
-            try:
-                row = _supplies.clean_request(self._supply_item.get(),
-                                              self._supply_detail.get(),
-                                              self._supply_qty.get())
-            except _supplies.SupplyError as exc:
-                messagebox.showwarning("Order Supplies", str(exc))
-                return
-            row["supplier_id"] = self._supply_from_id()
-            row["stock_item_id"] = self._supply_stock_id()
-            lines.append(row)
-        urgent = bool(self._supply_urgent.get())
-        note = self._supply_note.get()
-        together = bool(self._suppliers)      # step 40 run
-
-        def _work():
-            try:
-                if together:
-                    _buying.request_supplies(lines, urgent, note)
-                else:
-                    for line in lines:
-                        _supplies.request_supply(
-                            line["item"], line["detail"], line["quantity"],
-                            urgent, note)
-                err = ""
-            except Exception as exc:
-                err = ("Run migrate_supply_requests.sql in the Supabase SQL "
-                       "Editor first." if _supplies.is_missing_table(exc)
-                       else f"It wasn't sent:\n{exc}")
-            self.master.after(0, lambda: _done(err))
-
-        def _done(err):
-            if err:
-                messagebox.showerror("Order Supplies", err)
-                return
-            what = "; ".join(_supplies.describe(l) for l in lines)
-            try:
-                _db.log_action("supply_requested", what[:500])
-            except Exception:
-                pass
-            # Emptied, so the same thing is not sent twice by somebody
-            # pressing the button again to see if it worked.
-            self._supply_basket = []
-            self._show_supply_basket()
-            self._supply_detail.set("")
-            self._supply_qty.set("")
-            self._supply_note.set("")
-            self._supply_urgent.set(False)
-            self.status_var.set(
-                (f"Asked for {what}" if len(lines) == 1 else
-                 f"Asked for {len(lines)} things") +
-                " - the managers have been told.")
-            self._refresh_supplies()
+                    f"{waiting} order{'s' if waiting != 1 else ''} waiting"
+                    if waiting else "Nothing waiting.")
 
         threading.Thread(target=_work, daemon=True).start()
 
@@ -16584,9 +16408,9 @@ class ModernOrderApp(tk.Frame):
         top.grid(row=0, column=0, columnspan=2, sticky="ew")
         tk.Label(top, text="New order", bg=CBG, fg=CA,
                  font=F_TTL).pack(side="left")
-        tk.Label(top, text="Pick from the stock list - how many and who from "
-                 "are filled in where we know.", bg=CBG, fg=CMU,
-                 font=F_SM).pack(side="left", padx=(px(12), 0))
+        tk.Label(top, text="Pick from the stock list, or type what isn't on "
+                 "it - how many and who from are filled in where we know.",
+                 bg=CBG, fg=CMU, font=F_SM).pack(side="left", padx=(px(12), 0))
 
         # ── The stock list ────────────────────────────────────────────────
         left = tk.Frame(win, bg=CCA, highlightbackground=CSP,
@@ -16616,6 +16440,16 @@ class ModernOrderApp(tk.Frame):
         shown = {}
         btns = tk.Frame(left, bg=CCA)
         btns.grid(row=3, column=0, columnspan=2, sticky="ew", pady=(px(8), 0))
+        # Anything that is not a stock item - spray paint, a drill bit.
+        tk.Label(left, text="NOT ON THE STOCK LIST?", bg=CCA, fg=CMU,
+                 font=F_BOLD).grid(row=4, column=0, columnspan=2, sticky="w",
+                                   pady=(px(12), px(4)))
+        other_row = tk.Frame(left, bg=CCA)
+        other_row.grid(row=5, column=0, columnspan=2, sticky="ew")
+        other_row.columnconfigure(0, weight=1)
+        other = tk.StringVar()
+        other_e = field_entry(other_row, textvariable=other, width=24)
+        other_e.grid(row=0, column=0, sticky="ew", padx=(0, px(8)))
 
         # ── The order ─────────────────────────────────────────────────────
         right = tk.Frame(win, bg=CCA, highlightbackground=CSP,
@@ -16639,7 +16473,8 @@ class ModernOrderApp(tk.Frame):
         cv.bind("<Configure>", lambda e: cv.itemconfigure(holder, width=e.width))
         scroller = SmoothScroller(cv, px(44))
         empty = tk.Label(rows_box, text="Nothing on it yet.\nDouble-click "
-                         "stock on the left, or Add everything low.",
+                         "stock on the left, Add everything low, or type\n"
+                         "something that isn't on the stock list.",
                          bg=CCA, fg=CMU, font=F_BODY, justify="center")
 
         foot = tk.Frame(win, bg=CBG, padx=px(16), pady=px(12))
@@ -16661,7 +16496,8 @@ class ModernOrderApp(tk.Frame):
                             pady=px(7))
         send_btn.grid(row=0, column=4)
 
-        lines = []         # {"stock", "qty" var, "sup" var, "entry"}
+        # {"stock" (None for one typed), "text", "qty" var, "sup" var, "entry"}
+        lines = []
         names = {}         # supplier name -> id
 
         def _stock():
@@ -16680,7 +16516,8 @@ class ModernOrderApp(tk.Frame):
             """Who it comes from first, then everybody else."""
             theirs = [str(l.get("supplier_id")) for l in
                       _buying.suppliers_for(str(stock.get("id")),
-                                            self._supply_links or [])]
+                                            self._supply_links or [])
+                      ] if stock else []
             by_id = {v: k for k, v in names.items()}
             first = [by_id[s] for s in theirs if s in by_id]
             rest = sorted(n for n in names if n not in first)
@@ -16689,7 +16526,7 @@ class ModernOrderApp(tk.Frame):
         def _fill_list(*_):
             lst.delete(*lst.get_children())
             shown.clear()
-            have = {str(l["stock"].get("id")) for l in lines}
+            have = {str(l["stock"].get("id")) for l in lines if l["stock"]}
             for stock in _buying.search_stock(_stock(), find.get()):
                 sid = str(stock.get("id"))
                 state = _cards.stock_state(stock)
@@ -16723,18 +16560,22 @@ class ModernOrderApp(tk.Frame):
                                  padx=(px(4), px(6)), pady=(0, px(4)))
             for i, line in enumerate(lines, start=1):
                 stock = line["stock"]
-                tk.Label(rows_box, text=str(stock.get("name") or ""), bg=CCA,
+                tk.Label(rows_box, text=(str(stock.get("name") or "") if stock
+                                         else line["text"]), bg=CCA,
                          fg=CTX, font=F_BODY, anchor="w").grid(
                              row=i, column=0, sticky="ew",
                              padx=(px(4), px(6)), pady=px(3))
                 qbox = tk.Frame(rows_box, bg=CCA)
                 qbox.grid(row=i, column=1, sticky="w", padx=(px(4), px(6)))
-                q = field_entry(qbox, textvariable=line["qty"], width=6)
+                # Typed: "3 rolls" in the box. A stock item: its own unit.
+                q = field_entry(qbox, textvariable=line["qty"],
+                                width=6 if stock else 14)
                 q.pack(side="left")
                 line["entry"] = q
-                tk.Label(qbox, text=_cards.unit_label(stock.get("unit"), 2),
-                         bg=CCA, fg=CMU, font=F_SM, width=7,
-                         anchor="w").pack(side="left", padx=(px(4), 0))
+                if stock:
+                    tk.Label(qbox, text=_cards.unit_label(stock.get("unit"), 2),
+                             bg=CCA, fg=CMU, font=F_SM, width=7,
+                             anchor="w").pack(side="left", padx=(px(4), 0))
                 cb = ttk.Combobox(rows_box, textvariable=line["sup"],
                                   values=_offer(stock), state="readonly",
                                   width=20)
@@ -16751,7 +16592,7 @@ class ModernOrderApp(tk.Frame):
             _fill_list()
 
         def _add(picks, focus=True):
-            have = {str(l["stock"].get("id")) for l in lines}
+            have = {str(l["stock"].get("id")) for l in lines if l["stock"]}
             by_id = {v: k for k, v in names.items()}
             added = []
             for pick in picks:
@@ -16759,7 +16600,7 @@ class ModernOrderApp(tk.Frame):
                 if sid in have:
                     continue
                 have.add(sid)
-                line = {"stock": pick["stock"],
+                line = {"stock": pick["stock"], "text": "",
                         "qty": tk.StringVar(value=pick["quantity"]),
                         "sup": tk.StringVar(
                             value=by_id.get(pick["supplier_id"], ""))}
@@ -16782,6 +16623,19 @@ class ModernOrderApp(tk.Frame):
                 for iid in lst.selection() if iid in shown]
             if picks:
                 _add(picks)
+
+        def _add_other(*_):
+            said = " ".join(other.get().split())
+            if not said:
+                other_e.focus_set()
+                return
+            line = {"stock": None, "text": said, "qty": tk.StringVar(),
+                    "sup": tk.StringVar(value="")}
+            lines.append(line)
+            other.set("")
+            _show_lines()
+            win.after(50, line["entry"].focus_set)
+            win.after(80, lambda: cv.yview_moveto(1.0))
 
         def _add_low():
             picks = _buying.low_picks(_stock(), self._supply_links or [],
@@ -16806,13 +16660,17 @@ class ModernOrderApp(tk.Frame):
             if missing:
                 messagebox.showwarning(
                     "New order", "Say how many " +
-                    str(missing[0]["stock"].get("name") or "of it") + ".",
+                    (str(missing[0]["stock"].get("name") or "of it")
+                     if missing[0]["stock"] else missing[0]["text"]) + ".",
                     parent=win)
                 missing[0]["entry"].focus_set()
                 return
             out = [_buying.stock_request_line(
                 l["stock"], l["qty"].get(), names.get(l["sup"].get(), ""),
-                self._supply_links or []) for l in lines]
+                self._supply_links or []) if l["stock"] else
+                _buying.other_request_line(l["text"], l["qty"].get(),
+                                           names.get(l["sup"].get(), ""))
+                for l in lines]
             together = bool(self._suppliers)
             send_btn.configure(state="disabled")
 
@@ -16860,6 +16718,9 @@ class ModernOrderApp(tk.Frame):
         flat_btn(btns, "Add everything low", _add_low, bg=CNE,
                  variant="secondary", pady=px(5)).pack(side="left",
                                                        padx=(px(8), 0))
+        flat_btn(other_row, "Add", _add_other, bg=CNE, variant="secondary",
+                 pady=px(5)).grid(row=0, column=1)
+        other_e.bind("<Return>", _add_other)
         lst.bind("<Double-Button-1>", _add_selected)
         lst.bind("<Return>", _add_selected)
         find.trace_add("write", _fill_list)
@@ -16876,6 +16737,7 @@ class ModernOrderApp(tk.Frame):
             _show_lines()
         # Open on whatever has been loaded; load it first if nothing has.
         win.add_selected, win.add_low, win.send = _add_selected, _add_low, _send
+        win.add_other, win.other = _add_other, other
         win.lines, win.stock_list, win.find = lines, lst, find
         if self._suppliers is None and not self._supply_stock:
             lst.insert("", "end", values=("Loading stock…", ""))
@@ -16909,66 +16771,101 @@ class ModernOrderApp(tk.Frame):
         return po.get("po_number") or ("draft" if po.get("status") == "draft"
                                        else "on order")
 
+    def _toggle_supply_order(self, event=None):
+        """Double-click an order to open it, or close it again."""
+        tree = self.supply_tree
+        iid = tree.identify_row(event.y) if event is not None else \
+            (tree.selection() or ("",))[0]
+        if iid in self._supply_orders and tree.get_children(iid):
+            tree.item(iid, open=not tree.item(iid, "open"))
+            return "break"
+        return None
+
+    def _selected_supplies(self):
+        """The lines selected: every line of a selected order, and any line
+        picked on its own - each once."""
+        out, seen = [], set()
+        for iid in self.supply_tree.selection():
+            order = self._supply_orders.get(iid)
+            lines = order["lines"] if order else (
+                [self._supply_rows[iid]] if iid in self._supply_rows else [])
+            for line in lines:
+                if line.get("id") not in seen:
+                    seen.add(line.get("id"))
+                    out.append(line)
+        return out
+
     def _selected_supply(self):
-        sel = self.supply_tree.selection()
-        return self._supply_rows.get(sel[0]) if sel else None
+        lines = self._selected_supplies()
+        return lines[0] if lines else None
 
     def _move_supply(self, status):
-        row = self._selected_supply()
-        if not row:
-            messagebox.showinfo("Order Supplies", "Select a request first.")
+        picked = self._selected_supplies()
+        if not picked:
+            messagebox.showinfo("Order Supplies", "Select an order first.")
             return
-        now = row.get("status") or "open"
-        if status not in _supplies.NEXT.get(now, []):
+        rows = _supplies.lines_to_move(picked, status)
+        if not rows:
+            now = _supplies.order_status(picked)
             messagebox.showinfo(
                 "Order Supplies",
-                f"That request is already "
+                f"That is already "
                 f"{_supplies.STATUS_LABELS.get(now, now).lower()}.")
             return
 
         def _work():
-            try:
-                _supplies.set_status(row["id"], status)
-                err = ""
-            except Exception as exc:
-                err = f"It wasn't changed:\n{exc}"
-            self.master.after(0, lambda: _done(err))
+            done, err = [], ""
+            for row in rows:
+                try:
+                    _supplies.set_status(row["id"], status)
+                    done.append(row)
+                except Exception as exc:
+                    err = f"It wasn't all changed:\n{exc}"
+            self.master.after(0, lambda: _done(done, err))
 
-        def _done(err):
+        def _done(done, err):
             if err:
                 messagebox.showerror("Order Supplies", err)
-                return
-            try:
-                _db.log_action(f"supply_{status}", _supplies.describe(row))
-            except Exception:
-                pass
+            if done:
+                try:
+                    _db.log_action(f"supply_{status}", "; ".join(
+                        _supplies.describe(r) for r in done)[:500])
+                except Exception:
+                    pass
             self._refresh_supplies()
-            # Every manager's notification for it has just been cleared by
-            # the database, this one's included.
+            # Once nothing on a request is waiting, the database takes it
+            # off every manager's bell, this one's included.
             self._refresh_bell_now()
 
         threading.Thread(target=_work, daemon=True).start()
 
     def _cancel_supply(self):
-        row = self._selected_supply()
-        if not row:
+        picked = self._selected_supplies()
+        if not picked:
             messagebox.showinfo("Order Supplies",
-                                "Select the request you want to cancel.")
+                                "Select the order you want to cancel.")
             return
-        if (row.get("status") or "open") != "open":
+        me = str(getattr(_db.current_user(), "id", "") or "")
+        rows = [r for r in picked if (r.get("status") or "open") == "open"]
+        # Your own, while still waiting. Somebody else's is left to the
+        # database to refuse - it says who can.
+        rows = (_supplies.lines_to_cancel(rows, me) if me else []) or rows
+        if not rows:
             messagebox.showinfo(
                 "Order Supplies",
-                "Something has already been done about that one, so it "
+                "Something has already been done about that, so it "
                 "can't be cancelled here - ask a manager.")
             return
-        if not messagebox.askyesno(
-                "Cancel Request", f"Cancel the request for "
-                                  f"{_supplies.describe(row)}?"):
+        what = (_supplies.describe(rows[0]) if len(rows) == 1
+                else f"these {len(rows)} things")
+        if not messagebox.askyesno("Cancel Request",
+                                   f"Cancel the request for {what}?"):
             return
 
         def _work():
             try:
-                _supplies.cancel(row["id"])
+                for row in rows:
+                    _supplies.cancel(row["id"])
                 err = ""
             except _supplies.SupplyError:
                 # The database only lets you cancel your own, and says so by
@@ -20219,9 +20116,7 @@ class ModernOrderApp(tk.Frame):
 
     def _po_from_requests(self):
         """The selected requests, as one purchase order per supplier."""
-        rows = [self._supply_rows[i] for i in self.supply_tree.selection()
-                if i in self._supply_rows]
-        rows = [r for r in rows
+        rows = [r for r in self._selected_supplies()
                 if (r.get("status") or "open") in ("open", "ordered")
                 and not r.get("purchase_order_id")]
         if not rows:

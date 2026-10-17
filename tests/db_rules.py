@@ -1149,6 +1149,65 @@ def run_stock_supplier_checks(pg: Postgres) -> None:
           out or err)
 
 
+def run_supply_bell_checks(pg: Postgres) -> None:
+    print("\n── the bell only shows what still needs doing (step 43) ──")
+    for _ in range(2):
+        ok, _o, err = pg.psql((ROOT / "migrate_supply_bell.sql").read_text(
+            encoding="utf-8"), "f")
+        check("step 43 runs, and runs again cleanly", ok, err)
+
+    def told(first):
+        return q(pg, "SELECT count(*) FROM notifications "
+                     f"WHERE kind = 'supply_request' AND ref_id = '{first}';")
+
+    lines = ('[{"item": "Tape", "detail": "foil", "quantity": "3 rolls"}, '
+             '{"item": "Rivets", "detail": "4mm", "quantity": "2 boxes"}]')
+    ok, out, err = as_in(pg, "f", DAVE,
+                         f"SELECT id FROM request_supplies('{lines}', false, "
+                         "'', 'ref-43');")
+    ids = (out or "").splitlines()
+    check("two things asked for together tell each manager once",
+          ok and len(ids) == 2 and told(ids[0]) not in ("", "0")
+          and told(ids[1]) == "0", out or err)
+    ok, _o, err = as_in(pg, "f", SARAH, "UPDATE supply_requests SET status = "
+                                        f"'ordered' WHERE id = '{ids[0]}';")
+    check("one of them ordered: still on the bell, the other is waiting",
+          ok and told(ids[0]) not in ("", "0"), err or told(ids[0]))
+    ok, _o, err = as_in(pg, "f", SARAH, "UPDATE supply_requests SET status = "
+                                        f"'declined' WHERE id = '{ids[1]}';")
+    check("the last one dealt with: off every manager's bell",
+          ok and told(ids[0]) == "0", err or told(ids[0]))
+
+    ok, out, err = as_in(pg, "f", DAVE, "SELECT id FROM request_supply("
+                                        "'Media', 'G4', '1 roll', false, '', "
+                                        "'ref-43b');")
+    one = (out or "").strip()
+    check("one thing asked for is on the bell", ok and told(one) not in ("", "0"),
+          out or err)
+    ok, _o, err = as_in(pg, "f", DAVE, "UPDATE supply_requests SET status = "
+                                       f"'cancelled' WHERE id = '{one}';")
+    check("and comes off when the person who asked cancels it",
+          ok and told(one) == "0", err or told(one))
+
+    # Dealt with before step 43 was run: cleared when it is.
+    ok, out, err = as_in(pg, "f", DAVE, "SELECT id FROM request_supply("
+                                        "'Channel', '45', '20', false, '', "
+                                        "'ref-43c');")
+    old = (out or "").strip()
+    ok, out, err = as_in(pg, "f", DAVE, "SELECT id FROM request_supply("
+                                        "'Channel', '50', '20', false, '', "
+                                        "'ref-43d');")
+    waiting = (out or "").strip()
+    q(pg, "ALTER TABLE supply_requests DISABLE TRIGGER supply_requests_settle;"
+          f"UPDATE supply_requests SET status = 'received' WHERE id = '{old}';"
+          "ALTER TABLE supply_requests ENABLE TRIGGER supply_requests_settle;")
+    ok, _o, err = pg.psql((ROOT / "migrate_supply_bell.sql").read_text(
+        encoding="utf-8"), "f")
+    check("running step 43 clears what was dealt with already, and only that",
+          ok and told(old) == "0" and told(waiting) not in ("", "0"),
+          err or f"{told(old)} {told(waiting)}")
+
+
 def _skip(why: str) -> int:
     """Skipping is fine on a laptop. In CI it is not: a workflow that goes
     green having checked nothing is worse than no workflow, because it is
@@ -1175,6 +1234,7 @@ def main() -> int:
         run_customer_extra_checks(pg)
         run_purchasing_checks(pg)
         run_stock_supplier_checks(pg)
+        run_supply_bell_checks(pg)
     finally:
         pg.stop()
     print(f"\n{len(FAILURES)} FAILED" if FAILURES
