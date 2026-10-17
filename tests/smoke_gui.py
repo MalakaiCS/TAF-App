@@ -2281,17 +2281,16 @@ def _steps(app, gui, root):
             gui._REDUCED_MOTION = False
             assert app._badge.ok, "TAF_logo_badge.png did not load"
             app._spin_badge(duration=0.3)
-            mid = None
+            seen = set()
             for _ in range(40):
                 root.update()
                 time.sleep(0.01)
-                if app._badge_spin is not None:
-                    mid = str(app._badge_label.cget("image"))
+                seen.add(str(app._badge_label.cget("image")))
             _settle(0.4)
             assert app._badge_spin is None, "the turn never finished"
             assert str(app._badge_label.cget("image")) == str(app._badge.frame(0)), \
                 "it did not land upright"
-            assert mid and mid != str(app._badge.frame(0)), "it never turned"
+            assert len(seen) > 3, f"it never turned ({len(seen)} positions)"
 
             ready = {"v": False}
             screen = gui.LoadingScreen(root, ready=lambda: ready["v"],
