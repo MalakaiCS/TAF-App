@@ -17414,6 +17414,7 @@ class ModernOrderApp(tk.Frame):
         ("shutdown_calendar",  "Shutdown calendar…",      "_shutdown_calendar"),
         ("job_cost_actual",    "What a job actually cost…", "_job_cost"),
         ("xero_live",          "Xero…",                   "_xero"),
+        ("xero_live",          "Purchase orders…",        "_purchase_orders"),
         ("email_orders",       "Orders straight from email…", "_email_orders"),
         ("customer_display",   "Enable second screen display…",
                                                          "_customer_screen_from_menu"),
@@ -20640,6 +20641,9 @@ class ModernOrderApp(tk.Frame):
             mode_btn["w"].pack(side="left", padx=(px(8), 0))
             flat_btn(foot, "Invoice wording…",
                      lambda: self._xero_wording(dlg), bg=CNE, pady=px(6),
+                     variant="secondary").pack(side="left", padx=(px(8), 0))
+            flat_btn(foot, "Purchase orders…", self._purchase_orders,
+                     bg=CNE, pady=px(6),
                      variant="secondary").pack(side="left", padx=(px(8), 0))
             flat_btn(foot, "Disconnect", _disconnect, bg=CNE, pady=px(6),
                      variant="secondary").pack(side="left", padx=(px(8), 0))
