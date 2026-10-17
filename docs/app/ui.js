@@ -98,7 +98,19 @@ var TAFUI = (function () {
       })]
     });
     var tbody = el("tbody");
-    (rows || []).forEach(function (r) { tbody.appendChild(r); });
+    // Each cell carries its column's heading, which a phone shows above the
+    // value once the table has become a list of rows.
+    var labels = headings.map(function (h) {
+      return typeof h === "string" ? h : ((h && h.text) || "");
+    });
+    (rows || []).forEach(function (r) {
+      Array.prototype.forEach.call(r.children || [], function (td, i) {
+        if (labels[i] && !td.hasAttribute("data-label")) {
+          td.setAttribute("data-label", labels[i]);
+        }
+      });
+      tbody.appendChild(r);
+    });
     return el("div", {
       cls: "wrap",
       kids: [el("table", { kids: [thead, tbody] })]

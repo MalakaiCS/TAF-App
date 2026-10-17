@@ -15,18 +15,64 @@
 var TAFAPP = (function () {
 
   var U = TAFUI, D = TAFDATA, S = TAFSYNC;
+  // The first four shown are the phone's bottom bar; the rest are under
+  // More. On anything wider they are all in the sidebar.
   var TABS = [
-    { key: "dashboard",   label: "Today" },
-    { key: "new",         label: "New order" },
-    { key: "orders",      label: "Orders" },
-    { key: "scan",        label: "Scan" },
-    { key: "delivery",    label: "Delivery" },
-    { key: "quotes",      label: "Quotes" },
-    { key: "customers",   label: "Customers" },
-    { key: "stock",       label: "Stock" },
-    { key: "supplies",    label: "Supplies" },
-    { key: "log",         label: "Log", from: 3 }
+    { key: "dashboard",   label: "Today",     icon: "home" },
+    { key: "orders",      label: "Orders",    icon: "list" },
+    { key: "new",         label: "New order", icon: "plus" },
+    { key: "scan",        label: "Scan",      icon: "scan" },
+    { key: "delivery",    label: "Delivery",  icon: "truck" },
+    { key: "quotes",      label: "Quotes",    icon: "doc" },
+    { key: "customers",   label: "Customers", icon: "people" },
+    { key: "stock",       label: "Stock",     icon: "box" },
+    { key: "supplies",    label: "Supplies",  icon: "bag" },
+    { key: "log",         label: "Log",       icon: "clock", from: 3 }
   ];
+  var BAR = 4;
+
+  // Line icons, drawn here rather than fetched: a tab bar that waits on the
+  // network for its pictures is a tab bar with gaps in it out of signal.
+  var ICONS = {
+    home:   ["M3 10.5 12 3l9 7.5", "M5 9.5V21h14V9.5", "M10 21v-6h4v6"],
+    list:   ["M9 3.5h6v3H9z", "M7 5H5.5v16h13V5H17", "M9 11h6", "M9 15h6"],
+    plus:   ["M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0Z", "M12 8v8", "M8 12h8"],
+    scan:   ["M4 8V5h4", "M16 5h4v3", "M20 16v3h-4", "M8 19H4v-3", "M4 12h16"],
+    truck:  ["M2 6h11v10H2z", "M13 9h4l4 4v3h-8z",
+             "M8 18a1.6 1.6 0 1 1-3.2 0 1.6 1.6 0 0 1 3.2 0Z",
+             "M19 18a1.6 1.6 0 1 1-3.2 0 1.6 1.6 0 0 1 3.2 0Z"],
+    doc:    ["M14 3H6v18h12V7z", "M14 3v4h4", "M9 12.5h6", "M9 16.5h4"],
+    people: ["M16 20v-1a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v1",
+             "M13 7a4 4 0 1 1-8 0 4 4 0 0 1 8 0Z",
+             "M22 20v-1a4 4 0 0 0-3-3.9", "M16 3.2a4 4 0 0 1 0 7.6"],
+    box:    ["M21 7.5 12 3 3 7.5 12 12z", "M3 7.5v9L12 21l9-4.5v-9", "M12 12v9"],
+    bag:    ["M5.5 8h13l-1 12.5h-11z", "M9 8V7a3 3 0 0 1 6 0v1"],
+    clock:  ["M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0Z", "M12 7v5l3.5 2"],
+    more:   ["M5 12h.01", "M12 12h.01", "M19 12h.01"]
+  };
+
+  function icon(name) {
+    var ns = "http://www.w3.org/2000/svg";
+    var svg = document.createElementNS(ns, "svg");
+    svg.setAttribute("viewBox", "0 0 24 24");
+    svg.setAttribute("aria-hidden", "true");
+    (ICONS[name] || []).forEach(function (d) {
+      var path = document.createElementNS(ns, "path");
+      path.setAttribute("d", d);
+      if (name === "more") { path.setAttribute("stroke-width", "3.4"); }
+      svg.appendChild(path);
+    });
+    return svg;
+  }
+
+  function shownTabs() {
+    // A tab nobody below a manager can read anything on is a tab that only
+    // ever shows an empty table and a permission error. The database is
+    // still what decides - this only stops us offering it.
+    return TABS.filter(function (t) {
+      return !(t.from && D.roleLevel() < t.from);
+    });
+  }
 
   /* The things that run out. The same list as SUPPLY ITEMS in
      taf_order_app/supplies.py - a test holds the two together, so a phone
@@ -335,6 +381,12 @@ var TAFAPP = (function () {
           : null,
         U.button("Close", close, "quiet")
       ].filter(Boolean) }));
+      // On a phone the header has no room for it, so it is here as well.
+      body.appendChild(U.el("div", { cls: "row-actions", kids: [
+        U.button("Sign out", function () {
+          close();
+          document.getElementById("signout").click();
+        }, "quiet")] }));
     });
   }
 
@@ -458,21 +510,50 @@ var TAFAPP = (function () {
     document.getElementById("who-name").textContent =
       p.full_name || p.username || D.whoami().email || "Signed in";
     document.getElementById("who-role").textContent = p.role || "";
+    var name = String(p.full_name || p.username || D.whoami().email || "?");
+    document.getElementById("who-initials").textContent =
+      name.split(/[\s@._-]+/).filter(Boolean).slice(0, 2)
+        .map(function (w) { return w.charAt(0).toUpperCase(); }).join("") || "?";
   }
 
   function buildTabs() {
     var nav = U.clear(document.getElementById("tabs"));
-    TABS.forEach(function (t) {
-      // A tab nobody below a manager can read anything on is a tab that only
-      // ever shows an empty table and a permission error. The database is
-      // still what decides — this only stops us offering it.
-      if (t.from && D.roleLevel() < t.from) { return; }
+    var tabs = shownTabs();
+    tabs.forEach(function (t, i) {
       nav.appendChild(U.el("button", {
-        text: t.label,
-        attr: { role: "tab", "aria-selected": String(t.key === active),
+        cls: i < BAR ? "" : "extra",
+        attr: { role: "tab", type: "button",
+                "aria-selected": String(t.key === active),
                 "data-tab": t.key },
+        kids: [icon(t.icon), U.el("span", { text: t.label })],
         on: { click: function () { show(t.key); } }
       }));
+    });
+    // The phone's fifth button: everything that is not in the bar.
+    var under = tabs.slice(BAR).some(function (t) { return t.key === active; });
+    nav.appendChild(U.el("button", {
+      attr: { id: "tab-more", type: "button", "aria-selected": String(under),
+              "aria-label": "More" },
+      kids: [icon("more"), U.el("span", { text: "More" })],
+      on: { click: moreSheet }
+    }));
+    var here = tabs.filter(function (t) { return t.key === active; })[0];
+    document.getElementById("app-here").textContent =
+      here ? here.label : "Total Air Filtration";
+  }
+
+  function moreSheet() {
+    U.openSheet(function (body) {
+      body.appendChild(U.el("h2", { cls: "title", text: "More" }));
+      body.appendChild(U.el("div", { cls: "more-grid",
+        kids: shownTabs().slice(BAR).map(function (t) {
+          return U.el("button", {
+            attr: { type: "button", "aria-selected": String(t.key === active),
+                    "data-more": t.key },
+            kids: [icon(t.icon), U.el("span", { text: t.label })],
+            on: { click: function () { U.closeAllSheets(); show(t.key); } }
+          });
+        }) }));
     });
   }
 
@@ -618,19 +699,15 @@ var TAFAPP = (function () {
         ["Due this week", counts.overdue + counts.today + counts.week, "week"],
         ["Ready to go out", ready, "ready"]
       ];
-      var grid = U.el("div", {
-        attr: { style: "display:grid;gap:10px;"
-                     + "grid-template-columns:repeat(auto-fit,minmax(150px,1fr))" }
-      });
+      var grid = U.el("div", { cls: "stat-grid" });
       tiles.forEach(function (t) {
         grid.appendChild(U.el("div", {
-          cls: "card",
-          attr: { style: "margin:0;cursor:pointer" },
+          cls: "card stat stat-" + t[2] + (t[1] ? "" : " zero"),
+          attr: { role: "button", tabindex: "0" },
           on: { click: function () { show("orders"); filterTo(t[2]); } },
           kids: [
-            U.el("div", { text: String(t[1]),
-                          attr: { style: "font-size:26px;font-weight:700" } }),
-            U.el("div", { cls: "muted", text: t[0] })
+            U.el("div", { cls: "stat-n", text: String(t[1]) }),
+            U.el("div", { cls: "stat-l", text: t[0] })
           ]
         }));
       });

@@ -994,20 +994,30 @@ def run() -> int:
                             > c.getBoundingClientRect().bottom + 0.5));
               const grid = document.querySelector('.stock-grid');
               const cols = getComputedStyle(grid).gridTemplateColumns.split(' ').length;
-              return {square: boxes.every(b => Math.abs(b.width - b.height) < 1.5),
+              const room = document.querySelector('.stock-wrap').clientWidth;
+              return {room: room,
+                      square: boxes.every(b => Math.abs(b.width - b.height) < 1.5),
                       same: new Set(boxes.map(b => Math.round(b.width))).size === 1,
                       perRow: firstRow.length, cols: cols, overlaps: overlaps,
                       sideways: document.documentElement.scrollWidth
                                 > window.innerWidth};
             }""")
-        for width, want in ((375, 1), (480, 2), (768, 3), (1024, 4), (1440, 5)):
+        def _across(room):
+            # The same steps as the stylesheet and stock_cards.py, by the
+            # room the grid has - the sidebar's share taken off already.
+            for least, cols in ((1060, 5), (820, 4), (560, 3), (400, 2)):
+                if room >= least:
+                    return cols
+            return 1
+        for width, want in ((375, 1), (480, 2), (768, 2), (1024, 3), (1440, 5)):
             got = _layout(width)
             if os.environ.get("TAF_SHOTS"):
                 page.screenshot(path=os.path.join(os.environ["TAF_SHOTS"],
                                                   f"web_{width}.png"))
             check(f"at {width}px: {want} across, square, same size, nothing "
                   "spilling, no sideways scrolling",
-                  got["cols"] == want and got["square"] and got["same"]
+                  got["cols"] == want == _across(got["room"])
+                  and got["square"] and got["same"]
                   and not got["overlaps"] and not got["sideways"], str(got))
         page.set_viewport_size({"width": 900, "height": 900})
 
@@ -1668,6 +1678,43 @@ def run() -> int:
             httpd.server_close()
 
         real_errors = [e for e in errors if "favicon" not in e.lower()]
+        print("\n── the frame: a sidebar, and a bottom bar on a phone ──")
+        check("on a computer every tab is in the sidebar",
+              page.eval_on_selector("#tabs", "n => getComputedStyle(n).position")
+              == "sticky"
+              and page.locator("#tabs button[data-tab]:visible").count()
+              == page.locator("#tabs button[data-tab]").count()
+              and page.locator("#tab-more").is_hidden())
+        page.set_viewport_size({"width": 390, "height": 844})
+        page.wait_for_timeout(200)
+        bar = page.eval_on_selector("#tabs", "n => { const r = n.getBoundingClientRect();"
+                                    " return {bottom: Math.round(r.bottom), h: innerHeight,"
+                                    " pos: getComputedStyle(n).position}; }")
+        check("on a phone the tabs are a bar along the bottom",
+              bar["pos"] == "fixed" and bar["bottom"] == bar["h"], str(bar))
+        check("four tabs and More, all with words under their icons",
+              page.locator("#tabs button:visible").count() == 5
+              and page.locator("#tabs button:visible svg").count() == 5
+              and page.locator("#tab-more").inner_text().strip() == "More")
+        check("the header says which screen this is, and leaves out Sign out",
+              page.locator("#app-here").inner_text()
+              == page.eval_on_selector('#tabs button[data-tab][aria-selected="true"]',
+                                       "b => b.textContent.trim()")
+              and page.locator("#signout").is_hidden(),
+              page.locator("#app-here").inner_text())
+        page.click("#tab-more")
+        page.wait_for_selector("#sheet .more-grid")
+        more = page.locator("#sheet .more-grid button")
+        check("More holds the rest", more.count()
+              == page.locator("#tabs button.extra").count(), str(more.count()))
+        page.locator('#sheet .more-grid button[data-more="customers"]').click()
+        page.wait_for_selector("#sheet", state="hidden")
+        check("and opens them", page.locator("#app-here").inner_text() == "Customers"
+              and page.locator("#tab-more").get_attribute("aria-selected") == "true")
+        page.set_viewport_size({"width": 900, "height": 900})
+        page.click('#tabs button[data-tab="stock"]')
+        page.wait_for_selector("#screen .stock-card")
+
         print("\n── reduced motion ──")
         page.emulate_media(reduced_motion="reduce")
         page.click('#tabs button[data-tab="stock"]')
