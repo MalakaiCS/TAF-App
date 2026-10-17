@@ -2300,6 +2300,11 @@ def _steps(app, gui, root):
             ready["v"] = True
             _settle(0.8)
             assert not screen.winfo_exists(), "it stayed after loading"
+            screen = gui.LoadingScreen(root, ready=lambda: False, longest=30)
+            _settle(0.1)
+            screen.event_generate("<Escape>")
+            _settle(0.1)
+            assert not screen.winfo_exists(), "Escape did not put it away"
 
             gui._REDUCED_MOTION = True
             app._spin_badge()

@@ -2129,6 +2129,15 @@ class LoadingScreen(tk.Toplevel):
         self.deiconify()
         self.lift()
         self._follow = root.bind("<Configure>", lambda _e: self._cover(), add="+")
+        # Like every other window: Escape - or a click - puts it away now,
+        # for anybody who would rather not wait for it.
+        self.bind("<Escape>", lambda _e: self.close())
+        self.bind("<Button-1>", lambda _e: self.close())
+        self._label.bind("<Button-1>", lambda _e: self.close())
+        try:
+            self.focus_force()
+        except tk.TclError:
+            pass
         self.after(16, self._tick)
 
     def _cover(self):
@@ -2176,6 +2185,10 @@ class LoadingScreen(tk.Toplevel):
             pass
         if self.winfo_exists():
             self.destroy()
+            try:
+                self.root.focus_set()       # back to the window underneath
+            except tk.TclError:
+                pass
 
 
 # ═══════════════════════════════════════════════════════════════════════════
