@@ -825,14 +825,29 @@ a manager opens **Purchase orders…** (Order Supplies, or Buying…):
   priced from the sizes either side (a 47 between the 45 and the 50) and
   marked *estimated* in orange to check. Prices and lines can be changed
   before it goes.
-- **Send to supplier** makes the purchase order in Xero (approved — Xero
-  numbers it) and opens it in Xero, where you press **Email** to send it to
-  the supplier: Xero's API can email an invoice but not a purchase order.
-  **Open in Xero** opens one again later. The requests on it show the PO
-  number.
+- **Approve & send to supplier** makes the purchase order in Xero, approved
+  (Xero numbers it), and emails Xero's own PDF of it to the supplier from the
+  company's Gmail — the address on the order, or the supplier's email in
+  Xero. Xero's API can email an invoice but not a purchase order, so the app
+  sends it; the supplier gets the same PDF, from your address, and it is in
+  that account's Sent folder. Without Gmail set up, the order is opened in
+  Xero to press **Email** there. **Open in Xero** opens one again later. The
+  requests on it show the PO number.
 - **What arrived…** ticks off how many of each line came. Lines linked to a
   stock item are booked into stock; when everything is in, the order and its
   requests are received, otherwise it is *Part received*.
+
+**Sending purchase orders from Gmail** (Google Workspace):
+
+1. Sign in to Google as the account POs should come from (e.g. orders@…).
+   2-Step Verification must be on for it (Google Account → Security).
+2. Go to <https://myaccount.google.com/apppasswords>, make an app password
+   called "TAF Order Entry", and copy the 16 letters. (If the page says app
+   passwords are not available, a Workspace admin turns them on under Admin
+   console → Security → Authentication → 2-Step Verification.)
+3. In Supabase → Edge Functions → Secrets add `GMAIL_USER` (that address) and
+   `GMAIL_APP_PASSWORD` (the 16 letters). The password stays in Supabase; it
+   is never on a PC or in the installer.
 
 Optional function secrets: `XERO_PURCHASE_ACCOUNT` (default `310`, Cost of Goods Sold) and
 `XERO_PURCHASE_TAX` (default `INPUT`). To have the app email purchase orders

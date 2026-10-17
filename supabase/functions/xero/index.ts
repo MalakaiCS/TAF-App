@@ -48,10 +48,11 @@
 //   pdf         an order's invoice as Xero prints it            staff
 //   suppliers_pull  Xero's supplier contacts into the app       manager
 //   items_pull  every Xero item into the app                    manager
-//   po_send     make a purchase order in Xero, approved; it is
-//               emailed from Xero by a person (Xero's API cannot
-//               email one), or by the app's mail provider when
-//               PO_EMAIL_VIA=app                                 manager
+//   po_send     make a purchase order in Xero, approved, and email
+//               Xero's PDF of it to the supplier from the company's
+//               Gmail (GMAIL_USER, GMAIL_APP_PASSWORD) - Xero's API
+//               cannot email one itself. Without Gmail it is opened
+//               in Xero to be emailed from there.            manager
 //   po_pdf      a purchase order as Xero prints it              staff
 //   contacts    Xero contacts matching a search, to link a
 //               customer to theirs                              staff
@@ -68,7 +69,10 @@
 //
 // Optional secrets: XERO_ACCOUNT_CODE (default 200, Sales), XERO_TAX_TYPE
 // (default OUTPUT, GST on Income), XERO_CREATE_ITEMS=false to stop part
-// numbers being made items in Xero, and XERO_SCOPES.
+// numbers being made items in Xero, and XERO_SCOPES. Purchase orders:
+// GMAIL_USER and GMAIL_APP_PASSWORD (a Google app password) to email them
+// from the company's Gmail, XERO_PURCHASE_ACCOUNT (default 310) and
+// XERO_PURCHASE_TAX (default INPUT).
 
 const CORS = {
   "Access-Control-Allow-Origin": "*",
@@ -968,10 +972,13 @@ async function sendPo(poId: string) {
                  sent_at: nowIso(), error: null });
   }
 
-  // Xero's API cannot email a purchase order - only invoices. So unless the
-  // app's own mail provider is asked to (PO_EMAIL_VIA=app), the order is
-  // made in Xero and a person presses Email on it there, which the app opens.
-  if (env("PO_EMAIL_VIA", "xero").trim().toLowerCase() !== "app") {
+  // Xero's API cannot email a purchase order - only invoices. So the app
+  // emails Xero's own PDF of it: from the company's Gmail when GMAIL_USER and
+  // GMAIL_APP_PASSWORD are set, or through Resend when PO_EMAIL_VIA=app. With
+  // neither, the order is opened in Xero for a person to press Email there.
+  const gmail = !!(env("GMAIL_USER") && env("GMAIL_APP_PASSWORD"));
+  const resend = env("PO_EMAIL_VIA").trim().toLowerCase() === "app";
+  if (!gmail && !resend) {
     await note({ error: null });
     return { po_number: number, emailed: false, send_in_xero: true, xero_po_id: xeroId };
   }
@@ -979,46 +986,165 @@ async function sendPo(poId: string) {
   // The address on the order, when somebody typed one, beats the one Xero has.
   const to = String(po.supplier_email || sup.email || "").trim();
   if (!to) {
-    const error = `Purchase order ${number} is in Xero, but ${sup.name ?? po.supplier} ` +
+    const error = `Purchase order ${number} is approved in Xero, but ${sup.name ?? po.supplier} ` +
       "has no email address to send it to. Add one in Xero (and pull suppliers again), " +
-      "or send it from Xero.";
+      "or type it on the order, then press Send again.";
     await note({ error });
-    return { po_number: number, emailed: false, error };
+    return { po_number: number, emailed: false, error, xero_po_id: xeroId };
   }
-  const key = env("RESEND_API_KEY"), from = env("MAIL_FROM");
-  if (!key || !from) {
-    const error = `Purchase order ${number} is in Xero, but no mail provider is set up ` +
-      "(RESEND_API_KEY and MAIL_FROM function secrets). Send it from Xero.";
-    await note({ error });
-    return { po_number: number, emailed: false, error };
-  }
-  const pdf = await poPdf(xeroId!);
   const company = env("COMPANY_NAME", "Total Air Filtration");
-  const sent = await fetch(env("RESEND_API_URL", "https://api.resend.com/emails"), {
-    method: "POST",
-    headers: { Authorization: `Bearer ${key}`, "Content-Type": "application/json" },
-    body: JSON.stringify({
-      from, to: [to],
-      reply_to: env("MAIL_REPLY_TO") || undefined,
-      subject: `Purchase order ${number} from ${company}`,
-      html: `<p>Hello ${escapeHtml(sup.name ?? "")},</p><p>Please find attached purchase order ` +
-            `<b>${escapeHtml(number ?? "")}</b> from ${escapeHtml(company)}` +
-            (po.reference ? ` (our reference ${escapeHtml(po.reference)})` : "") +
-            `.</p><p>Please reply to confirm, and let us know of any changes.</p>` +
-            `<p>Thank you,<br>${escapeHtml(company)}</p>`,
-      attachments: [{ filename: `Purchase order ${number}.pdf`, content: base64(pdf) }],
-    }),
-  });
-  if (!sent.ok) {
-    const error = `Purchase order ${number} is in Xero, but the email did not go ` +
-      `(${sent.status}: ${(await sent.text()).slice(0, 160)}). Press Send again, or send it from Xero.`;
-    await note({ error });
-    return { po_number: number, emailed: false, error };
+  const subject = `Purchase order ${number} from ${company}`;
+  const html = `<p>Hello ${escapeHtml(sup.name ?? "")},</p><p>Please find attached purchase order ` +
+    `<b>${escapeHtml(number ?? "")}</b> from ${escapeHtml(company)}` +
+    (po.reference ? ` (our reference ${escapeHtml(po.reference)})` : "") +
+    `.</p><p>Please reply to confirm, and let us know of any changes.</p>` +
+    `<p>Thank you,<br>${escapeHtml(company)}</p>`;
+  const filename = `Purchase order ${number}.pdf`;
+  const pdf = await poPdf(xeroId!);
+
+  if (gmail) {
+    try {
+      await gmailSend({ to, subject, html, filename, pdf });
+    } catch (e) {
+      const error = `Purchase order ${number} is approved in Xero, but Gmail did not send it ` +
+        `(${(e as Error).message}). Press Send again, or send it from Xero.`;
+      await note({ error });
+      return { po_number: number, emailed: false, error, xero_po_id: xeroId };
+    }
+  } else {
+    const key = env("RESEND_API_KEY"), from = env("MAIL_FROM");
+    if (!key || !from) {
+      const error = `Purchase order ${number} is approved in Xero, but no mail provider is ` +
+        "set up (GMAIL_USER and GMAIL_APP_PASSWORD function secrets). Send it from Xero.";
+      await note({ error });
+      return { po_number: number, emailed: false, error, xero_po_id: xeroId };
+    }
+    const sent = await fetch(env("RESEND_API_URL", "https://api.resend.com/emails"), {
+      method: "POST",
+      headers: { Authorization: `Bearer ${key}`, "Content-Type": "application/json" },
+      body: JSON.stringify({
+        from, to: [to], reply_to: env("MAIL_REPLY_TO") || undefined, subject, html,
+        attachments: [{ filename, content: base64(pdf) }],
+      }),
+    });
+    if (!sent.ok) {
+      const error = `Purchase order ${number} is approved in Xero, but the email did not go ` +
+        `(${sent.status}: ${(await sent.text()).slice(0, 160)}). Press Send again, or send it from Xero.`;
+      await note({ error });
+      return { po_number: number, emailed: false, error, xero_po_id: xeroId };
+    }
   }
   // Emailing again after some has arrived leaves it part received.
   await note({ emailed_at: nowIso(), emailed_to: to, error: null,
                ...(po.status === "draft" ? { status: "sent", sent_at: nowIso() } : {}) });
   return { po_number: number, emailed: true, emailed_to: to };
+}
+
+// ── Gmail ────────────────────────────────────────────────────────────────────
+// Mail from the company's own Google Workspace account, so a supplier's reply
+// comes back to it and what was sent is in its Sent folder. Gmail's SMTP on
+// port 465 (TLS from the start - Supabase functions may not use 25 or 587),
+// signed in with an app password, which is a function secret and never on a
+// PC. SMTP_HOST / SMTP_PORT / SMTP_TLS are for the tests.
+
+type Mail = { to: string; subject: string; html: string; filename: string; pdf: ArrayBuffer };
+
+function mimeWord(text: string): string {
+  return /^[\x20-\x7e]*$/.test(text) ? text
+    : `=?UTF-8?B?${base64(new TextEncoder().encode(text).buffer as ArrayBuffer)}?=`;
+}
+
+function wrap76(b64: string): string {
+  return b64.replace(/.{1,76}/g, "$&\r\n");
+}
+
+function mimeMessage(from: string, m: Mail): string {
+  const boundary = `taf-${crypto.randomUUID()}`;
+  const html64 = base64(new TextEncoder().encode(m.html).buffer as ArrayBuffer);
+  const domain = from.split("@")[1] ?? "localhost";
+  return [
+    `From: ${mimeWord(env("COMPANY_NAME", "Total Air Filtration"))} <${from}>`,
+    `To: <${m.to}>`,
+    `Subject: ${mimeWord(m.subject)}`,
+    `Date: ${new Date().toUTCString().replace("GMT", "+0000")}`,
+    `Message-ID: <${crypto.randomUUID()}@${domain}>`,
+    "MIME-Version: 1.0",
+    `Content-Type: multipart/mixed; boundary="${boundary}"`,
+    "",
+    `--${boundary}`,
+    "Content-Type: text/html; charset=UTF-8",
+    "Content-Transfer-Encoding: base64",
+    "",
+    wrap76(html64),
+    `--${boundary}`,
+    `Content-Type: application/pdf; name="${m.filename}"`,
+    "Content-Transfer-Encoding: base64",
+    `Content-Disposition: attachment; filename="${m.filename}"`,
+    "",
+    wrap76(base64(m.pdf)),
+    `--${boundary}--`,
+    "",
+  ].join("\r\n");
+}
+
+async function gmailSend(m: Mail): Promise<void> {
+  const user = env("GMAIL_USER").trim();
+  const pass = env("GMAIL_APP_PASSWORD").replace(/\s+/g, "");
+  if (/[\r\n<>]/.test(m.to) || !m.to.includes("@")) {
+    throw new Error(`"${m.to}" is not an email address`);
+  }
+  const host = env("SMTP_HOST", "smtp.gmail.com");
+  const port = Number(env("SMTP_PORT", "465"));
+  const conn = env("SMTP_TLS", "true") === "false"
+    ? await Deno.connect({ hostname: host, port })
+    : await Deno.connectTls({ hostname: host, port });
+  const enc = new TextEncoder(), dec = new TextDecoder();
+  let buffered = "";
+  const timeout = <T>(p: Promise<T>) => Promise.race([p, new Promise<T>((_, no) =>
+    setTimeout(() => no(new Error("Gmail did not answer in time")), 30_000))]);
+
+  // One reply, which may run over several lines ("250-..." then "250 ...").
+  async function reply(): Promise<{ code: number; text: string }> {
+    const lines: string[] = [];
+    for (;;) {
+      const nl = buffered.indexOf("\r\n");
+      if (nl >= 0) {
+        const line = buffered.slice(0, nl);
+        buffered = buffered.slice(nl + 2);
+        lines.push(line);
+        if (line.length < 4 || line[3] !== "-") {
+          return { code: Number(line.slice(0, 3)), text: lines.join(" ") };
+        }
+        continue;
+      }
+      const chunk = new Uint8Array(4096);
+      const n = await timeout(conn.read(chunk));
+      if (n === null) throw new Error("Gmail closed the connection");
+      buffered += dec.decode(chunk.subarray(0, n));
+    }
+  }
+  async function say(line: string, want: number, why: string) {
+    await conn.write(enc.encode(line + "\r\n"));
+    const r = await reply();
+    if (r.code !== want) throw new Error(`${why}: ${r.text.slice(0, 160)}`);
+  }
+
+  try {
+    const hello = await reply();
+    if (hello.code !== 220) throw new Error(`Gmail said ${hello.text.slice(0, 120)}`);
+    await say("EHLO taf-order-entry", 250, "Gmail did not say hello");
+    await say(`AUTH PLAIN ${btoa(`\u0000${user}\u0000${pass}`)}`, 235,
+              "Gmail refused the sign-in - check GMAIL_USER and the app password");
+    await say(`MAIL FROM:<${user}>`, 250, "Gmail refused the sender");
+    await say(`RCPT TO:<${m.to}>`, 250, `Gmail refused ${m.to}`);
+    await say("DATA", 354, "Gmail would not take the message");
+    // A line that starts with a dot gets another, so it is not the end.
+    const body = mimeMessage(user, m).replace(/\r\n\./g, "\r\n..");
+    await say(body + "\r\n.", 250, "Gmail did not accept the message");
+    try { await say("QUIT", 221, "bye"); } catch { /* sent already */ }
+  } finally {
+    try { conn.close(); } catch { /* closed */ }
+  }
 }
 
 function escapeHtml(text: string): string {

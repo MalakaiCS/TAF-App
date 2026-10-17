@@ -296,6 +296,72 @@ def xero_api(method: str, path: str, query: dict, body, headers):
     return 200, {"Invoices": [invoice_out(inv)]}
 
 
+class FakeGmail(threading.Thread):
+    """Gmail's SMTP, as far as the function uses it: hello, sign in with the
+    app password, one message. What arrived is kept to look at."""
+
+    def __init__(self):
+        super().__init__(daemon=True)
+        self.sock = socket.socket()
+        self.sock.bind(("127.0.0.1", 0))
+        self.sock.listen(5)
+        self.port = self.sock.getsockname()[1]
+        self.messages: list = []
+        self.password = "abcd efgh ijkl mnop".replace(" ", "")
+
+    def run(self):
+        while True:
+            conn, _ = self.sock.accept()
+            threading.Thread(target=self.serve, args=(conn,), daemon=True).start()
+
+    def serve(self, conn):
+        f = conn.makefile("rb")
+        out = lambda line: conn.sendall(line.encode() + b"\r\n")
+        out("220 smtp.gmail.com ESMTP")
+        mail = {}
+        try:
+            while True:
+                line = f.readline().decode().rstrip("\r\n")
+                if not line:
+                    return
+                word = line.split(" ")[0].upper()
+                if word == "EHLO":
+                    out("250-smtp.gmail.com at your service")
+                    out("250 AUTH LOGIN PLAIN")
+                elif word == "AUTH":
+                    import base64
+                    _, user, pw = base64.b64decode(line.split(" ")[2]).split(b"\0")
+                    if pw.decode() == self.password:
+                        mail["user"] = user.decode()
+                        out("235 2.7.0 Accepted")
+                    else:
+                        out("535 5.7.8 Username and Password not accepted")
+                elif word == "MAIL":
+                    mail["from"] = line
+                    out("250 OK")
+                elif word == "RCPT":
+                    mail["to"] = line
+                    out("250 OK")
+                elif word == "DATA":
+                    out("354 Go ahead")
+                    body = []
+                    while True:
+                        got = f.readline().decode()
+                        if got in (".\r\n", "."):
+                            break
+                        body.append(got)
+                    mail["data"] = "".join(body)
+                    self.messages.append(dict(mail))
+                    out("250 2.0.0 OK")
+                elif word == "QUIT":
+                    out("221 2.0.0 closing")
+                    return
+                else:
+                    out("502 not here")
+        finally:
+            conn.close()
+
+
 class Fake(BaseHTTPRequestHandler):
     def log_message(self, *_a):
         pass
@@ -908,6 +974,50 @@ def run_checks() -> None:
     check("a supplier with no email: in Xero, and said plainly why it was not sent",
           out.get("po_number") and not out.get("emailed") and
           "no email address" in out.get("error", ""), str(out))
+
+    print("\n── purchase orders from the company's Gmail ──")
+    gmail = FakeGmail()
+    gmail.start()
+    set_secret(GMAIL_USER="orders@taf.example",
+               GMAIL_APP_PASSWORD="abcd efgh ijkl mnop", SMTP_HOST="127.0.0.1",
+               SMTP_PORT=str(gmail.port), SMTP_TLS="false")
+    po3 = str(uuid.uuid4())
+    W.pos[po3] = {"id": po3, "supplier": "FD Greenwood", "supplier_id": fdg["id"],
+                  "status": "draft", "reference": "Rack 4", "lines": [
+                      {"description": "45mm C channel", "quantity": 10,
+                       "unit_price": 18.5, "item_code": "FDG-C45-2440"}]}
+    resend_before = len(W.mails)
+    code, out = call("po_send", {"po_id": po3}, auth="Bearer boss")
+    got = gmail.messages[-1] if gmail.messages else {}
+    check("approve & send: approved in Xero and emailed from the company's Gmail",
+          code == 200 and out.get("emailed") and out.get("po_number")
+          and out.get("emailed_to") == "orders@fdg.example"
+          and len(W.mails) == resend_before, str(out))
+    check("signed in as the company's account, with its app password",
+          got.get("user") == "orders@taf.example"
+          and "orders@taf.example" in got.get("from", ""), str(got)[:200])
+    check("to the supplier, with Xero's PDF of the order attached",
+          "orders@fdg.example" in got.get("to", "")
+          and f"Purchase order {out.get('po_number')}.pdf" in got.get("data", "")
+          and "application/pdf" in got.get("data", ""), str(got)[:300])
+    import base64 as _b64, email as _email
+    parsed = _email.message_from_string(got.get("data", ""))
+    pdfs = [p.get_payload(decode=True) for p in parsed.walk()
+            if p.get_content_type() == "application/pdf"]
+    check("and the attachment is the PDF itself, whole",
+          pdfs and pdfs[0].startswith(b"%PDF"), str(pdfs[:1])[:80])
+    check("the order says it went, and to whom",
+          W.pos[po3]["emailed_to"] == "orders@fdg.example"
+          and W.pos[po3]["status"] == "sent", str(W.pos[po3]))
+    po4 = str(uuid.uuid4())
+    W.pos[po4] = dict(W.pos[po3], id=po4, status="draft", xero_po_id=None,
+                      po_number=None, emailed_to=None)
+    set_secret(GMAIL_APP_PASSWORD="wrong")
+    code, out = call("po_send", {"po_id": po4}, auth="Bearer boss")
+    check("a wrong app password is said plainly, and the order is still in Xero",
+          not out.get("emailed") and out.get("po_number")
+          and "app password" in out.get("error", ""), str(out))
+    set_secret(GMAIL_USER="", GMAIL_APP_PASSWORD="", PO_EMAIL_VIA="")
 
     print("\n── staying connected ──")
     W.conn["expires_at"] = (now() - dt.timedelta(minutes=5)).isoformat()

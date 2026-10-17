@@ -19780,7 +19780,8 @@ class ModernOrderApp(tk.Frame):
                         parent=dlg)
                 elif send:
                     self.status_var.set(f"Purchase order {out.get('po_number')} "
-                                        f"sent to {out.get('emailed_to')}.")
+                                        f"approved in Xero and emailed to "
+                                        f"{out.get('emailed_to')}.")
                 else:
                     self.status_var.set("Purchase order saved as a draft.")
                 dlg.destroy()
@@ -19790,7 +19791,7 @@ class ModernOrderApp(tk.Frame):
         foot.pack(fill="x")
         flat_btn(foot, "Close", dlg.destroy, bg=CNE,
                  pady=px(6)).pack(side="right")
-        flat_btn(foot, "Send to supplier", lambda: _store(True), bg=CGR,
+        flat_btn(foot, "Approve & send to supplier", lambda: _store(True), bg=CGR,
                  pady=px(6)).pack(side="left")
         flat_btn(foot, "Save draft", lambda: _store(False), bg=CNE,
                  variant="secondary", pady=px(6)).pack(side="left",
@@ -20115,7 +20116,7 @@ class ModernOrderApp(tk.Frame):
             if po.get("status") in ("received", "cancelled"):
                 msg.config(text="That one is finished.", fg=CRD)
                 return
-            msg.config(text="Sending to Xero…", fg=CMU)
+            msg.config(text="Approving in Xero and sending…", fg=CMU)
 
             def _done(out, err):
                 out = out or {}
@@ -20126,8 +20127,9 @@ class ModernOrderApp(tk.Frame):
                 elif not out.get("emailed"):
                     msg.config(text=out.get("error") or "", fg=CRD)
                 else:
-                    msg.config(text=f"{out.get('po_number')} emailed to "
-                                    f"{out.get('emailed_to')}.", fg=CMU)
+                    msg.config(text=f"{out.get('po_number')} approved in Xero "
+                                    f"and emailed to {out.get('emailed_to')}.",
+                               fg=CMU)
                 _reload()
             self._buy_bg(lambda: _xero.send_po(po["id"]), _done)
 
@@ -20208,7 +20210,7 @@ class ModernOrderApp(tk.Frame):
             flat_btn(o_bar, "Order what is low…", lambda: _order_low(),
                      variant="secondary", pady=px(5)).pack(side="left",
                                                            padx=(px(8), 0))
-            for text, fn in (("Open", _open), ("Send to supplier", _send),
+            for text, fn in (("Open", _open), ("Approve & send", _send),
                              ("What arrived…", _receive)):
                 flat_btn(o_bar, text, fn, variant="secondary",
                          pady=px(5)).pack(side="left", padx=(px(8), 0))
