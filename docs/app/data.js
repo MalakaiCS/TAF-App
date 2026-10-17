@@ -384,6 +384,11 @@ var TAFDATA = (function () {
     select: select, rpc: rpc, insert: insert, update: update, remove: remove,
     request: request, friendly: friendly,
     upload: upload, signedUrl: signedUrl, callFunction: callFunction,
+    // A file in a public bucket (job-photos, stock-images): no sign-in.
+    publicUrl: function (bucket, path) {
+      return URLBASE + "/storage/v1/object/public/" + bucket + "/"
+           + String(path || "").split("/").map(encodeURIComponent).join("/");
+    },
     _session: function () { return SESSION; }
   };
 })();

@@ -27,6 +27,7 @@ var TAFAPP = (function () {
     { key: "customers",   label: "Customers", icon: "people" },
     { key: "stock",       label: "Stock",     icon: "box" },
     { key: "supplies",    label: "Supplies",  icon: "bag" },
+    { key: "board",       label: "Board",     icon: "board", feature: "tv_board" },
     { key: "log",         label: "Log",       icon: "clock", from: 3 }
   ];
   var BAR = 4;
@@ -48,6 +49,8 @@ var TAFAPP = (function () {
     box:    ["M21 7.5 12 3 3 7.5 12 12z", "M3 7.5v9L12 21l9-4.5v-9", "M12 12v9"],
     bag:    ["M5.5 8h13l-1 12.5h-11z", "M9 8V7a3 3 0 0 1 6 0v1"],
     clock:  ["M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0Z", "M12 7v5l3.5 2"],
+    board:  ["M3 4h18v13H3z", "M8 21h8", "M12 17v4", "M8 8v5", "M12 8v3",
+             "M16 8v6"],
     more:   ["M5 12h.01", "M12 12h.01", "M19 12h.01"]
   };
 
@@ -70,7 +73,8 @@ var TAFAPP = (function () {
     // ever shows an empty table and a permission error. The database is
     // still what decides - this only stops us offering it.
     return TABS.filter(function (t) {
-      return !(t.from && D.roleLevel() < t.from);
+      return !(t.from && D.roleLevel() < t.from)
+          && !(t.feature && !feature(t.feature));
     });
   }
 
@@ -184,8 +188,21 @@ var TAFAPP = (function () {
       }
       pollBell();
       stateBar();
+      // The TV: opened with ?board=tv, it is the production board and
+      // nothing else.
+      if (/[?&]board=tv\b/.test(location.search)) {
+        document.body.classList.add("tv");
+        active = "board";
+        keepAwake();
+      }
       show(active);
       hideBootWhenLoaded();
+      // The switches decide which tabs and buttons there are; the screen
+      // is redrawn once they are known.
+      loadFeatures().then(function () {
+        buildTabs();
+        if (active === "board" || active === "orders") { show(active); }
+      });
     }
     start._showApp = showApp;
   }
@@ -869,9 +886,14 @@ var TAFAPP = (function () {
       var files = U.el("div");
       body.appendChild(files);
 
-      D.select("orders", { "id": "eq." + row.id, "select": "items,header" })
+      reportFault._order = row;
+      Promise.all([
+        D.select("orders", { "id": "eq." + row.id, "select": "items,header" }),
+        loadRunning()
+      ]).then(function (got) { return got[0]; })
         .then(function (rows) {
           var order = (rows && rows[0]) || {};
+          row._items = order.items || [];
           drawLines(lines, row, order.items || [], body);
           drawCutPlan(body, order.header || {});
           drawNotes(body, row, order.header || {});
@@ -903,23 +925,56 @@ var TAFAPP = (function () {
           + (items.length - n) + " to go";
     }
 
+    // Timing a line and recording a fault each want a button on the line,
+    // when they are switched on.
+    var extras = feature("job_timer") || feature("fault_log");
     var rows = items.map(function (it, idx) {
       var tick = U.el("button", {
         cls: "tick", text: it.made ? "✓" : "",
         attr: { type: "button", "aria-pressed": String(!!it.made),
                 "aria-label": "Mark line " + (idx + 1) + " as made" }
       });
-      var tr = U.el("tr", {
-        cls: it.made ? "made" : "",
-        kids: [U.cell(null, { node: tick }),
-               U.cell(it.Quantity || it.quantity || ""),
-               U.cell(lineName(it)),
-               U.cell(lineSize(it)),
-               U.cell(it["Media Type"] || it.media || "")]
-      });
+      var more = U.el("div", { cls: "line-acts" });
+      drawTimer(more, row, it);
+      if (feature("fault_log")) {
+        more.appendChild(U.button("⚠", function () {
+          reportFault(row, it, items);
+        }, "quiet fault"));
+        more.lastChild.setAttribute("aria-label", "Record a fault on line "
+                                                  + (idx + 1));
+      }
+      var cells = [U.cell(null, { node: tick }),
+                   U.cell(it.Quantity || it.quantity || ""),
+                   U.cell(lineName(it)),
+                   U.cell(lineSize(it)),
+                   U.cell(it["Media Type"] || it.media || "")];
+      if (extras) { cells.push(U.cell(null, { node: more })); }
+      var tr = U.el("tr", { cls: it.made ? "made" : "", kids: cells });
       tick.addEventListener("click", function () {
         var want = !it.made;
         tick.disabled = true;
+        if (!want) { markMade(false); return; }
+        // With QC on: its checks first, kept on the line, then made.
+        qcBeforeMade(it).then(function (qc) {
+          if (qc === null) { tick.disabled = false; return; }
+          if (!Object.keys(qc).length) { markMade(true); return; }
+          S.send({
+            rpc: "set_order_line_qc",
+            label: (row.customer || "Order") + " · line " + (idx + 1) + " checked",
+            needs_row: true,
+            gone: "That line is not on the order any more.",
+            body: { p_order_id: row.id, p_line_id: it.line_id || "", p_qc: qc }
+          }).then(function () {
+            it.qc = qc;
+            markMade(true);
+          }).catch(function (err) {
+            U.notice(body, err.message);
+            tick.disabled = false;
+          });
+        });
+      });
+
+      function markMade(want) {
         // The filter is made whether or not the wifi reaches this corner of
         // the factory. Setting a line to made is the same done twice as
         // done once, so this is safe to keep and send later.
@@ -958,14 +1013,13 @@ var TAFAPP = (function () {
         }).catch(function (err) {
           U.notice(body, err.message);
         }).then(function () { tick.disabled = false; });
-      });
+      }
       return tr;
     });
 
-    into.appendChild(U.card("Lines", [
-      U.table([" ", { text: "Qty" }, "Item", "Size (mm)", "Media"], rows),
-      count
-    ]));
+    var heads = [" ", { text: "Qty" }, "Item", "Size (mm)", "Media"];
+    if (extras) { heads.push(""); }
+    into.appendChild(U.card("Lines", [U.table(heads, rows), count]));
     var packing = packingNotes(items);
     if (packing) { into.appendChild(packing); }
     tally();
@@ -1025,6 +1079,478 @@ var TAFAPP = (function () {
     return [it.Short, it.Long, it.Channel].filter(Boolean).join(" × ");
   }
 
+  /* ── Feature switches ────────────────────────────────────────────────
+     The same switches the desktop turns on (Settings → Features), so a
+     thing is on for everybody or for nobody. Remembered for no signal. */
+
+  var FEATURES = {};
+
+  function feature(key) { return !!FEATURES[key]; }
+
+  function loadFeatures() {
+    return D.select("feature_switches", { "select": "key,enabled" })
+      .then(function (rows) {
+        var on = {};
+        (rows || []).forEach(function (r) { if (r.enabled) { on[r.key] = true; } });
+        FEATURES = on;
+        S.remember("features", on);
+        return on;
+      }).catch(function () {
+        var box = S.recall("features");
+        FEATURES = (box && box.v) || {};
+        return FEATURES;
+      });
+  }
+
+  /* ── The production board, and the TV ────────────────────────────────
+     Four columns somebody at the far end of the factory can read. The same
+     rules as floor.py's board_column and production_board - a test holds
+     the two together. */
+
+  var BOARD_COLUMNS = [["to_cut", "To cut"], ["making", "Making"],
+                       ["packed", "Packed"], ["out", "Out the door"]];
+  var GONE = ["Dispatched", "Delivered", "Collected"];
+
+  function pad2(n) { return (n < 10 ? "0" : "") + n; }
+  function ymd(d) {
+    return d ? d.getFullYear() + "-" + pad2(d.getMonth() + 1) + "-"
+               + pad2(d.getDate()) : "";
+  }
+
+  // The day, here, of a time the database stamped in UTC.
+  function stampDay(text) {
+    var s = String(text || "").trim();
+    if (!s) { return null; }
+    var d = new Date(s);
+    if (isNaN(d.getTime())) { return null; }
+    d.setHours(0, 0, 0, 0);
+    return d;
+  }
+
+  function stageReached(h) {
+    var got = h.stages, reached = "";
+    if (got && typeof got === "object") {
+      ["marked", "cut", "drilled", "assembled", "packed"].forEach(function (k) {
+        if (got[k]) { reached = k; }
+      });
+    }
+    return reached;
+  }
+
+  function boardColumn(row, today) {
+    if (row.archived) { return ""; }
+    var h = row.header || {};
+    var status = String(h.status || row.status || "Pending");
+    if (GONE.indexOf(status) >= 0) {
+      var went = stampDay(h.status_at) || U.parseDate(row.date_due);
+      return went && ymd(went) === ymd(today) ? "out" : "";
+    }
+    if (status === "Complete") { return "packed"; }
+    var reached = stageReached(h);
+    if (reached === "packed") { return "packed"; }
+    var made = parseInt(row.n_made, 10) || 0;
+    if (["cut", "drilled", "assembled"].indexOf(reached) >= 0 || made > 0
+        || status === "In Production") { return "making"; }
+    return "to_cut";
+  }
+
+  function workingDaysOn(day, n) {
+    var d = new Date(day.getTime()), left = Math.max(0, n | 0);
+    while (left) {
+      d.setDate(d.getDate() + 1);
+      if (d.getDay() !== 0 && d.getDay() !== 6) { left--; }
+    }
+    return d;
+  }
+
+  function productionBoard(rows, today, ahead) {
+    var horizon = workingDaysOn(today, ahead === undefined ? 1 : ahead);
+    var cols = {};
+    BOARD_COLUMNS.forEach(function (c) {
+      cols[c[0]] = { key: c[0], label: c[1], cards: [] };
+    });
+    (rows || []).forEach(function (row) {
+      var col = boardColumn(row, today);
+      if (!col) { return; }
+      var due = U.parseDate(row.date_due);
+      if (col === "to_cut" && (!due || due > horizon)) { return; }
+      var h = row.header || {};
+      cols[col].cards.push({
+        id: row.id,
+        customer: String(row.customer_name || row.customer || ""),
+        order_no: String(row.order_number || row.order_no || ""),
+        due: due ? ymd(due) : "",
+        late: !!(due && due < today && col !== "out"),
+        today: !!(due && ymd(due) === ymd(today)),
+        priority: !!h.priority,
+        made: parseInt(row.n_made, 10) || 0,
+        lines: parseInt(row.n_items, 10) || 0
+      });
+    });
+    BOARD_COLUMNS.forEach(function (c) {
+      cols[c[0]].cards.sort(function (a, b) {
+        if (a.priority !== b.priority) { return a.priority ? -1 : 1; }
+        var da = a.due || "9999-12-31", db = b.due || "9999-12-31";
+        if (da !== db) { return da < db ? -1 : 1; }
+        var ca = a.customer.toLowerCase(), cb = b.customer.toLowerCase();
+        return ca < cb ? -1 : (ca > cb ? 1 : 0);
+      });
+    });
+    return BOARD_COLUMNS.map(function (c) { return cols[c[0]]; });
+  }
+
+  var boardTimer = null;
+  var BOARD_AHEAD = "taf_board_ahead";
+
+  SCREENS.board = function (main) {
+    if (!feature("tv_board")) {
+      U.clear(main);
+      main.appendChild(U.empty("The production board is switched off.",
+        "A director or admin turns it on in the desktop app: Settings → "
+        + "Features → Production board on the TV."));
+      return;
+    }
+    var tv = document.body.classList.contains("tv");
+    var ahead = 1;
+    try { ahead = parseInt(localStorage.getItem(BOARD_AHEAD), 10) || 1; }
+    catch (e) { ahead = 1; }
+
+    function draw() {
+      loadOrders(true).then(function (rows) {
+        if (active !== "board") { return; }
+        U.clear(main);
+        var today = U.today();
+        var cols = productionBoard(rows, today, ahead);
+        var now = new Date();
+        var head = U.el("div", { cls: "board-head", kids: [
+          U.el("h2", { text: "Production board" }),
+          U.el("span", { cls: "board-clock",
+                         text: now.toLocaleDateString(undefined, {
+                           weekday: "long", day: "numeric", month: "long" })
+                       + "  ·  " + pad2(now.getHours()) + ":"
+                       + pad2(now.getMinutes()) })] });
+        if (!tv) {
+          var span = U.el("select", { attr: { id: "board-ahead",
+                                              "aria-label": "How far ahead" },
+            kids: [[1, "Due today and next working day"], [2, "Next 2 working days"],
+                   [5, "Next week"]].map(function (o) {
+              return U.el("option", { text: o[1], attr: { value: String(o[0]) } });
+            }) });
+          span.value = String(ahead);
+          span.addEventListener("change", function () {
+            ahead = parseInt(span.value, 10) || 1;
+            try { localStorage.setItem(BOARD_AHEAD, String(ahead)); } catch (e) {}
+            draw();
+          });
+          head.appendChild(span);
+          head.appendChild(U.button("Show on the TV", enterTv, "go"));
+        } else {
+          head.appendChild(U.button("⛶", function () {
+            var el = document.documentElement;
+            if (el.requestFullscreen) { el.requestFullscreen().catch(function () {}); }
+          }, "quiet board-full"));
+        }
+        main.appendChild(head);
+        main.appendChild(U.el("div", { cls: "board", kids: cols.map(function (c) {
+          return U.el("section", { cls: "board-col", attr: { "data-col": c.key },
+            kids: [U.el("h3", { kids: [U.el("span", { text: c.label }),
+                                       U.el("b", { text: String(c.cards.length) })] }),
+                   U.el("div", { cls: "board-cards", kids: c.cards.length
+                     ? c.cards.map(boardCard)
+                     : [U.el("div", { cls: "board-none", text: "—" })] })] });
+        }) }));
+      }).catch(function (err) {
+        if (active === "board") { U.notice(main, err.message); }
+      });
+    }
+
+    function boardCard(c) {
+      var pct = c.lines ? Math.round(100 * c.made / c.lines) : 0;
+      return U.el("article", {
+        cls: "board-card" + (c.late ? " late" : "") + (c.today ? " today" : "")
+           + (c.priority ? " prio" : ""),
+        attr: { "data-order": c.id },
+        kids: [U.el("div", { cls: "who", text: (c.priority ? "★ " : "") + c.customer }),
+               U.el("div", { cls: "meta", text: [c.order_no ? "O/N " + c.order_no : "",
+                 c.due ? (c.late ? "LATE " : "Due ")
+                   + c.due.slice(8, 10) + "/" + c.due.slice(5, 7) : ""]
+                 .filter(Boolean).join("  ·  ") }),
+               c.lines ? U.el("div", { cls: "bar", kids: [U.el("i", {
+                 attr: { style: "width:" + pct + "%" } })],
+                 attr: { title: c.made + " of " + c.lines + " lines made" } })
+                       : U.el("span")]
+      });
+    }
+
+    draw();
+    clearInterval(boardTimer);
+    // Every half minute while it is on the screen.
+    boardTimer = setInterval(function () {
+      if (active !== "board") { clearInterval(boardTimer); boardTimer = null; return; }
+      if (!document.hidden) { draw(); }
+    }, 30000);
+  };
+
+  // A phone or PC showing the board becomes the TV: no bars, big type, the
+  // screen kept awake.
+  function enterTv() {
+    document.body.classList.add("tv");
+    var el = document.documentElement;
+    if (el.requestFullscreen) { el.requestFullscreen().catch(function () {}); }
+    keepAwake();
+    if (!enterTv._wired) {
+      enterTv._wired = true;
+      // Escape puts a PC back to normal; the TV itself never needs to.
+      document.addEventListener("keydown", function (e) {
+        if (e.key !== "Escape" || !document.body.classList.contains("tv")
+            || /[?&]board=tv\b/.test(location.search) || U.sheetOpen()) { return; }
+        document.body.classList.remove("tv");
+        if (document.fullscreenElement && document.exitFullscreen) {
+          document.exitFullscreen().catch(function () {});
+        }
+        show("board");
+      });
+    }
+    show("board");
+  }
+
+  var wakeLock = null;
+  function keepAwake() {
+    if (!("wakeLock" in navigator)) { return; }
+    function ask() {
+      if (!document.body.classList.contains("tv") || document.hidden) { return; }
+      navigator.wakeLock.request("screen").then(function (lock) {
+        wakeLock = lock;
+      }).catch(function () {});
+    }
+    ask();
+    if (!keepAwake._wired) {
+      keepAwake._wired = true;
+      document.addEventListener("visibilitychange", ask);
+    }
+  }
+
+  /* ── Quality checks ──────────────────────────────────────────────────
+     The same lookup as floor.checks_for: the filter type's own list, or
+     the list for every type ('*'). */
+
+  function checksFor(type, lists) {
+    var want = String(type || "").trim().toLowerCase();
+    var keys = Object.keys(lists || {});
+    function clean(list) {
+      return (list || []).map(String).filter(function (c) { return c.trim(); });
+    }
+    for (var i = 0; i < keys.length; i++) {
+      if (want && keys[i].trim().toLowerCase() === want) {
+        return clean(lists[keys[i]]);
+      }
+    }
+    return clean((lists || {})["*"]);
+  }
+
+  var QC_LISTS = null;
+  function loadQcLists() {
+    if (QC_LISTS) { return Promise.resolve(QC_LISTS); }
+    return D.select("qc_checklists", { "select": "filter_type,checks" })
+      .then(function (rows) {
+        var out = {};
+        (rows || []).forEach(function (r) { out[r.filter_type] = r.checks || []; });
+        QC_LISTS = out;
+        S.remember("qc_lists", out);
+        return out;
+      }).catch(function () {
+        var box = S.recall("qc_lists");
+        return (box && box.v) || {};
+      });
+  }
+
+  // Resolves with what to keep on the line ({} for nothing to check), or
+  // null when it was not passed.
+  function qcBeforeMade(it) {
+    if (!feature("qc_checklist")) { return Promise.resolve({}); }
+    return loadQcLists().then(function (lists) {
+      var checks = checksFor(it["Filter Type"] || it.product_type, lists);
+      if (!checks.length) { return {}; }
+      return new Promise(function (resolve) {
+        var settled = false;
+        function done(v) { if (!settled) { settled = true; resolve(v); } }
+        U.openSheet(function (body, close) {
+          body.appendChild(U.el("h2", { cls: "title",
+            text: "Quality check: " + (it["Filter Type"] || "this line") }));
+          body.appendChild(U.el("div", { cls: "muted",
+            text: "Tick each one before it is marked made." }));
+          var boxes = checks.map(function (c, i) {
+            var box = U.el("input", { attr: { type: "checkbox",
+                                              "data-check": String(i) } });
+            body.appendChild(U.el("label", { cls: "qc-check", kids: [
+              box, U.el("span", { text: c })] }));
+            return box;
+          });
+          var ok = U.button("All checked - mark made", function () {
+            if (!boxes.every(function (b) { return b.checked; })) {
+              U.notice(body, "Tick every check - or if one fails, press It failed.");
+              return;
+            }
+            done({ passed: true, checks: checks,
+                   by: D.cachedProfile().full_name || D.cachedProfile().username || "",
+                   at: stamp() });
+            close();
+          }, "go");
+          ok.setAttribute("id", "qc-pass");
+          var failed = U.button("It failed", function () {
+            done(null);
+            close();
+            if (feature("fault_log")) { reportFault(null, it); }
+          }, "quiet");
+          failed.setAttribute("id", "qc-failed");
+          body.appendChild(U.el("div", { cls: "row-actions", kids: [
+            ok, failed, U.button("Cancel", function () { done(null); close(); }, "quiet")] }));
+        });
+      });
+    });
+  }
+
+  /* ── Faults ──────────────────────────────────────────────────────────
+     A filter that failed QC, or came back: which order and line, what was
+     wrong, who made it, and a photo. The same reasons as floor.FAULT_REASONS. */
+
+  var FAULT_REASONS = ["Wrong size", "Media damaged", "Frame or channel fault",
+                       "Gaps or poor seal", "Wrong media", "Brace missing",
+                       "Damaged in transit", "Other"];
+
+  function reportFault(row, it, items) {
+    row = row || reportFault._order || {};
+    U.openSheet(function (body, close) {
+      body.appendChild(U.el("h2", { cls: "title", text: "Record a fault" }));
+      body.appendChild(U.el("div", { cls: "muted", text: [row.customer,
+        row.order_no ? "O/N " + row.order_no : ""].filter(Boolean).join("  ·  ") }));
+      var lines = (items || (it ? [it] : [])).filter(Boolean);
+      var which = U.el("select", { attr: { id: "fault-line" },
+        kids: lines.map(function (l, i) {
+          return U.el("option", { text: "Line " + (i + 1) + ": " + lineName(l) + " "
+                                       + lineSize(l), attr: { value: String(i) } });
+        }) });
+      if (it) { which.value = String(Math.max(0, lines.indexOf(it))); }
+      var reason = U.el("select", { attr: { id: "fault-reason" },
+        kids: FAULT_REASONS.map(function (r) {
+          return U.el("option", { text: r, attr: { value: r } });
+        }) });
+      var found = U.el("select", { attr: { id: "fault-found" }, kids: [
+        U.el("option", { text: "Found in QC", attr: { value: "qc" } }),
+        U.el("option", { text: "Came back", attr: { value: "returned" } }),
+        U.el("option", { text: "Found on site", attr: { value: "site" } })] });
+      var qty = U.el("input", { attr: { type: "text", inputmode: "decimal",
+                                        id: "fault-qty", value: "1" } });
+      var detail = U.el("input", { attr: { type: "text", id: "fault-detail",
+                                           placeholder: "What exactly (optional)" } });
+      var photo = U.el("input", { attr: { type: "file", accept: "image/*",
+                                          capture: "environment", id: "fault-photo" } });
+      if (lines.length) {
+        body.appendChild(U.el("label", { cls: "f", kids: [
+          U.el("span", { text: "Which line" }), which] }));
+      }
+      [["What was wrong", reason], ["Where", found], ["How many", qty],
+       ["More detail", detail], ["Photo", photo]].forEach(function (p) {
+        body.appendChild(U.el("label", { cls: "f", kids: [
+          U.el("span", { text: p[0] }), p[1]] }));
+      });
+      var save = U.button("Save", function () {
+        var n = parseFloat(qty.value);
+        if (!(n > 0)) { U.notice(body, "How many should be a number."); return; }
+        var line = lines[parseInt(which.value, 10)] || it || {};
+        save.disabled = true;
+        var file = photo.files && photo.files[0];
+        var sending = file
+          ? D.upload(FILE_BUCKET, "faults/" + newId() + "."
+                     + ((file.type || "").split("/")[1] || "jpg").split("+")[0],
+                     file, file.type)
+          : Promise.resolve("");
+        sending.then(function (path) {
+          return D.insert("returns", {
+            order_id: row.id || null, order_number: row.order_no || "",
+            customer_name: row.customer || "", quantity: n,
+            reason: reason.value, detail: detail.value.trim(), found: found.value,
+            line_id: line.line_id || "", filter_type: lineName(line) === "Filter"
+              ? "" : lineName(line), made_by: line.made_by || "",
+            photo_path: path || "",
+            created_by: D.cachedProfile().full_name || D.cachedProfile().username || ""
+          }, true);
+        }).then(function () {
+          D.insert("audit_log", {
+            user_id: (D.whoami() || {}).id,
+            username: D.cachedProfile().username || D.cachedProfile().full_name || "",
+            action: "fault_recorded",
+            details: "O/N: " + (row.order_no || "") + " | " + reason.value
+          }, true).catch(function () {});
+          close();
+        }).catch(function (err) {
+          save.disabled = false;
+          U.notice(body, err.message);
+        });
+      }, "go");
+      save.setAttribute("id", "fault-save");
+      body.appendChild(U.el("div", { cls: "row-actions", kids: [
+        save, U.button("Cancel", close, "quiet")] }));
+    });
+  }
+
+  function newId() {
+    if (window.crypto && crypto.randomUUID) { return crypto.randomUUID(); }
+    return Date.now().toString(36) + Math.random().toString(36).slice(2, 12);
+  }
+
+  /* ── The job timer ───────────────────────────────────────────────────
+     Start on a line, Stop when it is done. Kept by the database with its
+     own clock, so it needs signal - a timer that guessed would teach the
+     wrong times. */
+
+  function drawTimer(into, row, it) {
+    if (!feature("job_timer") || !it.line_id) { return; }
+    var btn = U.button("", null, "quiet timer");
+    function paint() {
+      var mine = RUNNING && RUNNING.order_id === row.id
+                 && RUNNING.line_id === it.line_id;
+      btn.textContent = mine ? "■ Stop" : "▶ Start";
+      btn.classList.toggle("on", !!mine);
+      btn.setAttribute("aria-label", (mine ? "Stop timing " : "Start timing ")
+                       + lineName(it));
+    }
+    btn.addEventListener("click", function () {
+      var mine = RUNNING && RUNNING.order_id === row.id
+                 && RUNNING.line_id === it.line_id;
+      btn.disabled = true;
+      (mine ? D.rpc("stop_job_timer", {})
+            : D.rpc("start_job_timer", { p_order_id: row.id, p_line_id: it.line_id }))
+        .then(function (out) {
+          var got = Array.isArray(out) ? out[0] : out;
+          RUNNING = mine ? null : got;
+          document.querySelectorAll("button.timer").forEach(function (b) {
+            if (b._paint) { b._paint(); }
+          });
+          if (mine && got && got.minutes !== undefined) {
+            U.notice(document.getElementById("sheet-body"),
+                     "Took " + got.minutes + " min.", "ok");
+          }
+        }).catch(function (err) {
+          U.notice(document.getElementById("sheet-body"), err.offline
+            ? "The timer needs signal - it keeps the time itself." : err.message);
+        }).then(function () { btn.disabled = false; });
+    });
+    btn._paint = paint;
+    paint();
+    into.appendChild(btn);
+  }
+
+  var RUNNING = null;
+  function loadRunning() {
+    if (!feature("job_timer")) { return Promise.resolve(null); }
+    var me = (D.whoami() || {}).id;
+    return D.select("job_times", { "select": "*", "user_id": "eq." + me,
+                                   "stopped_at": "is.null", "limit": 1 })
+      .then(function (rows) { RUNNING = (rows && rows[0]) || null; return RUNNING; })
+      .catch(function () { return RUNNING; });
+  }
+
   /* ── Photos, and proof that it arrived ───────────────────────────────
      The same shape for both: a file against the order, with who and when.
      A photo of the plant room and a signature at the drop are the same
@@ -1081,6 +1607,7 @@ var TAFAPP = (function () {
       if (f.kind === "signature") {
         return "✍  " + (f.signed_by || "Signed");
       }
+      if (f.kind === "finished") { return "✅  Finished job"; }
       return "📷  " + (f.caption || "Photo");
     }
     load();
@@ -1107,6 +1634,23 @@ var TAFAPP = (function () {
     wrap.appendChild(pick);
     wrap.appendChild(U.button("📷  Add a photo", function () { pick.click(); },
                               "quiet"));
+    // The finished job: what the customer sees on their portal, and - with
+    // the switch on - what lets it be marked Complete.
+    if (feature("finished_photo")) {
+      var done = U.el("input", {
+        attr: { type: "file", accept: "image/*", capture: "environment",
+                style: "display:none", id: "finished-pick" } });
+      done.addEventListener("change", function () {
+        var file = done.files && done.files[0];
+        if (!file) { return; }
+        sendFinished(row, file, body).then(function (ok) { if (ok) { reload(); } });
+        done.value = "";
+      });
+      wrap.appendChild(done);
+      var btn = U.button("✅  Finished job photo", function () { done.click(); }, "go");
+      btn.setAttribute("id", "finished-photo");
+      wrap.appendChild(btn);
+    }
     wrap.appendChild(U.button("✍  Signed for", function () {
       signFor(row, reload, body);
     }, "quiet"));
@@ -1140,8 +1684,32 @@ var TAFAPP = (function () {
     });
   }
 
+  // Into the public job-photos bucket under a name nobody can guess, so the
+  // customer's portal can show it without a sign-in.
+  function sendFinished(row, blob, body) {
+    var ext = ((blob.type || "").split("/")[1] || "jpg").split("+")[0];
+    var path = row.id + "/" + newId() + "." + ext;
+    U.notice(body, "Sending…", "ok");
+    return D.upload("job-photos", path, blob, blob.type).then(function () {
+      return D.insert("order_files", {
+        order_id: row.id, kind: "finished", path: path, bucket: "job-photos",
+        caption: "Finished job",
+        taken_by: D.cachedProfile().full_name || D.cachedProfile().username || ""
+      });
+    }).then(function () {
+      U.notice(body, "Finished-job photo kept - the customer sees it on "
+                   + "their portal.", "ok");
+      return true;
+    }).catch(function (err) {
+      U.notice(body, err.message);
+      return false;
+    });
+  }
+
   function openFile(f, body) {
-    D.signedUrl(FILE_BUCKET, f.path, 3600).then(function (url) {
+    (f.bucket === "job-photos"
+      ? Promise.resolve(D.publicUrl("job-photos", f.path))
+      : D.signedUrl(FILE_BUCKET, f.path, 3600)).then(function (url) {
       if (!url) { throw new Error("That file could not be opened."); }
       U.openSheet(function (inner, closeInner) {
         inner.appendChild(U.el("h2", {
@@ -1297,9 +1865,30 @@ var TAFAPP = (function () {
 
   function drawStatus(actions, row, body, pill, close) {
     U.clear(actions);
+    if (feature("fault_log")) {
+      actions.appendChild(U.button("⚠  Record a fault", function () {
+        reportFault(row, null, row._items || []);
+      }, "quiet"));
+    }
     ["In Production", "Complete", "Dispatched"].forEach(function (want) {
       if (row.status === want) { return; }
       actions.appendChild(U.button(want, function () {
+        var gone = ["Complete", "Dispatched", "Delivered", "Collected"];
+        if (feature("finished_photo") && gone.indexOf(want) >= 0
+            && gone.indexOf(row.status) < 0) {
+          D.select("order_files", { "select": "id", "order_id": "eq." + row.id,
+                                    "kind": "eq.finished", "limit": 1 })
+            .then(function (got) {
+              if (got && got.length) { setStatus(); return; }
+              U.notice(body, "Take a photo of the finished job first - "
+                           + "press Finished job photo above.");
+            }).catch(setStatus);       // no signal: let it queue, as before
+          return;
+        }
+        setStatus();
+      }, want === "Complete" ? "go" : "quiet"));
+
+      function setStatus() {
         // merge_order_header patches the header rather than writing a whole
         // one back, so the same patch arriving twice leaves the same status
         // and nobody's notes are lost on the way.
@@ -1326,7 +1915,7 @@ var TAFAPP = (function () {
             ? "Set to " + want + " on this phone, and waiting for signal."
             : "Status set to " + want + ".", "ok");
         }).catch(function (err) { U.notice(body, err.message); });
-      }, want === "Complete" ? "go" : "quiet"));
+      }
     });
     actions.appendChild(U.button("Close", close, "quiet"));
   }
@@ -1463,6 +2052,9 @@ var TAFAPP = (function () {
     // Checked against the clock rather than counted down, so a phone that
     // slept for an hour comes back knowing it slept for an hour.
     setInterval(function () {
+      // The TV is nobody's phone: nobody touches it, and it should not sign
+      // itself out at morning tea.
+      if (document.body.classList.contains("tv")) { touched = Date.now(); }
       if (!asking && Date.now() - touched > IDLE_MS) { stillThere(); }
     }, 15000);
   }
@@ -3374,6 +3966,10 @@ var TAFAPP = (function () {
     _badgeText: badgeText,
     _setBell: setBell,
     _supplyItems: SUPPLY_ITEMS,
+    _floor: { boardColumn: boardColumn, productionBoard: productionBoard,
+              checksFor: checksFor, workingDaysOn: workingDaysOn,
+              faultReasons: FAULT_REASONS, feature: feature,
+              setFeatures: function (on) { FEATURES = on || {}; } },
     _supplyOrders: { group: groupRequests, label: orderLabel,
                      summary: orderSummary, status: orderStatus,
                      toMove: linesToMove, toCancel: linesToCancel },

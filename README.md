@@ -88,6 +88,27 @@ log, stock management and a customer database.
   notification, ask as somebody else, or have a request filed twice when a
   phone loses signal. Managers turn the requests into **purchase orders**
   sent through Xero (see *Buying through Xero*).
+- **The factory floor** (step 44, each part switched on in Settings →
+  Features):
+  - **Production board on the TV** — open the web app on the TV with
+    `?board=tv` (the link is under *Production board on the TV…*) and sign in
+    once as staff. Four columns — To cut, Making, Packed, Out the door —
+    big enough to read across the factory, refreshed every 30 seconds, never
+    signing itself out, the screen kept awake. Late jobs are red, today's
+    amber, priority jobs starred.
+  - **Job timer** — ▶ Start / ■ Stop on a line in the phone app (one running
+    per person; starting another stops the first). *How long things take…*
+    shows minutes a filter by type, from the last six months.
+  - **QC checklist** — managers set a few checks per filter type (or for
+    every type) in *QC checklists…*; they are ticked on the phone or PC
+    before a line can be marked made, and kept on the line with who and when.
+  - **Fault and rework log** — ⚠ on a line (or *Record a fault…*): what was
+    wrong, where it was found, who made it, a photo. *Faults and rework…*
+    adds them up by reason, filter type and person.
+  - **Photo of the finished job** — *Finished job photo* on an order in the
+    phone app. With the switch on, the database will not let an order be
+    marked Complete (or go out) without one, from any screen; the customer
+    sees it on their portal.
 - **Delivery labels** — one A4 landscape sheet per wrapped bundle, with the
   TAF logo, the company's base address as From, the delivery address, filter
   size, the quantity in that wrap (and the line's ordered quantity), the

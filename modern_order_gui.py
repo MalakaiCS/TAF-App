@@ -19231,7 +19231,7 @@ class ModernOrderApp(tk.Frame):
         flat_btn(bottom, "Record a fault…",
                  lambda: self._record_fault(dlg, {}), bg=CA,
                  pady=px(6)).pack(side="left")
-        return dlg
+        return dlg, tree, foot
 
     def _record_fault(self, parent, preset: dict):
         """A fault: which order and line, what was wrong, who made it, where

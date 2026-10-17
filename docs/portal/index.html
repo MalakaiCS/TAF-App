@@ -116,6 +116,10 @@
             margin-bottom:14px; }
   .back { background:none; border:0; color:var(--blue); font-weight:700;
           font-size:14px; padding:0 0 10px; cursor:pointer; width:auto; }
+  .photos { display:grid; gap:10px; grid-template-columns:repeat(auto-fill, minmax(140px, 1fr));
+            margin-bottom:12px; }
+  .photos img { width:100%; aspect-ratio:4 / 3; object-fit:cover; border-radius:10px;
+                border:1px solid #E3E8EF; background:#F7F9FB; }
 </style>
 </head>
 <body>
@@ -532,6 +536,32 @@ function renderOrder(o) {
     table.appendChild(tb);
     wrap.appendChild(table);
     body.appendChild(wrap);
+  }
+
+  // Their finished filters, photographed before they left.
+  var photos = o.photos || [];
+  if (photos.length) {
+    var ph = document.createElement("h2");
+    ph.textContent = "Your finished filters";
+    ph.style.marginTop = "18px";
+    body.appendChild(ph);
+    var grid = document.createElement("div");
+    grid.className = "photos";
+    photos.forEach(function (path) {
+      var a = document.createElement("a");
+      a.href = URLBASE + "/storage/v1/object/public/job-photos/"
+             + String(path).split("/").map(encodeURIComponent).join("/");
+      a.target = "_blank";
+      a.rel = "noopener";
+      var img = document.createElement("img");
+      img.src = a.href;
+      img.alt = "Finished filters";
+      img.loading = "lazy";
+      img.decoding = "async";
+      a.appendChild(img);
+      grid.appendChild(a);
+    });
+    body.appendChild(grid);
   }
 
   var ask = TAF.askUs("Order " + (o.order_number || ""));

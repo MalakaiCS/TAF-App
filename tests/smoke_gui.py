@@ -133,7 +133,30 @@ CUSTOMERS = [
      "region": "Local", "active": True},
 ]
 
+# The factory floor (step 44).
+SAVED_QC: list = []
+ADDED_FAULTS: list = []
+LINE_QC: list = []
+
 OVERRIDES = {
+    "job_rates":           lambda *a, **k: [
+        {"filter_type": "V-Form", "timings": 4, "filters": 20,
+         "minutes_each": 12.0}],
+    "recent_job_times":    lambda *a, **k: [
+        {"user_name": "Dave Floor", "order_number": "PO-8842",
+         "filter_type": "V-Form", "quantity": 5, "minutes": 61,
+         "stopped_at": "x", "started_at": "2026-10-16T01:00:00Z"}],
+    "qc_checklists":       lambda *a, **k: {"*": ["Size checked"],
+                                            "V-Form": ["Pleats even", "Brace in"]},
+    "save_qc_checklist":   lambda t, c: SAVED_QC.append((t, list(c))),
+    "remove_qc_checklist": lambda t: SAVED_QC.append((t, [])),
+    "set_line_qc":         lambda o, l, qc: LINE_QC.append((o, l, qc)),
+    "list_faults":         lambda *a, **k: [
+        {"reason": "Wrong size", "filter_type": "V-Form", "made_by": "Dave",
+         "found": "qc", "quantity": 2, "created_at": "2026-10-10T00:00:00Z"}],
+    "add_fault":           lambda row, photo="": ADDED_FAULTS.append(dict(row))
+                                                 or row,
+    "orders_with_finished_photo": lambda ids: set(),
     "is_ready":            lambda *a, **k: True,
     "is_configured":       lambda *a, **k: True,
     "current_user":        lambda *a, **k: {"id": "u1", "email": "smoke@taf.local",
@@ -1653,6 +1676,91 @@ def _steps(app, gui, root):
             w.destroy()
         _feat._switches = {}
     add("dialog: frame preferences", _frame_prefs)
+
+    def _floor_windows():
+        """The factory floor's desktop screens: the TV link, how long things
+        take, the QC checklists, QC before a line is made, and faults."""
+        from taf_order_app import features as _feat
+        _feat._switches = {k: True for k in ("tv_board", "job_timer",
+                                             "qc_checklist", "fault_log")}
+        try:
+            dlg = app._tv_board()
+            assert dlg.tv_url.endswith("/app/?board=tv"), dlg.tv_url
+            dlg.destroy()
+
+            dlg, tree, _foot = app._job_rates_window()
+            for _ in range(60):
+                root.update()
+                if tree.get_children():
+                    break
+                time.sleep(0.05)
+            rows = [tree.item(i, "values") for i in tree.get_children()]
+            assert any("V-Form" in r[0] and r[1] == "12 min" for r in rows), rows
+            assert any(r[1] == "1 h 01 min" for r in rows), rows
+            dlg.destroy()
+
+            dlg = app._qc_checklists()
+            for _ in range(60):
+                root.update()
+                if dlg.qc_types.size():
+                    break
+                time.sleep(0.05)
+            assert dlg.qc_types.get(0).startswith("Every type"), dlg.qc_types.get(0)
+            assert dlg.qc_text.get("1.0", "end").strip() == "Size checked"
+            if gui._db.can_handle_supplies():
+                dlg.qc_text.delete("1.0", "end")
+                dlg.qc_text.insert("1.0", "- Size checked\nLabel on\n")
+                SAVED_QC.clear()
+                dlg.qc_save()
+                assert SAVED_QC == [("*", ["Size checked", "Label on"])], SAVED_QC
+            else:
+                # Read, not written, below a manager.
+                assert str(dlg.qc_text.cget("state")) == "disabled"
+            dlg.destroy()
+
+            # QC before a line is made: every check ticked, or not made.
+            app._qc_lists = None
+
+            def _tick_all():
+                d = getattr(app, "_qc_dialog", None)
+                if d is None or not d.winfo_exists():
+                    root.after(50, _tick_all)
+                    return
+                d.qc_pass()                 # not all ticked: refused
+                assert d.winfo_exists()
+                for v in d.qc_ticks:
+                    v.set(True)
+                d.qc_pass()
+            app._qc_dialog = None
+            root.after(100, _tick_all)
+            got = app._qc_before_made({"Filter Type": "V-Form"}, root)
+            assert got and got["passed"] and got["checks"] == \
+                ["Pleats even", "Brace in"], got
+            _feat._switches["qc_checklist"] = False
+            assert app._qc_before_made({"Filter Type": "V-Form"}, root) == {}
+            _feat._switches["qc_checklist"] = True
+
+            dlg, tree, _foot = app._fault_log()
+            for _ in range(60):
+                root.update()
+                if tree.get_children():
+                    break
+                time.sleep(0.05)
+            rows = [tree.item(i, "values") for i in tree.get_children()]
+            assert ("    Wrong size", "2") in [tuple(r) for r in rows], rows
+            f = app._record_fault(dlg, {"order_number": "PO-8842",
+                                        "filter_type": "V-Form", "found": "qc"})
+            f.fault_vars["reason"].set("Media damaged")
+            f.fault_vars["made_by"].set("Dave")
+            ADDED_FAULTS.clear()
+            f.fault_save()
+            assert ADDED_FAULTS and ADDED_FAULTS[0]["reason"] == "Media damaged" \
+                and ADDED_FAULTS[0]["found"] == "qc" \
+                and ADDED_FAULTS[0]["made_by"] == "Dave", ADDED_FAULTS
+            dlg.destroy()
+        finally:
+            _feat._switches = {}
+    add("dialogs: the factory floor", _floor_windows)
 
     def _answer_waiting_dialogs(before):
         """Say yes to a dialog that has stopped and asked something.

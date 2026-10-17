@@ -123,8 +123,11 @@ def test_the_worker_is_not_registered_from_a_file_url():
 #                        filed under the client reference plus its place in
 #                        the list, so a retry files nothing new and tells
 #                        nobody again (checked in tests/db_rules.py too).
+#   set_order_line_qc    sets a line's QC record to the checks ticked. Twice
+#                        is the same record as once.
 REPEATABLE = {"set_order_line_made", "merge_order_header",
-              "adjust_stock_atomic", "request_supply", "request_supplies"}
+              "adjust_stock_atomic", "request_supply", "request_supplies",
+              "set_order_line_qc"}
 
 
 def _queued_calls() -> list:

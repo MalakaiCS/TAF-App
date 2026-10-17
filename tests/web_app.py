@@ -173,6 +173,12 @@ NOTES: list = [
      "read_at": None, "created_at": "2026-09-23T23:00:00Z"},
 ]
 BELL = {"override": None}    # a count to report instead, e.g. 150
+# The factory floor (step 44): which switches are on, the QC checks, and
+# what the phone sent.
+SWITCHES: list = []
+QC_LISTS = [{"filter_type": "*", "checks": ["Size checked", "Label on"]}]
+TIMERS: list = []
+FAULTS: list = []
 REFUSE_MOVE = {"on": False}  # row-level security matching nothing
 
 
@@ -257,6 +263,16 @@ class Stub:
             return send(AUDIT + LOGGED)
         if "/rest/v1/notifications" in url:
             return send(NOTES)
+        if "/rest/v1/feature_switches" in url:
+            return send(SWITCHES)
+        if "/rest/v1/qc_checklists" in url:
+            return send(QC_LISTS)
+        if "/rest/v1/job_times" in url:
+            return send([t for t in TIMERS if not t.get("stopped_at")])
+        if "/rest/v1/returns" in url and req.method == "POST":
+            FAULTS.append(dict(body))
+            return route.fulfill(status=201, headers={
+                "Access-Control-Allow-Origin": "*"}, body="")
         if "/rest/v1/stock_item_suppliers" in url:
             return send([{"stock_item_id": "s2", "supplier_id": "s-vul",
                           "supplier_code": "VUL-F5", "preferred": True}])
@@ -307,7 +323,12 @@ class Stub:
             for part in url.replace("?", "&").split("&"):
                 if part.startswith("order_id=eq."):
                     oid = part.split("eq.", 1)[1]
-            return send([f for f in FILES if f["order_id"] == oid])
+            kind = ""
+            for part in url.replace("?", "&").split("&"):
+                if part.startswith("kind=eq."):
+                    kind = part.split("eq.", 1)[1]
+            return send([f for f in FILES if f["order_id"] == oid
+                         and (not kind or f.get("kind") == kind)])
         if "/storage/v1/object/public/stock-images/" in url:
             return route.fulfill(status=200, content_type="image/png",
                                  body=_png(400, 150))
@@ -341,6 +362,27 @@ class Stub:
                     if it.get("line_id") == body.get("p_line_id"):
                         it["made"] = bool(body.get("p_made"))
                         return send("o1")
+                return send(None)
+            if name == "start_job_timer":
+                for t in TIMERS:
+                    t["stopped_at"] = t.get("stopped_at") or "now"
+                row = {"id": "t" + str(len(TIMERS)), "order_id": body.get("p_order_id"),
+                       "line_id": body.get("p_line_id"), "stopped_at": None}
+                TIMERS.append(row)
+                return send(row)
+            if name == "stop_job_timer":
+                out = []
+                for t in TIMERS:
+                    if not t.get("stopped_at"):
+                        t["stopped_at"] = "now"
+                        t["minutes"] = 3.5
+                        out.append(t)
+                return send(out)
+            if name == "set_order_line_qc":
+                for it in ITEMS.get(body.get("p_order_id"), []):
+                    if it.get("line_id") == body.get("p_line_id"):
+                        it["qc"] = body.get("p_qc")
+                        return send(body.get("p_order_id"))
                 return send(None)
             if name == "adjust_stock_atomic":
                 item = next((s for s in STOCK
@@ -917,6 +959,180 @@ def run() -> int:
               sheet.locator("button", has_text="Complete").count() == 0)
         page.locator("#sheet-body button", has_text="Close").first.click()
         page.wait_for_selector("#sheet.hidden", state="attached")
+
+        print("\n── the factory floor ──")
+        sys.path.insert(0, str(ROOT))
+        import datetime as _dt
+        from taf_order_app import floor as _floor
+        check("the board is not offered while it is switched off",
+              page.locator('#tabs button[data-tab="board"]').count() == 0)
+        on = ("tv_board", "job_timer", "qc_checklist", "fault_log",
+              "finished_photo")
+        SWITCHES[:] = [{"key": k, "enabled": True} for k in on]
+        page.evaluate("(on) => TAFAPP._floor.setFeatures("
+                      "Object.fromEntries(on.map(k => [k, true])))", list(on))
+        page.click('#tabs button[data-tab="orders"]')
+        page.wait_for_selector("#screen table")
+        check("switched on, it is",
+              page.locator('#tabs button[data-tab="board"]').count() == 1)
+        page.click('#tabs button[data-tab="board"]')
+        page.wait_for_selector("#screen .board-col")
+        shown = page.eval_on_selector_all(
+            "#screen .board-col", "cs => cs.map(c => [c.dataset.col, "
+            "Array.from(c.querySelectorAll('.board-card'))"
+            ".map(x => x.dataset.order)])")
+        want = [[c["key"], [card["id"] for card in c["cards"]]]
+                for c in _floor.production_board(ORDERS, _dt.date.today())]
+        check("the board shows the four columns, each job where the desktop "
+              "would put it", shown == want, f"{shown} != {want}")
+        page.locator("#screen button", has_text="Show on the TV").click()
+        page.wait_for_timeout(200)
+        check("on the TV it is the board and nothing else",
+              page.evaluate("document.body.classList.contains('tv') && "
+                            "getComputedStyle(document.querySelector('header'))"
+                            ".display === 'none' && getComputedStyle("
+                            "document.querySelector('nav')).display === 'none'"))
+        if os.environ.get("TAF_SHOTS"):
+            page.set_viewport_size({"width": 1600, "height": 900})
+            page.wait_for_timeout(200)
+            page.screenshot(path=os.path.join(os.environ["TAF_SHOTS"],
+                                              "web_tv_board.png"))
+            page.set_viewport_size({"width": 900, "height": 900})
+        page.keyboard.press("Escape")
+        page.wait_for_timeout(200)
+        check("and Escape puts a PC back to normal",
+              not page.evaluate("document.body.classList.contains('tv')"))
+
+        today = "2026-10-16"
+        sample = [
+            {"id": "a", "customer_name": "Zeta", "date_due": "16/10/2026",
+             "n_items": 4, "n_made": 0, "header": {}},
+            {"id": "b", "customer_name": "Alpha", "date_due": "19/10/2026",
+             "n_items": 4, "n_made": 0, "header": {}},
+            {"id": "c", "customer_name": "Bravo", "date_due": "20/10/2026",
+             "n_items": 4, "n_made": 0, "header": {}},
+            {"id": "d", "customer_name": "Late", "date_due": "14/10/2026",
+             "n_items": 4, "n_made": 0, "header": {"stages": {"marked": True}}},
+            {"id": "e", "customer_name": "Rush", "date_due": "16/10/2026",
+             "n_items": 4, "n_made": 0, "header": {"priority": True}},
+            {"id": "f", "customer_name": "Started", "date_due": "30/10/2026",
+             "n_items": 4, "n_made": 2, "header": {}},
+            {"id": "g", "customer_name": "Cut", "date_due": "30/10/2026",
+             "n_items": 4, "n_made": 0, "header": {"stages": {"cut": True}}},
+            {"id": "h", "customer_name": "Packed", "date_due": "01/10/2026",
+             "n_items": 4, "n_made": 4, "header": {"stages": {"packed": True}}},
+            {"id": "i", "customer_name": "Done", "date_due": "",
+             "header": {"status": "Complete"}},
+            {"id": "j", "customer_name": "Gone", "date_due": "",
+             "header": {"status": "Dispatched", "status_at": "2026-10-16T03:00:00Z"}},
+            {"id": "k", "customer_name": "Gone before", "date_due": "",
+             "header": {"status": "Delivered", "status_at": "2026-10-15T03:00:00Z"}},
+            {"id": "l", "customer_name": "Old", "archived": True,
+             "date_due": "16/10/2026", "header": {}}]
+        for ahead in (1, 2, 5):
+            js = page.evaluate("""([rows, ahead]) => TAFAPP._floor.productionBoard(
+                rows, new Date(2026, 9, 16), ahead).map(c => [c.key,
+                c.cards.map(x => [x.id, x.late, x.today, x.priority])])""",
+                [sample, ahead])
+            py = [[c["key"], [[x["id"], x["late"], x["today"], x["priority"]]
+                              for x in c["cards"]]]
+                  for c in _floor.production_board(
+                      sample, _dt.date.fromisoformat(today), ahead)]
+            check(f"the phone's board is the desktop's ({ahead} ahead)",
+                  js == py, f"{js} != {py}")
+        lists = {"V-Form": ["Pleats even"], "*": ["Size checked"]}
+        js = page.evaluate("(l) => ['v-form', 'Flat Panel', ''].map("
+                           "t => TAFAPP._floor.checksFor(t, l))", lists)
+        check("and its QC checks", js == [_floor.checks_for(t, lists)
+                                         for t in ("v-form", "Flat Panel", "")],
+              str(js))
+
+        # On an order: the timer, QC before a line is made, and a fault.
+        page.click('#tabs button[data-tab="orders"]')
+        page.wait_for_selector("#screen table")
+        page.locator("#screen tbody tr", has_text="Bells Creek").first.click()
+        page.wait_for_selector("#sheet-body button.timer")
+        sheet = page.locator("#sheet-body")
+        sheet.locator("button.timer").first.click()
+        page.wait_for_timeout(300)
+        check("Start times the line",
+              len(TIMERS) == 1 and TIMERS[0]["line_id"] == "L1"
+              and sheet.locator("button.timer").first.inner_text() == "■ Stop",
+              str(TIMERS))
+        sheet.locator("button.timer").first.click()
+        page.wait_for_timeout(300)
+        check("and Stop stops it, saying how long it took",
+              TIMERS[0]["stopped_at"] and "Took 3.5 min" in sheet.inner_text()
+              and sheet.locator("button.timer").first.inner_text() == "▶ Start")
+
+        before = sum(1 for _u, b in stub.calls if b.get("p_line_id") == "L3"
+                     and "p_made" in b)
+        sheet.locator("button.tick").nth(2).click()
+        page.wait_for_selector("#qc-pass")
+        check("ticking a line made asks for its checks first",
+              page.locator("#sheet-body .qc-check").count() == 2)
+        page.click("#qc-pass")
+        page.wait_for_timeout(150)
+        check("which all have to be ticked",
+              "Tick every check" in page.locator("#sheet-body").inner_text())
+        for box in page.locator("#sheet-body .qc-check input").all():
+            box.check()
+        page.click("#qc-pass")
+        page.wait_for_timeout(500)
+        qc = ITEMS["o1"][2].get("qc") or {}
+        check("then the checks are kept on the line, and it is made",
+              qc.get("checks") == ["Size checked", "Label on"]
+              and qc.get("by") == "Kai Brown" and ITEMS["o1"][2].get("made"),
+              str(ITEMS["o1"][2]))
+        check("and nothing was marked made before the checks",
+              sum(1 for _u, b in stub.calls if b.get("p_line_id") == "L3"
+                  and "p_made" in b) == before + 1)
+
+        page.wait_for_selector("#sheet-body button.fault")
+        page.locator("#sheet-body button.fault").nth(1).click()
+        page.wait_for_selector("#fault-save")
+        page.select_option("#fault-reason", "Wrong size")
+        page.fill("#fault-detail", "50mm short")
+        page.click("#fault-save")
+        page.wait_for_timeout(400)
+        check("a fault is recorded against the line, as found in QC",
+              FAULTS and FAULTS[-1]["reason"] == "Wrong size"
+              and FAULTS[-1]["line_id"] == "L2" and FAULTS[-1]["found"] == "qc"
+              and FAULTS[-1]["order_number"] == "PO-8842"
+              and FAULTS[-1]["detail"] == "50mm short", str(FAULTS[-1:]))
+        page.keyboard.press("Escape")
+        page.wait_for_selector("#sheet.hidden", state="attached")
+
+        # A photo of the finished job, before it can be Complete.
+        page.locator("#screen tbody tr", has_text="Pelican Waters").first.click()
+        page.wait_for_selector("#finished-photo")
+        page.locator("#sheet-body button", has_text="Complete").first.click()
+        page.wait_for_timeout(300)
+        check("with no photo of the finished job it cannot be Complete",
+              "Take a photo of the finished job first"
+              in page.locator("#sheet-body").inner_text()
+              and ORDERS[2]["header"]["status"] == "Pending")
+        page.locator("#finished-pick").set_input_files({
+            "name": "done.jpg", "mimeType": "image/jpeg",
+            "buffer": b"\xff\xd8\xff\xe0 finished filters"})
+        page.wait_for_timeout(600)
+        done = [f for f in FILES if f.get("kind") == "finished"]
+        check("the photo goes where the customer's portal can show it",
+              done and done[-1]["bucket"] == "job-photos"
+              and done[-1]["order_id"] == "o3"
+              and any(u.startswith("job-photos/o3/") for u in UPLOADED),
+              str(done[-1:]) + str(UPLOADED[-1:]))
+        page.locator("#sheet-body button", has_text="Complete").first.click()
+        page.wait_for_timeout(400)
+        check("and with it, it can", ORDERS[2]["header"]["status"] == "Complete")
+        ORDERS[2]["header"]["status"] = "Pending"       # for the rest
+        page.keyboard.press("Escape")
+        page.wait_for_selector("#sheet.hidden", state="attached")
+        SWITCHES.clear()
+        page.evaluate("TAFAPP._floor.setFeatures({})")
+        # Line 3 back as it was, for what follows.
+        ITEMS["o1"][2]["made"] = False
+        ITEMS["o1"][2].pop("qc", None)
 
         print("\n── delivery ──")
         page.click('#tabs button[data-tab="delivery"]')

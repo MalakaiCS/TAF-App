@@ -483,6 +483,66 @@
                    align-items:center; justify-content:center; font-weight:700;
                    background:var(--brand); color:#fff; }
   .no-pick.on .plus { background:var(--green-soft); color:var(--green); }
+  /* ── The production board, and the TV ─────────────────────────────── */
+  .board-head { display:flex; align-items:center; gap:12px; flex-wrap:wrap;
+                margin-bottom:14px; }
+  .board-head h2 { margin:0; font-size:22px; }
+  .board-clock { color:var(--muted); font-weight:600; flex:1 1 auto; }
+  .board { display:grid; gap:12px; grid-template-columns:repeat(4, minmax(0, 1fr)); }
+  .board-col { background:var(--tint); border:1px solid var(--line);
+               border-radius:14px; padding:10px; min-width:0; }
+  .board-col h3 { display:flex; justify-content:space-between; align-items:center;
+                  margin:2px 4px 10px; font-size:15px; text-transform:uppercase;
+                  letter-spacing:.04em; color:var(--muted); }
+  .board-col h3 b { color:var(--text); font-size:20px; }
+  .board-col[data-col="out"] h3 b { color:var(--green); }
+  .board-cards { display:flex; flex-direction:column; gap:8px; }
+  .board-card { background:var(--card); border:1px solid var(--line);
+                border-left:5px solid var(--brand); border-radius:10px;
+                padding:8px 10px; min-width:0; }
+  .board-card.today { border-left-color:var(--amber); }
+  .board-card.late { border-left-color:var(--red); background:var(--red-soft); }
+  .board-card.prio .who { color:var(--brand-ink); }
+  .board-card .who { font-weight:700; overflow:hidden; text-overflow:ellipsis;
+                     white-space:nowrap; }
+  .board-card .meta { color:var(--muted); font-size:13px; }
+  .board-card.late .meta { color:var(--red); font-weight:600; }
+  .board-card .bar { height:6px; background:var(--line); border-radius:3px;
+                     margin-top:6px; overflow:hidden; }
+  .board-card .bar i { display:block; height:100%; background:var(--green); }
+  .board-none { color:var(--muted); text-align:center; padding:12px 0; }
+  @media (max-width:759px) {
+    .board { grid-template-columns:repeat(2, minmax(0, 1fr)); }
+  }
+  /* On the TV: nothing but the board, sized to be read from across the
+     factory - the type grows with the screen. */
+  body.tv header, body.tv nav, body.tv #state { display:none !important; }
+  body.tv #app { display:block; }
+  body.tv main { max-width:none; padding:1.6vw; }
+  body.tv { background:#0F1A26; }
+  body.tv .board-head h2 { color:#fff; font-size:2.2vw; }
+  body.tv .board-clock { color:#B8C6D6; font-size:1.5vw; }
+  body.tv .board { grid-template-columns:repeat(4, minmax(0, 1fr)); gap:1vw; }
+  body.tv .board-col { background:#16263A; border-color:#22364F; }
+  body.tv .board-col h3 { color:#B8C6D6; font-size:1.2vw; }
+  body.tv .board-col h3 b { color:#fff; font-size:2vw; }
+  body.tv .board-card { padding:.7vw .9vw; }
+  body.tv .board-card .who { font-size:1.45vw; }
+  body.tv .board-card .meta { font-size:1.05vw; }
+  body.tv .board-card .bar { height:.45vw; }
+  body.tv .board-full { color:#B8C6D6; background:transparent;
+                        border:1px solid #22364F; font-size:1.4vw;
+                        min-height:0; padding:.3vw .8vw; }
+
+  /* ── On a line: timer, fault, quality check ───────────────────────── */
+  .line-acts { display:flex; gap:6px; justify-content:flex-end; }
+  .line-acts .btn { padding:6px 10px; min-height:36px; }
+  .btn.timer.on { background:var(--amber-soft); color:var(--amber);
+                  border-color:#F1D48A; font-weight:700; }
+  .qc-check { display:flex; align-items:center; gap:12px; padding:12px 4px;
+              border-bottom:1px solid var(--line); font-size:16px; }
+  .qc-check input { width:24px; height:24px; flex:0 0 auto; }
+
   .no-other { margin-top:12px; }
   .no-other-row { display:flex; gap:8px; }
   .no-other-row input { flex:1 1 auto; min-width:0; }

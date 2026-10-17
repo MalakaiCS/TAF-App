@@ -102,3 +102,22 @@ def test_minutes_read_as_people_say_them():
     assert floor.minutes_text(25.4) == "25 min"
     assert floor.minutes_text(65) == "1 h 05 min"
     assert floor.minutes_text("x") == ""
+
+
+def test_the_customer_sees_the_finished_job_on_their_portal():
+    from pathlib import Path
+    root = Path(__file__).resolve().parent.parent
+    sql = (root / "migrate_floor.sql").read_text(encoding="utf-8")
+    page = (root / "docs" / "portal" / "index.html").read_text(encoding="utf-8")
+    assert "'photos'" in sql and "f.kind = 'finished'" in sql
+    assert "o.photos" in page and "/storage/v1/object/public/job-photos/" in page
+
+
+def test_the_phone_has_the_same_fault_reasons():
+    import json
+    import re
+    from pathlib import Path
+    js = (Path(__file__).resolve().parent.parent / "docs" / "app"
+          / "screens.js").read_text(encoding="utf-8")
+    got = re.search(r"var FAULT_REASONS = (\[.*?\]);", js, re.S).group(1)
+    assert json.loads(got) == floor.FAULT_REASONS
