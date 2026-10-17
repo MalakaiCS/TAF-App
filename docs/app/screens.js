@@ -2500,8 +2500,11 @@ var TAFAPP = (function () {
         return U.el("option", { text: s, attr: { value: s } });
       }) });
     var hint = U.el("span", { text: SUPPLY_HINTS[SUPPLY_ITEMS[0]] });
+    // Type it, or pick one of the stock items of that kind.
+    var stockList = U.el("datalist", { attr: { id: "supply-stock" } });
     var detail = U.el("input", { attr: { type: "text", id: "supply-detail",
-                                         maxlength: "200" } });
+                                         maxlength: "200",
+                                         list: "supply-stock" } });
     var qty = U.el("input", { attr: { type: "text", id: "supply-qty",
                                       maxlength: "60",
                                       placeholder: "e.g. 3 rolls" } });
@@ -2529,6 +2532,48 @@ var TAFAPP = (function () {
       if ((rows || []).length) { fromLabel.style.display = ""; }
     }).catch(function () { /* not run yet - asked for without one */ });
 
+    // The stock items, and who each comes from (step 42).
+    var stock = [], links = [];
+    D.select("stock_items", { "select": "id,name,product_type",
+                              "order": "name" }).then(function (rows) {
+      stock = rows || []; offerStock();
+    }).catch(function () {});
+    D.select("stock_item_suppliers", { "select": "stock_item_id,supplier_id,preferred" })
+      .then(function (rows) { links = rows || []; })
+      .catch(function () { /* step 42 not run */ });
+    function offerStock() {
+      var word = item.value.toLowerCase();
+      var hits = stock.filter(function (s) {
+        var name = String(s.name || "").toLowerCase();
+        return word === "other" ||
+               String(s.product_type || "").toLowerCase() === word ||
+               name.indexOf(word) >= 0 ||
+               name.indexOf(word.replace(/s$/, "")) >= 0;
+      });
+      if (!hits.length) { hits = stock; }
+      U.clear(stockList);
+      hits.forEach(function (s) {
+        stockList.appendChild(U.el("option", { attr: { value: s.name } }));
+      });
+    }
+    function stockId() {
+      var said = detail.value.trim().toLowerCase();
+      var hit = stock.filter(function (s) {
+        return said && String(s.name || "").trim().toLowerCase() === said;
+      })[0];
+      return hit ? hit.id : "";
+    }
+    item.addEventListener("change", offerStock);
+    // A stock item picked: its preferred supplier, if it has one.
+    detail.addEventListener("change", function () {
+      var id = stockId();
+      var mine = links.filter(function (l) { return l.stock_item_id === id; });
+      mine.sort(function (a, b) { return (b.preferred ? 1 : 0) - (a.preferred ? 1 : 0); });
+      if (mine.length && suppliers[mine[0].supplier_id]) {
+        from.value = mine[0].supplier_id;
+      }
+    });
+
     // Several things at once: each onto the list, then one send and one
     // message to the managers.
     var basket = [];
@@ -2542,7 +2587,7 @@ var TAFAPP = (function () {
         return null;
       }
       return { item: what, detail: said, quantity: qty.value.trim(),
-               supplier_id: from.value || "" };
+               supplier_id: from.value || "", stock_item_id: stockId() };
     }
     function drawBasket() {
       U.clear(basketList);
@@ -2560,7 +2605,7 @@ var TAFAPP = (function () {
 
     var askCard = U.card("Ask for something", [
       U.el("label", { cls: "f", kids: [U.el("span", { text: "What" }), item] }),
-      U.el("label", { cls: "f", kids: [hint, detail] }),
+      U.el("label", { cls: "f", kids: [hint, detail, stockList] }),
       U.el("label", { cls: "f", kids: [
         U.el("span", { text: "How many" }), qty] }),
       fromLabel,
@@ -2589,7 +2634,11 @@ var TAFAPP = (function () {
       var label = lines.length === 1
         ? describeRequest(lines[0])
         : lines.length + " things";
-      var together = lines.length > 1 || !!lines[0].supplier_id;
+      // Several, or one naming a supplier or stock item: the step 40 way,
+      // which files all of that. Before step 40, the one-at-a-time way.
+      var together = lines.length > 1 || !!lines[0].supplier_id
+                     || (!!lines[0].stock_item_id
+                         && Object.keys(suppliers).length > 0);
       // One reference per request, so a send that lost its answer to a
       // dropout and got sent again is filed once, and managers told once.
       var sending = together ? S.send({

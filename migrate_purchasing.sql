@@ -110,9 +110,21 @@ REVOKE INSERT, DELETE ON public.xero_items FROM authenticated, anon;
 ALTER TABLE public.supply_requests
   ADD COLUMN IF NOT EXISTS supplier_id uuid REFERENCES public.suppliers(id) ON DELETE SET NULL,
   ADD COLUMN IF NOT EXISTS item_code text,
+  ADD COLUMN IF NOT EXISTS stock_item_id uuid,
   ADD COLUMN IF NOT EXISTS batch_id uuid,
   ADD COLUMN IF NOT EXISTS purchase_order_id uuid
       REFERENCES public.purchase_orders(id) ON DELETE SET NULL;
+
+-- Which stock item was asked for, when it was one (linked once stock_items
+-- is there, as for xero_items above).
+DO $$
+BEGIN
+  IF to_regclass('public.stock_items') IS NOT NULL AND NOT EXISTS (
+       SELECT 1 FROM pg_constraint WHERE conname = 'supply_requests_stock_item_fk') THEN
+    ALTER TABLE public.supply_requests ADD CONSTRAINT supply_requests_stock_item_fk
+      FOREIGN KEY (stock_item_id) REFERENCES public.stock_items(id) ON DELETE SET NULL;
+  END IF;
+END $$;
 
 -- One request for several things tells each manager once. The per-row
 -- notification stands aside while request_supplies files a batch, and the
@@ -190,7 +202,7 @@ BEGIN
         v_i := v_i + 1;
         INSERT INTO public.supply_requests
                (item, detail, quantity, urgent, note, client_ref,
-                supplier_id, item_code, batch_id)
+                supplier_id, item_code, stock_item_id, batch_id)
         VALUES (coalesce(v_line ->> 'item', ''),
                 left(coalesce(v_line ->> 'detail', ''), 200),
                 left(coalesce(v_line ->> 'quantity', ''), 60),
@@ -200,6 +212,7 @@ BEGIN
                      ELSE p_client_ref || '-' || v_i END,
                 nullif(v_line ->> 'supplier_id', '')::uuid,
                 nullif(trim(coalesce(v_line ->> 'item_code', '')), ''),
+                nullif(v_line ->> 'stock_item_id', '')::uuid,
                 v_batch)
         RETURNING id INTO v_first;
         v_items := v_items

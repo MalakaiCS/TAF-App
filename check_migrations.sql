@@ -172,7 +172,10 @@ WITH checks(step, file, purpose, needed, present) AS (VALUES
       AND to_regprocedure('public.receive_purchase(uuid,jsonb)') IS NOT NULL),
 
   (41, 'migrate_stock_images.sql', 'The storage bucket for pictures of stock items', 'recommended',
-      EXISTS (SELECT 1 FROM storage.buckets WHERE id = 'stock-images'))
+      EXISTS (SELECT 1 FROM storage.buckets WHERE id = 'stock-images')),
+
+  (42, 'migrate_stock_suppliers.sql', 'Where each stock item comes from: suppliers, their codes and prices', 'recommended',
+      to_regclass('public.stock_item_suppliers') IS NOT NULL)
 )
 SELECT step,
        CASE WHEN present THEN 'already done' ELSE 'RUN THIS' END AS status,

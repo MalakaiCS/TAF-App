@@ -1109,6 +1109,46 @@ def run_purchasing_checks(pg: Postgres) -> None:
           out or err)
 
 
+def run_stock_supplier_checks(pg: Postgres) -> None:
+    print("\n── where each stock item comes from (step 42) ──")
+    for _ in range(2):
+        ok, _o, err = pg.psql((ROOT / "migrate_stock_suppliers.sql").read_text(
+            encoding="utf-8"), "f")
+        check("step 42 runs, and runs again cleanly", ok, err)
+    item = q(pg, "INSERT INTO stock_items (name) VALUES ('C Channel 45') "
+                 "RETURNING id;").splitlines()[0]
+    fdg = q(pg, "SELECT id FROM suppliers WHERE name = 'FD Greenwood';")
+    ad = q(pg, "INSERT INTO suppliers (name) VALUES ('Air Diffusion') "
+               "RETURNING id;").splitlines()[0]
+    ok, out, err = as_in(pg, "f", DAVE,
+                         "INSERT INTO stock_item_suppliers (stock_item_id, "
+                         f"supplier_id) VALUES ('{item}', '{fdg}') RETURNING id;")
+    check("somebody on the floor cannot say where stock comes from", not ok, out)
+    ok, out, err = as_in(pg, "f", SARAH,
+                         "INSERT INTO stock_item_suppliers (stock_item_id, "
+                         "supplier_id, supplier_code, preferred) VALUES "
+                         f"('{item}', '{fdg}', 'FDG-C45-2440', true), "
+                         f"('{item}', '{ad}', 'AD-C45', false) RETURNING id;")
+    check("a manager can: channel from FD Greenwood and Air Diffusion",
+          ok and len((out or "").splitlines()) == 2, out or err)
+    ok, out, err = as_in(pg, "f", SARAH,
+                         "UPDATE stock_item_suppliers SET preferred = true "
+                         f"WHERE supplier_id = '{ad}';")
+    check("only one of them can be preferred", not ok, out)
+    ok, out, err = as_in(pg, "f", DAVE,
+                         "SELECT count(*) FROM stock_item_suppliers "
+                         f"WHERE stock_item_id = '{item}';")
+    check("everybody on staff can see where it comes from",
+          ok and out == "2", out or err)
+    lines = ('[{"item": "C Channel 45", "quantity": "20", '
+             f'"supplier_id": "{fdg}", "stock_item_id": "{item}"}}]')
+    ok, out, err = as_in(pg, "f", DAVE,
+                         f"SELECT stock_item_id FROM request_supplies('{lines}', "
+                         "false, '', 'ref-42');")
+    check("a request names the stock item asked for", ok and out == item,
+          out or err)
+
+
 def _skip(why: str) -> int:
     """Skipping is fine on a laptop. In CI it is not: a workflow that goes
     green having checked nothing is worse than no workflow, because it is
@@ -1134,6 +1174,7 @@ def main() -> int:
         run_tier_checks(pg)
         run_customer_extra_checks(pg)
         run_purchasing_checks(pg)
+        run_stock_supplier_checks(pg)
     finally:
         pg.stop()
     print(f"\n{len(FAILURES)} FAILED" if FAILURES

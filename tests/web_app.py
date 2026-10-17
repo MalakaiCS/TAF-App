@@ -236,6 +236,9 @@ class Stub:
             return send(AUDIT + LOGGED)
         if "/rest/v1/notifications" in url:
             return send(NOTES)
+        if "/rest/v1/stock_item_suppliers" in url:
+            return send([{"stock_item_id": "s2", "supplier_id": "s-vul",
+                          "preferred": True}])
         if "/rest/v1/suppliers" in url:
             return send([{"id": "s-fdg", "name": "FD Greenwood"},
                          {"id": "s-vul", "name": "Vulcan"}])
@@ -1333,6 +1336,32 @@ def run() -> int:
               and len(SUPPLY) == before + 2, str(many))
         check("and the list empties",
               page.locator("#supply-basket li").count() == 0)
+
+        # A stock item, picked from the list: where it comes from follows.
+        page.click('#tabs button[data-tab="supplies"]')
+        page.wait_for_selector("#screen table")
+        page.wait_for_selector("#supply-from option[value=s-vul]",
+                               state="attached")
+        page.select_option("#supply-item", "Media")
+        check("the stock items of that kind are offered",
+              sorted(page.eval_on_selector_all("#supply-stock option",
+                                               "os => os.map(o => o.value)"))
+              == ["F5 media roll 1m", "G4 media roll 1m"],
+              str(page.eval_on_selector_all("#supply-stock option",
+                                            "os => os.map(o => o.value)")))
+        page.fill("#supply-detail", "F5 media roll 1m")
+        page.dispatch_event("#supply-detail", "change")
+        check("picking one chooses the supplier it comes from",
+              page.input_value("#supply-from") == "s-vul",
+              page.input_value("#supply-from"))
+        page.fill("#supply-qty", "2 rolls")
+        page.click("#supply-send")
+        wait_for_text(page, "#screen", "managers have been told")
+        many = [b for u, b in stub.calls if "rpc/request_supplies" in u]
+        check("and the request names the stock item",
+              many and many[-1]["p_lines"][0].get("stock_item_id") == "s2"
+              and many[-1]["p_lines"][0].get("supplier_id") == "s-vul",
+              str(many[-1:]))
 
         page.click('#tabs button[data-tab="supplies"]')
         page.wait_for_selector("#screen table")

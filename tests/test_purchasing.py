@@ -103,3 +103,73 @@ def test_what_has_arrived_is_not_still_on_order():
             {"status": "received",
              "lines": [{"item_id": "st-45", "quantity": 99}]}]
     assert records.quantities_on_order(rows) == {"st-45": 15.0}
+
+
+# ── Where each stock item comes from ─────────────────────────────────────────
+
+STOCK = [
+    {"id": "st-45", "name": "C Channel 45mm", "product_type": "Channel",
+     "stock_on_hand": 4, "minimum_on_hand": 20},
+    {"id": "st-50", "name": "C Channel 50mm", "product_type": "Channel",
+     "stock_on_hand": 30, "minimum_on_hand": 10},
+    {"id": "st-tape", "name": "Foil tape 50mm", "product_type": "Consumables",
+     "stock_on_hand": 0, "minimum_on_hand": 6},
+    {"id": "st-glue", "name": "Glue", "product_type": "Consumables",
+     "stock_on_hand": 0, "minimum_on_hand": 2},
+]
+LINKS = [
+    {"id": "l1", "stock_item_id": "st-45", "supplier_id": "s-ad",
+     "supplier_code": "AD-C45", "unit_price": 17.0, "preferred": False},
+    {"id": "l2", "stock_item_id": "st-45", "supplier_id": "s-fdg",
+     "supplier_code": "FDG-C45-2440", "unit_price": None, "preferred": True},
+    {"id": "l3", "stock_item_id": "st-tape", "supplier_id": "s-ad",
+     "supplier_code": "", "unit_price": 9.5, "preferred": False},
+]
+
+
+def test_order_supplies_offers_the_stock_items_of_that_kind():
+    names = [s["name"] for s in purchasing.stock_for("Channel", STOCK)]
+    assert names == ["C Channel 45mm", "C Channel 50mm"]
+    assert [s["name"] for s in purchasing.stock_for("Tape", STOCK)] == ["Foil tape 50mm"]
+    assert len(purchasing.stock_for("Other", STOCK)) == 4
+    assert len(purchasing.stock_for("Mesh Wire", STOCK)) == 4    # nothing matches
+
+
+def test_the_preferred_supplier_comes_first():
+    assert [l["supplier_id"] for l in purchasing.suppliers_for("st-45", LINKS)] == \
+        ["s-fdg", "s-ad"]
+    assert purchasing.suppliers_for("st-glue", LINKS) == []
+
+
+def test_a_stock_line_takes_the_suppliers_code_and_price():
+    fdg = purchasing.stock_line(STOCK[0], LINKS[1], ITEMS, 16)
+    assert (fdg["item_code"], fdg["unit_price"], fdg["stock_item_id"]) == \
+        ("FDG-C45-2440", 18.5, "st-45")      # no agreed price: Xero's
+    ad = purchasing.stock_line(STOCK[0], LINKS[0], ITEMS, 16)
+    assert (ad["item_code"], ad["unit_price"], ad["description"]) == \
+        ("AD-C45", 17.0, "C Channel 45mm")
+
+
+def test_low_stock_becomes_an_order_per_supplier():
+    orders = purchasing.low_stock_orders(STOCK, LINKS, ITEMS, {"st-45": 6})
+    assert set(orders) == {"s-fdg", "s-ad", ""}
+    assert [(l["item_code"], l["quantity"]) for l in orders["s-fdg"]] == \
+        [("FDG-C45-2440", 10.0)]             # 20 wanted, 4 here, 6 coming
+    assert orders["s-ad"][0]["unit_price"] == 9.5
+    assert [l["description"] for l in orders[""]] == ["Glue"]
+
+
+def test_enough_on_hand_is_not_ordered():
+    assert purchasing.shortfall(STOCK[1]) == 0
+    assert purchasing.shortfall({"stock_on_hand": 1.2, "minimum_on_hand": 3}) == 2
+    assert purchasing.shortfall({"stock_on_hand": 0, "minimum_on_hand": 0}) == 0
+
+
+def test_a_request_for_a_stock_item_uses_that_suppliers_code():
+    line = purchasing.lines_from_requests(
+        [{"id": "r1", "item": "Channel", "detail": "C Channel 45mm",
+          "quantity": "12 lengths", "supplier_id": "s-ad",
+          "stock_item_id": "st-45"}], ITEMS, LINKS, STOCK)[0]
+    assert (line["item_code"], line["unit_price"], line["quantity"],
+            line["stock_item_id"], line["request_ids"]) == \
+        ("AD-C45", 17.0, 12.0, "st-45", ["r1"])

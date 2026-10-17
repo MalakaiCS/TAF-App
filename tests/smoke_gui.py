@@ -350,6 +350,10 @@ def _stub_supplies():
     purchasing.save_supplier = lambda *a, **k: None
     purchasing.link_item = lambda *a, **k: None
     purchasing.cancel_order = lambda *a, **k: None
+    purchasing.stock_links_ready = lambda: True
+    purchasing.list_stock_links = lambda: [dict(r) for r in STOCK_LINKS]
+    purchasing.save_stock_link = lambda *a, **k: SAVED_LINKS.append(a) or None
+    purchasing.remove_stock_link = lambda *a, **k: None
 
 
 SUPPLIERS = [
@@ -375,6 +379,15 @@ PURCHASE_ORDERS = [
                {"item_code": "FDG-C50-2440", "description": "C channel 50",
                 "quantity": 10, "unit_price": 20.9, "received": 10}]},
 ]
+# The media roll comes from FD Greenwood; the bag frame, low on stock, from
+# Vulcan at an agreed price.
+STOCK_LINKS = [
+    {"id": "k1", "stock_item_id": "s1", "supplier_id": "s-fdg",
+     "supplier_code": "FDG-G4", "unit_price": None, "preferred": True},
+    {"id": "k2", "stock_item_id": "s2", "supplier_id": "s-vul",
+     "supplier_code": "VUL-BF592", "unit_price": 3.0, "preferred": True},
+]
+SAVED_LINKS: list = []
 SENT_SUPPLIES: list = []
 SAVED_POS: list = []
 RECEIVED: list = []
@@ -2130,11 +2143,14 @@ def _steps(app, gui, root):
             if trees and trees[0].get_children():
                 break
             time.sleep(0.05)
-        orders, suppliers, items = trees[:3]
+        orders, suppliers, stock, items = trees[:4]
         assert orders.item("po-1", "values")[0] == "PO-0007"
         assert orders.item("po-1", "values")[4] == "Sent"
         assert set(suppliers.get_children()) == {"s-fdg", "s-vul"}
         assert len(items.get_children()) == 3
+        assert "★ Vulcan (VUL-BF592) $3.00" in stock.item("s2", "values")[3], \
+            stock.item("s2", "values")
+        assert "bad" in stock.item("s2", "tags")        # below its minimum
         win.destroy()
     add("buying: the purchase orders window", _po_window)
 
@@ -2152,6 +2168,71 @@ def _steps(app, gui, root):
         assert opened == ["https://go.xero.com/Accounts/Payable/PurchaseOrders/View/x-po-8"], opened
         assert "PO-0008" in text and "Email" in text, text
     add("buying: a purchase order is opened in Xero to email", _po_sent_in_xero)
+
+    def _ask_for_a_stock_item():
+        """Picking a stock item offers who it comes from, and files it."""
+        app._show_tab("supplies")
+        for _ in range(60):
+            root.update()
+            if app._supply_stock:
+                break
+            time.sleep(0.05)
+        app._supply_item.set("Media")
+        root.update()
+        assert list(app._supply_detail_cb.cget("values")) == ["G4 media roll"], \
+            app._supply_detail_cb.cget("values")
+        app._supply_from.set("")
+        app._supply_detail.set("G4 media roll")
+        root.update()
+        assert app._supply_from.get() == "FD Greenwood", app._supply_from.get()
+        assert list(app._supply_from_cb.cget("values")) == ["", "FD Greenwood"]
+        app._supply_qty.set("2 rolls")
+        app._add_supply_line()
+        line = app._supply_basket[-1]
+        assert (line["stock_item_id"], line["supplier_id"]) == ("s1", "s-fdg"), line
+        app._supply_basket.clear()
+        app._show_supply_basket()
+    add("supplies: ask for a stock item, from where it comes from",
+        _ask_for_a_stock_item)
+
+    def _order_what_is_low():
+        """The bag frame is short: a purchase order to Vulcan, at the agreed
+        price, for what gets it back to its minimum."""
+        if not gui._db.can_manage_prices():
+            return          # a manager's button; the floor is not offered it
+        win = app._purchase_orders()
+        for _ in range(60):
+            root.update()
+            trees = [w for w in _walk(win) if isinstance(w, gui.ttk.Treeview)]
+            if trees and trees[0].get_children():
+                break
+            time.sleep(0.05)
+        before = set(root.winfo_children())
+        _press(win, "Order what is low…")
+        editor, tree = None, None
+        for _ in range(60):
+            root.update()
+            opened = [w for w in set(root.winfo_children()) - before
+                      if isinstance(w, tk.Toplevel)]
+            if opened:
+                editor = opened[0]
+                ts = [w for w in _walk(editor) if isinstance(w, gui.ttk.Treeview)]
+                combos = [w for w in _walk(editor)
+                          if isinstance(w, gui.ttk.Combobox)]
+                # Its lines are there at once; the supplier once loaded.
+                if ts and ts[0].get_children() and combos and combos[0].get():
+                    tree = ts[0]
+                    break
+            time.sleep(0.05)
+        assert tree is not None, "no purchase order made from low stock"
+        values = tree.item("0", "values")
+        assert values[0] == "VUL-BF592" and values[2] == "6" and \
+            values[3] == "$3.00", values
+        combo = [w for w in _walk(editor) if isinstance(w, gui.ttk.Combobox)][0]
+        assert combo.get() == "Vulcan", combo.get()
+        editor.destroy()
+        win.destroy()
+    add("buying: order what is low, from where it comes from", _order_what_is_low)
 
     def _cut_list():
         from taf_order_app import features as _feat

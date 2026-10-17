@@ -433,6 +433,7 @@ just run it — nothing is lost and nothing is duplicated.
 | 39 | `migrate_customer_xero_delivery.sql` | A customer's Xero contact (opened from Customers → Customer ▾) and a delivery fee every order of theirs carries | recommended |
 | 40 | `migrate_purchasing.sql` | Buying through Xero: suppliers and items pulled from Xero, several items in one supply request, purchase orders received into stock (needs steps 16 and 31) | recommended |
 | 41 | `migrate_stock_images.sql` | The storage bucket for pictures of stock items (stock_schema.sql only said to make it by hand) | recommended |
+| 42 | `migrate_stock_suppliers.sql` | Where each stock item comes from: its suppliers, their codes and prices, so Order Supplies offers stock items and low stock becomes purchase orders (needs step 40) | recommended |
 
 **Step 16 is the one that matters most.** Every policy in the older scripts is
 `TO authenticated USING (true)` — meaning *anyone Supabase counts as signed
@@ -800,6 +801,17 @@ a manager opens **Purchase orders…** (Order Supplies, or Buying…):
   supplier; **Supplier…** and **Stock item…** link the rest (select several
   with Ctrl-click). An item linked to a stock item goes into stock when it
   arrives.
+- **Stock items** (step 42, `migrate_stock_suppliers.sql`) says where each
+  stock item comes from: **Add or change a supplier…** adds a supplier with
+  their code for it and, optionally, an agreed price (empty uses what Xero
+  says we pay for that code); one of them can be preferred (★). Channel from
+  FD Greenwood and from Air Diffusion is two suppliers on the one stock item.
+  Linking a Xero item to a stock item does this for you. On Order Supplies,
+  the "which one" box then offers the stock items of that kind, and picking
+  one offers only its suppliers, the preferred one chosen.
+- **Order what is low…** makes a purchase order for everything below its
+  minimum — what is already on order counted — to each item's preferred
+  supplier, with their codes and prices filled in, ready to check and send.
 - **Make purchase order…** (Order Supplies, with requests selected) makes one
   purchase order per supplier. A request's size is matched to the supplier's
   item code (45mm channel → `FDG-C45-…`); a size with no code of its own is
@@ -815,7 +827,7 @@ a manager opens **Purchase orders…** (Order Supplies, or Buying…):
   stock item are booked into stock; when everything is in, the order and its
   requests are received, otherwise it is *Part received*.
 
-Optional function secrets: `XERO_PURCHASE_ACCOUNT` (default `300`) and
+Optional function secrets: `XERO_PURCHASE_ACCOUNT` (default `310`, Cost of Goods Sold) and
 `XERO_PURCHASE_TAX` (default `INPUT`). To have the app email purchase orders
 itself instead of Xero, set `PO_EMAIL_VIA=app` with `RESEND_API_KEY` and
 `MAIL_FROM` (optionally `MAIL_REPLY_TO` and `COMPANY_NAME`).

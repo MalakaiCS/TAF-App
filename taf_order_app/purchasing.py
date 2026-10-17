@@ -17,6 +17,7 @@ database.
 """
 from __future__ import annotations
 
+import math
 import re
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
@@ -180,14 +181,118 @@ def _quantity(text: Any) -> float:
     return float(m.group(0)) if m else 1.0
 
 
+# ── Where each stock item comes from ─────────────────────────────────────────
+
+def stock_for(category: str, stock_items: Sequence[Dict[str, Any]]
+              ) -> List[Dict[str, Any]]:
+    """The stock items to offer under "Channel", "Tape" and so on: those of
+    that product type, or with the word in their name. "Other" - and a word
+    nothing matches - offers everything."""
+    word = str(category or "").strip().lower()
+    rows = sorted(stock_items or [], key=lambda r: str(r.get("name") or "").lower())
+    if not word or word == "other":
+        return rows
+    hits = [r for r in rows
+            if str(r.get("product_type") or "").strip().lower() == word
+            or word in str(r.get("name") or "").lower()
+            or word.rstrip("s") in str(r.get("name") or "").lower()]
+    return hits or rows
+
+
+def suppliers_for(stock_item_id: str, links: Sequence[Dict[str, Any]]
+                  ) -> List[Dict[str, Any]]:
+    """Who a stock item comes from, the preferred one first."""
+    mine = [l for l in links or []
+            if str(l.get("stock_item_id")) == str(stock_item_id)]
+    return sorted(mine, key=lambda l: (not l.get("preferred"),
+                                       str(l.get("supplier_code") or "")))
+
+
+def link_for(stock_item_id: str, supplier_id: str,
+             links: Sequence[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    """The supplier's code and price for a stock item, if they sell it."""
+    for l in links or []:
+        if str(l.get("stock_item_id")) == str(stock_item_id) and \
+                str(l.get("supplier_id")) == str(supplier_id):
+            return l
+    return None
+
+
+def stock_line(stock: Dict[str, Any], link: Optional[Dict[str, Any]],
+               items: Sequence[Dict[str, Any]], quantity: float) -> Dict[str, Any]:
+    """A purchase order line for a stock item from one supplier: their code,
+    the price agreed with them (or what Xero says we pay for that code), and
+    the stock item it goes into when it arrives."""
+    code = str((link or {}).get("supplier_code") or "").strip()
+    xero = next((it for it in items or []
+                 if code and str(it.get("code") or "").upper() == code.upper()), {})
+    price = (link or {}).get("unit_price")
+    if price in (None, ""):
+        price = xero.get("purchase_price")
+    return {
+        "description": (xero.get("purchase_description") or xero.get("name")
+                        or stock.get("name") or "Item"),
+        "quantity": quantity, "item_code": code,
+        "unit_price": None if price in (None, "") else float(price),
+        "stock_item_id": stock.get("id"), "received": 0,
+    }
+
+
+def shortfall(stock: Dict[str, Any], on_order: float = 0.0) -> float:
+    """How many to buy to get back to the minimum - what is already on order
+    counted - in whole units. 0 when there is enough."""
+    try:
+        want = float(stock.get("minimum_on_hand") or 0)
+        held = float(stock.get("stock_on_hand") or 0)
+    except (TypeError, ValueError):
+        return 0.0
+    if want <= 0:
+        return 0.0
+    return float(max(0, math.ceil(want - held - (on_order or 0))))
+
+
+def low_stock_orders(stock_items: Sequence[Dict[str, Any]],
+                     links: Sequence[Dict[str, Any]],
+                     items: Sequence[Dict[str, Any]] = (),
+                     on_order: Optional[Dict[str, float]] = None
+                     ) -> Dict[str, List[Dict[str, Any]]]:
+    """{supplier id: [lines]} - everything below its minimum, from its
+    preferred supplier (or the only one), ready to send. Stock with nowhere
+    to buy it from is under ""."""
+    on_order = on_order or {}
+    out: Dict[str, List[Dict[str, Any]]] = {}
+    for stock in stock_items or []:
+        need = shortfall(stock, on_order.get(str(stock.get("id")), 0.0))
+        if need <= 0:
+            continue
+        theirs = suppliers_for(str(stock.get("id")), links)
+        link = theirs[0] if theirs else None
+        out.setdefault(str((link or {}).get("supplier_id") or ""), []).append(
+            stock_line(stock, link, items, need))
+    return out
+
+
 def lines_from_requests(requests: Sequence[Dict[str, Any]],
-                        items: Sequence[Dict[str, Any]] = ()) -> List[Dict[str, Any]]:
+                        items: Sequence[Dict[str, Any]] = (),
+                        links: Sequence[Dict[str, Any]] = (),
+                        stock_items: Sequence[Dict[str, Any]] = ()
+                        ) -> List[Dict[str, Any]]:
     """Purchase order lines for supply requests: what they asked for, how
     many, and - where it can be told - the item code and its price (or an
-    estimate from the sizes either side)."""
+    estimate from the sizes either side). A request for a stock item takes
+    the supplier's code and price for it."""
     by_code = {str(it.get("code") or "").upper(): it for it in items or []}
+    stock_by_id = {str(s.get("id")): s for s in stock_items or []}
     out = []
     for r in requests:
+        sid = str(r.get("stock_item_id") or "")
+        link = link_for(sid, str(r.get("supplier_id") or ""), links) if sid else None
+        if sid and (link or sid in stock_by_id):
+            stock = stock_by_id.get(sid) or {"id": sid, "name": r.get("detail")}
+            line = stock_line(stock, link, items, _quantity(r.get("quantity")))
+            line["request_ids"] = [str(r.get("id"))] if r.get("id") else []
+            out.append(line)
+            continue
         words = " ".join(p for p in (r.get("item"), r.get("detail")) if p)
         line: Dict[str, Any] = {
             "description": words or "Item",
@@ -265,6 +370,42 @@ def link_item(code: str, **patch) -> None:
     _db.get_client().table("xero_items").update(patch).eq("code", code).execute()
 
 
+def stock_links_ready() -> bool:
+    """Whether migrate_stock_suppliers.sql (step 42) has been run."""
+    try:
+        _db.get_client().table("stock_item_suppliers").select("id").limit(1).execute()
+        return True
+    except Exception:
+        return False
+
+
+def list_stock_links() -> List[Dict[str, Any]]:
+    return _db._page_through(
+        lambda: _db.get_client().table("stock_item_suppliers").select("*")
+        .order("stock_item_id"))
+
+
+def save_stock_link(stock_item_id: str, supplier_id: str, supplier_code: str = "",
+                    unit_price: Optional[float] = None,
+                    preferred: bool = False) -> None:
+    """Where a stock item comes from: added, or changed if already there.
+    Only one supplier is preferred for each stock item."""
+    client = _db.get_client()
+    if preferred:
+        (client.table("stock_item_suppliers").update({"preferred": False})
+         .eq("stock_item_id", stock_item_id).neq("supplier_id", supplier_id)
+         .execute())
+    client.table("stock_item_suppliers").upsert({
+        "stock_item_id": stock_item_id, "supplier_id": supplier_id,
+        "supplier_code": (supplier_code or "").strip().upper(),
+        "unit_price": unit_price, "preferred": bool(preferred)},
+        on_conflict="stock_item_id,supplier_id").execute()
+
+
+def remove_stock_link(link_id: str) -> None:
+    _db.get_client().table("stock_item_suppliers").delete().eq("id", link_id).execute()
+
+
 def request_supplies(lines: Sequence[Dict[str, Any]], urgent: bool = False,
                      note: str = "", client_ref: Optional[str] = None) -> List[Dict[str, Any]]:
     """Several things asked for at once; managers are told once."""
@@ -276,8 +417,10 @@ def request_supplies(lines: Sequence[Dict[str, Any]], urgent: bool = False,
                                       line.get("quantity", ""))
         row["supplier_id"] = line.get("supplier_id") or ""
         row["item_code"] = line.get("item_code") or ""
+        row["stock_item_id"] = line.get("stock_item_id") or ""
         clean.append({k: row[k] for k in ("item", "detail", "quantity",
-                                          "supplier_id", "item_code")})
+                                          "supplier_id", "item_code",
+                                          "stock_item_id")})
     resp = _db.get_client().rpc("request_supplies", {
         "p_lines": clean, "p_urgent": bool(urgent), "p_note": (note or "")[:500],
         "p_client_ref": client_ref or f"desk-{uuid.uuid4()}"}).execute()

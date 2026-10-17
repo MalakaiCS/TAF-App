@@ -944,7 +944,7 @@ async function sendPo(poId: string) {
         Description: String(l.description ?? l.name ?? "").slice(0, 3900) || "Item",
         Quantity: Number(l.quantity ?? 0) || 1,
         UnitAmount: Math.round(Number(l.unit_price ?? 0) * 10000) / 10000,
-        AccountCode: env("XERO_PURCHASE_ACCOUNT", "300"),
+        AccountCode: env("XERO_PURCHASE_ACCOUNT", "310"),
         TaxType: env("XERO_PURCHASE_TAX", "INPUT"),
       };
       const code = known.get(String(l.item_code ?? l.sku ?? "").toUpperCase());
