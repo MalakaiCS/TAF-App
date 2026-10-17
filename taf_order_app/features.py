@@ -242,6 +242,20 @@ CATALOGUE: List[Feature] = [
             "Unpaid invoices from Xero by customer, aged, with a statement "
             "to print or email.",
             "Money", built=True),
+
+    # ── Stock you can trust (step 47) ────────────────────────────────────
+    Feature("stock_reserve", "Stock spoken for",
+            "What open orders will take of each stock item, so free is on "
+            "hand less what is already promised - on the PC and the phone.",
+            "The floor", built=True),
+    Feature("price_history", "What suppliers have charged",
+            "Every price paid for an item, by supplier and date, from the "
+            "purchase orders - and how much it moved.",
+            "Money", built=True),
+    Feature("lead_times", "Order before it runs out",
+            "How long each supplier takes, and the stock that will be under "
+            "its minimum before a new order could get here.",
+            "The floor", built=True),
 ]
 
 BY_KEY: Dict[str, Feature] = {f.key: f for f in CATALOGUE}

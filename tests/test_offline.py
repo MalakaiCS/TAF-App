@@ -125,9 +125,11 @@ def test_the_worker_is_not_registered_from_a_file_url():
 #                        nobody again (checked in tests/db_rules.py too).
 #   set_order_line_qc    sets a line's QC record to the checks ticked. Twice
 #                        is the same record as once.
+#   count_stock          writes what is on the shelf against the open count;
+#                        counting again replaces the count, so twice is once.
 REPEATABLE = {"set_order_line_made", "merge_order_header",
               "adjust_stock_atomic", "request_supply", "request_supplies",
-              "set_order_line_qc"}
+              "set_order_line_qc", "count_stock"}
 
 
 def _queued_calls() -> list:

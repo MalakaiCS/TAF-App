@@ -1390,6 +1390,60 @@ def run_sales_checks(pg: Postgres) -> None:
     check("a filter change every 0 weeks is refused", not ok, err)
 
 
+def run_stock_insight_checks(pg: Postgres) -> None:
+    print("\n── stock you can trust (step 47) ──")
+    for _ in range(2):
+        ok, _o, err = pg.psql((ROOT / "migrate_stock_insight.sql").read_text(
+            encoding="utf-8"), "f")
+        check("step 47 runs, and runs again cleanly", ok, err)
+    item = q(pg, "INSERT INTO stock_items (name, stock_on_hand) VALUES "
+                 "('Rivets 4mm', 12) RETURNING id;").splitlines()[0]
+    take = q(pg, "INSERT INTO stocktakes (name) VALUES ('Back rack') "
+                 "RETURNING id;").splitlines()[0]
+    for _ in range(2):
+        ok, out, err = as_in(pg, "f", DAVE, f"SELECT count_stock('{take}', "
+                             f"'{item}', 9, 'Dave');")
+    got = q(pg, "SELECT count(*) || '|' || max(counted) || '|' || max(was) FROM "
+                f"stocktake_counts WHERE stocktake_id = '{take}';")
+    check("a count from the phone, sent twice, is one count with what the "
+          "system said", ok and got == "1|9|12.000", got or err)
+    ok, out, err = as_in(pg, "f", DAVE, f"SELECT count_stock('{take}', "
+                         f"'{item}', -1, 'Dave');")
+    check("a count below nothing writes nothing", ok and out == "", out or err)
+    q(pg, f"UPDATE stocktakes SET finished_at = now() WHERE id = '{take}';")
+    ok, out, err = as_in(pg, "f", DAVE, f"SELECT count_stock('{take}', "
+                         f"'{item}', 3, 'Dave');")
+    got = q(pg, f"SELECT max(counted) FROM stocktake_counts WHERE stocktake_id = '{take}';")
+    check("nor anything to a stocktake that is finished", got == "9", got)
+
+    rows = ('[{"item_id": "' + item + '", "reserved": 4, "orders": 2}, '
+            '{"item_id": "00000000-0000-0000-0000-0000000000ff", "reserved": 1}]')
+    ok, out, err = as_in(pg, "f", DAVE, f"SELECT set_stock_reserved('{rows}');")
+    got = q(pg, "SELECT string_agg(reserved || '/' || orders, ',') FROM stock_reserved;")
+    check("what open orders speak for is written all at once, for real items",
+          ok and out == "1" and got == "4/2", (out or err) + " " + got)
+    ok, out, err = as_in(pg, "f", DAVE, "SELECT set_stock_reserved('[]');")
+    got = q(pg, "SELECT count(*) FROM stock_reserved;")
+    check("and replaced each time", ok and got == "0", got or err)
+
+    sup = q(pg, "SELECT id FROM suppliers WHERE name = 'FD Greenwood';")
+    lines = ('[{"item_code": "FDG-C45", "unit_price": 18.5, "quantity": 20, '
+             f'"stock_item_id": "{item}"}}, {{"item_code": "X", "unit_price": "tbc"}}]')
+    q(pg, "INSERT INTO purchase_orders (supplier, supplier_id, status, lines, "
+          "created_at, sent_at, received_at) VALUES ('FD Greenwood', "
+          f"'{sup}', 'received', '{lines}', now() - interval '10 days', "
+          "now() - interval '9 days', now() - interval '2 days');")
+    ok, out, err = as_in(pg, "f", DAVE, "SELECT item_code || '|' || unit_price "
+                         "|| '|' || quantity FROM supplier_prices "
+                         "WHERE supplier = 'FD Greenwood';")
+    check("what was paid is listed by item, and a price that is not one is "
+          "left out", ok and out == "FDG-C45|18.5|20", out or err)
+    ok, out, err = as_in(pg, "f", DAVE, "SELECT median_days FROM "
+                         f"supplier_lead_times WHERE supplier_id = '{sup}';")
+    check("and how long the supplier took, sent to received",
+          ok and out == "7.0", out or err)
+
+
 def _skip(why: str) -> int:
     """Skipping is fine on a laptop. In CI it is not: a workflow that goes
     green having checked nothing is worse than no workflow, because it is
@@ -1420,6 +1474,7 @@ def main() -> int:
         run_floor_checks(pg)
         run_planning_checks(pg)
         run_sales_checks(pg)
+        run_stock_insight_checks(pg)
     finally:
         pg.stop()
     print(f"\n{len(FAILURES)} FAILED" if FAILURES

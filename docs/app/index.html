@@ -543,6 +543,19 @@
               border-bottom:1px solid var(--line); font-size:16px; }
   .qc-check input { width:24px; height:24px; flex:0 0 auto; }
 
+  .count-list { display:flex; flex-direction:column; gap:6px; margin-top:10px; }
+  .count-row { display:grid; grid-template-columns:minmax(0, 1fr) auto; gap:2px 10px;
+               text-align:left; background:var(--card); border:1px solid var(--line);
+               border-radius:10px; padding:10px 12px; font:inherit; color:var(--text);
+               cursor:pointer; min-height:56px; }
+  .count-row .nm { font-weight:600; grid-column:1; }
+  .count-row .muted { grid-column:1; font-size:13px; }
+  .count-row b { grid-column:2; grid-row:1 / span 2; align-self:center; }
+  .count-row.done { background:var(--tint); }
+  .count-row.done b { color:var(--green); }
+  .count-row.off b { color:var(--amber); }
+  .big-number input { font-size:28px; height:60px; text-align:center; }
+  .spoken { margin-top:6px; color:var(--amber); font-weight:600; }
   .chase-row { display:flex; align-items:center; justify-content:space-between;
                gap:10px; padding:8px 0; border-top:1px solid var(--line); }
   .chase-row b { display:block; }

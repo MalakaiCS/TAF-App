@@ -179,6 +179,12 @@ SWITCHES: list = []
 QC_LISTS = [{"filter_type": "*", "checks": ["Size checked", "Label on"]}]
 TIMERS: list = []
 FAULTS: list = []
+# Stock (step 47): the count going on, what was counted, and what the phone
+# was told about stock spoken for and prices paid.
+TAKES: list = []
+COUNTS: dict = {}
+APPLIED: list = []
+
 # Planning (step 45): one person in for a few minutes a day, so any order
 # fills it.
 ROSTER = [{"person": "Dave", "days": [1, 2, 3, 4, 5, 6, 7], "hours": 0.1,
@@ -271,6 +277,25 @@ class Stub:
             return send(SWITCHES)
         if "/rest/v1/qc_checklists" in url:
             return send(QC_LISTS)
+        if "/rest/v1/stocktakes" in url and req.method == "POST":
+            row = {"id": "tk" + str(len(TAKES)), "name": body.get("name", ""),
+                   "finished_at": None}
+            TAKES.append(row)
+            return send([row])
+        if "/rest/v1/stocktakes" in url and req.method == "PATCH":
+            for t in TAKES:
+                t.update(body)
+            return send(TAKES)
+        if "/rest/v1/stocktakes" in url:
+            return send([t for t in TAKES if not t.get("finished_at")])
+        if "/rest/v1/stocktake_counts" in url:
+            return send(list(COUNTS.values()))
+        if "/rest/v1/stock_reserved" in url:
+            return send([{"reserved": 12, "orders": 2}] if "s1" in url else [])
+        if "/rest/v1/supplier_prices" in url:
+            return send([{"bought_at": "2026-09-01T00:00:00Z",
+                          "supplier": "FD Greenwood", "unit_price": 82.5,
+                          "po_number": "PO-0007"}] if "s1" in url else [])
         if "/rest/v1/staff_roster" in url:
             return send(ROSTER)
         if "/rest/v1/staff_leave" in url or "/rest/v1/shutdown_days" in url:
@@ -398,6 +423,19 @@ class Stub:
                         t["minutes"] = 3.5
                         out.append(t)
                 return send(out)
+            if name == "count_stock":
+                take = next((t for t in TAKES if t["id"] == body.get("p_stocktake")
+                             and not t.get("finished_at")), None)
+                item = next((s for s in STOCK if s["id"] == body.get("p_item")), None)
+                if not take or not item:
+                    return send(None)
+                COUNTS[item["id"]] = {"item_id": item["id"],
+                                      "counted": body.get("p_counted"),
+                                      "was": item.get("stock_on_hand")}
+                return send("c-" + item["id"])
+            if name == "apply_stocktake":
+                APPLIED.append(body.get("p_stocktake"))
+                return send([])
             if name == "set_order_line_qc":
                 for it in ITEMS.get(body.get("p_order_id"), []):
                     if it.get("line_id") == body.get("p_line_id"):
@@ -1312,6 +1350,75 @@ def run() -> int:
         page.wait_for_selector("#sheet.hidden", state="attached")
         QUOTES[0].update({"status": "sent", "lost_reason": ""})
         CUSTOMERS[0].pop("service_weeks", None)
+        SWITCHES.clear()
+        page.evaluate("TAFAPP._floor.setFeatures({})")
+
+        print("\n── stock you can trust ──")
+        on = ("stocktake", "stock_reserve", "price_history")
+        SWITCHES[:] = [{"key": k, "enabled": True} for k in on]
+        page.evaluate("(on) => TAFAPP._floor.setFeatures("
+                      "Object.fromEntries(on.map(k => [k, true])))", list(on))
+        page.click('#tabs button[data-tab="orders"]')
+        page.wait_for_selector("#screen table")
+        page.click('#tabs button[data-tab="count"]')
+        page.wait_for_selector("#count-start")
+        page.fill("#count-name", "Back racks")
+        page.click("#count-start")
+        page.wait_for_selector("#count-list .count-row")
+        check("a count is started from the phone, and lists every item",
+              TAKES and TAKES[0]["name"] == "Back racks"
+              and page.locator("#count-list .count-row").count() == len(STOCK))
+        sku = STOCK[0]["sku"]
+        page.fill("#count-find", sku)
+        page.press("#count-find", "Enter")
+        page.wait_for_selector("#count-qty")
+        page.fill("#count-qty", "40")
+        page.press("#count-qty", "Enter")
+        page.wait_for_timeout(400)
+        check("a gun that types the label goes straight to the item, and the "
+              "count goes in with what the system said",
+              COUNTS.get(STOCK[0]["id"], {}).get("counted") == 40
+              and COUNTS[STOCK[0]["id"]]["was"] == STOCK[0]["stock_on_hand"],
+              str(COUNTS))
+        page.route("**/rest/v1/rpc/count_stock*",
+                   lambda r: r.abort("internetdisconnected"))
+        page.locator(f'#count-list .count-row[data-stock="{STOCK[1]["id"]}"]').click()
+        page.wait_for_selector("#count-qty")
+        page.fill("#count-qty", "5")
+        page.click("#count-save")
+        page.wait_for_timeout(400)
+        check("out of signal the count is kept on the phone",
+              STOCK[1]["id"] not in COUNTS
+              and "1 change waiting" in page.locator("#state").inner_text()
+              and "2 of" in page.locator("#screen").inner_text())
+        page.unroute("**/rest/v1/rpc/count_stock*")
+        page.evaluate("TAFSYNC.flush()")
+        page.wait_for_timeout(600)
+        check("and goes in when the signal is back",
+              COUNTS.get(STOCK[1]["id"], {}).get("counted") == 5)
+        page.click("#count-finish")
+        page.wait_for_selector("#count-apply")
+        check("finishing shows what is not what the system says",
+              "not what the system says" in page.locator("#sheet-body").inner_text())
+        page.click("#count-apply")
+        page.wait_for_timeout(500)
+        check("and a manager can set stock to what was counted",
+              APPLIED == [TAKES[0]["id"]] and TAKES[0].get("finished_at"))
+
+        page.click('#tabs button[data-tab="stock"]')
+        page.wait_for_selector(f'#screen .stock-card[data-stock="{STOCK[0]["id"]}"]')
+        page.locator(f'#screen .stock-card[data-stock="{STOCK[0]["id"]}"]').click()
+        page.wait_for_selector("#stock-spoken")
+        free = STOCK[0]["stock_on_hand"] - 12
+        check("a stock item says what open jobs have spoken for, and what is free",
+              page.locator("#stock-spoken").inner_text() == f"12 on 2 jobs · {free:g} free",
+              page.locator("#stock-spoken").inner_text())
+        check("and what we have paid for it",
+              "What we've paid" in page.locator("#sheet-body").inner_text()
+              and "$82.50" in page.locator("#sheet-body").inner_text())
+        page.keyboard.press("Escape")
+        page.wait_for_selector("#sheet.hidden", state="attached")
+        COUNTS.clear()
         SWITCHES.clear()
         page.evaluate("TAFAPP._floor.setFeatures({})")
 

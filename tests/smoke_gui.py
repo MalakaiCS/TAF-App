@@ -166,6 +166,27 @@ OVERRIDES = {
     "add_fault":           lambda row, photo="": ADDED_FAULTS.append(dict(row))
                                                  or row,
     "orders_with_finished_photo": lambda ids: set(),
+    "supplier_prices":     lambda *a, **k: [
+        {"bought_at": "2026-06-01T00:00:00Z", "supplier": "FD Greenwood",
+         "item_code": "FDG-G4", "stock_item_id": None, "unit_price": 80,
+         "quantity": 10, "po_number": "PO-0003"},
+        {"bought_at": "2026-09-01T00:00:00Z", "supplier": "FD Greenwood",
+         "item_code": "FDG-G4", "stock_item_id": "s1", "unit_price": 88,
+         "quantity": 10, "po_number": "PO-0007"},
+        {"bought_at": "2026-09-02T00:00:00Z", "supplier": "Vulcan",
+         "item_code": "VUL-BF592", "stock_item_id": "s2", "unit_price": 3,
+         "quantity": 6, "po_number": "PO-0008"}],
+    "supplier_lead_times": lambda *a, **k: [
+        {"supplier_id": "s-fdg", "supplier": "FD Greenwood", "orders": 4,
+         "avg_days": 5, "median_days": 5, "longest_days": 9},
+        {"supplier_id": "s-vul", "supplier": "Vulcan", "orders": 2,
+         "avg_days": 12, "median_days": 12, "longest_days": 14}],
+    "stock_transactions_since": lambda *a, **k: [
+        {"stock_item_id": "s1", "transaction_type": "use",
+         "quantity_change": -60,
+         "created_at": __import__("datetime").datetime.now().isoformat()}],
+    "stock_reserved":      lambda *a, **k: {"s1": {"reserved": 28, "orders": 2}},
+    "set_stock_reserved":  lambda *a, **k: 0,
     "staff_roster":        lambda *a, **k: [
         {"person": "Dave Floor", "days": [1, 2, 3, 4, 5], "hours": 1,
          "makes": True, "active": True}],
@@ -1894,6 +1915,8 @@ def _steps(app, gui, root):
         real_open_path = gui._open_path
         gui._open_path = lambda path: opened.append(str(path))
         real_owing = gui._xero.owing
+        real_app_dir = gui.APP_DIR
+        gui.APP_DIR = Path(tempfile.mkdtemp(prefix="taf-statements-"))
         gui._xero.owing = lambda: {"rows": [
             {"customer": "Bells Creek", "number": "INV-1", "due": "2026-08-01",
              "total": 100, "owing": 100, "days_late": 70},
@@ -1963,6 +1986,7 @@ def _steps(app, gui, root):
             webbrowser.open = real
             gui._open_path = real_open_path
             gui._xero.owing = real_owing
+            gui.APP_DIR = real_app_dir
             _feat._switches = {}
     add("dialogs: winning the work", _sales_windows)
 
@@ -2612,6 +2636,58 @@ def _steps(app, gui, root):
         app._stock_search_var.set("")
         _settle(0.4)
     add("stock: square cards, picked and opened", _stock_cards)
+
+    def _stock_insight_windows():
+        """What we have paid for an item, and what to order before it runs
+        out."""
+        from taf_order_app import features as _feat
+        _feat._switches = {k: True for k in ("stock_reserve", "price_history",
+                                             "lead_times")}
+
+        def _wait(tree):
+            for _ in range(80):
+                root.update()
+                if tree.get_children():
+                    return
+                time.sleep(0.05)
+
+        try:
+            app._show_tab("stock")
+            app._refresh_stock_list()
+            for _ in range(80):
+                root.update()
+                if len(app._stock_cards) == 2:
+                    break
+                time.sleep(0.05)
+            card = next(c for c, _p, i in app._stock_cards if i["id"] == "s1")
+            card.event_generate("<Button-1>", x=5, y=5)
+            root.update()
+            dlg, tree, foot = app._stock_price_history()
+            _wait(tree)
+            rows = [tree.item(c, "values") for c in tree.get_children()]
+            # The older price was bought under the supplier's code, not the id.
+            assert len(rows) == 2, rows
+            assert rows[0][3] == "$88.00" and rows[0][4] == "+10.0%", rows[0]
+            assert rows[1][5] == "PO-0003", rows[1]
+            dlg.destroy()
+
+            dlg, tree, foot = app._order_soon_window()
+            _wait(tree)
+            rows = [tree.item(c, "values") for c in tree.get_children()]
+            names = [str(r[0]).strip() for r in rows]
+            assert names[:3] == ["Order soon", "Bag frame 592", "G4 media roll"], names
+            # 40 on hand, 28 on jobs: 12 free, used 1 a day, 2 days from the
+            # minimum and FD Greenwood takes 5 - order 3.
+            g4 = rows[2]
+            assert g4[1].startswith("12") and g4[2] == "2 days" and \
+                g4[3].startswith("5 days (FD Greenwood)") and g4[4].startswith("3"), g4
+            assert rows[1][2] == "now" and "Vulcan" in rows[1][3], rows[1]
+            assert "How long each supplier takes" in names, names
+            dlg.destroy()
+        finally:
+            _feat._switches = {}
+    add("stock: what we have paid, and order before it runs out",
+        _stock_insight_windows)
 
     def _badge_and_loading():
         """The header's badge turns once when clicked and lands upright; the

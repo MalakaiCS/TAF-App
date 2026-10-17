@@ -3136,6 +3136,42 @@ def cancel_price_change(change_id: str) -> None:
      .is_("applied_at", "null").execute())
 
 
+# ── Stock you can trust (step 47, migrate_stock_insight.sql) ─────────────────
+
+def set_stock_reserved(reserved: dict) -> int:
+    rows = [{"item_id": k, "reserved": v["reserved"], "orders": v["orders"]}
+            for k, v in (reserved or {}).items()]
+    resp = get_client().rpc("set_stock_reserved", {"p_rows": rows}).execute()
+    return int(resp.data or 0)
+
+
+def stock_reserved() -> dict:
+    resp = get_client().table("stock_reserved").select("*").execute()
+    return {str(r["item_id"]): {"reserved": float(r.get("reserved") or 0),
+                                "orders": int(r.get("orders") or 0)}
+            for r in (resp.data or [])}
+
+
+def supplier_prices(limit: int = 3000) -> list:
+    resp = (get_client().table("supplier_prices").select("*")
+            .order("bought_at", desc=True).limit(limit).execute())
+    return list(resp.data or [])
+
+
+def supplier_lead_times() -> list:
+    resp = get_client().table("supplier_lead_times").select("*").execute()
+    return list(resp.data or [])
+
+
+def stock_transactions_since(days: int = 60) -> list:
+    import datetime as _d
+    since = (_d.datetime.utcnow() - _d.timedelta(days=days)).isoformat()
+    resp = (get_client().table("stock_transactions")
+            .select("stock_item_id,transaction_type,quantity_change,created_at")
+            .gte("created_at", since).limit(20000).execute())
+    return list(resp.data or [])
+
+
 def _now_stamp() -> str:
     import datetime as _dt
     d = _dt.datetime.now()

@@ -34,6 +34,7 @@ from taf_order_app import insights as _insights
 from taf_order_app import floor as _floor
 from taf_order_app import planning as _planning
 from taf_order_app import sales as _sales
+from taf_order_app import stock_insight as _stock_insight
 from taf_order_app import records as _records
 from taf_order_app import xero as _xero
 from taf_order_app import invoice_wording as _wording
@@ -15051,6 +15052,8 @@ class ModernOrderApp(tk.Frame):
             can = _db.is_ready() and _db.can_manage_stock()
             return [
                 ("Transaction history",   self._view_stock_history),
+            ] + ([("What we've paid…",   self._stock_price_history)]
+                 if _features.is_on("price_history") else []) + [
                 ("Print barcode labels…", self._print_stock_labels),
                 ("Make the photos load faster…",
                  self._shrink_stock_photos if can else None),
@@ -15141,6 +15144,17 @@ class ModernOrderApp(tk.Frame):
             except Exception:
                 prices = {}
             self._stock_prices = prices
+            # What open orders have spoken for (step 47). Worked out here,
+            # from the same rules stock is deducted by, and written for the
+            # phones. Not when orders already take their stock as they go in.
+            self._stock_reserved = {}
+            if _features.is_on("stock_reserve") and not STOCK_SETTINGS.get("auto_deduct"):
+                try:
+                    self._stock_reserved = _stock_insight.reserved_by_item(
+                        _db.get_all_orders(), items)
+                    _db.set_stock_reserved(self._stock_reserved)
+                except Exception:
+                    pass
             q.put(("ok", items))
 
         def _poll():
@@ -15355,9 +15369,19 @@ class ModernOrderApp(tk.Frame):
             parts["photo_h"] = photo_h
             parts["name"].configure(text=_clamp_lines(
                 item.get("name") or "", name_font, text_w, 1))
-            parts["desc"].configure(text=_clamp_lines(
-                item.get("description") or item.get("product_type") or "",
-                desc_font, text_w, 2), wraplength=text_w)
+            spoken = (getattr(self, "_stock_reserved", {}) or {}).get(
+                str(item.get("id")))
+            words = item.get("description") or item.get("product_type") or ""
+            if spoken and spoken.get("reserved"):
+                # What open orders have spoken for, before the description.
+                free = _stock_insight.free(item, self._stock_reserved)
+                head = (f"{_cards.qty_text(spoken['reserved'])} on jobs · "
+                        f"{_cards.qty_text(free)} free")
+                parts["desc"].configure(text=head + "\n" + _clamp_lines(
+                    words, desc_font, text_w, 1), wraplength=text_w)
+            else:
+                parts["desc"].configure(text=_clamp_lines(
+                    words, desc_font, text_w, 2), wraplength=text_w)
             held, moq = _stock_numbers(item, text_w, name_font, desc_font)
             parts["held"].configure(text=held)
             parts["moq"].configure(text=moq)
@@ -18366,6 +18390,7 @@ class ModernOrderApp(tk.Frame):
         ("service_reminders",  "Due for a filter change…", "_service_due_window"),
         ("price_change",       "Change prices…",          "_price_change_tool"),
         ("owing_view",         "Who owes what…",          "_owing_window"),
+        ("lead_times",         "Order before it runs out…", "_order_soon_window"),
         ("customer_display",   "Enable second screen display…",
                                                          "_customer_screen_from_menu"),
     ]
@@ -20297,6 +20322,90 @@ class ModernOrderApp(tk.Frame):
                                                        padx=(px(8), 0))
         dlg.owing_cache, dlg.owing_statement = cache, _statement
         return dlg, tree, foot
+
+    # ── Stock you can trust (step 47) ────────────────────────────────────
+
+    def _stock_price_history(self):
+        """Every price paid for the selected item, by supplier and date."""
+        item = self._get_selected_stock()
+        if item is None:
+            messagebox.showinfo("What we've paid", "Select a stock item first.")
+            return None
+        sid = str(item.get("id"))
+
+        def build():
+            codes = []
+            try:
+                codes = [l.get("supplier_code") for l in _buying.list_stock_links()
+                         if str(l.get("stock_item_id")) == sid]
+            except Exception:
+                codes = []
+            hist = _stock_insight.price_history(_db.supplier_prices(), sid, codes)
+            out = [((h["day"].strftime("%d/%m/%Y") if h["day"] else "",
+                     h["supplier"], h["code"], f"${h['price']:,.2f}",
+                     "" if h["change"] is None else f"{h['change']:+.1f}%",
+                     h["po"]), None, None) for h in reversed(hist)]
+            return out, ("Nothing bought for it on a purchase order yet."
+                         if not hist else
+                         f"{len(hist)} purchase{'s' if len(hist) != 1 else ''}, "
+                         "newest first. The change is against the last price "
+                         "from the same supplier.")
+        return self._table_window(
+            f"What we've paid: {item.get('name') or ''}",
+            "From every purchase order sent for it.",
+            [("d", "Date", 100, "w"), ("s", "Supplier", 200, "w"),
+             ("c", "Their code", 120, "w"), ("p", "Each (ex GST)", 110, "e"),
+             ("x", "Change", 80, "e"), ("o", "PO", 100, "w")], build, width=780)
+
+    def _order_soon_window(self):
+        """What will be under its minimum before a new order could get here,
+        and how long each supplier takes."""
+        def build():
+            today = datetime.date.today()
+            items = _db.get_stock_items()
+            links = (_buying.list_stock_links()
+                     if _buying.ready() and _buying.stock_links_ready() else [])
+            leads = _db.supplier_lead_times()
+            reserved = {}
+            try:
+                reserved = _db.stock_reserved()
+            except Exception:
+                reserved = {}
+            rows = _stock_insight.order_soon(items, _db.stock_transactions_since(60),
+                                             links, leads, today, reserved)
+            unit = {str(i.get("id")): i.get("unit") for i in items}
+            out = [(("Order soon", "", "", "", ""), "head", None)]
+            for r in rows:
+                it = r["item"]
+                out.append(((f"    {it.get('name') or ''}",
+                             f"{_cards.qty_text(r['free'])} free",
+                             "now" if r["days_left"] <= 0 else f"{r['days_left']:g} days",
+                             f"{r['lead_days']:g} days" + (f" ({r['supplier']})"
+                                                           if r["supplier"] else ""),
+                             f"{_cards.qty_text(r['order'])} "
+                             f"{_cards.unit_label(unit.get(str(it.get('id'))), r['order'])}"),
+                            "late" if r["days_left"] <= 0 else None, None))
+            out.append((("How long each supplier takes", "", "", "", ""), "head", None))
+            for l in sorted(leads, key=lambda l: str(l.get("supplier") or "")):
+                out.append(((f"    {l.get('supplier') or '—'}", "",
+                             f"{l.get('orders') or 0} orders",
+                             f"{float(l.get('median_days') or 0):g} days usually",
+                             f"longest {float(l.get('longest_days') or 0):g}"),
+                            None, None))
+            return out, ("Nothing will run short before more could arrive."
+                         if not rows else
+                         "Order is enough to be back at the minimum when it "
+                         "arrives, at the rate it has been used over the last "
+                         "60 days. A supplier with no received orders yet is "
+                         "counted at a week.")
+        return self._table_window(
+            "Order before it runs out",
+            "Stock that will be under its minimum before a new order could "
+            "get here, from how fast it is used and how long its supplier "
+            "takes.", [("w", "Item / supplier", 300, "w"), ("f", "Free", 110, "e"),
+                       ("d", "Until the minimum", 140, "e"),
+                       ("l", "Supplier takes", 190, "w"), ("o", "Order", 110, "e")],
+            build, width=900)
 
     def _outstanding_orders(self):
         """Every live order, with its lines. Read fresh rather than from the
@@ -26735,6 +26844,14 @@ class ModernOrderApp(tk.Frame):
         transaction that can be reversed by hand if it turns out to be wrong.
         """
         if not STOCK_SETTINGS.get("auto_deduct"):
+            # Spoken for instead (step 47): this order's share, worked out
+            # again for everyone now it is in.
+            if _features.is_on("stock_reserve"):
+                try:
+                    _db.set_stock_reserved(_stock_insight.reserved_by_item(
+                        _db.get_all_orders(), _db.get_stock_items()))
+                except Exception:
+                    pass
             return ""
         try:
             stock = _db.get_stock_items()

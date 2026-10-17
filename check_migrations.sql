@@ -193,7 +193,11 @@ WITH checks(step, file, purpose, needed, present) AS (VALUES
       to_regclass('public.price_changes') IS NOT NULL
       AND EXISTS (SELECT 1 FROM information_schema.columns
                    WHERE table_schema='public' AND table_name='quotes'
-                     AND column_name='lost_reason'))
+                     AND column_name='lost_reason')),
+
+  (47, 'migrate_stock_insight.sql', 'Stocktakes on the phone, stock spoken for, supplier prices and lead times', 'recommended',
+      to_regclass('public.stock_reserved') IS NOT NULL
+      AND to_regclass('public.supplier_lead_times') IS NOT NULL)
 )
 SELECT step,
        CASE WHEN present THEN 'already done' ELSE 'RUN THIS' END AS status,

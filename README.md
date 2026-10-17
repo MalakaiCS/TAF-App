@@ -147,6 +147,24 @@ log, stock management and a customer database.
   - **Who owes what** — unpaid invoices from Xero by customer, aged (not
     due, 1-30, 31-60, 61-90, over 90 days), with a statement PDF and an
     email to send it with.
+- **Stock you can trust** (step 47, switched on in Settings → Features):
+  - **Stocktake on the phone** — with *Stocktake mode* on, the phone has a
+    *Stocktake* tab: start a count, find each item (a scanner that types the
+    label goes straight to it), type what is on the shelf. Counts made out of
+    signal wait on the phone and go in when it is back. *Finish* lists what
+    is not what the system says, and a manager sets stock to what was
+    counted.
+  - **Stock spoken for** — what the open orders will take of each item, by
+    the same rules stock is deducted by, worked out when the Stock page
+    refreshes. Cards say "12 on 2 jobs · 28 free", desktop and phone.
+  - **What suppliers have charged** — *Item ▾ → What we've paid…* (and on a
+    stock item on the phone): every price from a purchase order sent, by
+    supplier and date, with the change against that supplier's last price.
+  - **Order before it runs out** — *Order before it runs out…*: stock that
+    will be under its minimum before a new order could arrive, from how fast
+    it has been used over 60 days and how long its supplier takes (sent to
+    received, from the last 18 months; a week until known), with how many to
+    order.
 - **Delivery labels** — one A4 landscape sheet per wrapped bundle, with the
   TAF logo, the company's base address as From, the delivery address, filter
   size, the quantity in that wrap (and the line's ordered quantity), the
@@ -514,6 +532,7 @@ just run it — nothing is lost and nothing is duplicated.
 | 44 | `migrate_floor.sql` | The factory floor: when an order changed status (for the TV board), a job timer, QC checklists, faults found in QC, and finished-job photos the customer sees on their portal (needs steps 16, 32 and the order-files, features and portal steps). Everything arrives switched off | recommended |
 | 45 | `migrate_planning.sql` | Staff roster and leave, so a new order due on a day that is already full says so - and names the next day with room (needs steps 16 and the features step) | recommended |
 | 46 | `migrate_sales.sql` | Winning the work: when a quote was chased and why one was lost, how often a customer's filters are changed (for reminders), and price changes previewed and applied once from a date (needs the quotes, quote portal, pricing and price tier steps) | recommended |
+| 47 | `migrate_stock_insight.sql` | Stock you can trust: counting on the phone during a stocktake, what open orders have spoken for, what each supplier has charged, and how long each takes (needs steps 3, 40 and the more-features step) | recommended |
 
 **Step 16 is the one that matters most.** Every policy in the older scripts is
 `TO authenticated USING (true)` — meaning *anyone Supabase counts as signed

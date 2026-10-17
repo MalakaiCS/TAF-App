@@ -28,6 +28,7 @@ var TAFAPP = (function () {
     { key: "stock",       label: "Stock",     icon: "box" },
     { key: "supplies",    label: "Supplies",  icon: "bag" },
     { key: "board",       label: "Board",     icon: "board", feature: "tv_board" },
+    { key: "count",       label: "Stocktake", icon: "count", feature: "stocktake" },
     { key: "log",         label: "Log",       icon: "clock", from: 3 }
   ];
   var BAR = 4;
@@ -51,6 +52,7 @@ var TAFAPP = (function () {
     clock:  ["M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0Z", "M12 7v5l3.5 2"],
     board:  ["M3 4h18v13H3z", "M8 21h8", "M12 17v4", "M8 8v5", "M12 8v3",
              "M16 8v6"],
+    count:  ["M9 3.5h6v3H9z", "M7 5H5.5v16h13V5H17", "M9 13l2 2 4-4"],
     more:   ["M5 12h.01", "M12 12h.01", "M19 12h.01"]
   };
 
@@ -1909,6 +1911,219 @@ var TAFAPP = (function () {
             attr: { "data-customer": r.customer.id }, kids: kids }));
         });
       }).catch(function () { card.remove(); });
+  }
+
+  /* ── Stocktake on the phone ──────────────────────────────────────────
+     The count session the desktop runs (records.py): walk the racks, find
+     each item (or scan its label with a gun that types), type what is on
+     the shelf. Each count goes through count_stock, which is the same done
+     twice as once, so a phone with no signal keeps them and sends them
+     later. A manager finishes it - applying the differences or not. */
+
+  SCREENS.count = function (main) {
+    if (!feature("stocktake")) {
+      U.clear(main);
+      main.appendChild(U.empty("Stocktakes are switched off.",
+        "A director or admin turns them on in the desktop app: Settings → "
+        + "Features → Stocktake mode."));
+      return;
+    }
+    D.select("stocktakes", { "select": "*", "finished_at": "is.null",
+                             "order": "started_at.desc", "limit": 1 })
+      .then(function (rows) {
+        var take = (rows || [])[0];
+        if (!take) { return noCount(main); }
+        return Promise.all([
+          loadKept("stock", function () {
+            return D.select("stock_items", { "select": "*", "order": "name",
+                                             "limit": 2000 });
+          }),
+          D.select("stocktake_counts", { "select": "item_id,counted,was,counted_by",
+                                         "stocktake_id": "eq." + take.id,
+                                         "limit": 5000 }).catch(function () { return []; })
+        ]).then(function (got) { counting(main, take, got[0].rows, got[1]); });
+      }).catch(function (err) {
+        U.clear(main);
+        U.notice(main, err.message);
+      });
+  };
+
+  function noCount(main) {
+    U.clear(main);
+    var name = U.el("input", { attr: { type: "text", id: "count-name",
+                                       placeholder: "e.g. Back racks, October" } });
+    var go = U.button("Start a count", function () {
+      go.disabled = true;
+      D.insert("stocktakes", { name: name.value.trim() || ymd(new Date()),
+        started_by: D.cachedProfile().full_name || D.cachedProfile().username || "" })
+        .then(function () { show("count"); })
+        .catch(function (err) { go.disabled = false; U.notice(main, err.message); });
+    }, "go");
+    go.setAttribute("id", "count-start");
+    main.appendChild(U.card("No count going", [
+      U.el("div", { cls: "muted", text: "Start one, and everybody counting "
+        + "adds to the same count - on phones and PCs." }),
+      U.el("label", { cls: "f", kids: [U.el("span", { text: "Name it" }), name] }),
+      U.el("div", { cls: "row-actions", kids: [go] })]));
+  }
+
+  function counting(main, take, stock, counts) {
+    var done = {};
+    (counts || []).forEach(function (c) { done[c.item_id] = c; });
+    U.clear(main);
+    var head = U.el("div", { cls: "muted" });
+    var find = U.el("input", { attr: { type: "search", id: "count-find",
+      placeholder: "Find an item, or scan its label", autocomplete: "off" } });
+    var list = U.el("div", { cls: "count-list", attr: { id: "count-list" } });
+    var acts = U.el("div", { cls: "row-actions" });
+    if (D.roleLevel() >= 3) {
+      var fin = U.button("Finish the count…", function () {
+        finishCount(take, stock, done);
+      }, "quiet");
+      fin.setAttribute("id", "count-finish");
+      acts.appendChild(fin);
+    }
+    main.appendChild(U.card(take.name || "Stocktake", [head, find, list, acts]));
+
+    function matches(s, words) {
+      var hay = [s.name, s.sku, s.location, s.product_type].map(function (v) {
+        return String(v || ""); }).join(" ").toLowerCase();
+      return words.every(function (w) { return hay.indexOf(w) >= 0; });
+    }
+
+    function draw() {
+      var words = find.value.toLowerCase().split(/\s+/).filter(Boolean);
+      var hits = stock.filter(function (s) { return matches(s, words); });
+      // Not counted first, then the rest - each by where it is kept.
+      hits.sort(function (a, b) {
+        var ca = done[a.id] ? 1 : 0, cb = done[b.id] ? 1 : 0;
+        if (ca !== cb) { return ca - cb; }
+        var la = String(a.location || "") + String(a.name || "");
+        var lb = String(b.location || "") + String(b.name || "");
+        return la < lb ? -1 : (la > lb ? 1 : 0);
+      });
+      var n = Object.keys(done).length;
+      var out = Object.keys(done).filter(function (k) {
+        return Number(done[k].counted) !== Number(done[k].was);
+      }).length;
+      head.textContent = n + " of " + stock.length + " counted"
+        + (out ? "  ·  " + out + " not what the system says" : "");
+      U.clear(list);
+      hits.slice(0, 80).forEach(function (s) {
+        var c = done[s.id];
+        var off = c && Number(c.counted) !== Number(c.was);
+        list.appendChild(U.el("button", {
+          cls: "count-row" + (c ? " done" : "") + (off ? " off" : ""),
+          attr: { type: "button", "data-stock": s.id },
+          on: { click: function () { countOne(s); } },
+          kids: [U.el("span", { cls: "nm", text: s.name || "" }),
+                 U.el("span", { cls: "muted", text: [s.sku, s.location]
+                   .filter(Boolean).join(" · ") }),
+                 U.el("b", { text: c ? qtyText(c.counted) + (off ? " (system "
+                   + qtyText(c.was) + ")" : " ✓") : "—" })]
+        }));
+      });
+      if (!hits.length) {
+        list.appendChild(U.empty("Nothing matches.", "Try fewer words."));
+      }
+    }
+
+    // A gun that types the label and presses Enter: straight to that item.
+    find.addEventListener("keydown", function (e) {
+      if (e.key !== "Enter") { return; }
+      var code = find.value.trim().toLowerCase();
+      var hit = stock.filter(function (s) {
+        return String(s.sku || "").toLowerCase() === code;
+      })[0];
+      if (hit) { e.preventDefault(); find.value = ""; draw(); countOne(hit); }
+    });
+    find.addEventListener("input", draw);
+
+    function countOne(s) {
+      U.openSheet(function (body, close) {
+        body.appendChild(U.el("h2", { cls: "title", text: s.name || "Item" }));
+        body.appendChild(U.el("div", { cls: "muted", text: [s.sku, s.location,
+          "The system says " + qtyText(s.stock_on_hand) + " "
+          + unitLabel(s.unit, s.stock_on_hand)].filter(Boolean).join(" · ") }));
+        var n = U.el("input", { attr: { type: "text", inputmode: "decimal",
+          id: "count-qty", placeholder: "How many on the shelf",
+          value: done[s.id] ? String(done[s.id].counted) : "" } });
+        body.appendChild(U.el("label", { cls: "f big-number", kids: [
+          U.el("span", { text: "Counted (" + unitLabel(s.unit, 2) + ")" }), n] }));
+        var save = U.button("Save the count", function () {
+          var v = parseFloat(String(n.value).trim());
+          if (!(v >= 0)) { U.notice(body, "How many, as a number."); return; }
+          save.disabled = true;
+          S.send({
+            rpc: "count_stock",
+            label: "Count · " + (s.name || "item") + " = " + v,
+            needs_row: true,
+            gone: "That count has been finished, so it was not added.",
+            body: { p_stocktake: take.id, p_item: s.id, p_counted: v,
+                    p_by: D.cachedProfile().full_name || D.cachedProfile().username || "" }
+          }).then(function (res) {
+            done[s.id] = { item_id: s.id, counted: v, was: s.stock_on_hand,
+                           queued: !!res.queued };
+            close();
+            draw();
+            find.focus();
+          }).catch(function (err) {
+            save.disabled = false;
+            U.notice(body, err.message);
+          });
+        }, "go");
+        save.setAttribute("id", "count-save");
+        n.addEventListener("keydown", function (e) {
+          if (e.key === "Enter") { e.preventDefault(); save.click(); }
+        });
+        body.appendChild(U.el("div", { cls: "row-actions", kids: [
+          save, U.button("Cancel", close, "quiet")] }));
+        setTimeout(function () { n.focus(); }, 50);
+      });
+    }
+
+    draw();
+  }
+
+  function finishCount(take, stock, done) {
+    var byId = {};
+    stock.forEach(function (s) { byId[s.id] = s; });
+    U.openSheet(function (body, close) {
+      body.appendChild(U.el("h2", { cls: "title", text: "Finish the count" }));
+      var off = Object.keys(done).filter(function (k) {
+        return Number(done[k].counted) !== Number(done[k].was);
+      });
+      body.appendChild(U.el("div", { cls: "muted", text: Object.keys(done).length
+        + " counted, " + (stock.length - Object.keys(done).length)
+        + " not counted, " + off.length + " not what the system says." }));
+      if (off.length) {
+        body.appendChild(U.table(["Item", { text: "System", num: true },
+                                  { text: "Counted", num: true }],
+          off.map(function (k) {
+            return U.el("tr", { kids: [U.cell((byId[k] || {}).name || ""),
+              U.cell(qtyText(done[k].was), { num: true }),
+              U.cell(qtyText(done[k].counted), { num: true })] });
+          })));
+      }
+      function finish(apply) {
+        var who = D.cachedProfile().full_name || D.cachedProfile().username || "";
+        (apply ? D.rpc("apply_stocktake", { p_stocktake: take.id })
+               : Promise.resolve(null)).then(function () {
+          return D.update("stocktakes", { "id": "eq." + take.id },
+                          { finished_at: new Date().toISOString(), finished_by: who });
+        }).then(function () {
+          close();
+          show("count");
+        }).catch(function (err) { U.notice(body, err.message); });
+      }
+      var apply = U.button("Finish, and set stock to what was counted",
+                           function () { finish(true); }, "go");
+      apply.setAttribute("id", "count-apply");
+      body.appendChild(U.el("div", { cls: "row-actions", kids: [apply,
+        U.button("Finish without changing stock", function () { finish(false); },
+                 "quiet"),
+        U.button("Not yet", close, "quiet")] }));
+    });
   }
 
   /* ── Order again ─────────────────────────────────────────────────────
@@ -3921,9 +4136,41 @@ var TAFAPP = (function () {
       var onHand = U.el("div", {
         text: String(item.stock_on_hand || 0),
         attr: { style: "font-size:30px;font-weight:700" } });
-      body.appendChild(U.card("On hand", [onHand,
+      var onHandCard = U.card("On hand", [onHand,
         U.el("div", { cls: "muted",
-          text: "Minimum " + (item.minimum_on_hand || 0) })]));
+          text: "Minimum " + (item.minimum_on_hand || 0) })]);
+      body.appendChild(onHandCard);
+      // What open orders have spoken for (worked out by the desktop).
+      if (feature("stock_reserve")) {
+        D.select("stock_reserved", { "select": "reserved,orders",
+                                     "item_id": "eq." + item.id })
+          .then(function (rows) {
+            var r = (rows || [])[0];
+            if (!r || !Number(r.reserved)) { return; }
+            onHandCard.appendChild(U.el("div", { cls: "spoken",
+              attr: { id: "stock-spoken" },
+              text: qtyText(r.reserved) + " on " + r.orders + " job"
+                  + (r.orders === 1 ? "" : "s") + " · "
+                  + qtyText(Number(item.stock_on_hand || 0) - Number(r.reserved))
+                  + " free" }));
+          }).catch(function () {});
+      }
+      if (feature("price_history")) {
+        D.select("supplier_prices", { "select": "bought_at,supplier,unit_price,po_number",
+                                      "stock_item_id": "eq." + item.id,
+                                      "order": "bought_at.desc", "limit": 6 })
+          .then(function (rows) {
+            if (!rows || !rows.length) { return; }
+            onHandCard.parentNode.insertBefore(U.card("What we've paid", [
+              U.table(["When", "Supplier", { text: "Each", num: true }],
+                rows.map(function (r) {
+                  return U.el("tr", { kids: [
+                    U.cell(String(r.bought_at || "").slice(0, 10)),
+                    U.cell(r.supplier || ""),
+                    U.cell("$" + money2(r.unit_price), { num: true })] });
+                }))]), onHandCard.nextSibling);
+          }).catch(function () {});
+      }
 
       if (!D.canManageStock()) {
         body.appendChild(U.el("div", { cls: "muted",
