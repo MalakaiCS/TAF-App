@@ -733,6 +733,7 @@ var TAFAPP = (function () {
       main.appendChild(U.el("h2", { text: todayLine() }));
       main.appendChild(grid);
       main.appendChild(U.card("What is late", lateList(rows)));
+      if (feature("sales_targets")) { targetCard(main); }
       if (feature("quote_chase")) { chaseCard(main); }
       if (feature("service_reminders")) { serviceCard(main, rows); }
     }).catch(function (err) {
@@ -2388,7 +2389,9 @@ var TAFAPP = (function () {
               .then(function (ok) {
                 // Only step back to the order once it is actually saved, so
                 // the order redraws from a database that has it.
-                if (ok) { closeInner(); }
+                if (!ok) { return; }
+                if (feature("pod_email")) { proofOfDelivery(row, body); }
+                closeInner();
               });
           }, "image/png");
         }, "go"),
@@ -2397,6 +2400,31 @@ var TAFAPP = (function () {
         }, "quiet"),
         U.button("Cancel", closeInner, "quiet")
       ] }));
+    });
+  }
+
+  /* Signed for: it has been delivered. The order says so, and the customer
+     is emailed the signature and the photos from the drop (the
+     proof-of-delivery function, which reads the switch for itself and sends
+     one signature once). */
+  function proofOfDelivery(row, body) {
+    var already = ["Delivered", "Collected"].indexOf(row.status) !== -1;
+    (already ? Promise.resolve(true)
+      : D.rpc("merge_order_header", {
+          p_order_id: row.id, p_patch: { status: "Delivered" } })
+        .then(function () {
+          row.status = "Delivered";
+          loadedAt = 0;
+          xeroNudge("Delivered");
+        })
+    ).then(function () {
+      return D.callFunction("proof-of-delivery", { order_id: row.id });
+    }).then(function (out) {
+      U.notice(body, out.sent
+        ? "Delivered - the signature and photos are emailed to " + out.to + "."
+        : "Delivered. " + (out.reason || ""), "ok");
+    }).catch(function (err) {
+      U.notice(body, "Signature kept, but: " + err.message);
     });
   }
 
@@ -2463,7 +2491,7 @@ var TAFAPP = (function () {
      goes now. Nothing is said either way: it is not this screen's job, and
      Xero not being linked is not a fault. */
   function xeroNudge(status) {
-    if (status !== "Complete" && status !== "Dispatched") { return; }
+    if (["Complete", "Dispatched", "Delivered"].indexOf(status) === -1) { return; }
     D.callFunction("xero?do=sweep", {}).catch(function () {});
   }
 
@@ -3259,6 +3287,7 @@ var TAFAPP = (function () {
           "Orders appear here once they are marked Complete.")]));
         return;
       }
+      if (feature("route_order")) { runCard(main, ready); }
       var byRegion = {};
       ready.forEach(function (r) {
         var region = (r.location || "").trim() || "Unassigned";
@@ -3325,6 +3354,246 @@ var TAFAPP = (function () {
       });
     }, "go"));
     return wrap;
+  }
+
+  /* ── The order the van goes round in ────────────────────────────────
+     The same three rules as taf_order_app/delivery.py (suggest_route,
+     apply_route, maps_links), held to them by tests/web_app.py. Saved for
+     the day in delivery_runs, so the PC's run sheet follows it too. */
+
+  var RUN_ORDER = ["Pick Up", "Local", "Logan", "Ipswich", "North",
+                   "Gold Coast", "Sunshine Coast", "Freight"];
+  var MAPS = "https://www.google.com/maps/dir/?api=1";
+  var BASE_ADDRESS = "Unit 1/19 Tradelink Road, Hillcrest Queensland 4118 Australia";
+  var STOPS_PER_LINK = 9;
+
+  function addressText(c) {
+    c = c || {};
+    function joined(keys, sep) {
+      return keys.map(function (k) { return String(c[k] || "").trim(); })
+                 .filter(Boolean).join(sep);
+    }
+    return [joined(["delivery_address1", "delivery_address2"], ", "),
+            joined(["delivery_city", "delivery_state", "delivery_postcode"], " ")]
+      .filter(Boolean).join(", ");
+  }
+
+  function postcodeOf(text) {
+    var words = String(text || "").replace(/,/g, " ").split(/\s+/)
+      .filter(function (w) { return /^\d{4}$/.test(w); });
+    return words.length ? parseInt(words[words.length - 1], 10) : 99999;
+  }
+
+  function suggestRoute(stops) {
+    function rank(s) {
+      var i = RUN_ORDER.indexOf(String(s.region || ""));
+      return i === -1 ? RUN_ORDER.length : i;
+    }
+    return (stops || []).filter(function (s) { return s.region !== "Pick Up"; })
+      .slice().sort(function (a, b) {
+        var an = String(a.customer || "").toLowerCase(),
+            bn = String(b.customer || "").toLowerCase();
+        return rank(a) - rank(b) || postcodeOf(a.address) - postcodeOf(b.address)
+          || (an < bn ? -1 : an > bn ? 1 : 0);
+      });
+  }
+
+  function applyRoute(stops, saved) {
+    stops = (stops || []).filter(function (s) { return s.region !== "Pick Up"; });
+    var byId = {}, seen = {}, out = [];
+    stops.forEach(function (s) { byId[String(s.id)] = s; });
+    (saved || []).forEach(function (id) {
+      id = String(id);
+      if (byId[id] && !seen[id]) { out.push(byId[id]); seen[id] = true; }
+    });
+    suggestRoute(stops).forEach(function (s) {
+      if (!seen[String(s.id)]) { out.push(s); }
+    });
+    return out;
+  }
+
+  // encodeURIComponent is what Python's quote(safe="!*'()-_.~") gives.
+  function mapsLinks(base, addresses) {
+    var route = (addresses || []).map(function (a) { return String(a || "").trim(); })
+      .filter(Boolean);
+    if (!route.length) { return []; }
+    var points = route.concat([base]), links = [], start = base;
+    while (points.length) {
+      var leg = points.splice(0, STOPS_PER_LINK + 1);
+      var end = leg[leg.length - 1], via = leg.slice(0, -1);
+      var url = MAPS + "&origin=" + encodeURIComponent(start) + "&destination="
+              + encodeURIComponent(end) + "&travelmode=driving";
+      if (via.length) { url += "&waypoints=" + encodeURIComponent(via.join("|")); }
+      links.push(url);
+      start = end;
+    }
+    return links;
+  }
+
+  function runCard(main, ready) {
+    var card = U.card("Today's run", [U.el("div", { cls: "muted", text: "Loading…" })]);
+    card.setAttribute("id", "run-card");
+    main.appendChild(card);
+    var day = ymd(U.today()), stops = [];
+    Promise.all([
+      D.select("delivery_runs", { "select": "stops", "run_date": "eq." + day })
+        .catch(function () { return []; }),
+      D.select("customers", { "select": "name,short_name,delivery_address1,"
+        + "delivery_address2,delivery_city,delivery_state,delivery_postcode" })
+        .catch(function () { return []; }),
+      D.select("calc_settings", { "select": "value", "key": "eq.company" })
+        .catch(function () { return []; })
+    ]).then(function (got) {
+      var saved = (got[0][0] || {}).stops || [];
+      var byName = {};
+      got[1].forEach(function (c) {
+        [c.name, c.short_name].forEach(function (n) {
+          n = String(n || "").trim().toLowerCase();
+          if (n && !byName[n]) { byName[n] = c; }
+        });
+      });
+      // The company's base address, as the PC's run sheet and labels use it.
+      var base = String(((got[2][0] || {}).value || {}).base_address || "").trim()
+        || BASE_ADDRESS;
+      stops = applyRoute(ready.map(function (r) {
+        return { id: r.id, region: (r.location || "").trim(), customer: r.customer,
+                 order_no: r.order_no, row: r,
+                 address: addressText(byName[String(r.customer || "").trim().toLowerCase()]) };
+      }), saved);
+      draw(base, saved.length > 0);
+    });
+
+    function draw(base, saved) {
+      while (card.childNodes.length > 1) { card.removeChild(card.lastChild); }
+      if (!stops.length) {
+        card.appendChild(U.empty("Only pick-ups today", "Nothing goes in the van."));
+        return;
+      }
+      var list = U.el("div", { cls: "run-list" });
+      stops.forEach(function (s, i) {
+        list.appendChild(U.el("div", { cls: "run-row", attr: { "data-order": s.id }, kids: [
+          U.el("b", { cls: "run-n", text: String(i + 1) }),
+          U.el("div", { cls: "run-what", kids: [
+            U.el("b", { text: s.customer + (s.order_no ? " · " + s.order_no : "") }),
+            U.el("div", { cls: "muted", text: s.address || "No address on the account" })] }),
+          U.button("▲", function () { move(i, -1, base); }, "quiet"),
+          U.button("▼", function () { move(i, 1, base); }, "quiet"),
+          U.button("Open", function () { openOrder(s.row); }, "quiet")] }));
+      });
+      card.appendChild(list);
+      var links = mapsLinks(base, stops.map(function (s) { return s.address; }));
+      var maps = U.el("div", { cls: "row-actions" });
+      links.forEach(function (url, i) {
+        maps.appendChild(U.el("a", { cls: "btn go maps-link", text: links.length > 1
+          ? "Maps, part " + (i + 1) : "Open in Google Maps",
+          attr: { href: url, target: "_blank", rel: "noopener" } }));
+      });
+      var save = U.button(saved ? "Saved" : "Save the run", function () {
+        save.disabled = true;
+        D.upsert("delivery_runs", {
+          run_date: ymd(U.today()), stops: stops.map(function (s) { return s.id; }),
+          updated_at: new Date().toISOString(),
+          updated_by: D.cachedProfile().full_name || D.cachedProfile().username || ""
+        }).then(function () {
+          save.textContent = "Saved";
+        }).catch(function (err) {
+          save.disabled = false;
+          U.notice(card, err.message);
+        });
+      }, saved ? "quiet" : "go");
+      save.setAttribute("id", "run-save");
+      maps.appendChild(save);
+      card.appendChild(maps);
+    }
+
+    function move(i, by, base) {
+      var j = Math.max(0, Math.min(stops.length - 1, i + by));
+      var t = stops[i]; stops[i] = stops[j]; stops[j] = t;
+      draw(base, false);
+    }
+  }
+
+  /* ── The month's target ──────────────────────────────────────────────
+     The same sums as taf_order_app/money.py (target_progress, target_text),
+     held to them by tests/web_app.py. What an order is worth comes from the
+     order_values view, so this, the PC and the owner's report agree. */
+
+  var MONTH_NAMES = ["January", "February", "March", "April", "May", "June",
+                     "July", "August", "September", "October", "November",
+                     "December"];
+
+  function workingDays(first, last) {
+    var n = 0, d = new Date(first.getFullYear(), first.getMonth(), first.getDate());
+    while (d <= last) {
+      var w = d.getDay();
+      if (w !== 0 && w !== 6) { n += 1; }
+      d.setDate(d.getDate() + 1);
+    }
+    return n;
+  }
+
+  function round2(n) { return Math.round(n * 100) / 100; }
+
+  function targetProgress(sold, target, today) {
+    target = Number(target) || 0;
+    if (target <= 0) { return null; }
+    sold = round2(Number(sold) || 0);
+    var first = new Date(today.getFullYear(), today.getMonth(), 1);
+    var last = new Date(today.getFullYear(), today.getMonth() + 1, 0);
+    var total = workingDays(first, last) || 1;
+    var done = workingDays(first, today);
+    var tomorrow = new Date(today.getFullYear(), today.getMonth(), today.getDate() + 1);
+    var left = workingDays(tomorrow, last);
+    var short = Math.max(0, round2(target - sold));
+    var expected = round2(target * done / total);
+    return { sold: sold, target: round2(target),
+             percent: Math.floor(sold / target * 100),
+             short: short, days_left: left,
+             per_day: left ? round2(short / left) : short,
+             expected: expected, ahead: round2(sold - expected),
+             made_it: sold >= target };
+  }
+
+  function dollars(n) {
+    return "$" + String(Math.round(n)).replace(/\B(?=(\d{3})+(?!\d))/g, ",");
+  }
+
+  function targetText(p, month) {
+    var name = MONTH_NAMES[month.getMonth()];
+    if (!p) { return "No target set for " + name + "."; }
+    var head = name + ": " + dollars(p.sold) + " of " + dollars(p.target)
+             + " (" + p.percent + "%).";
+    if (p.made_it) { return head + " Target made."; }
+    if (!p.days_left) {
+      return head + " " + dollars(p.short) + " short, and no working days left.";
+    }
+    return head + " " + dollars(p.per_day) + " a day for the " + p.days_left
+         + " working day" + (p.days_left === 1 ? "" : "s") + " left.";
+  }
+
+  function targetCard(main) {
+    var today = U.today();
+    var first = ymd(new Date(today.getFullYear(), today.getMonth(), 1));
+    var card = U.card("This month", [U.el("div", { cls: "muted", text: "Loading…" })]);
+    card.setAttribute("id", "target-card");
+    main.appendChild(card);
+    Promise.all([
+      D.select("sales_targets", { "select": "target", "month": "eq." + first }),
+      D.select("order_values", { "select": "value", "ordered_on": "gte." + first,
+                                 "limit": 20000 })
+    ]).then(function (got) {
+      var target = (got[0][0] || {}).target || 0;
+      if (!target) { card.remove(); return; }
+      var sold = got[1].reduce(function (t, r) { return t + (Number(r.value) || 0); }, 0);
+      var p = targetProgress(sold, target, today);
+      while (card.childNodes.length > 1) { card.removeChild(card.lastChild); }
+      var bar = U.el("div", { cls: "target-bar", kids: [
+        U.el("span", { attr: { style: "width:" + Math.min(100, p.percent) + "%" } })] });
+      if (p.ahead < 0) { bar.classList.add("behind"); }
+      card.appendChild(U.el("div", { cls: "target-n", text: p.percent + "%" }));
+      card.appendChild(bar);
+      card.appendChild(U.el("div", { cls: "muted", text: targetText(p, today) }));
+    }).catch(function () { card.remove(); });
   }
 
   /* ── Quotes ──────────────────────────────────────────────────────────
@@ -4686,6 +4955,15 @@ var TAFAPP = (function () {
                      next_free: r.next_free ? U.parseDate(r.next_free) : null }));
                  },
                  repeatItems: repeatItems },
+    _route: { suggest: function (s) { return suggestRoute(s).map(function (x) { return x.id; }); },
+              apply: function (s, saved) {
+                return applyRoute(s, saved).map(function (x) { return x.id; }); },
+              mapsLinks: mapsLinks, addressText: addressText },
+    _money: { progress: function (sold, target, today) {
+                return targetProgress(sold, target, U.parseDate(today)); },
+              text: function (sold, target, today) {
+                var d = U.parseDate(today);
+                return targetText(targetProgress(sold, target, d), d); } },
     _floor: { boardColumn: boardColumn, productionBoard: productionBoard,
               checksFor: checksFor, workingDaysOn: workingDaysOn,
               faultReasons: FAULT_REASONS, feature: feature,

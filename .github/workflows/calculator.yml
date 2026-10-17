@@ -13,6 +13,7 @@ name: Calculator and API
 #   - xero_function.py does the same for the xero function, against a
 #     stand-in for Xero as well: an order drafted, completed, approved and
 #     emailed, and the ways that goes wrong.
+#   - mail_functions.py does the same for proof-of-delivery and owner-report.
 
 on:
   push:
@@ -23,6 +24,7 @@ on:
       - 'tests/test_calc_parity.py'
       - 'tests/api_function.py'
       - 'tests/xero_function.py'
+      - 'tests/mail_functions.py'
       - '.github/workflows/calculator.yml'
   pull_request:
     paths:
@@ -32,6 +34,7 @@ on:
       - 'tests/test_calc_parity.py'
       - 'tests/api_function.py'
       - 'tests/xero_function.py'
+      - 'tests/mail_functions.py'
   workflow_dispatch:
 
 jobs:
@@ -78,3 +81,8 @@ jobs:
         env:
           REQUIRE_DENO: "1"
         run: python tests/xero_function.py
+
+      - name: Proof of delivery and the owner's report go to the right people
+        env:
+          REQUIRE_DENO: "1"
+        run: python tests/mail_functions.py

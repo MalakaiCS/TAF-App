@@ -15,6 +15,7 @@ where they are missing, the way the GUI smoke test does.
 """
 from __future__ import annotations
 
+import datetime as dt
 import functools
 import http.server
 import json
@@ -179,6 +180,11 @@ SWITCHES: list = []
 QC_LISTS = [{"filter_type": "*", "checks": ["Size checked", "Label on"]}]
 TIMERS: list = []
 FAULTS: list = []
+# Out the door (step 48): the saved run, the target, and proofs asked for.
+RUNS: dict = {}
+POD_CALLS: list = []
+TARGET = {"target": 60000, "sold": 30000}
+
 # Stock (step 47): the count going on, what was counted, and what the phone
 # was told about stock spoken for and prices paid.
 TAKES: list = []
@@ -248,6 +254,21 @@ class Stub:
             return send([PROFILE])
         if "/rest/v1/notify_settings" in url:
             return send([{"daily_summary": NOTIFY["on"]}])
+        if "/functions/v1/proof-of-delivery" in url:
+            POD_CALLS.append(dict(body))
+            return send({"sent": True, "to": "jobs@bellscreek.com.au"})
+        if "/rest/v1/delivery_runs" in url and req.method == "POST":
+            if "merge-duplicates" not in (req.headers.get("prefer") or ""):
+                return send({"message": "duplicate key"}, 409)
+            RUNS[body["run_date"]] = list(body["stops"])
+            return send(None, 201)
+        if "/rest/v1/delivery_runs" in url:
+            day = url.split("run_date=eq.", 1)[1].split("&")[0]
+            return send([{"stops": RUNS[day]}] if day in RUNS else [])
+        if "/rest/v1/sales_targets" in url:
+            return send([{"target": TARGET["target"]}] if TARGET["target"] else [])
+        if "/rest/v1/order_values" in url:
+            return send([{"value": TARGET["sold"] / 2}, {"value": TARGET["sold"] / 2}])
         if "/functions/v1/daily-summary" in url:
             if not NOTIFY["company"]:
                 return send({"sent": 0,
@@ -1431,6 +1452,152 @@ def run() -> int:
         check("completed work is on the run", "CAS - Tweed" in text)
         check("work still being made is not",
               "Pelican Waters" not in text, text[:250])
+
+        print("\n── out the door, and what it made ──")
+        from taf_order_app import calc_settings as _cs
+        from taf_order_app import delivery as _dl
+        from taf_order_app import money as _mn
+        stops = [
+            {"id": "1", "region": "Gold Coast", "address": "Southport QLD 4215", "customer": "B"},
+            {"id": "2", "region": "Local", "address": "Loganholme QLD 4129", "customer": "a"},
+            {"id": "3", "region": "Pick Up", "address": "", "customer": "C"},
+            {"id": "4", "region": "Local", "address": "Hillcrest QLD 4118", "customer": "D"},
+            {"id": "6", "region": "Local", "address": "Hillcrest QLD 4118", "customer": "Aa"},
+            {"id": "5", "region": "Freight", "address": "", "customer": "E"},
+            {"id": "7", "region": "Somewhere new", "address": "", "customer": "F"},
+        ]
+        check("the phone suggests the same route as the PC",
+              page.evaluate("s => TAFAPP._route.suggest(s)", stops)
+              == [s["id"] for s in _dl.suggest_route(stops)])
+        check("and keeps a saved one the same way",
+              page.evaluate("a => TAFAPP._route.apply(a[0], a[1])",
+                            [stops, ["5", "gone", "1", "5"]])
+              == [s["id"] for s in _dl.apply_route(stops, ["5", "gone", "1", "5"])])
+        addrs = ["Unit 3 & 4/12 O'Neil St, Hillcrest QLD 4118", "",
+                 "50 Smith Rd (rear), Logan #2"] + [f"S{i} St" for i in range(14)]
+        same = all(page.evaluate("a => TAFAPP._route.mapsLinks(a[0], a[1])",
+                                 [_cs.BASE_ADDRESS_DEFAULT, addrs[:n]])
+                   == _dl.maps_links(_cs.BASE_ADDRESS_DEFAULT, addrs[:n])
+                   for n in (0, 1, 3, 10, 12, 17))
+        check("and the same Google Maps links, split the same way", same)
+        cust = {"delivery_address1": "1 Smith St", "delivery_address2": "Unit 2",
+                "delivery_city": "Hillcrest", "delivery_state": "QLD",
+                "delivery_postcode": "4118"}
+        check("and the same address",
+              page.evaluate("c => TAFAPP._route.addressText(c)", cust)
+              == _dl.address_text(cust))
+
+        def _norm(p):
+            return None if p is None else {k: (v if isinstance(v, bool) else float(v))
+                                           for k, v in p.items()}
+        cases = [(30000, 60000, "16/10/2026"), (61000, 60000, "16/10/2026"),
+                 (50000, 60000, "30/10/2026"), (0, 1000, "01/11/2026"),
+                 (12345.67, 50000, "03/02/2027"), (100, 0, "03/02/2027"),
+                 (1000, 7000, "31/10/2026")]
+        agree = True
+        for sold, target, day in cases:
+            d = dt.datetime.strptime(day, "%d/%m/%Y").date()
+            js = page.evaluate("a => TAFAPP._money.progress(a[0], a[1], a[2])",
+                               [sold, target, day])
+            txt = page.evaluate("a => TAFAPP._money.text(a[0], a[1], a[2])",
+                                [sold, target, day])
+            py = _mn.target_progress(sold, target, d)
+            if _norm(js) != _norm(py) or txt != _mn.target_text(py, d):
+                agree = False
+                print("        ", day, js, py, txt)
+        check("the month's target is worked out the same on the phone", agree)
+
+        on = ("route_order", "sales_targets", "pod_email")
+        SWITCHES[:] = [{"key": k, "enabled": True} for k in on]
+        page.evaluate("(on) => TAFAPP._floor.setFeatures("
+                      "Object.fromEntries(on.map(k => [k, true])))", list(on))
+        CUSTOMERS[0].update({"delivery_address1": "12 Industrial Ave",
+                             "delivery_city": "Caloundra", "delivery_state": "QLD",
+                             "delivery_postcode": "4551"})
+        ORDERS.append({"id": "o4", "customer_name": "Bells Creek",
+                       "order_number": "PO-7000", "date_ordered": "05/09/2026",
+                       "date_due": "30/09/2026", "archived": False,
+                       "created_at": "2026-09-05T00:00:00Z", "n_items": 1,
+                       "n_made": 1, "full_name": "Kai Brown",
+                       "header": {"status": "Complete", "Location": "Sunshine Coast"}})
+        ITEMS["o4"] = [{"line_id": "L9", "Quantity": 1, "Filter Type": "Flat Panel",
+                        "Short": 300, "Long": 300, "made": True}]
+        # Only o2 and o4 ready, whatever the sections before left o1 at.
+        o1_was = ORDERS[0]["header"].get("status")
+        ORDERS[0]["header"]["status"] = "In Production"
+        page.evaluate("TAFAPP._stale()")
+        page.click('#tabs button[data-tab="dashboard"]')
+        page.click('#tabs button[data-tab="delivery"]')
+        page.wait_for_selector("#run-card .run-row")
+        rows = page.locator("#run-card .run-row")
+        firsts = [rows.nth(i).get_attribute("data-order") for i in range(rows.count())]
+        check("today's run lists what is going out, in a suggested order",
+              firsts == ["o4", "o2"], str(firsts))
+        check("with the address from the customer, or a note there is none",
+              "12 Industrial Ave, Caloundra QLD 4551" in rows.nth(0).inner_text()
+              and "No address" in rows.nth(1).inner_text())
+        href = page.locator("#run-card a.maps-link").first.get_attribute("href")
+        check("one tap opens Google Maps from the base, round the stops and back",
+              href == _dl.maps_links(_cs.BASE_ADDRESS_DEFAULT,
+                                     ["12 Industrial Ave, Caloundra QLD 4551"])[0], href)
+        rows.nth(1).locator("button", has_text="▲").click()
+        page.click("#run-save")
+        page.wait_for_timeout(300)
+        today = dt.date.today().isoformat()
+        check("the driver moves a stop up and saves the run",
+              RUNS.get(today) == ["o2", "o4"], str(RUNS))
+        page.click('#tabs button[data-tab="dashboard"]')
+        page.click('#tabs button[data-tab="delivery"]')
+        page.wait_for_selector("#run-card .run-row")
+        check("and it comes back in that order",
+              page.locator("#run-card .run-row").first.get_attribute("data-order") == "o2")
+
+        page.locator('#run-card .run-row[data-order="o4"] button',
+                     has_text="Open").click()
+        page.wait_for_selector("#sheet:not(.hidden)")
+        sheet = page.locator("#sheet-body")
+        sheet.locator("button", has_text="Signed for").click()
+        page.wait_for_selector("#sheet-body canvas")
+        pad = page.locator("#sheet-body canvas")
+        box = pad.bounding_box()
+        page.mouse.move(box["x"] + 40, box["y"] + 90)
+        page.mouse.down()
+        page.mouse.move(box["x"] + 200, box["y"] + 120)
+        page.mouse.up()
+        page.locator('#sheet-body input[type="text"]').first.fill("Jo Smith")
+        page.locator("#sheet-body button", has_text="Keep it").click()
+        wait_for_text(page, "#sheet-body", "emailed to jobs@bellscreek.com.au")
+        check("signed for: the order is Delivered",
+              ORDERS[-1]["header"]["status"] == "Delivered")
+        check("and the customer is emailed the proof of delivery",
+              POD_CALLS == [{"order_id": "o4"}], str(POD_CALLS))
+        page.keyboard.press("Escape")
+        page.wait_for_selector("#sheet.hidden", state="attached")
+
+        page.click('#tabs button[data-tab="dashboard"]')
+        page.wait_for_selector("#target-card .target-n")
+        p = _mn.target_progress(30000, 60000, dt.date.today())
+        check("Today shows how far through the month's target the orders are",
+              page.locator("#target-card .target-n").inner_text() == "50%"
+              and _mn.target_text(p, dt.date.today())
+              in page.locator("#target-card").inner_text(),
+              page.locator("#target-card").inner_text())
+        TARGET["target"] = 0
+        page.click('#tabs button[data-tab="orders"]')
+        page.click('#tabs button[data-tab="dashboard"]')
+        page.wait_for_timeout(500)
+        check("and says nothing when there is no target",
+              page.locator("#target-card").count() == 0)
+
+        ORDERS.pop()
+        ORDERS[0]["header"]["status"] = o1_was
+        ITEMS.pop("o4", None)
+        for k in ("delivery_address1", "delivery_city", "delivery_state",
+                  "delivery_postcode"):
+            CUSTOMERS[0].pop(k, None)
+        SWITCHES.clear()
+        page.evaluate("TAFAPP._floor.setFeatures({})")
+        page.evaluate("TAFAPP._stale()")
 
         print("\n── quotes ──")
         page.click('#tabs button[data-tab="quotes"]')

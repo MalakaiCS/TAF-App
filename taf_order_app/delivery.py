@@ -230,3 +230,108 @@ def build_run_sheet_pdf(out_path, grouped: List[tuple],
 
     doc.build(story)
     return str(out_path)
+
+
+# ── The order the van goes round in ──────────────────────────────────────────
+# Saved for each day in delivery_runs (step 48), first stop first, so the PC
+# and the driver's phone have the same run. docs/app/screens.js has the same
+# three rules (suggestRoute, applyRoute, mapsLinks), held to these by
+# tests/web_app.py.
+
+MAPS = "https://www.google.com/maps/dir/?api=1"
+# Google Maps takes at most nine stops between the start and the end of one
+# link on a phone, so a longer run is several links, each starting where the
+# last one ended.
+STOPS_PER_LINK = 9
+
+
+def address_text(customer: Optional[Dict[str, Any]]) -> str:
+    """"1 Smith St, Hillcrest QLD 4118" from a customer's delivery address,
+    or "" when there is none."""
+    c = customer or {}
+    street = ", ".join(str(c.get(k) or "").strip()
+                       for k in ("delivery_address1", "delivery_address2")
+                       if str(c.get(k) or "").strip())
+    town = " ".join(str(c.get(k) or "").strip()
+                    for k in ("delivery_city", "delivery_state", "delivery_postcode")
+                    if str(c.get(k) or "").strip())
+    return ", ".join(p for p in (street, town) if p)
+
+
+def _postcode(text: str) -> int:
+    digits = [w for w in str(text or "").replace(",", " ").split()
+              if w.isdigit() and len(w) == 4]
+    return int(digits[-1]) if digits else 99999
+
+
+def suggest_route(stops: Iterable[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """A first go at the order: by region in run order, then by postcode
+    (neighbouring postcodes are mostly neighbouring suburbs), then by name.
+    Each stop is {"id", "region", "address", "customer"}. Pick-ups are left
+    out - they do not go in the van."""
+    rank = {name: i for i, name in enumerate(RUN_ORDER)}
+    keep = [s for s in stops or [] if str(s.get("region") or "") != "Pick Up"]
+    return sorted(keep, key=lambda s: (rank.get(str(s.get("region") or ""), len(RUN_ORDER)),
+                                       _postcode(s.get("address") or ""),
+                                       str(s.get("customer") or "").lower()))
+
+
+def apply_route(stops: Iterable[Dict[str, Any]], saved: Iterable[str]) -> List[Dict[str, Any]]:
+    """The stops in the saved order. One saved that is no longer ready is
+    dropped; one ready since the run was saved goes on the end, in the
+    suggested order."""
+    stops = [s for s in stops or [] if str(s.get("region") or "") != "Pick Up"]
+    by_id = {str(s.get("id")): s for s in stops}
+    out, seen = [], set()
+    for sid in saved or []:
+        sid = str(sid)
+        if sid in by_id and sid not in seen:
+            out.append(by_id[sid])
+            seen.add(sid)
+    out += [s for s in suggest_route(stops) if str(s.get("id")) not in seen]
+    return out
+
+
+def _enc(text: str) -> str:
+    from urllib.parse import quote
+    return quote(str(text), safe="!*'()-_.~")
+
+
+def maps_links(base: str, addresses: Iterable[str]) -> List[str]:
+    """Google Maps directions from the base, round every address in order,
+    and back - as one link, or several when there are more stops than one
+    link takes. Stops with no address are skipped."""
+    route = [a.strip() for a in addresses or [] if str(a or "").strip()]
+    if not route:
+        return []
+    points = route + [base]
+    links, start = [], base
+    while points:
+        leg, points = points[:STOPS_PER_LINK + 1], points[STOPS_PER_LINK + 1:]
+        end, via = leg[-1], leg[:-1]
+        url = f"{MAPS}&origin={_enc(start)}&destination={_enc(end)}&travelmode=driving"
+        if via:
+            url += "&waypoints=" + _enc("|".join(via))
+        links.append(url)
+        start = end
+    return links
+
+
+def route_grouped(grouped: List[tuple], saved: Iterable[str],
+                  heading: str = "The run, in order") -> List[tuple]:
+    """The run sheet's groups with a saved route: every order going in the
+    van under one heading in the order it is driven, and pick-ups after.
+    With nothing saved, the groups are left as they were."""
+    saved = [str(s) for s in saved or []]
+    if not saved:
+        return grouped
+    orders = [o for _region, rows in grouped or [] for o in rows]
+    stops = [{"id": str(o.get("db_id") or o.get("id") or ""), "region": region_of(o),
+              "address": "", "customer": o.get("customer", ""), "order": o}
+             for o in orders]
+    routed = [s["order"] for s in apply_route(stops, saved)]
+    pickups = [s["order"] for s in stops if s["region"] == "Pick Up"]
+    out = [(heading, routed)] if routed else []
+    if pickups:
+        out.append(("Pick Up", pickups))
+    return out

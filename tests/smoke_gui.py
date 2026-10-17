@@ -20,6 +20,7 @@ import faulthandler
 import inspect
 import os
 import sys
+import datetime
 import tempfile
 import time
 import traceback
@@ -166,6 +167,27 @@ OVERRIDES = {
     "add_fault":           lambda row, photo="": ADDED_FAULTS.append(dict(row))
                                                  or row,
     "orders_with_finished_photo": lambda ids: set(),
+    "delivery_run":        lambda *a, **k: list(SAVED_RUNS[-1][1]) if SAVED_RUNS else [],
+    "save_delivery_run":   lambda day, stops: SAVED_RUNS.append((day, list(stops))),
+    "delivery_proof":      lambda *a, **k: {
+        "emailed_at": "2026-10-16T00:42:00+00:00", "emailed_to": "po@cas.example",
+        "signed_by": "Jo Smith"},
+    "sales_targets":       lambda *a, **k: {
+        __import__("datetime").date.today().replace(day=1).isoformat(): 60000.0},
+    "set_sales_target":    lambda month, value: SET_TARGETS.append((month, value)),
+    "sales_between":       lambda *a, **k: 30000.0,
+    "sales_by_month":      lambda *a, **k: {
+        __import__("datetime").date.today().replace(day=1).isoformat(): 30000.0},
+    "finished_orders_since": lambda *a, **k: [
+        {"id": "o1", "customer_name": "Bells Creek", "order_number": "PO-8842",
+         "header": {"Delivery Fee": 20, "status": "Complete"},
+         "items": [{"line_id": "a", "Filter Type": "V-form", "Quantity": 2,
+                    "Unit Price": 50, "Part Number": "PPF50-1.8-G4"}]}],
+    "job_times_for":       lambda *a, **k: [
+        {"order_id": "o1", "line_id": "a", "minutes": 60}],
+    "owner_report":        lambda month, send=False: (
+        {"sent": 1, "to": "smoke@taf.local"} if send else
+        {"html": f"<h1>{month}</h1>", "figures": {}}),
     "supplier_prices":     lambda *a, **k: [
         {"bought_at": "2026-06-01T00:00:00Z", "supplier": "FD Greenwood",
          "item_code": "FDG-G4", "stock_item_id": None, "unit_price": 80,
@@ -499,6 +521,8 @@ STOCK_LINKS = [
      "supplier_code": "VUL-BF592", "unit_price": 3.0, "preferred": True},
 ]
 SAVED_LINKS: list = []
+SAVED_RUNS: list = []
+SET_TARGETS: list = []
 SENT_SUPPLIES: list = []
 SAVED_POS: list = []
 RECEIVED: list = []
@@ -1989,6 +2013,101 @@ def _steps(app, gui, root):
             gui.APP_DIR = real_app_dir
             _feat._switches = {}
     add("dialogs: winning the work", _sales_windows)
+
+    def _delivery_money_windows():
+        """The route, what jobs made, sales targets, the owner's report and
+        the proof of delivery on an order."""
+        import webbrowser
+        from taf_order_app import features as _feat
+        _feat._switches = {k: True for k in (
+            "route_order", "job_profit", "sales_targets", "owner_report", "pod_email")}
+        opened, real = [], webbrowser.open
+        webbrowser.open = lambda url, *a, **k: opened.append(url)
+        real_open_path = gui._open_path
+        gui._open_path = lambda path: opened.append(str(path))
+        real_ask = gui.simpledialog.askstring
+        gui.simpledialog.askstring = lambda *a, **k: "70,000"
+
+        def _wait(tree, n=1):
+            for _ in range(80):
+                root.update()
+                if len(tree.get_children()) >= n:
+                    return
+                time.sleep(0.05)
+
+        def _until(test):
+            for _ in range(80):
+                root.update()
+                if test():
+                    return True
+                time.sleep(0.05)
+            return False
+
+        try:
+            dlg, tree, foot = app._route_planner()
+            _wait(tree)
+            assert tree.get_children() == ("o1",), tree.get_children()
+            assert "1 Filter Rd, Caloundra QLD 4551" in tree.item("o1", "values")[4]
+            SAVED_RUNS.clear()
+            assert dlg.route_save() and SAVED_RUNS[-1][1] == ["o1"], SAVED_RUNS
+            links = dlg.route_maps()
+            assert links and opened[-1] == links[0] and "Caloundra" in links[0], links
+            dlg.destroy()
+
+            dlg, tree, foot = app._job_profit_window()
+            _wait(tree)
+            if gui._db.can_handle_supplies():
+                rows = [tree.item(c, "values") for c in tree.get_children()]
+                assert any("PO-8842" in str(r[0]) for r in rows), rows
+                assert any(str(r[0]) == "By customer" for r in rows), rows
+                assert "sold $120, made $65" in foot.cget("text"), foot.cget("text")
+            else:
+                assert "Only managers" in str(tree.item(tree.get_children()[0], "values"))
+            dlg.destroy()
+
+            dlg, tree, foot = app._sales_targets_window()
+            _wait(tree, 12)
+            this = datetime.date.today().replace(day=1).isoformat()
+            assert tree.item(this, "values")[3] == "50%", tree.item(this, "values")
+            assert "of $60,000 (50%)" in foot.cget("text"), foot.cget("text")
+            if gui._db.can_handle_supplies():
+                SET_TARGETS.clear()
+                dlg.target_set(this, dlg)
+                assert SET_TARGETS == [(datetime.date.fromisoformat(this), 70000.0)], SET_TARGETS
+                for w in root.winfo_children():
+                    if isinstance(w, gui.tk.Toplevel) and "Sales targets" in w.title():
+                        w.destroy()
+            else:
+                dlg.destroy()
+
+            dlg = app._owner_report_window()
+            dlg.report_run(False)
+            assert _until(lambda: any("TAF_owner_report_" in o for o in opened)), opened
+            dlg.report_run(True)
+            assert _until(lambda: "Sent to smoke@taf.local" in dlg.report_status.cget("text"))
+            dlg.destroy()
+
+            app._refresh_dashboard()
+            root.update()
+
+            # The proof of delivery on an order that went out.
+            app._show_tab("prev_orders")
+            root.update()
+            shown = getattr(app, "_displayed_orders", app._all_orders_data)
+            idx = next(i for i, o in enumerate(shown) if o.get("db_id") == "o2")
+            app.orders_tree.selection_set(str(idx))
+            before = set(root.winfo_children())
+            app._view_order()
+            view = next(iter(set(root.winfo_children()) - before))
+            assert _until(lambda: "po@cas.example" in view.pod_label.cget("text")), \
+                view.pod_label.cget("text")
+            view.destroy()
+        finally:
+            webbrowser.open = real
+            gui._open_path = real_open_path
+            gui.simpledialog.askstring = real_ask
+            _feat._switches = {}
+    add("dialogs: out the door, and what it made", _delivery_money_windows)
 
     def _answer_waiting_dialogs(before):
         """Say yes to a dialog that has stopped and asked something.

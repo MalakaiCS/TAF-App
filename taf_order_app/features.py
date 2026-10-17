@@ -256,6 +256,29 @@ CATALOGUE: List[Feature] = [
             "How long each supplier takes, and the stock that will be under "
             "its minimum before a new order could get here.",
             "The floor", built=True),
+
+    # ── Out the door, and what it made (step 48) ─────────────────────────
+    Feature("pod_email", "Proof of delivery emails",
+            "When a customer signs for a delivery on the driver's phone, they "
+            "are emailed the signature and photos straight away, and the "
+            "order is marked Delivered.",
+            "Customers", built=True),
+    Feature("route_order", "Route order for the run",
+            "Put the day's stops in the order the van goes, on the PC or the "
+            "phone, with Google Maps directions round them.",
+            "The floor", built=True),
+    Feature("job_profit", "Job profitability",
+            "What each finished job made: sold, less materials and the time "
+            "the job timer says it took - by job, customer and filter type.",
+            "Money", built=True),
+    Feature("owner_report", "Owner's report",
+            "Last month on one page - sales against target, quotes won and "
+            "lost, on-time jobs, faults - emailed to the directors on the 1st.",
+            "Money", built=True),
+    Feature("sales_targets", "Sales targets",
+            "A target for each month, and how far through it the orders are "
+            "on Today, on the PC and the phone.",
+            "Money", built=True),
 ]
 
 BY_KEY: Dict[str, Feature] = {f.key: f for f in CATALOGUE}

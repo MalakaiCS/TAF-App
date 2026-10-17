@@ -197,7 +197,12 @@ WITH checks(step, file, purpose, needed, present) AS (VALUES
 
   (47, 'migrate_stock_insight.sql', 'Stocktakes on the phone, stock spoken for, supplier prices and lead times', 'recommended',
       to_regclass('public.stock_reserved') IS NOT NULL
-      AND to_regclass('public.supplier_lead_times') IS NOT NULL)
+      AND to_regclass('public.supplier_lead_times') IS NOT NULL),
+
+  (48, 'migrate_delivery_money.sql', 'Route order, proof of delivery, order values, sales targets, owner''s report', 'recommended',
+      to_regclass('public.delivery_runs') IS NOT NULL
+      AND to_regclass('public.order_values') IS NOT NULL
+      AND to_regclass('public.owner_reports') IS NOT NULL)
 )
 SELECT step,
        CASE WHEN present THEN 'already done' ELSE 'RUN THIS' END AS status,

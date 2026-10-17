@@ -165,6 +165,37 @@ log, stock management and a customer database.
     it has been used over 60 days and how long its supplier takes (sent to
     received, from the last 18 months; a week until known), with how many to
     order.
+- **Out the door, and what it made** (step 48, switched on in Settings →
+  Features):
+  - **Proof of delivery emails** — when the customer signs on the driver's
+    phone (*Signed for* on an order), the order is marked Delivered and the
+    customer is emailed straight away: what was delivered, who signed and
+    when, with the signature and the photos taken at the drop attached. One
+    signature is sent once. The order on the PC says who signed and when it
+    was emailed. Needs the `proof-of-delivery` function (below).
+  - **Route order for the run** — *Plan the route…* (Delivery → Run ▾, or
+    on the phone's Delivery screen as *Today's run*): today's stops in the
+    order the van goes, suggested by region and postcode, moved up and down
+    and saved - the PC, the phone and the printed run sheet all follow it.
+    *Open in Google Maps* gives directions from the base round every stop and
+    back (split into parts past nine stops, which is as many as Maps takes).
+  - **Job profitability** — *What jobs made…* (managers): every job finished
+    in the last 90 days - sold (ex GST, with delivery), less materials (the
+    costs kept for quote margins) and labour (the job timer's minutes at the
+    workshop's rate per hour; the usual minutes for a type when a line was
+    not timed) - least made first, then by customer and by filter type.
+  - **Owner's report** — *Owner's report…*: a month on one page - orders and
+    their value against the month before and the target, biggest customers,
+    quotes won and lost and why, jobs finished and how many on time, hours
+    timed, faults, stock under its minimum. *Look at it* or *Email it to me*
+    from the PC; emailed to every director and admin on the 1st once the
+    schedule at the bottom of `migrate_delivery_money.sql` is set up. Needs
+    the `owner-report` function (below).
+  - **Sales targets** — *Sales targets…*: a target for each month (a manager
+    double-clicks a month); Today on the PC and the phone shows how far
+    through it the month's orders are and what each working day left needs.
+    What an order is worth (priced lines plus delivery, ex GST) is worked out
+    in the database, so every screen and the report agree.
 - **Delivery labels** — one A4 landscape sheet per wrapped bundle, with the
   TAF logo, the company's base address as From, the delivery address, filter
   size, the quantity in that wrap (and the line's ordered quantity), the
@@ -533,6 +564,7 @@ just run it — nothing is lost and nothing is duplicated.
 | 45 | `migrate_planning.sql` | Staff roster and leave, so a new order due on a day that is already full says so - and names the next day with room (needs steps 16 and the features step) | recommended |
 | 46 | `migrate_sales.sql` | Winning the work: when a quote was chased and why one was lost, how often a customer's filters are changed (for reminders), and price changes previewed and applied once from a date (needs the quotes, quote portal, pricing and price tier steps) | recommended |
 | 47 | `migrate_stock_insight.sql` | Stock you can trust: counting on the phone during a stocktake, what open orders have spoken for, what each supplier has charged, and how long each takes (needs steps 3, 40 and the more-features step) | recommended |
+| 48 | `migrate_delivery_money.sql` | Out the door, and what it made: the order the van goes round in, which proof of delivery was emailed, what each order is worth, monthly sales targets, and which owner's report went out | recommended |
 
 **Step 16 is the one that matters most.** Every policy in the older scripts is
 `TO authenticated USING (true)` — meaning *anyone Supabase counts as signed
@@ -767,6 +799,24 @@ only caller holding the service-role key, and a signed-in account asking for
 it is refused. Each person's copy goes to their address alone — a summary of
 the whole factory bcc'd around is one wrong address away from being a list of
 every customer's late job in a stranger's inbox.
+
+### Proof of delivery and the owner's report (optional)
+
+Two more functions on the same mail provider key - nothing new to configure
+if the emails above already work:
+
+```bash
+supabase functions deploy proof-of-delivery
+supabase functions deploy owner-report
+```
+
+No terminal? **Edge Functions → Deploy a new function**, once for each, with
+`supabase/functions/proof-of-delivery/index.ts` and
+`supabase/functions/owner-report/index.ts`. Both read their switch (Settings →
+Features) on every call, so deploying them sends nothing until it is on.
+The owner's report on the 1st is a pg_cron schedule, written out at the
+bottom of `migrate_delivery_money.sql`; only that schedule (holding the
+service-role key, from Vault) can send to every director.
 
 ### Link Xero (optional)
 

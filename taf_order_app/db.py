@@ -3172,6 +3172,130 @@ def stock_transactions_since(days: int = 60) -> list:
     return list(resp.data or [])
 
 
+# ── Out the door, and what it made (step 48) ─────────────────────────────────
+
+def _utc_now() -> str:
+    import datetime as _d
+    return _d.datetime.now(_d.timezone.utc).isoformat()
+
+
+def delivery_run(day) -> list:
+    """The saved order of a day's stops, as order ids, first stop first."""
+    resp = (get_client().table("delivery_runs").select("stops")
+            .eq("run_date", day.isoformat()).execute())
+    rows = resp.data or []
+    return [str(s) for s in (rows[0].get("stops") or [])] if rows else []
+
+
+def save_delivery_run(day, stops: list) -> None:
+    get_client().table("delivery_runs").upsert({
+        "run_date": day.isoformat(), "stops": [str(s) for s in stops],
+        "updated_at": _utc_now(), "updated_by": current_full_name() or current_username() or "",
+    }).execute()
+
+
+def delivery_proof(order_id: str) -> dict:
+    """When the proof of delivery for an order was emailed, and to whom."""
+    resp = (get_client().table("delivery_proofs").select("*")
+            .eq("order_id", order_id).execute())
+    return (resp.data or [{}])[0] or {}
+
+
+def sales_between(first, last) -> float:
+    """What the orders entered from `first` to `last` (Brisbane days) are
+    worth, from the order_values view."""
+    resp = (get_client().table("order_values").select("value")
+            .gte("ordered_on", first.isoformat()).lte("ordered_on", last.isoformat())
+            .limit(20000).execute())
+    return round(sum(float(r.get("value") or 0) for r in resp.data or []), 2)
+
+
+def sales_by_month(since) -> dict:
+    """{first of month: value} for every month from `since`."""
+    resp = (get_client().table("order_values").select("ordered_on,value")
+            .gte("ordered_on", since.isoformat()).limit(50000).execute())
+    out: dict = {}
+    for r in resp.data or []:
+        key = str(r.get("ordered_on") or "")[:7] + "-01"
+        out[key] = round(out.get(key, 0.0) + float(r.get("value") or 0), 2)
+    return out
+
+
+def sales_targets() -> dict:
+    """{"2026-10-01": 60000.0, ...}"""
+    resp = get_client().table("sales_targets").select("month,target").execute()
+    return {str(r["month"]): float(r.get("target") or 0) for r in resp.data or []}
+
+
+def set_sales_target(month, target) -> None:
+    month = month.replace(day=1)
+    if target in (None, ""):
+        get_client().table("sales_targets").delete().eq("month", month.isoformat()).execute()
+        return
+    get_client().table("sales_targets").upsert({
+        "month": month.isoformat(), "target": float(target),
+        "updated_at": _utc_now(), "updated_by": current_full_name() or current_username() or "",
+    }).execute()
+
+
+def finished_orders_since(days: int = 90) -> list:
+    """Orders that reached Complete or after in the last `days`, with lines."""
+    import datetime as _d
+    since = (_d.datetime.utcnow() - _d.timedelta(days=days)).isoformat()
+    resp = (get_client().table("orders")
+            .select("id,customer_name,order_number,header,items,date_due")
+            .gte("header->>status_at", since)
+            .in_("header->>status", ["Complete", "Dispatched", "Delivered", "Collected"])
+            .limit(5000).execute())
+    return list(resp.data or [])
+
+
+def job_times_for(order_ids: list) -> list:
+    out: list = []
+    ids = [str(i) for i in order_ids if i]
+    for n in range(0, len(ids), 150):
+        resp = (get_client().table("job_times")
+                .select("order_id,line_id,minutes,filter_type")
+                .in_("order_id", ids[n:n + 150]).execute())
+        out += list(resp.data or [])
+    return out
+
+
+def owner_report(month: str, send: bool = False, timeout: int = 60) -> dict:
+    """The owner's report for "2026-09", from the owner-report function:
+    {"html", "figures"} to look at, or {"sent", "to"} when sent. Problems
+    come back as {"error": ...}."""
+    import json as _json
+    import urllib.error
+    import urllib.request
+    try:
+        session = get_client().auth.get_session()
+        token = getattr(session, "access_token", "") if session else ""
+    except Exception:
+        token = ""
+    if not token:
+        return {"error": "Not signed in."}
+    req = urllib.request.Request(
+        f"{SUPABASE_URL.rstrip('/')}/functions/v1/owner-report",
+        data=_json.dumps({"month": month, "send": bool(send)}).encode(),
+        method="POST", headers={"Authorization": f"Bearer {token}",
+                                "apikey": current_anon_key(),
+                                "Content-Type": "application/json"})
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return _json.loads(resp.read().decode("utf-8") or "{}")
+    except urllib.error.HTTPError as exc:
+        try:
+            detail = _json.loads(exc.read().decode("utf-8") or "{}").get("error", "")
+        except Exception:
+            detail = ""
+        if exc.code == 404 and not detail:
+            detail = "The owner-report function is not deployed to this Supabase project yet."
+        return {"error": detail or f"The server said {exc.code}."}
+    except Exception as exc:
+        return {"error": str(exc)}
+
+
 def _now_stamp() -> str:
     import datetime as _dt
     d = _dt.datetime.now()

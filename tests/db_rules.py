@@ -1444,6 +1444,66 @@ def run_stock_insight_checks(pg: Postgres) -> None:
           ok and out == "7.0", out or err)
 
 
+def run_delivery_money_checks(pg: Postgres) -> None:
+    print("\n── out the door, and what it made (step 48) ──")
+    for _ in range(2):
+        ok, _o, err = pg.psql((ROOT / "migrate_delivery_money.sql").read_text(
+            encoding="utf-8"), "f")
+        check("step 48 runs, and runs again cleanly", ok, err)
+    lines = ('[{"Unit Price": 27.5, "Quantity": "4"}, '
+             '{"Unit Price": "", "Quantity": 2}, '
+             '{"item_kind": "bag", "Unit Price": 3, "quantity": 10}]')
+    head = '{"Delivery Fee": "$25", "status": "Complete"}'
+    a = q(pg, "INSERT INTO orders (user_id, customer_name, order_number, items, "
+              f"header) VALUES ('{DAVE}', 'Bells Creek', 'PO-48A', '{lines}', "
+              f"'{head}') RETURNING id;").splitlines()[0]
+    b = q(pg, "INSERT INTO orders (user_id, customer_name, order_number, items, "
+              f"header) VALUES ('{DAVE}', 'Tweed', 'PO-48B', 'null', '{{}}') "
+              "RETURNING id;").splitlines()[0]
+    ok, out, err = as_in(pg, "f", DAVE, "SELECT value || '|' || unpriced || '|' "
+                         f"|| delivery_fee || '|' || status FROM order_values "
+                         f"WHERE id = '{a}';")
+    check("an order is worth its priced lines and its delivery fee, with the "
+          "lines that have no price counted", ok and out == "165.00|1|25.00|Complete",
+          out or err)
+    ok, out, err = as_in(pg, "f", DAVE, "SELECT value || '|' || status FROM "
+                         f"order_values WHERE id = '{b}';")
+    check("an order with no lines is worth nothing, not an error",
+          ok and out == "0.00|Pending", out or err)
+
+    ok, _o, err = as_in(pg, "f", DAVE, "INSERT INTO delivery_runs (run_date, stops) "
+                        f"VALUES ('2026-10-20', ARRAY['{b}', '{a}']::uuid[]);")
+    ok2, _o, err2 = as_in(pg, "f", DAVE, "UPDATE delivery_runs SET stops = "
+                          f"ARRAY['{a}', '{b}']::uuid[] WHERE run_date = '2026-10-20';")
+    got = q(pg, "SELECT stops[1] FROM delivery_runs WHERE run_date = '2026-10-20';")
+    check("the driver can set and change the order of the run",
+          ok and ok2 and got == a, err or err2 or got)
+
+    ok, _o, err = as_in(pg, "f", DAVE, "INSERT INTO sales_targets (month, target) "
+                        "VALUES ('2026-10-01', 60000);")
+    check("somebody on the floor cannot set a sales target", not ok)
+    ok, _o, err = as_in(pg, "f", SARAH, "INSERT INTO sales_targets (month, target) "
+                        "VALUES ('2026-10-01', 60000);")
+    check("a manager can", ok, err)
+    ok, _o, err = as_in(pg, "f", SARAH, "INSERT INTO sales_targets (month, target) "
+                        "VALUES ('2026-11-15', 60000);")
+    check("a target is for a whole month", not ok)
+
+    ok, _o, err = as_in(pg, "f", SARAH, "INSERT INTO delivery_proofs (order_id, "
+                        f"emailed_to) VALUES ('{a}', 'someone@example.com');")
+    check("nobody can say a proof of delivery was emailed - only the function "
+          "that sent it", not ok)
+    ok, _o, err = as_in(pg, "f", SARAH, "INSERT INTO owner_reports (month) "
+                        "VALUES ('2026-09-01');")
+    check("nor that an owner's report went", not ok)
+    q(pg, "INSERT INTO owner_reports (month, sent_to) VALUES ('2026-09-01', "
+          "'{kai@taf.example}');")
+    ok, out, err = as_in(pg, "f", DAVE, "SELECT count(*) FROM owner_reports;")
+    ok2, out2, err2 = as_in(pg, "f", SARAH, "SELECT count(*) FROM owner_reports;")
+    check("managers can see which reports went; the floor cannot",
+          ok and out == "0" and ok2 and out2 == "1", f"{out} {out2} {err}{err2}")
+
+
 def _skip(why: str) -> int:
     """Skipping is fine on a laptop. In CI it is not: a workflow that goes
     green having checked nothing is worse than no workflow, because it is
@@ -1475,6 +1535,7 @@ def main() -> int:
         run_planning_checks(pg)
         run_sales_checks(pg)
         run_stock_insight_checks(pg)
+        run_delivery_money_checks(pg)
     finally:
         pg.stop()
     print(f"\n{len(FAILURES)} FAILED" if FAILURES

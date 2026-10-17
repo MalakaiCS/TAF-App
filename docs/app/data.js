@@ -234,6 +234,15 @@ var TAFDATA = (function () {
     });
   }
 
+  /* Insert, or change the row already there with the same key. Quiet, for
+     the same reason as insert's `quiet`. */
+  function upsert(table, row) {
+    return request("/rest/v1/" + table, {
+      method: "POST", body: row,
+      headers: { "Prefer": "resolution=merge-duplicates,return=minimal" }
+    });
+  }
+
   function update(table, match, patch) {
     return request("/rest/v1/" + table + qs(match), {
       method: "PATCH", body: patch,
@@ -382,6 +391,7 @@ var TAFDATA = (function () {
     canManagePrices: canManagePrices, canManageStock: canManageStock,
     canManageStaff: canManageStaff,
     select: select, rpc: rpc, insert: insert, update: update, remove: remove,
+    upsert: upsert,
     request: request, friendly: friendly,
     upload: upload, signedUrl: signedUrl, callFunction: callFunction,
     // The publishable key, which a customer's quote link carries (it opens

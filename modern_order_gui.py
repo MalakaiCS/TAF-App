@@ -35,6 +35,7 @@ from taf_order_app import floor as _floor
 from taf_order_app import planning as _planning
 from taf_order_app import sales as _sales
 from taf_order_app import stock_insight as _stock_insight
+from taf_order_app import money as _money
 from taf_order_app import records as _records
 from taf_order_app import xero as _xero
 from taf_order_app import invoice_wording as _wording
@@ -10928,7 +10929,9 @@ class ModernOrderApp(tk.Frame):
                  variant="secondary", pady=7).pack(side="left", padx=(0, 8))
         flat_btn(bot, "✓  Mark Dispatched", self._mark_dispatched,
                  bg=CA, pady=7).pack(side="left", padx=(0, 8))
-        menu_btn(bot, "Run  ▾", [
+        menu_btn(bot, "Run  ▾", lambda: ([
+            ("Plan the route…",           self._route_planner), None]
+            if _features.is_on("route_order") else []) + [
             ("Print delivery labels",     self._print_delivery_labels_run),
             ("Pallet labels for the selected orders…", self._pallet_labels_from_run),
             None,
@@ -11004,6 +11007,12 @@ class ModernOrderApp(tk.Frame):
             return
         ORDERS_DIR.mkdir(parents=True, exist_ok=True)
         today = datetime.date.today()
+        if _features.is_on("route_order"):
+            # In the order the van goes, when somebody has planned it.
+            try:
+                grouped = _delivery.route_grouped(grouped, _db.delivery_run(today))
+            except Exception:
+                pass
         out = ORDERS_DIR / f"Run_Sheet_{today:%Y-%m-%d}.pdf"
         try:
             path = _delivery.build_run_sheet_pdf(
@@ -13730,10 +13739,24 @@ class ModernOrderApp(tk.Frame):
         if staff:
             tiles.append(("Staff to approve", staff, CRD,
                           self._open_user_management))
+        # How the month is going (step 48), when there is a target for it.
+        if _features.is_on("sales_targets"):
+            try:
+                today = datetime.date.today()
+                target = _db.sales_targets().get(_money.month_start(today).isoformat())
+                p = _money.target_progress(
+                    _db.sales_between(_money.month_start(today), today) if target else 0,
+                    target or 0, today)
+            except Exception:
+                p = None
+            if p:
+                tiles.append((f"of {today:%B}'s ${p['target']:,.0f}",
+                              f"{p['percent']}%", CGR if p["ahead"] >= 0 else "#D98C00",
+                              self._sales_targets_window))
 
         for i, (label, count, colour, action) in enumerate(tiles):
             frame.columnconfigure(i, weight=1)
-            live = count > 0
+            live = count > 0 if isinstance(count, (int, float)) else bool(count)
             card = tk.Frame(frame, bg=CCA, highlightbackground=CBR,
                             highlightthickness=1, cursor="hand2",
                             padx=px(14), pady=px(12))
@@ -18391,6 +18414,10 @@ class ModernOrderApp(tk.Frame):
         ("price_change",       "Change prices…",          "_price_change_tool"),
         ("owing_view",         "Who owes what…",          "_owing_window"),
         ("lead_times",         "Order before it runs out…", "_order_soon_window"),
+        ("route_order",        "Plan the route…",         "_route_planner"),
+        ("job_profit",         "What jobs made…",         "_job_profit_window"),
+        ("sales_targets",      "Sales targets…",          "_sales_targets_window"),
+        ("owner_report",       "Owner's report…",         "_owner_report_window"),
         ("customer_display",   "Enable second screen display…",
                                                          "_customer_screen_from_menu"),
     ]
@@ -20406,6 +20433,324 @@ class ModernOrderApp(tk.Frame):
                        ("d", "Until the minimum", 140, "e"),
                        ("l", "Supplier takes", 190, "w"), ("o", "Order", 110, "e")],
             build, width=900)
+
+    # ── Out the door, and what it made (step 48) ─────────────────────────
+
+    def _route_stops(self) -> list:
+        """Every order ready to go out, as a stop with its address."""
+        data = getattr(self, "_all_orders_data", None) or self._scan_orders()
+        found: dict = {}
+        stops = []
+        for o in _delivery.ready_for_delivery(data):
+            if not o.get("db_id"):
+                continue
+            name = o.get("customer") or ""
+            if name not in found:
+                try:
+                    found[name] = _delivery.address_text(_db.customer_for_order(name))
+                except Exception:
+                    found[name] = ""
+            stops.append({"id": str(o["db_id"]), "region": _delivery.region_of(o),
+                          "customer": name, "order_no": o.get("order_no") or "",
+                          "address": found[name]})
+        return stops
+
+    def _route_planner(self):
+        """Today's stops in the order the van goes: moved up and down, or
+        suggested, then saved for the phone and the run sheet - and opened
+        in Google Maps."""
+        today = datetime.date.today()
+        state = {"stops": []}
+
+        def build():
+            stops = self._route_stops()
+            try:
+                saved = _db.delivery_run(today)
+            except Exception:
+                saved = []
+            state["stops"] = _delivery.apply_route(stops, saved)
+            return _rows(), _foot(saved)
+
+        def _rows():
+            return [((n, s["customer"], s["order_no"], s["region"],
+                      s["address"] or "no address on the account"),
+                     None if s["address"] else "late", s["id"])
+                    for n, s in enumerate(state["stops"], 1)]
+
+        def _foot(saved):
+            n = len(state["stops"])
+            if not n:
+                return "Nothing is marked Complete, so there is nothing to take."
+            return (f"{n} stop{'s' if n != 1 else ''}. "
+                    + ("Saved - the driver's phone and the run sheet follow this order."
+                       if saved else "Not saved yet: suggested by region and postcode."))
+
+        dlg, tree, foot = self._table_window(
+            f"The run for {today:%A %d/%m}",
+            "First stop first. Pick-ups are not in it - they do not go in the van.",
+            [("n", "#", 40, "center"), ("c", "Customer", 200, "w"),
+             ("o", "Order #", 110, "w"), ("r", "Region", 110, "w"),
+             ("a", "Address", 330, "w")], build, width=900)
+
+        def _redraw(select=None):
+            for iid in tree.get_children():
+                tree.delete(iid)
+            for i, (values, tag, ref) in enumerate(_rows()):
+                tree.insert("", "end", iid=ref,
+                            tags=(tag or ("even" if i % 2 == 0 else "odd"),),
+                            values=values)
+            if select:
+                tree.selection_set(select)
+                tree.focus(select)
+
+        def _move(by):
+            sid = tree.focus()
+            ids = [s["id"] for s in state["stops"]]
+            if sid not in ids:
+                return
+            i = ids.index(sid)
+            j = max(0, min(len(ids) - 1, i + by))
+            stops = state["stops"]
+            stops[i], stops[j] = stops[j], stops[i]
+            _redraw(sid)
+            foot.config(text="Moved - save the run to keep it.")
+
+        def _suggest():
+            state["stops"] = _delivery.suggest_route(state["stops"])
+            _redraw()
+            foot.config(text="Suggested by region and postcode - save the run to keep it.")
+
+        def _save():
+            try:
+                _db.save_delivery_run(today, [s["id"] for s in state["stops"]])
+            except Exception as exc:
+                messagebox.showerror("The run", f"Could not save it:\n{exc}", parent=dlg)
+                return False
+            foot.config(text="Saved - the driver's phone and the run sheet follow this order.")
+            return True
+
+        def _maps():
+            import webbrowser
+            try:
+                base = _calc_settings.base_address(_calc_settings.cached())
+            except Exception:
+                base = ""
+            links = _delivery.maps_links(base, [s["address"] for s in state["stops"]])
+            if not links:
+                messagebox.showinfo("The run", "None of the stops has an address.",
+                                    parent=dlg)
+                return []
+            for url in links:
+                webbrowser.open(url)
+            return links
+
+        bottom = dlg.winfo_children()[-1]
+        for text, cmd in (("▲  Up", lambda: _move(-1)), ("▼  Down", lambda: _move(1)),
+                          ("Suggest", _suggest)):
+            flat_btn(bottom, text, cmd, bg=CNE, variant="secondary",
+                     pady=px(6)).pack(side="left", padx=(0, px(8)))
+        flat_btn(bottom, "Save the run", _save, bg=CA,
+                 pady=px(6)).pack(side="left", padx=(0, px(8)))
+        flat_btn(bottom, "Open in Google Maps", _maps, bg=CNE, variant="secondary",
+                 pady=px(6)).pack(side="left")
+        dlg.route_state, dlg.route_move = state, _move
+        dlg.route_save, dlg.route_maps, dlg.route_suggest = _save, _maps, _suggest
+        return dlg, tree, foot
+
+    def _job_profit_window(self):
+        """What each job finished in the last 90 days made: sold, less what
+        went into it and the time the job timer says it took."""
+        if not _db.can_handle_supplies():
+            return self._table_window(
+                "What jobs made", "", [("m", "", 600, "w")],
+                lambda: ([(("Only managers can see what jobs made.",), None, None)], ""),
+                width=640, height=260)
+
+        def build():
+            orders = _db.finished_orders_since(90)
+            costs, cost_rates = self._cost_data()
+            times = _db.job_times_for([o.get("id") for o in orders])
+            rates = _planning.rate_map(_db.job_rates())
+            per_hour = _features.workshop().get("labour_per_hour", 55.0)
+            usual = _db.planning_settings().get("minutes_per_filter", 15.0)
+            jobs = [_money.job_profit(o, costs, cost_rates, times, rates, per_hour, usual)
+                    for o in orders]
+            jobs.sort(key=lambda j: j["profit"])
+
+            def money(v):
+                return f"${v:,.0f}"
+
+            def pct(v):
+                return "—" if v is None else f"{v:g}%"
+            out = [(("By job, least made first", "", "", "", "", "", ""), "head", None)]
+            for j in jobs:
+                flag = (" *" if j["estimated"] else "") + (" †" if j["uncosted"] else "")
+                out.append(((f"    {j['order_number'] or '—'}{flag}", j["customer"],
+                             money(j["sold"]), money(j["materials"]),
+                             f"{money(j['labour'])} ({j['minutes'] / 60:.1f} h)",
+                             money(j["profit"]), pct(j["percent"])),
+                            "late" if j["profit"] < 0 else None, None))
+            for title, key in (("By customer", "customer"), ("By filter type", "type")):
+                out.append(((title, "", "", "", "", "", ""), "head", None))
+                for g in _money.profit_by(jobs, key):
+                    out.append(((f"    {g['name']}", f"{g['jobs']} job{'s' if g['jobs'] != 1 else ''}",
+                                 money(g["sold"]), money(g["materials"]),
+                                 f"{money(g['labour'])} ({g['minutes'] / 60:.1f} h)",
+                                 money(g["profit"]), pct(g["percent"])),
+                                "late" if g["profit"] < 0 else None, None))
+            sold = sum(j["sold"] for j in jobs)
+            made = sum(j["profit"] for j in jobs)
+            if not jobs:
+                return out[:1], "No job has been finished in the last 90 days."
+            return out, (f"{len(jobs)} jobs: sold ${sold:,.0f}, made ${made:,.0f}. "
+                         f"Labour at ${per_hour:g} an hour. * some lines not timed, "
+                         f"so at the minutes that type usually takes. † a line with "
+                         f"no cost on file, left out of materials.")
+        return self._table_window(
+            "What jobs made",
+            "Finished in the last 90 days. Sold is ex GST with delivery; "
+            "materials are the costs kept for quote margins; labour is the job "
+            "timer's minutes.",
+            [("j", "Job / customer / type", 220, "w"), ("c", "Customer", 170, "w"),
+             ("s", "Sold", 90, "e"), ("m", "Materials", 90, "e"),
+             ("l", "Labour", 130, "e"), ("p", "Made", 90, "e"), ("x", "%", 60, "e")],
+            build, width=980)
+
+    def _sales_targets_window(self):
+        """Each month's target against what the orders came to. A manager
+        double-clicks a month to set its target."""
+        today = datetime.date.today()
+        first = _money.month_start(today)
+        months = []
+        d = first
+        for _ in range(6):                      # five back, this one
+            months.insert(0, d)
+            d = _money.month_start(d - datetime.timedelta(days=1))
+        d = first
+        for _ in range(6):                      # and six ahead
+            d = _money.month_start(_money.month_end(d) + datetime.timedelta(days=1))
+            months.append(d)
+
+        def build():
+            targets = _db.sales_targets()
+            sold = _db.sales_by_month(months[0])
+            out = []
+            for m in months:
+                key = m.isoformat()
+                t = targets.get(key, 0.0)
+                s = sold.get(key, 0.0) if m <= first else None
+                p = (f"{int(s / t * 100)}%" if (t and s is not None) else "")
+                out.append(((m.strftime("%B %Y"), f"${t:,.0f}" if t else "—",
+                             "" if s is None else f"${s:,.0f}", p),
+                            "head" if m == first else None, key))
+            p = _money.target_progress(sold.get(first.isoformat(), 0.0),
+                                       targets.get(first.isoformat(), 0.0), today)
+            return out, _money.target_text(p, today) + (
+                "  Double-click a month to set its target." if _db.can_handle_supplies()
+                else "")
+
+        def _set(key, dlg):
+            if not _db.can_handle_supplies():
+                messagebox.showinfo("Sales targets", "Only a manager can set a target.",
+                                    parent=dlg)
+                return
+            month = datetime.date.fromisoformat(key)
+            text = simpledialog.askstring(
+                "Sales target", f"Target for {month:%B %Y}, ex GST (blank for none):",
+                parent=dlg)
+            if text is None:
+                return
+            text = text.strip().lstrip("$").replace(",", "")
+            try:
+                value = float(text) if text else None
+                if value is not None and value < 0:
+                    raise ValueError
+            except ValueError:
+                messagebox.showerror("Sales target", "That is not an amount.", parent=dlg)
+                return
+            try:
+                _db.set_sales_target(month, value)
+            except Exception as exc:
+                messagebox.showerror("Sales target", f"Could not save it:\n{exc}", parent=dlg)
+                return
+            dlg.destroy()
+            self._sales_targets_window()
+
+        dlg, tree, foot = self._table_window(
+            "Sales targets",
+            "What the orders entered each month are worth (priced lines and "
+            "delivery, ex GST) against the month's target.",
+            [("m", "Month", 170, "w"), ("t", "Target", 120, "e"),
+             ("s", "Orders came to", 140, "e"), ("p", "", 80, "e")],
+            build, width=620, height=520, on_row=_set)
+        dlg.target_set = _set
+        return dlg, tree, foot
+
+    def _owner_report_window(self):
+        """Last month's report, to look at or email to yourself. The
+        directors get it on the 1st once the schedule is set up."""
+        dlg = tk.Toplevel(self.master, bg=CBG)
+        dlg.title("Owner's report")
+        dlg.transient(self.master)
+        _centre_on_parent(dlg, self.master, px(560), px(300))
+        body = tk.Frame(dlg, bg=CBG, padx=px(18), pady=px(14))
+        body.pack(fill="both", expand=True)
+        tk.Label(body, text="Owner's report", bg=CBG, fg=CA, font=F_TTL).pack(anchor="w")
+        tk.Label(body, text="A month on one page: sales against the target, quotes "
+                            "won and lost, jobs on time, faults, hours and stock. "
+                            "Emailed to every director and admin on the 1st once the "
+                            "schedule in step 48 is set up.",
+                 bg=CBG, fg=CMU, font=F_SM, wraplength=px(520),
+                 justify="left").pack(anchor="w", pady=(px(4), px(10)))
+        today = datetime.date.today()
+        months, d = [], _money.month_start(today)
+        for _ in range(12):
+            d = _money.month_start(d - datetime.timedelta(days=1))
+            months.append(d.strftime("%Y-%m"))
+        pick = ttk.Combobox(body, values=months, state="readonly", width=12)
+        pick.set(months[0])
+        pick.pack(anchor="w")
+        status = tk.Label(body, text="", bg=CBG, fg=CMU, font=F_SM,
+                          wraplength=px(520), justify="left")
+        status.pack(anchor="w", pady=(px(10), 0))
+
+        def _run(send: bool):
+            month = pick.get()
+            status.config(text="Asking…")
+
+            def _work():
+                got = _db.owner_report(month, send)
+
+                def _done():
+                    try:
+                        if not status.winfo_exists():
+                            return
+                    except tk.TclError:
+                        return
+                    if got.get("error"):
+                        status.config(text=got["error"], fg=CRD)
+                    elif send:
+                        status.config(text=f"Sent to {got.get('to')}.", fg=CGR)
+                    else:
+                        import tempfile
+                        out = Path(tempfile.gettempdir()) / f"TAF_owner_report_{month}.html"
+                        out.write_text("<!doctype html><meta charset='utf-8'>"
+                                       + str(got.get("html") or ""), encoding="utf-8")
+                        _open_path(str(out))
+                        status.config(text="Opened in your browser.", fg=CMU)
+                    dlg.report_result = got
+                self.master.after(0, _done)
+            threading.Thread(target=_work, daemon=True).start()
+
+        row = tk.Frame(body, bg=CBG)
+        row.pack(side="bottom", fill="x", pady=(px(12), 0))
+        flat_btn(row, "Close", dlg.destroy, bg=CNE, pady=px(6)).pack(side="right")
+        flat_btn(row, "Look at it", lambda: _run(False), bg=CA,
+                 pady=px(6)).pack(side="left", padx=(0, px(8)))
+        flat_btn(row, "Email it to me", lambda: _run(True), bg=CNE,
+                 variant="secondary", pady=px(6)).pack(side="left")
+        dlg.report_pick, dlg.report_run, dlg.report_status = pick, _run, status
+        return dlg
 
     def _outstanding_orders(self):
         """Every live order, with its lines. Read fresh rather than from the
@@ -29426,6 +29771,35 @@ class ModernOrderApp(tk.Frame):
                                  freight.get("delay_reason")) if b]
             tk.Label(hdr, text="🚚  " + "   ·   ".join(fbits), bg=CA,
                      fg="white", font=F_SM).pack(anchor="w", pady=(px(4), 0))
+
+        # Proof of delivery, once the customer has been emailed it.
+        if _features.is_on("pod_email") and row.get("db_id") and \
+                status in ("Dispatched", "Delivered", "Collected"):
+            pod_lbl = tk.Label(hdr, text="", bg=CA, fg="white", font=F_SM)
+            pod_lbl.pack(anchor="w", pady=(px(4), 0))
+            dlg.pod_label = pod_lbl
+
+            def _pod_worker(oid=row["db_id"]):
+                try:
+                    proof = _db.delivery_proof(str(oid))
+                except Exception:
+                    proof = {}
+                text = ""
+                if proof.get("emailed_at"):
+                    text = (f"✍  Signed for by {proof.get('signed_by') or '—'} · "
+                            f"proof of delivery emailed to {proof.get('emailed_to')} "
+                            f"{_money.local_when(proof['emailed_at'])}")
+
+                def _show():
+                    try:
+                        if pod_lbl.winfo_exists():
+                            pod_lbl.config(text=text)
+                            if not text:
+                                pod_lbl.pack_forget()
+                    except tk.TclError:
+                        pass
+                self.master.after(0, _show)
+            threading.Thread(target=_pod_worker, daemon=True).start()
 
         # ── Lines ─────────────────────────────────────────────────────────
         split = tk.Frame(body, bg=CBG)
