@@ -1208,6 +1208,103 @@ def run_supply_bell_checks(pg: Postgres) -> None:
           err or f"{told(old)} {told(waiting)}")
 
 
+def run_floor_checks(pg: Postgres) -> None:
+    print("\n── the factory floor (step 44) ──")
+    # The photos table comes with Storage, which this database has not got:
+    # its shape, so the photo rule can be tried.
+    q(pg, "CREATE TABLE IF NOT EXISTS order_files (id uuid PRIMARY KEY DEFAULT "
+          "gen_random_uuid(), order_id uuid REFERENCES orders(id) ON DELETE "
+          "CASCADE, kind text NOT NULL DEFAULT 'photo', path text NOT NULL, "
+          "caption text NOT NULL DEFAULT '', signed_by text NOT NULL DEFAULT '', "
+          "taken_by text NOT NULL DEFAULT '', created_at timestamptz NOT NULL "
+          "DEFAULT now());")
+    for _ in range(2):
+        ok, _o, err = pg.psql((ROOT / "migrate_floor.sql").read_text(
+            encoding="utf-8"), "f")
+        check("step 44 runs, and runs again cleanly", ok, err)
+    order = q(pg, "INSERT INTO orders (id, user_id, customer_name, order_number, "
+                  "header, items) VALUES (gen_random_uuid(), '" + DAVE + "', "
+                  "'Bells', 'F-44', '{\"status\": \"Pending\"}', "
+                  "'[{\"line_id\": \"L1\", \"Filter Type\": \"V-Form\", "
+                  "\"Quantity\": \"6\"}, {\"line_id\": \"L2\", "
+                  "\"Filter Type\": \"Flat Panel\", \"Quantity\": 2}]') "
+                  "RETURNING id;").splitlines()[0]
+
+    ok, _o, err = as_in(pg, "f", SARAH, "UPDATE orders SET header = header || "
+                        "'{\"status\": \"In Production\"}' "
+                        f"WHERE id = '{order}';")
+    stamp = q(pg, f"SELECT header ->> 'status_at' FROM orders WHERE id = '{order}';")
+    check("a change of status is stamped with when", ok and stamp.endswith("Z")
+          and stamp.startswith("20"), err or stamp)
+
+    # The timer.
+    ok, out, err = as_in(pg, "f", DAVE, "SELECT filter_type || '|' || quantity "
+                         f"FROM start_job_timer('{order}', 'L1');")
+    check("starting a timer on a line notes its type and how many",
+          ok and out == "V-Form|6", out or err)
+    ok, out, err = as_in(pg, "f", DAVE, "SELECT filter_type FROM "
+                         f"start_job_timer('{order}', 'L2');")
+    running = q(pg, "SELECT count(*) FROM job_times WHERE stopped_at IS NULL;")
+    check("starting another stops the first - one bench at a time",
+          ok and running == "1", f"{out} {running} {err}")
+    ok, out, err = as_in(pg, "f", DAVE, f"SELECT 1 FROM start_job_timer("
+                         f"'{order}', 'nope');")
+    check("a line that is not on the order is refused",
+          not ok and "not on the order" in err, out or err)
+    q(pg, "UPDATE job_times SET started_at = now() - interval '30 minutes' "
+          "WHERE stopped_at IS NULL;")
+    ok, out, err = as_in(pg, "f", DAVE, "SELECT round(minutes) FROM stop_job_timer();")
+    check("stopping it works out the minutes", ok and out == "30", out or err)
+    ok, out, err = as_in(pg, "f", DAVE, "SELECT minutes_each FROM job_rates "
+                         "WHERE filter_type = 'Flat Panel';")
+    check("and how long each one takes", ok and out == "15.0", out or err)
+    ok, _o, err = as_in(pg, "f", DAVE, "INSERT INTO job_times (filter_type, "
+                        "minutes) VALUES ('V-Form', 1);")
+    check("a time cannot be typed in, only timed", not ok, err)
+    ok, _o, err = as_in(pg, "f", DAVE, "DELETE FROM job_times;")
+    left = q(pg, "SELECT count(*) FROM job_times;")
+    check("nor thrown away by somebody on the floor", left == "2", left)
+
+    # Quality checks.
+    ok, _o, err = as_in(pg, "f", DAVE, "INSERT INTO qc_checklists (filter_type, "
+                        "checks) VALUES ('*', '[\"Size checked\"]');")
+    check("somebody on the floor cannot write the checklists", not ok, err)
+    ok, _o, err = as_in(pg, "f", SARAH, "INSERT INTO qc_checklists (filter_type, "
+                        "checks) VALUES ('V-Form', '[\"Pleats even\"]');")
+    check("a manager can", ok, err)
+    ok, out, err = as_in(pg, "f", DAVE, f"SELECT 1 FROM set_order_line_qc('{order}', "
+                         "'L1', '{\"passed\": true, \"by\": \"Dave\"}');")
+    qc = q(pg, f"SELECT items -> 0 -> 'qc' ->> 'by' || '|' || "
+               f"(items -> 1 ? 'qc')::text FROM orders WHERE id = '{order}';")
+    check("the checks ticked are kept on that line, and only that line",
+          ok and qc == "Dave|false", out or err or qc)
+
+    # Faults.
+    ok, _o, err = as_in(pg, "f", DAVE, "INSERT INTO returns (order_id, reason, "
+                        "found, filter_type, made_by, line_id) VALUES "
+                        f"('{order}', 'Wrong size', 'qc', 'V-Form', 'Dave', 'L1');")
+    check("a fault found in QC is recorded against the line", ok, err)
+    ok, _o, err = as_in(pg, "f", DAVE, "INSERT INTO returns (reason, found) "
+                        "VALUES ('x', 'somewhere');")
+    check("and where it was found is one of the three", not ok, err)
+
+    # The finished photo, once it is required.
+    q(pg, "INSERT INTO feature_switches (key, enabled) VALUES "
+          "('finished_photo', true) ON CONFLICT (key) DO UPDATE SET enabled = true;")
+    ok, _o, err = as_in(pg, "f", SARAH, "UPDATE orders SET header = header || "
+                        "'{\"status\": \"Complete\"}' "
+                        f"WHERE id = '{order}';")
+    check("with the switch on, no photo means it cannot be Complete",
+          not ok and "photo of the finished job" in err, err)
+    q(pg, "INSERT INTO order_files (order_id, kind, path, bucket) VALUES "
+          f"('{order}', 'finished', '{order}/a.jpg', 'job-photos');")
+    ok, _o, err = as_in(pg, "f", SARAH, "UPDATE orders SET header = header || "
+                        "'{\"status\": \"Complete\"}' "
+                        f"WHERE id = '{order}';")
+    check("with one it can", ok, err)
+    q(pg, "UPDATE feature_switches SET enabled = false WHERE key = 'finished_photo';")
+
+
 def _skip(why: str) -> int:
     """Skipping is fine on a laptop. In CI it is not: a workflow that goes
     green having checked nothing is worse than no workflow, because it is
@@ -1235,6 +1332,7 @@ def main() -> int:
         run_purchasing_checks(pg)
         run_stock_supplier_checks(pg)
         run_supply_bell_checks(pg)
+        run_floor_checks(pg)
     finally:
         pg.stop()
     print(f"\n{len(FAILURES)} FAILED" if FAILURES

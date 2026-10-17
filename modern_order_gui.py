@@ -31,6 +31,7 @@ from taf_order_app import notify as _notify
 from taf_order_app import features as _features
 from taf_order_app import cutting as _cutting
 from taf_order_app import insights as _insights
+from taf_order_app import floor as _floor
 from taf_order_app import records as _records
 from taf_order_app import xero as _xero
 from taf_order_app import invoice_wording as _wording
@@ -18327,6 +18328,10 @@ class ModernOrderApp(tk.Frame):
         ("xero_live",          "Xero…",                   "_xero"),
         ("xero_live",          "Purchase orders…",        "_purchase_orders"),
         ("email_orders",       "Orders straight from email…", "_email_orders"),
+        ("tv_board",           "Production board on the TV…", "_tv_board"),
+        ("job_timer",          "How long things take…",   "_job_rates_window"),
+        ("qc_checklist",       "QC checklists…",          "_qc_checklists"),
+        ("fault_log",          "Faults and rework…",      "_fault_log"),
         ("customer_display",   "Enable second screen display…",
                                                          "_customer_screen_from_menu"),
     ]
@@ -18919,6 +18924,409 @@ class ModernOrderApp(tk.Frame):
                  pady=px(6)).pack(side="right")
         threading.Thread(target=_work, daemon=True).start()
         return dlg, tree, foot_lbl
+
+    # ── The factory floor (step 44) ──────────────────────────────────────
+
+    def _tv_board(self):
+        """Where the TV board is: the web app, full screen. Any TV with a
+        browser - or a stick plugged into one - signed in as staff."""
+        url = self._web_app_base() + "?board=tv"
+        dlg = tk.Toplevel(self.master, bg=CBG)
+        dlg.title("Production board on the TV")
+        dlg.transient(self.master)
+        _centre_on_parent(dlg, self.master, px(620), px(330))
+        body = tk.Frame(dlg, bg=CBG, padx=px(18), pady=px(14))
+        body.pack(fill="both", expand=True)
+        tk.Label(body, text="Production board on the TV", bg=CBG, fg=CA,
+                 font=F_TTL).pack(anchor="w")
+        tk.Label(body, text=(
+            "Open this link in the TV's web browser (or on a Fire Stick, "
+            "Chromecast or small PC plugged into it) and sign in once with a "
+            "staff account. It fills the screen with today's jobs - To cut, "
+            "Making, Packed, Out the door - and keeps itself up to date as "
+            "lines are ticked on the phones and PCs."),
+            bg=CBG, fg=CTX, font=F_BODY, wraplength=px(580),
+            justify="left").pack(anchor="w", pady=(px(8), px(10)))
+        box = field_entry(body, width=70)
+        box.insert(0, url)
+        box.configure(state="readonly")
+        box.pack(fill="x")
+        row = tk.Frame(body, bg=CBG)
+        row.pack(fill="x", pady=(px(14), 0))
+
+        def _copy():
+            self.master.clipboard_clear()
+            self.master.clipboard_append(url)
+            self.status_var.set("The TV board link is copied.")
+
+        def _open():
+            import webbrowser
+            webbrowser.open(url)
+        flat_btn(row, "Copy link", _copy, bg=CA, pady=px(6)).pack(side="left")
+        flat_btn(row, "Open it here", _open, bg=CNE, variant="secondary",
+                 pady=px(6)).pack(side="left", padx=(px(8), 0))
+        flat_btn(row, "Close", dlg.destroy, bg=CNE, variant="secondary",
+                 pady=px(6)).pack(side="right")
+        dlg.tv_url = url
+        return dlg
+
+    def _job_rates_window(self):
+        """What the job timer has learned: minutes a filter, by type."""
+        def build():
+            rates = _db.job_rates()
+            recent = _db.recent_job_times(40)
+            out = [(("Minutes a filter, by type (last six months)", "", "", ""),
+                    "head", None)]
+            for r in rates:
+                out.append(((f"    {r.get('filter_type') or '—'}",
+                             _floor.minutes_text(r.get("minutes_each")),
+                             f"{float(r.get('filters') or 0):g}",
+                             r.get("timings") or 0), None, None))
+            out.append((("Lately", "", "", ""), "head", None))
+            for t in recent:
+                running = not t.get("stopped_at")
+                out.append(((
+                    f"    {t.get('user_name') or '—'} · O/N "
+                    f"{t.get('order_number') or '—'} · "
+                    f"{t.get('filter_type') or ''}",
+                    "running" if running else _floor.minutes_text(t.get("minutes")),
+                    f"{float(t.get('quantity') or 0):g}",
+                    str(t.get("started_at") or "")[:10]), None, None))
+            footer = ("Nothing has been timed yet - press Start on a line in "
+                      "the phone app, and Stop when it is done."
+                      if not rates and not recent else
+                      "Timed on the phones: Start on a line, Stop when it is "
+                      "done. Starting another line stops the last one.")
+            return out, footer
+
+        return self._table_window(
+            "How long things take",
+            "From the job timer on the phones. A timer left running more "
+            "than ten hours is not counted.",
+            [("what", "Filter type / timing", 380, "w"),
+             ("mins", "Each / took", 110, "e"),
+             ("qty", "Filters", 80, "e"), ("n", "Timings / day", 120, "e")],
+            build, width=760)
+
+    def _qc_checklists(self):
+        """The checks for each filter type, ticked before a line is made.
+        Managers write them; everybody sees them."""
+        can = _db.is_ready() and _db.can_handle_supplies()
+        dlg = tk.Toplevel(self.master, bg=CBG)
+        dlg.title("QC checklists")
+        dlg.transient(self.master)
+        _centre_on_parent(dlg, self.master, px(760), px(520))
+        dlg.columnconfigure(1, weight=1)
+        dlg.rowconfigure(1, weight=1)
+        tk.Label(dlg, text="QC checklists", bg=CBG, fg=CA, font=F_TTL).grid(
+            row=0, column=0, columnspan=2, sticky="w", padx=px(16),
+            pady=(px(12), 0))
+        tk.Label(dlg, text=("Ticked on the phone or PC before a line can be "
+                            "marked made. \"Every type\" applies to any "
+                            "filter type without a list of its own."),
+                 bg=CBG, fg=CMU, font=F_SM).grid(row=0, column=1, sticky="e",
+                                                 padx=px(16), pady=(px(12), 0))
+        types = tk.Listbox(dlg, height=14, font=F_BODY, bg=CRE, fg=CTX,
+                           relief="flat", highlightthickness=1,
+                           highlightbackground=CBR, exportselection=False,
+                           activestyle="none")
+        types.grid(row=1, column=0, sticky="nsw", padx=(px(16), px(8)),
+                   pady=px(10))
+        right = tk.Frame(dlg, bg=CBG)
+        right.grid(row=1, column=1, sticky="nsew", padx=(0, px(16)),
+                   pady=px(10))
+        right.rowconfigure(1, weight=1)
+        right.columnconfigure(0, weight=1)
+        which = tk.StringVar(value="")
+        tk.Label(right, textvariable=which, bg=CBG, fg=CTX,
+                 font=F_BOLD).grid(row=0, column=0, sticky="w")
+        text = tk.Text(right, height=10, font=F_BODY, wrap="word",
+                       relief="flat", highlightthickness=1,
+                       highlightbackground=CBR, bg=CCA, fg=CTX)
+        text.grid(row=1, column=0, sticky="nsew", pady=(px(4), 0))
+        tk.Label(right, text="One check a line, e.g. \"Size checked against "
+                 "the worksheet\".", bg=CBG, fg=CMU, font=F_SM).grid(
+                     row=2, column=0, sticky="w", pady=(px(4), 0))
+        state = {"lists": {}, "keys": [], "on": None}
+        known = sorted({str(t) for t in getattr(self, "_filter_types", []) or []}
+                       | {"V-Form", "Flat Panel", "Pleated Panel", "Bag Filter",
+                          "Mini Pleat", "Flyscreen"})
+
+        def _label(key):
+            return "Every type" if key == "*" else key
+
+        def _show_types():
+            keys = ["*"] + sorted(set(known) | set(state["lists"]) - {"*"})
+            state["keys"] = keys
+            types.delete(0, "end")
+            for k in keys:
+                n = len(state["lists"].get(k) or [])
+                types.insert("end", f"{_label(k)}" + (f"  ({n})" if n else ""))
+
+        def _pick(_e=None):
+            sel = types.curselection()
+            if not sel:
+                return
+            key = state["keys"][sel[0]]
+            state["on"] = key
+            which.set(_label(key))
+            text.configure(state="normal")
+            text.delete("1.0", "end")
+            text.insert("1.0", "\n".join(state["lists"].get(key) or []))
+            if not can:
+                text.configure(state="disabled")
+
+        def _save():
+            key = state["on"]
+            if key is None:
+                return
+            checks = _floor.parse_checks(text.get("1.0", "end"))
+            try:
+                if checks:
+                    _db.save_qc_checklist(key, checks)
+                    state["lists"][key] = checks
+                else:
+                    _db.remove_qc_checklist(key)
+                    state["lists"].pop(key, None)
+            except Exception as exc:
+                messagebox.showerror("QC checklists",
+                                     f"It wasn't saved:\n{exc}", parent=dlg)
+                return
+            self._qc_lists = dict(state["lists"])
+            _show_types()
+            self.status_var.set(f"QC checks for {_label(key)} saved.")
+
+        types.bind("<<ListboxSelect>>", _pick)
+        bottom = tk.Frame(dlg, bg=CBG, padx=px(16), pady=px(10))
+        bottom.grid(row=2, column=0, columnspan=2, sticky="ew")
+        if can:
+            flat_btn(bottom, "Save these checks", _save, bg=CA,
+                     pady=px(6)).pack(side="left")
+        else:
+            tk.Label(bottom, text="Only a manager can change the checks.",
+                     bg=CBG, fg=CMU, font=F_SM).pack(side="left")
+        flat_btn(bottom, "Close", dlg.destroy, bg=CNE, variant="secondary",
+                 pady=px(6)).pack(side="right")
+
+        def _load():
+            try:
+                lists = _db.qc_checklists()
+            except Exception:
+                lists = {}
+            self.master.after(0, lambda: _loaded(lists))
+
+        def _loaded(lists):
+            if not dlg.winfo_exists():
+                return
+            state["lists"] = lists
+            self._qc_lists = dict(lists)
+            _show_types()
+            types.selection_set(0)
+            _pick()
+        threading.Thread(target=_load, daemon=True).start()
+        dlg.qc_state, dlg.qc_text, dlg.qc_types, dlg.qc_save = \
+            state, text, types, _save
+        return dlg
+
+    def _qc_before_made(self, line, parent) -> "dict | None":
+        """With QC on: the checks for this line's filter type, all to be
+        ticked before it is marked made. Returns what to keep on the line,
+        {} when there is nothing to check, or None when not passed."""
+        if not _features.is_on("qc_checklist"):
+            return {}
+        lists = getattr(self, "_qc_lists", None)
+        if lists is None:
+            try:
+                lists = _db.qc_checklists()
+            except Exception:
+                lists = {}
+            self._qc_lists = lists
+        checks = _floor.checks_for(line.get("Filter Type")
+                                   or line.get("product_type"), lists)
+        if not checks:
+            return {}
+        dlg = tk.Toplevel(parent, bg=CBG)
+        dlg.title("Quality check")
+        dlg.transient(parent)
+        _centre_on_parent(dlg, parent, px(460), px(140 + 34 * len(checks)))
+        tk.Label(dlg, text=f"Before it is marked made: "
+                 f"{line.get('Filter Type') or 'this line'}", bg=CBG, fg=CA,
+                 font=F_SEC).pack(anchor="w", padx=px(16), pady=(px(12), px(6)))
+        ticks = []
+        for c in checks:
+            var = tk.BooleanVar(value=False)
+            tk.Checkbutton(dlg, text=c, variable=var, bg=CBG, fg=CTX,
+                           activebackground=CBG, selectcolor=CCA, font=F_BODY,
+                           anchor="w", cursor="hand2").pack(fill="x",
+                                                            padx=px(16))
+            ticks.append(var)
+        out = {"result": None}
+        row = tk.Frame(dlg, bg=CBG)
+        row.pack(fill="x", padx=px(16), pady=px(12))
+
+        def _pass():
+            if not all(v.get() for v in ticks):
+                messagebox.showinfo(
+                    "Quality check", "Tick every check - or if one fails, "
+                    "press It failed and record the fault.", parent=dlg)
+                return
+            import datetime as _d
+            out["result"] = _floor.qc_record(
+                checks, _db.current_full_name() or _db.current_username(),
+                _d.datetime.now().strftime("%d/%m/%Y %H:%M"))
+            dlg.destroy()
+
+        def _failed():
+            out["result"] = None
+            dlg.destroy()
+            if _features.is_on("fault_log"):
+                self._record_fault(parent, {
+                    "filter_type": line.get("Filter Type") or "",
+                    "line_id": line.get(_db.LINE_ID) or "",
+                    "found": "qc", "made_by": line.get("made_by") or ""})
+
+        flat_btn(row, "All checked - mark made", _pass, bg=CA,
+                 pady=px(6)).pack(side="left")
+        flat_btn(row, "It failed", _failed, bg=CNE, variant="secondary",
+                 pady=px(6)).pack(side="left", padx=(px(8), 0))
+        dlg.qc_ticks, dlg.qc_pass, dlg.qc_failed = ticks, _pass, _failed
+        self._qc_dialog = dlg
+        dlg.grab_set()
+        self.master.wait_window(dlg)
+        return out["result"]
+
+    def _fault_log(self):
+        """Faults found in QC and filters that came back, added up: by
+        reason, by filter type, by who made it."""
+        import datetime as _d
+        since = _d.date.today() - _d.timedelta(days=180)
+
+        def build():
+            rows = _db.list_faults()
+            got = _floor.fault_patterns(rows, since=since)
+            out = []
+            for title, key in (("By reason", "by_reason"),
+                               ("By filter type", "by_type"),
+                               ("By who made it", "by_maker"),
+                               ("Where it was found", "by_found")):
+                out.append(((title, ""), "head", None))
+                for c in got[key][:12]:
+                    out.append(((f"    {c['name']}", f"{c['count']:g}"),
+                                None, None))
+            footer = (f"{got['total']:g} in the last six months. Record one "
+                      "from the phone (a line on an order → Fault) or with "
+                      "Record a fault below."
+                      if got["total"] else
+                      "Nothing recorded in the last six months.")
+            return out, footer
+
+        dlg, tree, foot = self._table_window(
+            "Faults and rework",
+            "Filters that failed QC or came back, added up so the patterns "
+            "show - a reason that keeps coming up, a type, a person who "
+            "needs a hand.",
+            [("what", "What", 460, "w"), ("n", "Filters", 100, "e")],
+            build, width=640)
+        bottom = dlg.winfo_children()[-1]
+        flat_btn(bottom, "Record a fault…",
+                 lambda: self._record_fault(dlg, {}), bg=CA,
+                 pady=px(6)).pack(side="left")
+        return dlg
+
+    def _record_fault(self, parent, preset: dict):
+        """A fault: which order and line, what was wrong, who made it, where
+        it was found - and a photo if there is one on this PC."""
+        dlg = tk.Toplevel(parent, bg=CBG)
+        dlg.title("Record a fault")
+        dlg.transient(parent)
+        _centre_on_parent(dlg, parent, px(520), px(470))
+        body = tk.Frame(dlg, bg=CBG, padx=px(16), pady=px(12))
+        body.pack(fill="both", expand=True)
+        body.columnconfigure(1, weight=1)
+        v = {k: tk.StringVar(value=str(preset.get(k) or "")) for k in (
+            "order_number", "filter_type", "made_by", "detail")}
+        v["quantity"] = tk.StringVar(value=str(preset.get("quantity") or "1"))
+        v["reason"] = tk.StringVar(value=_floor.FAULT_REASONS[0])
+        found_names = {"qc": "Found in QC", "returned": "Came back",
+                       "site": "Found on site"}
+        v["found"] = tk.StringVar(value=found_names.get(
+            preset.get("found") or "qc", "Found in QC"))
+        photo = {"path": ""}
+        rows = [("Order number", field_entry(body, textvariable=v["order_number"])),
+                ("Filter type", field_entry(body, textvariable=v["filter_type"])),
+                ("How many", field_entry(body, textvariable=v["quantity"], width=8)),
+                ("What was wrong", ttk.Combobox(
+                    body, textvariable=v["reason"], state="readonly",
+                    values=_floor.FAULT_REASONS)),
+                ("Where", ttk.Combobox(body, textvariable=v["found"],
+                                       state="readonly",
+                                       values=list(found_names.values()))),
+                ("Who made it", field_entry(body, textvariable=v["made_by"])),
+                ("More detail", field_entry(body, textvariable=v["detail"]))]
+        for r, (label, widget) in enumerate(rows):
+            tk.Label(body, text=label, bg=CBG, fg=CTX, font=F_BODY).grid(
+                row=r, column=0, sticky="w", pady=px(3))
+            widget.grid(row=r, column=1, sticky="ew", padx=(px(8), 0),
+                        pady=px(3))
+        photo_lbl = tk.Label(body, text="No photo", bg=CBG, fg=CMU, font=F_SM)
+        photo_lbl.grid(row=len(rows), column=1, sticky="w", padx=(px(8), 0))
+
+        def _photo():
+            from tkinter import filedialog
+            got = filedialog.askopenfilename(
+                parent=dlg, title="A photo of the fault",
+                filetypes=[("Pictures", "*.jpg *.jpeg *.png *.heic *.webp"),
+                           ("All files", "*.*")])
+            if got:
+                photo["path"] = got
+                photo_lbl.config(text=os.path.basename(got))
+        flat_btn(body, "Photo…", _photo, bg=CNE, variant="secondary",
+                 pady=px(4)).grid(row=len(rows), column=0, sticky="w",
+                                  pady=px(6))
+
+        def _save():
+            try:
+                qty = float(v["quantity"].get() or 1)
+                if qty <= 0:
+                    raise ValueError
+            except ValueError:
+                messagebox.showwarning("Record a fault",
+                                       "How many should be a number.",
+                                       parent=dlg)
+                return
+            found = next((k for k, n in found_names.items()
+                          if n == v["found"].get()), "qc")
+            row = {"order_number": v["order_number"].get().strip(),
+                   "order_id": preset.get("order_id") or "",
+                   "customer_name": preset.get("customer_name") or "",
+                   "line_id": preset.get("line_id") or "",
+                   "filter_type": v["filter_type"].get().strip(),
+                   "quantity": qty, "reason": v["reason"].get(),
+                   "found": found, "made_by": v["made_by"].get().strip(),
+                   "detail": v["detail"].get().strip()}
+            try:
+                _db.add_fault(row, photo["path"])
+            except Exception as exc:
+                messagebox.showerror("Record a fault",
+                                     f"It wasn't saved:\n{exc}", parent=dlg)
+                return
+            try:
+                _db.log_action("fault_recorded",
+                               f"O/N: {row['order_number']} | {row['reason']}"
+                               f" | {row['filter_type']}")
+            except Exception:
+                pass
+            self.status_var.set("Fault recorded.")
+            dlg.destroy()
+
+        bottom = tk.Frame(dlg, bg=CBG, padx=px(16), pady=px(10))
+        bottom.pack(fill="x")
+        flat_btn(bottom, "Save", _save, bg=CA, pady=px(6)).pack(side="left")
+        flat_btn(bottom, "Cancel", dlg.destroy, bg=CNE, variant="secondary",
+                 pady=px(6)).pack(side="right")
+        dlg.fault_vars, dlg.fault_save, dlg.fault_photo = v, _save, photo
+        self._fault_dialog = dlg
+        return dlg
 
     def _outstanding_orders(self):
         """Every live order, with its lines. Read fresh rather than from the
@@ -26500,6 +26908,7 @@ class ModernOrderApp(tk.Frame):
                 it["item_kind"] = "bag" if "product_type" in it else "filter"
             # A repeat is a fresh job in the shop: nothing on it is made yet.
             it.pop("made", None); it.pop("made_by", None); it.pop("made_at", None)
+            it.pop("qc", None)
             it.pop(_db.LINE_ID, None)
 
         header["Order Number"] = ""
@@ -27178,10 +27587,30 @@ class ModernOrderApp(tk.Frame):
         self.status_var.set(f"Setting {total} order{'s' if total != 1 else ''} "
                             f"to '{new_status}'…")
 
+        # With the finished-photo switch on, the database will not let an
+        # order be Complete (or go out) without one; said plainly up front
+        # rather than as one error an order.
+        gone = ("Complete", "Dispatched", "Delivered", "Collected")
+        need_photo = (new_status in gone
+                      and _features.is_on("finished_photo"))
+
         def _work():
             done, problems = 0, []
+            have = set()
+            if need_photo:
+                try:
+                    have = _db.orders_with_finished_photo(
+                        r["db_id"] for r in todo)
+                except Exception:
+                    have = None          # cannot tell: let the database say
             for r in todo:
                 old = r.get("status", "Pending") or "Pending"
+                if need_photo and have is not None and old not in gone \
+                        and str(r["db_id"]) not in have:
+                    problems.append((r.get("order_no", "?"),
+                                     "No photo of the finished job yet - "
+                                     "take one on the phone first."))
+                    continue
                 try:
                     _db.set_order_status(str(r["db_id"]), new_status)
                     done += 1
@@ -27990,6 +28419,20 @@ class ModernOrderApp(tk.Frame):
                     "This order is only on this PC, so there is nowhere to "
                     "record which lines are made.", parent=dlg)
                 return "break"
+            if want:
+                # With QC on, its checks first - all ticked, or not made.
+                qc = self._qc_before_made(line, dlg)
+                if qc is None:
+                    return "break"
+                if qc:
+                    try:
+                        _db.set_line_qc(str(db_id), line.get(_db.LINE_ID) or "",
+                                        qc)
+                        line["qc"] = qc
+                    except Exception as exc:
+                        messagebox.showerror("Quality check", str(exc),
+                                             parent=dlg)
+                        return "break"
             try:
                 _db.set_line_made(str(db_id), line.get(_db.LINE_ID) or "",
                                   want, by=_db.current_full_name()

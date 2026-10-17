@@ -179,7 +179,11 @@ WITH checks(step, file, purpose, needed, present) AS (VALUES
 
   (43, 'migrate_supply_bell.sql', 'The bell only shows supply requests still waiting', 'recommended',
       COALESCE(pg_get_functiondef(to_regprocedure('public.settle_supply_notifications()'))
-               LIKE '%DELETE FROM public.notifications%', false))
+               LIKE '%DELETE FROM public.notifications%', false)),
+
+  (44, 'migrate_floor.sql', 'The factory floor: TV board, job timer, QC checks, faults, finished-job photos', 'recommended',
+      to_regclass('public.job_times') IS NOT NULL
+      AND to_regclass('public.qc_checklists') IS NOT NULL)
 )
 SELECT step,
        CASE WHEN present THEN 'already done' ELSE 'RUN THIS' END AS status,

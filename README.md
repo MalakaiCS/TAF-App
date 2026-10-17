@@ -452,6 +452,7 @@ just run it — nothing is lost and nothing is duplicated.
 | 41 | `migrate_stock_images.sql` | The storage bucket for pictures of stock items (stock_schema.sql only said to make it by hand) | recommended |
 | 42 | `migrate_stock_suppliers.sql` | Where each stock item comes from: its suppliers, their codes and prices, so Order Supplies offers stock items and low stock becomes purchase orders (needs step 40) | recommended |
 | 43 | `migrate_supply_bell.sql` | The bell only shows supply requests still waiting: once everything on a request has been ordered, received, declined or cancelled, it comes off every manager's bell (needs steps 32 and 40) | recommended |
+| 44 | `migrate_floor.sql` | The factory floor: when an order changed status (for the TV board), a job timer, QC checklists, faults found in QC, and finished-job photos the customer sees on their portal (needs steps 16, 32 and the order-files, features and portal steps). Everything arrives switched off | recommended |
 
 **Step 16 is the one that matters most.** Every policy in the older scripts is
 `TO authenticated USING (true)` — meaning *anyone Supabase counts as signed

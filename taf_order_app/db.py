@@ -470,7 +470,7 @@ def replace_order_line(order_id: str, line_id: str, new_line: dict) -> list:
             continue
         fixed = dict(new_line)
         for key, value in line.items():
-            if key == LINE_ID or key.startswith("made"):
+            if key == LINE_ID or key.startswith("made") or key == "qc":
                 fixed[key] = value
         items[i] = fixed
         break
@@ -2859,6 +2859,90 @@ def set_order_stage(order_id: str, stage: str, done: bool = True) -> str:
     stages["at"] = _now_stamp()
     stages["by"] = current_full_name() or current_username()
     return merge_order_header(str(order_id), {"stages": stages})
+
+
+# ── The factory floor (step 44, migrate_floor.sql) ───────────────────────────
+
+def job_rates() -> list:
+    """Minutes a filter, by filter type, from the job timer."""
+    resp = (get_client().table("job_rates").select("*")
+            .order("filter_type").execute())
+    return list(resp.data or [])
+
+
+def recent_job_times(limit: int = 80) -> list:
+    resp = (get_client().table("job_times").select("*")
+            .order("started_at", desc=True).limit(limit).execute())
+    return list(resp.data or [])
+
+
+def qc_checklists() -> dict:
+    """{filter type: [checks]} - '*' is for every type without its own."""
+    resp = get_client().table("qc_checklists").select("*").execute()
+    return {str(r.get("filter_type") or ""): list(r.get("checks") or [])
+            for r in (resp.data or [])}
+
+
+def save_qc_checklist(filter_type: str, checks: list) -> None:
+    get_client().table("qc_checklists").upsert({
+        "filter_type": str(filter_type).strip() or "*",
+        "checks": list(checks),
+        "updated_by": current_full_name() or current_username(),
+    }, on_conflict="filter_type").execute()
+
+
+def remove_qc_checklist(filter_type: str) -> None:
+    (get_client().table("qc_checklists").delete()
+     .eq("filter_type", str(filter_type)).execute())
+
+
+def set_line_qc(order_id: str, line_id: str, qc: dict) -> None:
+    """The checks ticked on one line, kept on that line (by its id)."""
+    resp = get_client().rpc("set_order_line_qc", {
+        "p_order_id": str(order_id), "p_line_id": str(line_id),
+        "p_qc": qc}).execute()
+    if not resp.data:
+        raise RuntimeError("That line was not found on the order. It may "
+                           "have been changed since this screen was opened.")
+
+
+def list_faults(limit: int = 500) -> list:
+    """Faults found in QC and filters that came back, newest first."""
+    resp = (get_client().table("returns").select("*")
+            .order("created_at", desc=True).limit(limit).execute())
+    return list(resp.data or [])
+
+
+def add_fault(row: dict, photo_path: str = "") -> dict:
+    """A fault, found in QC or come back, with an optional photo (a file on
+    this PC, shrunk and kept with the order's files)."""
+    data = {k: row.get(k) for k in (
+        "order_id", "order_number", "customer_name", "quantity", "reason",
+        "detail", "line_id", "filter_type", "found", "made_by") if k in row}
+    data["created_by"] = current_full_name() or current_username()
+    if not data.get("order_id"):
+        data.pop("order_id", None)
+    if photo_path:
+        import uuid as _uuid
+        from pathlib import Path as _P
+        from . import photos as _photos
+        blob, mime, ext = _photos.shrink(_P(photo_path).read_bytes())
+        name = f"faults/{_uuid.uuid4()}{ext or _P(photo_path).suffix.lower()}"
+        get_client().storage.from_("order-files").upload(
+            name, blob, file_options={"content-type": mime or "image/jpeg"})
+        data["photo_path"] = name
+    resp = get_client().table("returns").insert(data).execute()
+    return (resp.data or [data])[0]
+
+
+def orders_with_finished_photo(order_ids) -> set:
+    """Which of these orders have a photo of the finished job."""
+    ids = [str(i) for i in order_ids if i]
+    if not ids:
+        return set()
+    resp = (get_client().table("order_files").select("order_id")
+            .in_("order_id", ids).eq("kind", "finished").execute())
+    return {str(r.get("order_id")) for r in (resp.data or [])}
 
 
 def _now_stamp() -> str:

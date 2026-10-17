@@ -183,6 +183,29 @@ CATALOGUE: List[Feature] = [
             "A second monitor at the counter showing the quote as it is "
             "built - every line, its price, the delivery and the total.",
             "Money", built=True),
+
+    # ── The floor, round two (step 44) ───────────────────────────────────
+    Feature("tv_board", "Production board on the TV",
+            "Today's jobs in four columns - To cut, Making, Packed, Out the "
+            "door - big enough to read across the factory, moving as lines "
+            "are ticked. Open the web app on the TV with ?board=tv.",
+            "The floor", built=True),
+    Feature("job_timer", "Job timer",
+            "Start and stop on a line from the phone, so you learn how long "
+            "each filter type really takes.",
+            "The floor", built=True),
+    Feature("qc_checklist", "QC checklist",
+            "A few checks for each filter type, ticked before a line can be "
+            "marked made. Kept on the line with who and when.",
+            "The floor", built=True),
+    Feature("fault_log", "Fault and rework log",
+            "A filter that failed QC or came back, with the reason, who made "
+            "it and a photo - and the patterns by type and by person.",
+            "The floor", built=True),
+    Feature("finished_photo", "Photo of the finished job",
+            "A photo before an order can be marked Complete. The customer "
+            "sees it on their portal.",
+            "The floor", built=True),
 ]
 
 BY_KEY: Dict[str, Feature] = {f.key: f for f in CATALOGUE}
