@@ -882,6 +882,20 @@ sign). View Order → Actions → **Invoice & packing slip (PDF)** makes it agai
 for an order already invoiced. (It opens for now, while it is being tried;
 switching `INVOICE_PAPERWORK_PRINTS` on sends it straight to the printer.)
 
+**Every customer in Xero.** Make a new customer and the app asks whether they
+already have an account in Xero: *Yes* finds it (by their legal name, name or
+short name) to link; *No* makes their contact in Xero from everything the app
+has - legal name, email, contact person, ABN, phone, delivery and postal
+address, payment terms - and links it; *Cancel* is not now. Pick a customer
+on a new order who isn't linked and the same question comes up, once a
+session for each. When a customer is linked to a contact that already
+exists, anything that contact is **missing** in Xero is filled in from the
+app (nothing Xero already has is changed), and their **payment terms** come
+back from Xero - their own, or Xero's default when they have none - in words
+like "Net 30" or "20th of the following month". **Customer ▾ → Payment terms
+from Xero (everyone)** does the terms for every linked customer at once;
+**Customer ▾ → Make them in Xero…** makes the selected one there.
+
 **Cash sales** (step 51): tick *Cash sale account* on the customer walk-in
 and one-off buyers go under (managers only). **Send to Xero & invoice
 customer** on one of its orders then asks who to email the invoice to -

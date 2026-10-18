@@ -2736,6 +2736,106 @@ def _steps(app, gui, root):
             app._tab_loaded.update(loaded)
     add("orders: a cash sale asks who to email the invoice to", _cash_sale_invoice)
 
+    def _customers_in_xero():
+        """A new customer: asked if they are in Xero - made there from the
+        app's details, or found and linked with the blanks filled in and
+        their payment terms brought back. And everyone's terms at once."""
+        from taf_order_app import features as _feat
+        from taf_order_app import xero as _x
+        saved_calls, updates, answers, said = [], [], [], []
+        keep = (_x.save_contact, _x.find_contacts, _x.read_contacts,
+                gui._db.update_customer, gui._db.get_customer, gui._db.get_customers,
+                gui.messagebox.askyesnocancel, gui.messagebox.showinfo,
+                gui._db.customer_extras_ready, dict(_feat._switches))
+        _feat._switches = {"xero_live": True}
+        gui._db.customer_extras_ready = lambda: True
+        _x.save_contact = lambda c: saved_calls.append(dict(c)) or (
+            {"id": c.get("ContactID") or "11111111-1111-1111-1111-111111111111",
+             "name": c.get("Name") or "Bells Creek Pty Ltd", "email": ""})
+        _x.find_contacts = lambda term: {"contacts": [
+            {"id": "22222222-2222-2222-2222-222222222222", "name": "Bells Creek",
+             "email": "ap@bells.example"}]}
+        _x.read_contacts = lambda ids: {"contacts": [{
+            "id": ids[0], "EmailAddress": "ap@bells.example", "FirstName": "",
+            "LastName": "", "TaxNumber": "", "Phones": [], "Addresses": [],
+            "PaymentTerms": {"Type": "OFFOLLOWINGMONTH", "Day": 20}}],
+            "default_terms": {"Type": "DAYSAFTERBILLDATE", "Day": 30}}
+        gui._db.update_customer = lambda cid, data: updates.append((cid, dict(data)))
+        gui._db.get_customer = lambda cid: {"id": cid}
+        gui.messagebox.askyesnocancel = lambda *a, **k: answers.pop(0)
+        gui.messagebox.showinfo = lambda *a, **k: said.append(a)
+
+        def _until(test):
+            for _ in range(100):
+                root.update()
+                if test():
+                    return True
+                time.sleep(0.03)
+            return False
+
+        cust = {"id": "c-new", "name": "Bells Creek", "legal_name": "Bells Creek Pty Ltd",
+                "email": "ap@bells.example", "phone": "07 5555 1234",
+                "contact_person": "Jo Smith", "abn": "12 345 678 901",
+                "delivery_address1": "12 Industrial Ave", "delivery_city": "Caloundra",
+                "delivery_state": "QLD", "delivery_postcode": "4551",
+                "payment_terms": "Net 30"}
+        try:
+            # Not in Xero: made there from the app, and linked.
+            answers[:] = [False]
+            app._xero_link_customer(dict(cust), new=True)
+            assert _until(lambda: updates), "never linked"
+            assert saved_calls[0]["Name"] == "Bells Creek Pty Ltd" and \
+                saved_calls[0]["TaxNumber"] == "12345678901", saved_calls
+            assert updates[0] == ("c-new", {"xero_contact_id":
+                                            "11111111-1111-1111-1111-111111111111"}), updates
+
+            # In Xero: found, linked, its blanks filled, its terms brought back.
+            saved_calls.clear(); updates.clear()
+            answers[:] = [True]
+            before = set(root.winfo_children())
+            app._xero_link_customer(dict(cust))
+            assert _until(lambda: any(hasattr(w, "picker_link")
+                                      for w in set(root.winfo_children()) - before))
+            pick = next(w for w in set(root.winfo_children()) - before
+                        if hasattr(w, "picker_link"))
+            pick.picker_tree.selection_set("22222222-2222-2222-2222-222222222222")
+            pick.picker_link()
+            assert _until(lambda: len(updates) >= 2), updates
+            assert updates[0][1] == {"xero_contact_id": "22222222-2222-2222-2222-222222222222"}
+            assert updates[1][1] == {"payment_terms": "20th of the following month"}, updates
+            assert saved_calls and saved_calls[0]["ContactID"] == \
+                "22222222-2222-2222-2222-222222222222", saved_calls
+            assert "EmailAddress" not in saved_calls[0]        # Xero had one
+            assert saved_calls[0]["TaxNumber"] == "12345678901"
+
+            # On an order: asked once a session, not every time.
+            answers[:] = [None, None]
+            app._offer_xero_link({"id": "c-once", "name": "Once Co"})
+            root.update()
+            app._offer_xero_link({"id": "c-once", "name": "Once Co"})
+            root.update()
+            assert answers == [None], answers
+
+            # Everyone's terms from Xero.
+            updates.clear()
+            gui._db.get_customers = lambda active_only=True: [
+                {"id": "a", "name": "A", "xero_contact_id": "33333333-3333-3333-3333-333333333333",
+                 "payment_terms": "Net 30"},
+                {"id": "b", "name": "B", "xero_contact_id": None}]
+            app._xero_terms_all()
+            assert _until(lambda: said), "no report"
+            assert updates == [("a", {"payment_terms": "20th of the following month"})], updates
+            assert "1 customers are linked" in str(said[-1]) and "A: 20th" in str(said[-1])
+        finally:
+            (_x.save_contact, _x.find_contacts, _x.read_contacts,
+             gui._db.update_customer, gui._db.get_customer, gui._db.get_customers,
+             gui.messagebox.askyesnocancel, gui.messagebox.showinfo,
+             gui._db.customer_extras_ready, _feat._switches) = keep
+            for w in root.winfo_children():
+                if isinstance(w, gui.tk.Toplevel) and w.title() == "Link to a Xero contact":
+                    w.destroy()
+    add("customers: in Xero - made there, or found and linked", _customers_in_xero)
+
     def _press(win, text):
         for w in _walk(win):
             if isinstance(w, gui.PillButton) and w.cget("text") == text:

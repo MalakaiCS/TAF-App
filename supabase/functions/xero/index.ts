@@ -1454,6 +1454,67 @@ Deno.serve(async (req: Request) => {
       return json({ contacts });
     }
 
+    if (action === "contacts_read") {
+      // Contacts in full, for their payment terms and to see what is
+      // missing from them: up to 500 at a time, 50 to a request.
+      const ids = (Array.isArray(body.ids) ? body.ids : [])
+        .map((x: unknown) => String(x ?? "")).filter((x: string) => UUID.test(x))
+        .slice(0, 500);
+      const contacts: Row[] = [];
+      for (let i = 0; i < ids.length; i += 50) {
+        const out = await xero("GET", "/api.xro/2.0/Contacts?IDs=" +
+          encodeURIComponent(ids.slice(i, i + 50).join(",")));
+        for (const c of out?.Contacts ?? []) {
+          contacts.push({
+            id: c.ContactID, name: c.Name ?? "", status: c.ContactStatus ?? "",
+            EmailAddress: c.EmailAddress ?? "", FirstName: c.FirstName ?? "",
+            LastName: c.LastName ?? "", TaxNumber: c.TaxNumber ?? "",
+            Phones: c.Phones ?? [], Addresses: c.Addresses ?? [],
+            PaymentTerms: c.PaymentTerms?.Sales ?? null,
+          });
+        }
+      }
+      return json({ contacts, default_terms: await orgTerms() });
+    }
+
+    if (action === "contact_save") {
+      // Make a customer's contact in Xero, or fill in what one is missing.
+      // Only these fields, and only what is given: nothing here clears
+      // anything in Xero.
+      const raw = (body.contact ?? {}) as Row;
+      const c: Row = {};
+      const id = String(raw.ContactID ?? "");
+      if (id && !UUID.test(id)) return json({ error: "Which contact?" }, 400);
+      for (const k of ["Name", "EmailAddress", "FirstName", "LastName", "TaxNumber"]) {
+        const v = String(raw[k] ?? "").trim();
+        if (v) c[k] = v.slice(0, k === "Name" ? 255 : 120);
+      }
+      if (Array.isArray(raw.Phones) && raw.Phones.length) c.Phones = raw.Phones.slice(0, 4);
+      if (Array.isArray(raw.Addresses) && raw.Addresses.length) {
+        c.Addresses = raw.Addresses.slice(0, 2);
+      }
+      const t = raw.PaymentTerms as Row | undefined;
+      if (t && typeof t === "object" && t.Sales) c.PaymentTerms = { Sales: t.Sales };
+      if (!id && !c.Name) return json({ error: "A new contact needs a name." }, 400);
+      if (id && !Object.keys(c).length) return json({ id, unchanged: true });
+      try {
+        const out = id
+          ? await xero("POST", `/api.xro/2.0/Contacts/${id}`,
+                       { Contacts: [{ ContactID: id, ...c }] })
+          : await xero("POST", "/api.xro/2.0/Contacts", { Contacts: [c] });
+        const made = out?.Contacts?.[0] ?? {};
+        return json({ id: made.ContactID ?? id, name: made.Name ?? c.Name ?? "",
+                      email: made.EmailAddress ?? "" });
+      } catch (e) {
+        const msg = String((e as Error).message ?? e);
+        if (!id && /already|unique|exists/i.test(msg)) {
+          return json({ error: `Xero already has a contact called "${c.Name}". ` +
+                        "Link the customer to that one instead.", exists: true }, 409);
+        }
+        return json({ error: msg }, 422);
+      }
+    }
+
     if (action === "list") {
       return json({ rows: await rpc<Row[]>("xero_list", { p_limit: 300 }) });
     }

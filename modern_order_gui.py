@@ -14133,6 +14133,8 @@ class ModernOrderApp(tk.Frame):
                 None,
                 ("Open in Xero",          lambda: self._customer_xero(link=False)),
                 ("Link to a Xero contact…", lambda: self._customer_xero(link=True)),
+                ("Make them in Xero…",    self._customer_make_in_xero),
+                ("Payment terms from Xero (everyone)", self._xero_terms_all),
                 None,
                 ("Delete this customer…", self._delete_customer),
             ]
@@ -14818,10 +14820,24 @@ class ModernOrderApp(tk.Frame):
                 if is_new:
                     saved  = _db.create_customer(data) or dict(data)
                     action = "customer_created"
+                    # In Xero already, or to be made there? Asked once it
+                    # exists, so it has an id to link.
+                    if not saved.get("xero_contact_id") and saved.get("id"):
+                        self.master.after(300, lambda c=dict(saved):
+                                          self._xero_link_customer(c, new=True))
+                    elif saved.get("xero_contact_id") and saved.get("id"):
+                        # Linked in the card as it was made: fill Xero's
+                        # blanks and bring their terms back, as any link does.
+                        self.master.after(300, lambda c=dict(saved):
+                                          self._after_xero_link(c, c["xero_contact_id"]))
                 else:
                     _db.update_customer(cust["id"], data)
                     saved  = {**cust, **data}
                     action = "customer_updated"
+                    if data.get("xero_contact_id") and \
+                            data["xero_contact_id"] != cust.get("xero_contact_id"):
+                        self.master.after(300, lambda c=dict(saved):
+                                          self._after_xero_link(c, c["xero_contact_id"]))
                     # Renamed: offer to carry the new name onto their orders.
                     def _shown(c):
                         return ((c.get("short_name") or "").strip()
@@ -14898,6 +14914,8 @@ class ModernOrderApp(tk.Frame):
             self.status_var.set(
                 f"{cust.get('name', '')} linked to {contact['name']} in Xero."
                 if contact else f"{cust.get('name', '')} unlinked from Xero.")
+            if contact:
+                self._after_xero_link(cust, contact["id"])
             return True
 
         def _work():
@@ -14924,6 +14942,246 @@ class ModernOrderApp(tk.Frame):
 
         self.status_var.set("Looking in Xero…")
         threading.Thread(target=_work, daemon=True).start()
+
+    # ── Every customer in Xero ────────────────────────────────────────────
+
+    def _xero_customers_on(self) -> bool:
+        return (_features.is_on("xero_live") and _db.is_ready()
+                and _db.customer_extras_ready())
+
+    def _customer_make_in_xero(self):
+        """Customer > Make them in Xero: the selected customer's contact made
+        in Xero from what the app has, and linked."""
+        cust = self._get_selected_customer()
+        if not cust:
+            messagebox.showinfo("Xero", "Select a customer first.")
+            return None
+        if not self._xero_customers_on():
+            messagebox.showinfo("Xero", "Xero isn't connected, or step 39 "
+                                "hasn't been run.")
+            return None
+        if cust.get("xero_contact_id"):
+            messagebox.showinfo("Xero", f"{cust.get('name', '')} is already "
+                                "linked to a contact in Xero.")
+            return None
+        return self._create_xero_contact(cust)
+
+    def _offer_xero_link(self, cust):
+        """A customer picked on an order who isn't linked to Xero: ask, once
+        a session for each, whether they are in Xero - after any question
+        about their address."""
+        if not (cust and cust.get("id") and not cust.get("xero_contact_id")
+                and self._xero_customers_on()):
+            return
+        if any(isinstance(w, AddAddressDialog) for w in self.master.winfo_children()):
+            self.master.after(500, lambda: self._offer_xero_link(cust))
+            return
+        asked = self.__dict__.setdefault("_xero_offered", set())
+        if cust["id"] in asked:
+            return
+        asked.add(cust["id"])
+        # Read afresh: linked on another PC since this one loaded the list.
+        try:
+            fresh = _db.get_customer(cust["id"])
+        except Exception:
+            fresh = None
+        if fresh and fresh.get("xero_contact_id"):
+            cust["xero_contact_id"] = fresh["xero_contact_id"]
+            return
+        self._xero_link_customer(cust)
+
+    def _xero_link_customer(self, cust, new: bool = False):
+        """Is this customer in Xero? Yes: find the contact and link it. No:
+        make one in Xero from what the app has. Not now: nothing."""
+        if not self._xero_customers_on():
+            return None
+        name = cust.get("name") or "This customer"
+        answer = messagebox.askyesnocancel(
+            "Their account in Xero",
+            (f"{name} has been added." if new else
+             f"{name} isn't linked to their account in Xero yet.")
+            + f"\n\nDoes {name} already have an account in Xero?\n\n"
+            "Yes - find it and link it\n"
+            "No - make one in Xero from the details here\n"
+            "Cancel - not now", parent=self.master)
+        if answer is None:
+            return None
+        if answer:
+            return self._find_and_link_xero(cust)
+        return self._create_xero_contact(cust)
+
+    def _link_saved(self, cust, contact) -> bool:
+        """Keep the link on the customer, here and in the list."""
+        try:
+            _db.update_customer(cust["id"], {"xero_contact_id": contact["id"]})
+        except Exception as exc:
+            messagebox.showerror("Xero", f"Not linked:\n{exc}", parent=self.master)
+            return False
+        cust["xero_contact_id"] = contact["id"]
+        for rec in getattr(self, "_customer_records", None) or []:
+            if rec.get("id") == cust.get("id"):
+                rec["xero_contact_id"] = contact["id"]
+        self.status_var.set(f"{cust.get('name', '')} linked to "
+                            f"{contact.get('name', '')} in Xero.")
+        return True
+
+    def _find_and_link_xero(self, cust):
+        names = _xero.contact_names(cust, {})
+
+        def _save(contact):
+            if not contact:
+                return False
+            if self._link_saved(cust, contact):
+                self._after_xero_link(cust, contact["id"])
+                return True
+            return False
+
+        def _work():
+            found = []
+            for n in names:
+                got = _xero.find_contacts(n)
+                if got.get("error"):
+                    self.master.after(0, lambda e=got["error"]:
+                                      messagebox.showerror("Xero", e, parent=self.master))
+                    return
+                found = got.get("contacts") or []
+                if found:
+                    break
+            self.master.after(0, lambda: self._xero_contact_picker(
+                cust, names[0] if names else "", found, _save))
+        self.status_var.set("Looking in Xero…")
+        threading.Thread(target=_work, daemon=True).start()
+
+    def _create_xero_contact(self, cust, wait: bool = False):
+        """Make the customer's contact in Xero from everything the app has,
+        and link it."""
+        payload = _xero.contact_payload(cust)
+        result = {}
+
+        def _work():
+            out = _xero.save_contact(payload)
+            result.update(out)
+            self.master.after(0, lambda: _done(out))
+
+        def _done(out):
+            if out.get("error"):
+                if out.get("exists") and messagebox.askyesno(
+                        "Xero", f"{out['error']}\n\nFind it and link it now?",
+                        parent=self.master):
+                    self._find_and_link_xero(cust)
+                elif not out.get("exists"):
+                    messagebox.showerror("Xero", "Could not make them in Xero:\n"
+                                         + str(out["error"]), parent=self.master)
+                return
+            if self._link_saved(cust, out):
+                self.status_var.set(f"{cust.get('name', '')} made in Xero as "
+                                    f"{out.get('name', '')}, and linked.")
+        self.status_var.set("Making them in Xero…")
+        t = threading.Thread(target=_work, daemon=True)
+        t.start()
+        if wait:
+            t.join(60)
+            self.master.update()
+        return result
+
+    def _after_xero_link(self, cust, contact_id, wait: bool = False):
+        """Just linked: fill in what their Xero contact is missing from the
+        app (nothing Xero has is changed), and take their payment terms
+        from Xero."""
+        result = {}
+
+        def _work():
+            got = _xero.read_contacts([contact_id])
+            if got.get("error") or not got.get("contacts"):
+                result["error"] = got.get("error") or "not found"
+                return
+            contact = got["contacts"][0]
+            patch, filled = _xero.contact_gaps(contact, cust)
+            if patch:
+                out = _xero.save_contact(dict(patch, ContactID=contact_id))
+                if out.get("error"):
+                    filled = []
+                    result["fill_error"] = out["error"]
+            terms = _xero.terms_by_contact(got).get(str(contact_id), "")
+            if terms and terms != (cust.get("payment_terms") or ""):
+                try:
+                    _db.update_customer(cust["id"], {"payment_terms": terms})
+                    cust["payment_terms"] = terms
+                except Exception:
+                    terms = ""
+            else:
+                terms = ""
+            result.update(filled=filled, terms=terms)
+            self.master.after(0, _say)
+
+        def _say():
+            bits = []
+            if result.get("filled"):
+                bits.append("filled in their " + ", ".join(result["filled"]) + " in Xero")
+            if result.get("terms"):
+                bits.append(f"payment terms now {result['terms']}, as in Xero")
+            if bits:
+                self.status_var.set(f"{cust.get('name', '')}: " + "; ".join(bits) + ".")
+        t = threading.Thread(target=_work, daemon=True)
+        t.start()
+        if wait:
+            t.join(60)
+            self.master.update()
+        return result
+
+    def _xero_terms_all(self):
+        """Every linked customer's payment terms, as Xero has them."""
+        if not self._xero_customers_on():
+            messagebox.showinfo("Payment terms from Xero",
+                                "Xero isn't connected, or step 39 hasn't been run.")
+            return None
+        result = {}
+
+        def _work():
+            try:
+                custs = [c for c in _db.get_customers(active_only=False)
+                         if c.get("xero_contact_id")]
+            except Exception as exc:
+                result["error"] = str(exc)
+                self.master.after(0, _done)
+                return
+            got = _xero.read_contacts([c["xero_contact_id"] for c in custs])
+            if got.get("error"):
+                result["error"] = got["error"]
+                self.master.after(0, _done)
+                return
+            terms = _xero.terms_by_contact(got)
+            changed = []
+            for c in custs:
+                want = terms.get(str(c["xero_contact_id"]))
+                if want and want != (c.get("payment_terms") or ""):
+                    try:
+                        _db.update_customer(c["id"], {"payment_terms": want})
+                        changed.append(f"{c.get('name', '')}: {want}")
+                    except Exception:
+                        pass
+            result.update(linked=len(custs), changed=changed)
+            self.master.after(0, _done)
+
+        def _done():
+            if result.get("error"):
+                messagebox.showerror("Payment terms from Xero", result["error"])
+                return
+            changed = result.get("changed") or []
+            messagebox.showinfo(
+                "Payment terms from Xero",
+                f"{result.get('linked', 0)} customers are linked to Xero. "
+                + (f"{len(changed)} now have Xero's payment terms:\n\n"
+                   + "\n".join(f"  • {c}" for c in changed[:25])
+                   + ("\n  …" if len(changed) > 25 else "")
+                   if changed else "Their payment terms already match Xero's."))
+            try:
+                self._refresh_customers_list()
+            except Exception:
+                pass
+        self.status_var.set("Reading payment terms from Xero…")
+        threading.Thread(target=_work, daemon=True).start()
+        return result
 
     def _xero_contact_picker(self, cust, term, found, save, open_after=False):
         """Choose which Xero contact a customer is."""
@@ -15009,6 +15267,7 @@ class ModernOrderApp(tk.Frame):
             flat_btn(foot, "Unlink", _unlink, bg=CNE, pady=px(6),
                      variant="secondary").pack(side="left")
         _fill(found)
+        dlg.picker_tree, dlg.picker_link = tree, _link
         return dlg
 
     def _toggle_customer_labels(self):
@@ -25645,6 +25904,7 @@ class ModernOrderApp(tk.Frame):
         """Add Address for "Customer", when the account has no delivery
         address - or no Location. Asked once per customer per session: "Not
         now" means not now, not every time the field is touched."""
+        self.master.after(250, lambda c=cust: self._offer_xero_link(c))
         if not (customer_needs_address(cust) or customer_needs_region(cust)):
             return
         asked = self.__dict__.setdefault("_address_asked", set())

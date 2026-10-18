@@ -227,8 +227,22 @@ def xero_api(method: str, path: str, query: dict, body, headers):
         if not c:
             return 404, {}
         c.update({k: v for k, v in (body or {}).get("Contacts", [{}])[0].items()
-                  if k == "EmailAddress"})
+                  if k != "ContactID"})
         return 200, {"Contacts": [c]}
+    if kind == "Contacts" and method == "POST":
+        new = dict((body or {}).get("Contacts", [{}])[0])
+        if any(c["Name"].lower() == new.get("Name", "").lower()
+               for c in W.contacts.values() if c.get("ContactStatus") != "ARCHIVED"):
+            return validation(f"The contact name {new.get('Name')} is already "
+                              "assigned to another contact. The contact name "
+                              "must be unique across all active contacts.")
+        new.update(ContactID=str(uuid.uuid4()), ContactStatus="ACTIVE")
+        new.setdefault("EmailAddress", "")
+        W.contacts[new["ContactID"]] = new
+        return 200, {"Contacts": [new]}
+    if kind == "Contacts" and q("IDs"):
+        ids = q("IDs").split(",")
+        return 200, {"Contacts": [W.contacts[i] for i in ids if i in W.contacts]}
     if kind == "Contacts":
         if ident:
             c = W.contacts.get(ident)
@@ -696,6 +710,51 @@ def run_checks() -> None:
     check("a line with no price stops the invoice, before anything is made",
           code == 422 and "no price" in out.get("error", "") and
           not W.rows[t2]["invoice_id"], str(out))
+    print("\n── customers made in Xero, and read back ──")
+    sys.path.insert(0, str(ROOT))
+    from taf_order_app import xero as _xr
+    cust = {"name": "Tweed Plant", "legal_name": "Tweed Plant Hire Pty Ltd",
+            "email": "ap@tweed.example", "phone": "07 5536 0000",
+            "contact_person": "Sam Lee", "abn": "98 765 432 109",
+            "delivery_address1": "4 Quarry Rd", "delivery_city": "Tweed Heads",
+            "delivery_state": "NSW", "delivery_postcode": "2485",
+            "billing_same": True, "payment_terms": "Net 14"}
+    code, out = call("contact_save", {"contact": _xr.contact_payload(cust)})
+    made = W.contacts.get(out.get("id"), {})
+    check("a customer is made in Xero with everything the app has",
+          code == 200 and made.get("Name") == "Tweed Plant Hire Pty Ltd"
+          and made.get("EmailAddress") == "ap@tweed.example"
+          and made.get("TaxNumber") == "98765432109" and made.get("FirstName") == "Sam"
+          and len(made.get("Addresses", [])) == 2
+          and made.get("PaymentTerms") == {"Sales": {"Day": 14, "Type": "DAYSAFTERBILLDATE"}},
+          f"{out} {made}")
+    code, out2 = call("contact_save", {"contact": _xr.contact_payload(cust)})
+    check("made twice, Xero's refusal says to link the one there instead",
+          code == 409 and out2.get("exists") and "Link the customer" in out2.get("error", ""),
+          str(out2))
+    code, out3 = call("contact_save", {"contact": {"EmailAddress": "x@y.example"}})
+    check("a new contact needs a name", code == 400, str(out3))
+    bare_id = str(uuid.uuid4())
+    W.contacts[bare_id] = {"ContactID": bare_id, "Name": "Bare Co", "EmailAddress": "",
+                           "ContactStatus": "ACTIVE", "Phones": [], "Addresses": []}
+    code, got = call("contacts_read", {"ids": [out["id"], bare_id, "not-a-uuid"]})
+    terms = _xr.terms_by_contact(got)
+    check("contacts are read back in full, with Xero's default terms for one with none",
+          code == 200 and len(got.get("contacts", [])) == 2
+          and terms.get(out["id"]) == "Net 14"
+          and terms.get(bare_id) == "20th of the following month", str(got)[:300])
+    bare = next(c for c in got["contacts"] if c["id"] == bare_id)
+    patch, filled = _xr.contact_gaps(bare, cust)
+    code, out4 = call("contact_save", {"contact": dict(patch, ContactID=bare_id)})
+    check("an existing contact's blanks are filled in from the app",
+          code == 200 and W.contacts[bare_id]["EmailAddress"] == "ap@tweed.example"
+          and W.contacts[bare_id]["Name"] == "Bare Co"
+          and "email" in filled
+          and any("delivery address" in f for f in filled), f"{out4} {filled}")
+    code, out5 = call("contact_save", {"contact": {"ContactID": bare_id}})
+    check("and nothing is sent when there is nothing to fill",
+          code == 200 and out5.get("unchanged"), str(out5))
+
     print("\n── cash sales: emailed to the buyer on the order ──")
     cash_names = ("Cash Sales", "Cash")
     c1, c2, c3 = (str(uuid.uuid4()) for _ in range(3))

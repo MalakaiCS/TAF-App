@@ -472,3 +472,169 @@ def clean_email(text: Any) -> str:
     """The address as typed, trimmed - or "" when it is not one."""
     text = str(text or "").strip().strip("<>").strip()
     return text if _EMAIL.match(text) else ""
+
+
+# ── Customers and their contacts in Xero ─────────────────────────────────────
+# A customer made in the app is asked whether they are already in Xero:
+# linked to that contact if so (with any blanks in Xero filled from the app),
+# made in Xero from the app's details if not. Either way their payment terms
+# come back from Xero, which is where invoices are dated by.
+
+_ORD = {1: "st", 2: "nd", 3: "rd", 21: "st", 22: "nd", 23: "rd", 31: "st"}
+
+
+def _nth(n: int) -> str:
+    return f"{n}{_ORD.get(n, 'th')}"
+
+
+def terms_text(sales: Optional[Dict[str, Any]]) -> str:
+    """Xero's sales payment terms ({"Day", "Type"}) as the app writes them:
+    "Net 30", "COD", "20th of the following month"... "" for none."""
+    if not isinstance(sales, dict):
+        return ""
+    kind = str(sales.get("Type") or "").upper()
+    try:
+        day = int(float(sales.get("Day") or 0))
+    except (TypeError, ValueError):
+        return ""
+    if kind == "DAYSAFTERBILLDATE":
+        return "COD" if day <= 0 else f"Net {day}"
+    if kind == "DAYSAFTERBILLMONTH":
+        return "EOM" if day <= 0 else f"{day} days after the end of the month"
+    if kind == "OFFOLLOWINGMONTH" and day > 0:
+        return f"{_nth(day)} of the following month"
+    if kind == "OFCURRENTMONTH" and day > 0:
+        return f"{_nth(day)} of the month"
+    return ""
+
+
+def terms_for_xero(text: Any) -> Optional[Dict[str, Any]]:
+    """The app's payment terms as Xero's, for a contact made from the app -
+    or None where Xero's own default should stand."""
+    t = str(text or "").strip().lower()
+    m = _re.match(r"^net\s*(\d{1,3})$", t)
+    if m:
+        return {"Day": int(m.group(1)), "Type": "DAYSAFTERBILLDATE"}
+    if t in ("cod", "prepaid", "on receipt"):
+        return {"Day": 0, "Type": "DAYSAFTERBILLDATE"}
+    if t == "eom":
+        return {"Day": 0, "Type": "DAYSAFTERBILLMONTH"}
+    m = _re.match(r"^(\d{1,3}) days after the end of the month$", t)
+    if m:
+        return {"Day": int(m.group(1)), "Type": "DAYSAFTERBILLMONTH"}
+    m = _re.match(r"^(\d{1,2})(?:st|nd|rd|th) of the following month$", t)
+    if m:
+        return {"Day": int(m.group(1)), "Type": "OFFOLLOWINGMONTH"}
+    m = _re.match(r"^(\d{1,2})(?:st|nd|rd|th) of the month$", t)
+    if m:
+        return {"Day": int(m.group(1)), "Type": "OFCURRENTMONTH"}
+    return None
+
+
+def _s(customer: Dict[str, Any], key: str) -> str:
+    return str((customer or {}).get(key) or "").strip()
+
+
+def _address(customer: Dict[str, Any], prefix: str, kind: str) -> Optional[Dict[str, Any]]:
+    line1 = _s(customer, f"{prefix}_address1")
+    if not line1:
+        return None
+    return {"AddressType": kind, "AddressLine1": line1,
+            "AddressLine2": _s(customer, f"{prefix}_address2"),
+            "City": _s(customer, f"{prefix}_city"),
+            "Region": _s(customer, f"{prefix}_state"),
+            "PostalCode": _s(customer, f"{prefix}_postcode"),
+            "Country": _s(customer, f"{prefix}_country") or "Australia"}
+
+
+def _people(customer: Dict[str, Any]) -> Dict[str, str]:
+    who = _s(customer, "contact_person")
+    if not who:
+        return {}
+    first, _, last = who.partition(" ")
+    return {"FirstName": first, "LastName": last.strip()}
+
+
+def contact_payload(customer: Dict[str, Any]) -> Dict[str, Any]:
+    """A new Xero contact from everything the app knows about a customer.
+    Its name is the legal name - what goes on an invoice - or the account
+    name; delivery is the street address, billing the postal one."""
+    c: Dict[str, Any] = {"Name": _s(customer, "legal_name") or _s(customer, "name")}
+    if _s(customer, "email"):
+        c["EmailAddress"] = _s(customer, "email")
+    c.update(_people(customer))
+    if _s(customer, "abn"):
+        c["TaxNumber"] = _s(customer, "abn").replace(" ", "")
+    if _s(customer, "phone"):
+        c["Phones"] = [{"PhoneType": "DEFAULT", "PhoneNumber": _s(customer, "phone")}]
+    addresses = []
+    street = _address(customer, "delivery", "STREET")
+    if street:
+        addresses.append(street)
+    same = (customer or {}).get("billing_same", True) is not False
+    postal = (dict(street, AddressType="POBOX") if (same and street)
+              else _address(customer, "billing", "POBOX"))
+    if postal:
+        addresses.append(postal)
+    if addresses:
+        c["Addresses"] = addresses
+    terms = terms_for_xero(_s(customer, "payment_terms"))
+    if terms:
+        c["PaymentTerms"] = {"Sales": terms}
+    return c
+
+
+def contact_gaps(existing: Dict[str, Any], customer: Dict[str, Any]):
+    """What an existing Xero contact is missing that the app knows:
+    (patch to send, [what was filled]). Nothing Xero has is changed."""
+    want = contact_payload(customer)
+    patch: Dict[str, Any] = {}
+    filled: List[str] = []
+    if not str(existing.get("EmailAddress") or "").strip() and want.get("EmailAddress"):
+        patch["EmailAddress"] = want["EmailAddress"]
+        filled.append("email")
+    if not (str(existing.get("FirstName") or "").strip()
+            or str(existing.get("LastName") or "").strip()) and want.get("FirstName"):
+        patch["FirstName"] = want["FirstName"]
+        patch["LastName"] = want.get("LastName", "")
+        filled.append("contact person")
+    if not str(existing.get("TaxNumber") or "").strip() and want.get("TaxNumber"):
+        patch["TaxNumber"] = want["TaxNumber"]
+        filled.append("ABN")
+    phones = [p for p in existing.get("Phones") or [] if str(p.get("PhoneNumber") or "").strip()]
+    if not phones and want.get("Phones"):
+        patch["Phones"] = want["Phones"]
+        filled.append("phone")
+    have = {str(a.get("AddressType") or "").upper() for a in existing.get("Addresses") or []
+            if str(a.get("AddressLine1") or "").strip()}
+    adds = [a for a in want.get("Addresses") or [] if a["AddressType"] not in have]
+    if adds:
+        patch["Addresses"] = adds
+        filled.append(" and ".join("delivery address" if a["AddressType"] == "STREET"
+                                   else "postal address" for a in adds))
+    if not existing.get("PaymentTerms") and want.get("PaymentTerms"):
+        patch["PaymentTerms"] = want["PaymentTerms"]
+        filled.append("payment terms")
+    return patch, filled
+
+
+def read_contacts(ids: List[str]) -> Dict[str, Any]:
+    """{"contacts": [...], "default_terms": {...}} - contacts in full."""
+    return _call("contacts_read", {"ids": [str(i) for i in ids if i]}, timeout=120)
+
+
+def save_contact(contact: Dict[str, Any]) -> Dict[str, Any]:
+    """Make a contact (no ContactID) or add to one: {"id", "name", "email"}."""
+    return _call("contact_save", {"contact": contact})
+
+
+def terms_by_contact(read: Dict[str, Any]) -> Dict[str, str]:
+    """{contact id: the payment terms text} from read_contacts' answer - a
+    contact with no terms of its own on Xero's default terms."""
+    default = terms_text(read.get("default_terms"))
+    out = {}
+    for c in read.get("contacts") or []:
+        text = terms_text(c.get("PaymentTerms")) or default
+        if text:
+            out[str(c.get("id"))] = text
+    return out
