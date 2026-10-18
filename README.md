@@ -196,8 +196,8 @@ log, stock management and a customer database.
     through it the month's orders are and what each working day left needs.
     What an order is worth (priced lines plus delivery, ex GST) is worked out
     in the database, so every screen and the report agree.
-- **How we do things, and talking to each other** (step 49, switched on in
-  Settings → Features):
+- **How we do things, and talking to each other** (steps 49 and 50 - part of
+  the app, with no switch):
   - **How-to library** — *How-to library…* on the PC and *How to* on the
     phone: a procedure for each job or filter type, with the words, a video
     link and a file (PDF, photo). Managers add and change them; changing what
@@ -205,9 +205,12 @@ log, stock management and a customer database.
     there now, and a manager sees who has read the latest, who read an older
     one and who has not read it at all. A line on an order on the phone
     offers 📘 how to make that filter type.
-  - **Noticeboard and group chats** — *Messages…* on the PC and *Messages*
-    on the phone (with a count of what is new, and a tile on Today): one
-    noticeboard everybody reads, and group chats only their members see.
+  - **Messages** — the speech bubble beside the bell, on the PC and the
+    phone, with a count of what you have not read (and a word on screen when
+    something comes in); also *Messages* under your name on the PC and in
+    the phone's tabs. One noticeboard everybody reads, group chats only
+    their members see, and private messages: *Message someone* to anybody on
+    staff, which only the two of you can read (one conversation per pair).
     Pinned messages stay at the top. Who may do what is a minimum role for
     each, set by a director or admin in *Who can do what…*:
 
@@ -593,6 +596,7 @@ just run it — nothing is lost and nothing is duplicated.
 | 47 | `migrate_stock_insight.sql` | Stock you can trust: counting on the phone during a stocktake, what open orders have spoken for, what each supplier has charged, and how long each takes (needs steps 3, 40 and the more-features step) | recommended |
 | 48 | `migrate_delivery_money.sql` | Out the door, and what it made: the order the van goes round in, which proof of delivery was emailed, what each order is worth, monthly sales targets, and which owner's report went out | recommended |
 | 49 | `migrate_staff_board.sql` | How we do things, and talking to each other: the how-to library with "I've read this" per version, the noticeboard and group chats, and who may post, pin, start groups and take messages down | recommended |
+| 50 | `migrate_direct_messages.sql` | Private messages: a conversation between any two people on staff, only they can see it - one per pair (needs step 49) | recommended |
 
 **Step 16 is the one that matters most.** Every policy in the older scripts is
 `TO authenticated USING (true)` — meaning *anyone Supabase counts as signed

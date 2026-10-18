@@ -3431,6 +3431,12 @@ def group_members(channel_id: str) -> list:
     return [str(r["user_id"]) for r in resp.data or []]
 
 
+def open_direct(user_id: str) -> str:
+    """The private conversation with somebody - started if there is none."""
+    resp = get_client().rpc("open_direct", {"p_user": str(user_id)}).execute()
+    return str(resp.data or "")
+
+
 def leave_group(channel_id: str) -> None:
     get_client().rpc("leave_group", {"p_channel": channel_id}).execute()
 

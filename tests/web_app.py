@@ -497,6 +497,14 @@ class Stub:
                     if c["id"] == body.get("p_channel"):
                         c["unread"] = 0
                 return send(None)
+            if name == "open_direct":
+                cid = "dm-" + body.get("p_user", "")
+                if not any(c["id"] == cid for c in CHATS):
+                    CHATS.append({"id": cid, "name": "Dave Floor", "kind": "direct",
+                                  "post_min_role": "Employee", "unread": 0,
+                                  "can_post": True})
+                CHAT_CALLS.append((name, dict(body)))
+                return send(cid)
             if name in ("pin_message", "remove_message", "make_group"):
                 CHAT_CALLS.append((name, dict(body)))
                 for m in CHAT_MSGS:
@@ -1694,10 +1702,12 @@ def run() -> int:
                       == _sb.read_state(s, m)
                       for s in SOPS for m in (None, {"version": 1}, {"version": 2})))
 
-        on = ("sops", "staff_chat")
-        SWITCHES[:] = [{"key": k, "enabled": True} for k in on]
-        page.evaluate("(on) => TAFAPP._floor.setFeatures("
-                      "Object.fromEntries(on.map(k => [k, true])))", list(on))
+        page.evaluate("TAFAPP._floor.setFeatures({})")
+        page.evaluate("TAFAPP._board.pollChats()")
+        page.wait_for_selector("#chat-badge:not(.hidden)")
+        check("messages and how-tos need no switch: Messages sits beside the bell, "
+              "with what is unread", page.locator("#chat-badge").inner_text() == "2"
+              and page.locator('#tabs button[data-tab="howto"]').count() == 1)
         page.click('#tabs button[data-tab="howto"]')
         page.wait_for_selector("#screen .howto-row")
         check("the how-to library lists every how-to, saying which are not read",
@@ -1796,6 +1806,90 @@ def run() -> int:
                                                 "p_members": ["u2"],
                                                 "p_post_min_role": "Manager"}),
               str(CHAT_CALLS[-1:]))
+
+        page.click('#tabs button[data-tab="chat"]')
+        page.wait_for_selector("#chat-dm")
+        page.click("#chat-dm")
+        page.wait_for_selector('#dm-people .chat-row[data-person="u2"]')
+        page.fill("#dm-find", "dav")
+        check("anybody can message somebody privately, found by name",
+              page.locator("#dm-people .chat-row").count() == 1)
+        page.locator('#dm-people .chat-row[data-person="u2"]').click()
+        page.wait_for_selector("#chat-text")
+        check("which opens the conversation with them",
+              CHAT_CALLS[-1] == ("open_direct", {"p_user": "u2"})
+              and page.locator("#sheet-body h2").first.inner_text() == "Dave Floor")
+        page.fill("#chat-text", "Can you grab the G4 roll?")
+        page.click("#chat-send")
+        page.wait_for_selector("#chat-msgs .chat-msg.mine")
+        check("and the message goes to it",
+              CHAT_MSGS[-1]["channel_id"] == "dm-u2"
+              and CHAT_MSGS[-1]["body"] == "Can you grab the G4 roll?")
+        page.locator("#sheet-body button", has_text="Close").last.click()
+        page.wait_for_selector("#sheet.hidden", state="attached")
+
+        page.click('#tabs button[data-tab="orders"]')
+        CHATS[-1].update(unread=1, last_author="Dave Floor", last_body="On it")
+        page.evaluate("TAFAPP._board.pollChats()")
+        page.wait_for_selector("#toast")
+        check("a message coming in pops up, whatever screen is open",
+              "Dave Floor" in page.locator("#toast").inner_text()
+              and "On it" in page.locator("#toast").inner_text()
+              and page.locator("#chat-badge").inner_text() == "1")
+        page.click("#toast")
+        page.wait_for_selector("#chat-text")
+        check("and tapping it opens the conversation",
+              page.locator("#sheet-body h2").first.inner_text() == "Dave Floor")
+
+        # Pulling the handle down closes the sheet.
+        page.evaluate("""() => {
+          const panel = document.querySelector('#sheet > div');
+          const r = panel.getBoundingClientRect();
+          const at = y => [new Touch({identifier: 1, target: panel,
+                                      clientX: r.left + 50, clientY: y})];
+          const fire = (type, y) => panel.dispatchEvent(new TouchEvent(type, {
+            bubbles: true, cancelable: true,
+            touches: type === 'touchend' ? [] : at(y),
+            changedTouches: at(y)}));
+          fire('touchstart', r.top + 10);
+          fire('touchmove', r.top + 120);
+          fire('touchmove', r.top + 320);
+          fire('touchend', r.top + 320);
+        }""")
+        page.wait_for_selector("#sheet.hidden", state="attached", timeout=3000)
+        check("pulling a sheet's handle down closes it",
+              page.locator("#sheet.hidden").count() == 1)
+        page.click('#tabs button[data-tab="orders"]')
+        page.wait_for_selector("#screen table")
+        page.locator("#screen tbody tr", has_text="PO-8842").first.click()
+        page.wait_for_selector("#sheet:not(.hidden)")
+        page.evaluate("""() => {
+          const panel = document.querySelector('#sheet > div');
+          const r = panel.getBoundingClientRect();
+          const at = y => [new Touch({identifier: 1, target: panel,
+                                      clientX: r.left + 50, clientY: y})];
+          const fire = (type, y) => panel.dispatchEvent(new TouchEvent(type, {
+            bubbles: true, cancelable: true,
+            touches: type === 'touchend' ? [] : at(y), changedTouches: at(y)}));
+          fire('touchstart', r.top + 10);
+          fire('touchmove', r.top + 40);
+          fire('touchend', r.top + 40);
+        }""")
+        page.wait_for_timeout(400)
+        check("a small pull springs back rather than closing it",
+              page.locator("#sheet:not(.hidden)").count() == 1)
+        page.keyboard.press("Escape")
+        page.wait_for_selector("#sheet.hidden", state="attached")
+
+        meta = page.locator('meta[name="viewport"]').get_attribute("content")
+        sizes = page.evaluate("""() => ['search', 'text', 'number'].map(t => {
+          const i = document.createElement('input'); i.type = t;
+          document.getElementById('screen').appendChild(i);
+          const s = parseFloat(getComputedStyle(i).fontSize); i.remove(); return s; })""")
+        check("the page does not zoom, and a box is big enough that tapping it "
+              "does not zoom in either",
+              "maximum-scale=1" in meta and "user-scalable=no" in meta
+              and min(sizes) >= 16, f"{meta} {sizes}")
         SWITCHES.clear()
         page.evaluate("TAFAPP._floor.setFeatures({})")
         page.evaluate("TAFAPP._board.forgetSops()")

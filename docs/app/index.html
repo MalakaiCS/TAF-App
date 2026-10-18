@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
 <meta name="theme-color" content="#FFFFFF">
 <meta name="robots" content="noindex, nofollow">
 <title>Total Air Filtration &middot; Orders</title>
@@ -81,7 +81,7 @@
                         cursor:pointer; line-height:0; flex:0 0 auto; }
   .taf-badge { width:38px; height:38px; display:block; }
   header button { background:transparent; border:0; color:var(--text);
-                  font:600 14px/1 inherit; padding:9px 12px; border-radius:10px;
+                  font-weight:600; font-size:14px; line-height:1; padding:9px 12px; border-radius:10px;
                   cursor:pointer; }
   header button:hover { background:var(--tint); }
   header .who { display:flex; align-items:center; gap:10px; text-align:right;
@@ -93,7 +93,7 @@
   header .who .avatar { width:36px; height:36px; border-radius:50%;
                         background:var(--brand-soft); color:var(--brand-ink);
                         display:flex; align-items:center; justify-content:center;
-                        font:700 14px/1 inherit; flex:0 0 auto; order:2; }
+                        font-weight:700; font-size:14px; line-height:1; flex:0 0 auto; order:2; }
   #signout { color:var(--muted); border:1px solid var(--line); }
 
   /* The bell. Quiet with nothing unread; red, with the count on it, when
@@ -103,17 +103,26 @@
                      stroke:var(--muted); stroke-width:2; stroke-linecap:round;
                      stroke-linejoin:round; }
   header .bell.has svg { stroke:var(--red); }
+  header .chat-btn.has svg { stroke:var(--brand); }
+  header .chat-btn .badge { background:var(--brand); }
+  /* Nothing on the page zooms: a double tap is a tap. */
+  html { touch-action:manipulation; -webkit-text-size-adjust:100%; }
+  .toast { position:fixed; left:50%; transform:translateX(-50%); z-index:40;
+           top:calc(70px + env(safe-area-inset-top)); max-width:min(92vw, 520px);
+           background:var(--navy); color:#fff; border:0; border-radius:14px;
+           padding:12px 16px; font-size:15px; box-shadow:var(--shadow-lg);
+           text-align:left; cursor:pointer; }
   header .bell .badge { position:absolute; top:2px; right:1px; min-width:18px;
                         height:18px; padding:0 5px; border-radius:9px;
                         background:var(--red); color:#fff;
-                        font:700 11px/18px inherit; text-align:center;
+                        font-weight:700; font-size:11px; line-height:18px; text-align:center;
                         white-space:nowrap; box-shadow:0 0 0 2px #fff; }
 
   /* The tabs: a sidebar on anything wide, a bottom bar on a phone. */
   nav { grid-area:nav; }
   nav button { display:flex; align-items:center; gap:12px; width:100%;
                background:transparent; border:0; color:var(--muted);
-               font:600 15px/1 inherit; padding:11px 14px; border-radius:12px;
+               font-weight:600; font-size:15px; line-height:1; padding:11px 14px; border-radius:12px;
                cursor:pointer; text-align:left; }
   nav button svg { width:22px; height:22px; flex:0 0 auto; fill:none;
                    stroke:currentColor; stroke-width:1.9; stroke-linecap:round;
@@ -272,7 +281,7 @@
   /* ── Buttons and fields ───────────────────────────────────────────── */
   button.btn { display:inline-flex; align-items:center; justify-content:center;
                gap:8px; min-height:44px; background:var(--brand); border:0;
-               color:#fff; cursor:pointer; font:650 15px/1 inherit;
+               color:#fff; cursor:pointer; font-weight:650; font-size:15px; line-height:1;
                padding:12px 18px; border-radius:12px;
                box-shadow:0 1px 2px rgba(16,24,40,.08);
                transition:background .15s, transform .1s; }
@@ -290,7 +299,7 @@
 
   input[type=text], input[type=email], input[type=password], input[type=search],
   input[type=number], input[type=date], input:not([type]), select, textarea {
-    width:100%; min-height:46px; font:16px/1.4 inherit; color:var(--text);
+    width:100%; min-height:46px; font-size:16px; line-height:1.4; color:var(--text);
     padding:11px 13px; border:1px solid var(--line); border-radius:12px;
     background:var(--card); transition:border-color .15s, box-shadow .15s; }
   input:focus, select:focus, textarea:focus { outline:none;
@@ -343,7 +352,7 @@
                border-color:#BFE3F8; }
   #state span.grow { flex:1; }
   #state button { background:rgba(0,0,0,.07); border:0; color:inherit;
-                  font:700 13px/1 inherit; padding:9px 12px; border-radius:10px;
+                  font-weight:700; font-size:13px; line-height:1; padding:9px 12px; border-radius:10px;
                   cursor:pointer; }
 
   /* Scanning. The picture fills the width and nothing competes with it. */
@@ -396,6 +405,7 @@
   #sheet > div::before { content:""; display:block; width:40px; height:5px;
                          border-radius:3px; background:#CBD5E1;
                          margin:0 auto 12px; }
+  #sheet > div { overscroll-behavior:contain; will-change:transform; }
   #sheet h2 { display:flex; align-items:center; gap:10px; }
   @media (min-width:760px) {
     #sheet { align-items:center; }
@@ -407,7 +417,7 @@
   .more-grid button { display:flex; flex-direction:column; align-items:center;
                       gap:8px; padding:16px 6px; border-radius:16px;
                       border:1px solid var(--line); background:var(--card);
-                      color:var(--text); font:600 13px/1.2 inherit;
+                      color:var(--text); font-weight:600; font-size:13px; line-height:1.2;
                       cursor:pointer; box-shadow:var(--shadow); }
   .more-grid button[aria-selected="true"] { border-color:var(--brand);
                                             color:var(--brand-ink); }
@@ -734,6 +744,12 @@
       <h1 id="app-title"><span class="full">Total Air Filtration</span><span
           class="here" id="app-here"></span></h1>
     </div>
+    <button class="bell chat-btn" id="chat-btn" type="button" aria-label="Messages">
+      <svg viewBox="0 0 24 24" aria-hidden="true">
+        <path d="M4 5h16v11H9l-5 4z"/><path d="M8 9.5h8"/><path d="M8 12.5h5"/>
+      </svg>
+      <span class="badge hidden" id="chat-badge"></span>
+    </button>
     <button class="bell" id="bell" type="button" aria-label="Notifications">
       <svg viewBox="0 0 24 24" aria-hidden="true">
         <path d="M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9"/>

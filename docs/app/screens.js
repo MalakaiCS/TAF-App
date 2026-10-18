@@ -29,8 +29,8 @@ var TAFAPP = (function () {
     { key: "supplies",    label: "Supplies",  icon: "bag" },
     { key: "board",       label: "Board",     icon: "board", feature: "tv_board" },
     { key: "count",       label: "Stocktake", icon: "count", feature: "stocktake" },
-    { key: "chat",        label: "Messages",  icon: "chat",  feature: "staff_chat" },
-    { key: "howto",       label: "How to",    icon: "book",  feature: "sops" },
+    { key: "chat",        label: "Messages",  icon: "chat" },
+    { key: "howto",       label: "How to",    icon: "book" },
     { key: "log",         label: "Log",       icon: "clock", from: 3 }
   ];
   var BAR = 4;
@@ -186,6 +186,10 @@ var TAFAPP = (function () {
       // on top of itself.
       document.getElementById("who").onclick = meSheet;
       document.getElementById("bell").onclick = bellSheet;
+      document.getElementById("chat-btn").onclick = function () {
+        U.closeAllSheets();
+        show("chat");
+      };
       if (!showApp._wired) {
         showApp._wired = true;
         S.onChange(stateBar);
@@ -1105,7 +1109,10 @@ var TAFAPP = (function () {
 
   var FEATURES = {};
 
-  function feature(key) { return !!FEATURES[key]; }
+  // Messages and the how-to library are part of the app, not switches -
+  // the same as features.ALWAYS_ON.
+  var ALWAYS_ON = { sops: true, staff_chat: true };
+  function feature(key) { return !!(ALWAYS_ON[key] || FEATURES[key]); }
 
   function loadFeatures() {
     return D.select("feature_switches", { "select": "key,enabled" })
@@ -3751,6 +3758,7 @@ var TAFAPP = (function () {
      (step 49): these only decide which buttons to offer. */
 
   var CHAT_UNREAD = 0;
+  var CHAT_SEEN = false;      // the first look after signing in is not "new"
   var RANK = { Employee: 1, Manager: 3, Admin: 4, Director: 4 };
   var WHO = { Employee: "Everybody", Manager: "Managers and above",
               Admin: "Directors and admins" };
@@ -3789,10 +3797,32 @@ var TAFAPP = (function () {
 
   function pollChats() {
     return D.rpc("my_chats", {}).then(function (rows) {
-      var n = (rows || []).reduce(function (t, c) { return t + (c.unread || 0); }, 0);
+      rows = rows || [];
+      var n = rows.reduce(function (t, c) { return t + (c.unread || 0); }, 0);
+      if (n > CHAT_UNREAD && CHAT_SEEN && active !== "chat") {
+        var c = rows.filter(function (x) { return x.unread; })[0];
+        if (c) {
+          U.toast("💬  " + (c.last_author || c.name) + (c.kind === "direct" ? ""
+                  : " in " + c.name) + ": " + String(c.last_body || "").slice(0, 80),
+                  function () { show("chat"); openChat(c, null); });
+        }
+      }
+      CHAT_SEEN = true;
       if (n !== CHAT_UNREAD) { CHAT_UNREAD = n; buildTabs(); }
-      return rows || [];
+      setChatBadge(n);
+      return rows;
     }).catch(function () { return []; });
+  }
+
+  function setChatBadge(n) {
+    var btn = document.getElementById("chat-btn");
+    var badge = document.getElementById("chat-badge");
+    if (!btn || !badge) { return; }
+    btn.classList.toggle("has", n > 0);
+    badge.classList.toggle("hidden", !n);
+    badge.textContent = n > 99 ? "99+" : String(n);
+    btn.setAttribute("aria-label", n ? n + " unread message" + (n === 1 ? "" : "s")
+                                     : "Messages");
   }
 
   function myRole() { return D.cachedProfile().role || "Employee"; }
@@ -3802,18 +3832,25 @@ var TAFAPP = (function () {
                  D.select("chat_rules", { "select": "action,min_role" })
                    .catch(function () { return []; })]).then(function (got) {
       var chats = got[0], rules = rulesWithDefaults(got[1]);
+      CHAT_RULES = rules;
       U.clear(main);
+      var top = U.el("div", { cls: "row-actions" });
+      var dm = U.button("💬  Message someone", function () { messageSomeone(rules); }, "go");
+      dm.setAttribute("id", "chat-dm");
+      top.appendChild(dm);
       if (chatMay("make_group", myRole(), rules)) {
-        var add = U.button("+  New group", function () { newGroup(rules); }, "go");
+        var add = U.button("+  New group", function () { newGroup(rules); }, "quiet");
         add.setAttribute("id", "chat-new");
-        main.appendChild(U.el("div", { cls: "row-actions", kids: [add] }));
+        top.appendChild(add);
       }
+      main.appendChild(top);
       var list = U.el("div", { attr: { id: "chat-list" } });
       chats.forEach(function (c) {
         list.appendChild(U.el("div", { cls: "chat-row", attr: { "data-chat": c.id },
           on: { click: function () { openChat(c, rules); } },
           kids: [U.el("div", { cls: "chat-what", kids: [
-                   U.el("b", { text: (c.kind === "board" ? "📌 " : "👥 ") + c.name }),
+                   U.el("b", { text: ({ board: "📌 ", direct: "💬 " }[c.kind] || "👥 ")
+                                     + c.name }),
                    U.el("div", { cls: "muted", text: c.last_body
                      ? (c.last_author ? c.last_author + ": " : "") + c.last_body
                      : "Nothing yet" })] }),
@@ -3826,6 +3863,7 @@ var TAFAPP = (function () {
   };
 
   function openChat(chat, rules) {
+    rules = rules || CHAT_RULES || rulesWithDefaults([]);
     U.openSheet(function (body, close) {
       body.appendChild(U.el("h2", { cls: "title", text: chat.name }));
       var pinned = U.el("div", { attr: { id: "chat-pinned" } });
@@ -3911,6 +3949,55 @@ var TAFAPP = (function () {
         if (!t || !t.value) { load(); }
       }, 10000);
     });
+  }
+
+  var CHAT_RULES = null;
+
+  // Anybody on staff, privately. One conversation between two people: the
+  // database opens the one there is, or starts it.
+  function messageSomeone(rules) {
+    D.select("profiles", { "select": "id,full_name,username,role,approved",
+                           "approved": "eq.true", "order": "full_name.asc" })
+      .then(function (people) {
+        var me = (D.whoami() || {}).id;
+        people = people.filter(function (p) { return p.id !== me; });
+        U.openSheet(function (body, close) {
+          body.appendChild(U.el("h2", { cls: "title", text: "Message someone" }));
+          var find = U.el("input", { attr: { type: "search", id: "dm-find",
+                                             placeholder: "Find somebody" } });
+          var list = U.el("div", { attr: { id: "dm-people" } });
+          body.appendChild(find);
+          body.appendChild(list);
+          function draw() {
+            var q = lower(find.value);
+            U.clear(list);
+            people.filter(function (p) {
+              return !q || lower(p.full_name || p.username).indexOf(q) !== -1;
+            }).forEach(function (p) {
+              list.appendChild(U.el("div", { cls: "chat-row", attr: { "data-person": p.id },
+                on: { click: function () { start(p); } },
+                kids: [U.el("div", { cls: "chat-what", kids: [
+                  U.el("b", { text: p.full_name || p.username }),
+                  U.el("div", { cls: "muted", text: p.role || "" })] })] }));
+            });
+          }
+          function start(p) {
+            D.rpc("open_direct", { p_user: p.id }).then(function (id) {
+              return pollChats().then(function (rows) {
+                var chat = rows.filter(function (c) { return c.id === id; })[0]
+                  || { id: id, name: p.full_name || p.username, kind: "direct",
+                       can_post: true };
+                close();
+                openChat(chat, rules);
+              });
+            }).catch(function (err) { U.notice(body, err.message); });
+          }
+          find.addEventListener("input", draw);
+          draw();
+          body.appendChild(U.el("div", { cls: "row-actions",
+                                         kids: [U.button("Cancel", close, "quiet")] }));
+        });
+      }).catch(function (err) { U.notice(document.getElementById("screen"), err.message); });
   }
 
   function newGroup(rules) {
@@ -5323,7 +5410,8 @@ var TAFAPP = (function () {
               byCategory: function (s) {
                 return byCategory(s).map(function (g) {
                   return [g[0], g[1].map(function (x) { return x.id; })]; }); },
-              forgetSops: function () { SOPS = null; } },
+              forgetSops: function () { SOPS = null; },
+              pollChats: pollChats },
     _route: { suggest: function (s) { return suggestRoute(s).map(function (x) { return x.id; }); },
               apply: function (s, saved) {
                 return applyRoute(s, saved).map(function (x) { return x.id; }); },

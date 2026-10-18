@@ -1638,6 +1638,48 @@ def run_staff_board_checks(pg: Postgres) -> None:
           ok and got == "f", got or err)
 
 
+def run_direct_message_checks(pg: Postgres) -> None:
+    print("\n── private messages (step 50) ──")
+    for _ in range(2):
+        ok, _o, err = pg.psql((ROOT / "migrate_direct_messages.sql").read_text(
+            encoding="utf-8"), "f")
+        check("step 50 runs, and runs again cleanly", ok, err)
+    ok, out, err = as_in(pg, "f", DAVE, f"SELECT open_direct('{KAI}');")
+    dm = out if ok else ""
+    check("anybody on staff can message anybody else on staff", ok and dm, err)
+    ok, out, err = as_in(pg, "f", KAI, f"SELECT open_direct('{DAVE}');")
+    check("there is one conversation between two people, whoever starts it",
+          ok and out == dm, f"{out} {dm} {err}")
+    ok, _o, err = as_in(pg, "f", DAVE, f"SELECT open_direct('{DAVE}');")
+    check("nobody messages themselves", not ok)
+    ok, _o, err = as_in(pg, "f", DAVE, f"SELECT open_direct('{STRANGER}');")
+    check("nor an account nobody approved", not ok)
+    ok, _o, err = as_in(pg, "f", STRANGER, f"SELECT open_direct('{DAVE}');")
+    check("and an account nobody approved cannot message anybody", not ok)
+    ok, _o, err = as_in(pg, "f", DAVE, "INSERT INTO chat_messages (channel_id, body, "
+                        f"user_id) VALUES ('{dm}', 'can I leave at 3?', '{DAVE}');")
+    check("either of them can write in it", ok, err)
+    ok, out, err = as_in(pg, "f", KAI, "SELECT name || '|' || unread FROM my_chats() "
+                         "WHERE kind = 'direct';")
+    check("it is named after the other person, with what is new",
+          ok and out == "Dave Floor|1", out or err)
+    ok, out, err = as_in(pg, "f", DAVE, "SELECT name FROM my_chats() WHERE kind = 'direct';")
+    check("for both of them", ok and out == "Kai Brown", out or err)
+    for who in (AMY, SARAH):
+        ok, out, err = as_in(pg, "f", who, "SELECT count(*) FROM chat_messages "
+                             f"WHERE channel_id = '{dm}';")
+        check("nobody else can read it, an admin included" if who == AMY
+              else "nor a manager", ok and out == "0", out or err)
+    ok, _o, err = as_in(pg, "f", AMY, "INSERT INTO chat_messages (channel_id, body, "
+                        f"user_id) VALUES ('{dm}', 'hi', '{AMY}');")
+    check("or write in it", not ok)
+    ok, _o, err = as_in(pg, "f", KAI, f"SELECT set_group_members('{dm}', "
+                        f"ARRAY['{AMY}']::uuid[]);")
+    check("and nobody can be added to it", not ok)
+    ok, out, err = as_in(pg, "f", DAVE, "SELECT kind FROM my_chats() LIMIT 1;")
+    check("the noticeboard still comes first", ok and out == "board", out or err)
+
+
 def _skip(why: str) -> int:
     """Skipping is fine on a laptop. In CI it is not: a workflow that goes
     green having checked nothing is worse than no workflow, because it is
@@ -1671,6 +1713,7 @@ def main() -> int:
         run_stock_insight_checks(pg)
         run_delivery_money_checks(pg)
         run_staff_board_checks(pg)
+        run_direct_message_checks(pg)
     finally:
         pg.stop()
     print(f"\n{len(FAILURES)} FAILED" if FAILURES

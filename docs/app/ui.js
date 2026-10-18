@@ -214,6 +214,7 @@ var TAFUI = (function () {
 
   function openSheet(build) {
     var wrap = document.getElementById("sheet");
+    swipeToClose(wrap);
     STACK.push(build);
     var body = clear(document.getElementById("sheet-body"));
     build(body, closeSheet);
@@ -224,6 +225,96 @@ var TAFUI = (function () {
   }
 
   function escClose(e) { if (e.key === "Escape") { closeSheet(); } }
+
+  /* The handle at the top of a sheet does what it looks like it does: pull
+     it down and the sheet follows the finger; let go far enough (or flick)
+     and it closes, otherwise it springs back. From anywhere on the sheet,
+     too, once it is scrolled to the top - but never from a signature pad,
+     a text box or a list being scrolled, which want the finger for
+     themselves. */
+  function swipeToClose(wrap) {
+    if (wrap._swipe) { return; }
+    wrap._swipe = true;
+    var panel = wrap.firstElementChild;
+    var start = null, dy = 0, t0 = 0, dragging = false;
+
+    function reset(animate) {
+      panel.style.transition = animate && motionOK() ? "transform .2s ease" : "";
+      panel.style.transform = "";
+      wrap.style.background = "";
+    }
+
+    panel.addEventListener("touchstart", function (e) {
+      if (e.touches.length !== 1) { start = null; return; }
+      var target = e.target;
+      if (target.closest && target.closest("canvas, input, textarea, select")) {
+        start = null; return;
+      }
+      var r = panel.getBoundingClientRect();
+      var onHandle = e.touches[0].clientY - r.top < 44;
+      if (!onHandle && panel.scrollTop > 0) { start = null; return; }
+      start = e.touches[0].clientY;
+      dy = 0; t0 = Date.now(); dragging = false;
+      panel.style.transition = "";
+    }, { passive: true });
+
+    panel.addEventListener("touchmove", function (e) {
+      if (start === null) { return; }
+      dy = e.touches[0].clientY - start;
+      if (!dragging) {
+        if (dy < 6) { if (dy < -6) { start = null; } return; }
+        dragging = true;
+      }
+      e.preventDefault();               // the sheet moves, not the page
+      panel.style.transform = "translateY(" + Math.max(0, dy) + "px)";
+      wrap.style.background = "rgba(15,23,42," + Math.max(0, .45 - dy / 900) + ")";
+    }, { passive: false });
+
+    function end() {
+      if (start === null) { return; }
+      start = null;
+      if (!dragging) { return; }
+      var fast = dy > 40 && dy / Math.max(1, Date.now() - t0) > 0.6;
+      if (dy > Math.min(160, panel.offsetHeight * 0.3) || fast) {
+        panel.style.transition = motionOK() ? "transform .18s ease-in" : "";
+        panel.style.transform = "translateY(100%)";
+        setTimeout(function () { reset(false); closeSheet(); }, motionOK() ? 170 : 0);
+      } else {
+        reset(true);
+      }
+    }
+    panel.addEventListener("touchend", end);
+    panel.addEventListener("touchcancel", end);
+  }
+
+  /* A word at the top of the screen for a moment - a message has come in -
+     that does something when tapped. */
+  function toast(text, onTap) {
+    var old = document.getElementById("toast");
+    if (old) { old.remove(); }
+    var t = el("button", { cls: "toast", text: text,
+                           attr: { id: "toast", type: "button" } });
+    t.addEventListener("click", function () { t.remove(); if (onTap) { onTap(); } });
+    document.body.appendChild(t);
+    setTimeout(function () { if (t.parentNode) { t.remove(); } }, 6000);
+    return t;
+  }
+
+  /* No pinch-zooming the app, and no zooming in when a box is tapped. The
+     viewport says so, and Safari - which ignores that in the browser -
+     is told again by refusing its zoom gesture. Text boxes are 16px, the
+     size below which an iPhone zooms in on one when it is tapped. */
+  (function noZoom() {
+    ["gesturestart", "gesturechange", "gestureend"].forEach(function (n) {
+      document.addEventListener(n, function (e) { e.preventDefault(); },
+                                { passive: false });
+    });
+    document.addEventListener("touchmove", function (e) {
+      if (e.touches && e.touches.length > 1) { e.preventDefault(); }
+    }, { passive: false });
+    // A double tap is a tap: the stylesheet's touch-action: manipulation
+    // stops it zooming without swallowing a second quick press.
+  })();
 
   function closeSheet() {
     STACK.pop();
@@ -330,7 +421,7 @@ var TAFUI = (function () {
     el: el, clear: clear, onPick: onPick, card: card, table: table, cell: cell,
     button: button, pill: pill, empty: empty, notice: notice,
     parseDate: parseDate, dueBucket: dueBucket, today: today, money: money,
-    openSheet: openSheet, closeSheet: closeSheet,
+    openSheet: openSheet, closeSheet: closeSheet, toast: toast,
     closeAllSheets: closeAllSheets, sheetOpen: sheetOpen
   };
 })();

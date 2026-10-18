@@ -207,7 +207,10 @@ WITH checks(step, file, purpose, needed, present) AS (VALUES
   (49, 'migrate_staff_board.sql', 'How-to library, noticeboard and group chats with who-may-do-what', 'recommended',
       to_regclass('public.sops') IS NOT NULL
       AND to_regclass('public.chat_messages') IS NOT NULL
-      AND to_regclass('public.chat_rules') IS NOT NULL)
+      AND to_regclass('public.chat_rules') IS NOT NULL),
+
+  (50, 'migrate_direct_messages.sql', 'Private messages between two people', 'recommended',
+      to_regprocedure('public.open_direct(uuid)') IS NOT NULL)
 )
 SELECT step,
        CASE WHEN present THEN 'already done' ELSE 'RUN THIS' END AS status,

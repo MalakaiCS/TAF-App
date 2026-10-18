@@ -280,16 +280,11 @@ CATALOGUE: List[Feature] = [
             "on Today, on the PC and the phone.",
             "Money", built=True),
 
-    # ── How we do things, and talking to each other (step 49) ───────────
-    Feature("sops", "How-to library",
-            "Procedures for each job and filter type - words, a video, a "
-            "file - on the PC and the phone, with who has read the latest.",
-            "The floor", built=True),
-    Feature("staff_chat", "Noticeboard and group chats",
-            "A noticeboard everybody reads and group chats, with who may "
-            "post, pin, start a group or take a message down set by role.",
-            "Admin", built=True),
 ]
+
+# Part of the program, not something to switch on: messages (the
+# noticeboard, groups and private messages) and the how-to library.
+ALWAYS_ON = frozenset({"sops", "staff_chat"})
 
 BY_KEY: Dict[str, Feature] = {f.key: f for f in CATALOGUE}
 
@@ -344,6 +339,8 @@ def is_on(key: str) -> bool:
     False for anything not in the catalogue and anything not built yet, so a
     stray row in the table cannot light up a screen that does not exist.
     """
+    if key in ALWAYS_ON:
+        return True
     feature = BY_KEY.get(key)
     if feature is None or not feature.built:
         return False

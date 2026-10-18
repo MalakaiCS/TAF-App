@@ -205,6 +205,7 @@ OVERRIDES = {
     "set_group_members":   lambda cid, ids: CHAT_DONE.append(("members", cid, list(ids))) or 2,
     "group_members":       lambda cid: ["u-me", "u2"],
     "leave_group":         lambda cid: CHAT_DONE.append(("leave", cid)),
+    "open_direct":         lambda uid: CHAT_DONE.append(("direct", uid)) or "ch-board",
     "delivery_run":        lambda *a, **k: list(SAVED_RUNS[-1][1]) if SAVED_RUNS else [],
     "save_delivery_run":   lambda day, stops: SAVED_RUNS.append((day, list(stops))),
     "delivery_proof":      lambda *a, **k: {
@@ -2235,7 +2236,25 @@ def _steps(app, gui, root):
             rules = app._chat_rules_window(win)
             rules.rule_boxes["pin"].set("Managers and above")
             assert rules.rule_save() and ("rule", "pin", "Manager") in CHAT_DONE
+            # Privately, to anybody: picked by name.
+            pick = app._pick_person(win, win.chat_direct)
+            pick.person_find.set("dave")
+            root.update()
+            assert pick.person_box.size() == 1, pick.person_box.size()
+            pick.person_box.selection_set(0)
+            pick.person_go()
+            assert ("direct", "u2") in CHAT_DONE, CHAT_DONE[-3:]
+            # One Messages window: asked again, the same one comes forward.
+            assert app._messages_window() is win
             win.destroy()
+
+            # Beside the bell: the unread count, and a word when one comes in.
+            btn = app._chat_btn
+            app._set_messages(0)
+            app._set_messages(3, {"last_author": "Amy Admin", "name": "Noticeboard",
+                                  "kind": "board"})
+            assert btn.count == 3 and btn.badge == "3"
+            assert "New message from Amy Admin in Noticeboard" in app.status_var.get()
             app._refresh_dashboard()
             root.update()
         finally:

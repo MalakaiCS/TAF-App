@@ -6113,6 +6113,10 @@ class NotificationBell(tk.Canvas):
         def p(*xy):
             return [v * s for v in xy]
 
+        self._draw_icon(p, s, colour)
+        self._draw_badge(s)
+
+    def _draw_icon(self, p, s, colour) -> None:
         # The bell: knob, dome flaring to a lip, and the clapper under it.
         self.create_oval(*p(15.2, 5.2, 18.8, 8.8), outline=colour, width=2 * s)
         self.create_polygon(*p(17, 8, 22, 10, 23, 16, 24, 21, 27, 24,
@@ -6123,6 +6127,11 @@ class NotificationBell(tk.Canvas):
         self.create_arc(*p(14, 23, 20, 29), start=180, extent=180,
                         style="arc", outline=colour, width=2 * s)
 
+    def _tip_text(self) -> str:
+        return ("No new notifications" if not self._count else
+                f"{self._count} new notification{'s' if self._count != 1 else ''}")
+
+    def _draw_badge(self, s) -> None:
         text = self.badge
         if text:
             # A circle for one digit, stretched into a pill for "12" or
@@ -6150,9 +6159,30 @@ class NotificationBell(tk.Canvas):
         else:
             self._badge_box = None
             self._badge_text_width = 0
-        self._tip._text = ("No new notifications" if not self._count else
-                           f"{self._count} new notification"
-                           f"{'s' if self._count != 1 else ''}")
+        self._tip._text = self._tip_text()
+
+
+class MessagesButton(NotificationBell):
+    """Beside the bell: a speech bubble, blue with the count on it when
+    there are messages you have not read. Opens Messages."""
+
+    RED = "#1DA1E6"            # the badge: blue for messages, red is the bell's
+
+    def __init__(self, master, command=None, bg=None):
+        super().__init__(master, command=command, bg=bg)
+        self._tip._text = self._tip_text()
+
+    def _draw_icon(self, p, s, colour) -> None:
+        # A rounded bubble with a tail, and two lines of writing in it.
+        self.create_polygon(*p(6, 7, 28, 7, 28, 21, 14, 21, 8, 27, 9, 21, 6, 21),
+                            smooth=False, fill="", outline=colour, width=2 * s,
+                            joinstyle="round")
+        self.create_line(*p(11, 12, 23, 12), fill=colour, width=2 * s, capstyle="round")
+        self.create_line(*p(11, 16, 19, 16), fill=colour, width=2 * s, capstyle="round")
+
+    def _tip_text(self) -> str:
+        return ("Messages" if not self._count else
+                f"{self._count} unread message{'s' if self._count != 1 else ''}")
 
 
 class NotificationsPanel(tk.Toplevel):
@@ -9806,6 +9836,9 @@ class ModernOrderApp(tk.Frame):
             None,
             ("Open on a phone…",    self._web_app_link),
             None,
+            ("Messages",            self._messages_window),
+            ("How-to library",      self._sop_library),
+            None,
             ("Testable Features", self._testable_features()),
             None,
             ("Products and prices", lambda: self._show_tab("products")),
@@ -10014,6 +10047,9 @@ class ModernOrderApp(tk.Frame):
             # than out beyond the shortcuts link.
             self._bell = NotificationBell(inner, command=self._open_notifications)
             self._bell.pack(side="right", padx=(px(4), px(8)))
+            # Messages, beside it: what has come in that you have not read.
+            self._chat_btn = MessagesButton(inner, command=self._messages_window)
+            self._chat_btn.pack(side="right", padx=(px(4), 0))
             self.master.after(1500, self._poll_notifications)
             self.master.after(6000, self._apply_due_price_changes)
 
@@ -16172,9 +16208,39 @@ class ModernOrderApp(tk.Frame):
         def _work():
             n = _supplies.unread_count()
             self.master.after(0, lambda: self._set_bell(n))
+            self._poll_messages_work()
 
         threading.Thread(target=_work, daemon=True).start()
         self.master.after(self._BELL_EVERY_MS, self._poll_notifications)
+
+    def _poll_messages_work(self):
+        """Off the main thread: what is unread in Messages, for the button
+        beside the bell - and a word in the status bar when something new
+        has come in since the last look."""
+        try:
+            chats = _db.my_chats()
+        except Exception:
+            return
+        n = sum(int(c.get("unread") or 0) for c in chats)
+        newest = next((c for c in chats if int(c.get("unread") or 0)), None)
+        self.master.after(0, lambda: self._set_messages(n, newest))
+
+    def _set_messages(self, n, newest=None):
+        btn = getattr(self, "_chat_btn", None)
+        if btn is None or not btn.winfo_exists():
+            return
+        was = btn.count
+        btn.set_count(n)
+        if n > was and newest:
+            who = newest.get("last_author") or newest.get("name") or "somebody"
+            where = "" if newest.get("kind") == "direct" else f" in {newest.get('name')}"
+            try:
+                self.status_var.set(f"💬  New message from {who}{where}")
+            except Exception:
+                pass
+
+    def _refresh_messages_now(self):
+        threading.Thread(target=self._poll_messages_work, daemon=True).start()
 
     def _set_bell(self, n):
         bell = getattr(self, "_bell", None)
@@ -18426,8 +18492,6 @@ class ModernOrderApp(tk.Frame):
         ("job_profit",         "What jobs made…",         "_job_profit_window"),
         ("sales_targets",      "Sales targets…",          "_sales_targets_window"),
         ("owner_report",       "Owner's report…",         "_owner_report_window"),
-        ("sops",               "How-to library…",         "_sop_library"),
-        ("staff_chat",         "Messages…",               "_messages_window"),
         ("customer_display",   "Enable second screen display…",
                                                          "_customer_screen_from_menu"),
     ]
@@ -20981,7 +21045,17 @@ class ModernOrderApp(tk.Frame):
         pin, start a group, take a message down - is the company's rules
         (Who can do what…), held by the database whatever this offers."""
         role = _db.current_role()
+        open_win = getattr(self, "_messages_win", None)
+        try:
+            if open_win is not None and open_win.winfo_exists():
+                open_win.deiconify()
+                open_win.lift()
+                open_win.chat_reload()
+                return open_win
+        except tk.TclError:
+            pass
         win = tk.Toplevel(self.master, bg=CBG)
+        self._messages_win = win
         win.title("Messages")
         win.transient(self.master)
         _centre_on_parent(win, self.master, px(1000), px(660))
@@ -21049,9 +21123,9 @@ class ModernOrderApp(tk.Frame):
                 chats.delete(iid)
             for c in state["chats"]:
                 n = int(c.get("unread") or 0)
+                mark = {"board": "📌 ", "direct": "💬 "}.get(c.get("kind"), "👥 ")
                 chats.insert("", "end", iid=str(c["id"]),
-                             text=("📌 " if c.get("kind") == "board" else "👥 ") + str(c.get("name")),
-                             values=(n or "",))
+                             text=mark + str(c.get("name")), values=(n or "",))
             want = select or state["on"] or (state["chats"][0]["id"] if state["chats"] else None)
             if want and chats.exists(str(want)):
                 chats.selection_set(str(want))
@@ -21064,7 +21138,8 @@ class ModernOrderApp(tk.Frame):
                 return
             state["on"] = str(cid)
             title.config(text=str(c.get("name")) + (
-                "" if c.get("kind") == "board" else f"   ·   {c.get('members') or 0} people"))
+                f"   ·   {c.get('members') or 0} people" if c.get("kind") == "group"
+                else ("   ·   private" if c.get("kind") == "direct" else "")))
             try:
                 state["messages"] = _db.chat_messages(str(cid))
                 _db.mark_chat_read(str(cid))
@@ -21074,6 +21149,8 @@ class ModernOrderApp(tk.Frame):
             if chats.exists(str(cid)):
                 chats.set(str(cid), "n", "")
             _draw()
+            _side()
+            self._refresh_messages_now()
 
         def _draw():
             for iid in msgs.get_children():
@@ -21117,6 +21194,8 @@ class ModernOrderApp(tk.Frame):
         def _side():
             for w in side.winfo_children():
                 w.destroy()
+            flat_btn(side, "Message someone…", lambda: self._pick_person(win, _direct),
+                     bg=CA, pady=px(5)).pack(fill="x", pady=(0, px(6)))
             if _board.may("make_group", role, state["rules"]):
                 flat_btn(side, "New group…", lambda: self._new_group(win, _load_chats),
                          bg=CA, pady=px(5)).pack(fill="x")
@@ -21177,6 +21256,16 @@ class ModernOrderApp(tk.Frame):
                 return
             _open(state["on"])
 
+        def _direct(person):
+            try:
+                cid = _db.open_direct(person["id"])
+            except Exception as exc:
+                note.config(text=f"Could not start it: {exc}", fg=CRD)
+                return None
+            state["on"] = None
+            _load_chats(cid)
+            return cid
+
         def _leave():
             c = _chat(state["on"])
             if not c or not messagebox.askyesno("Messages", f"Leave {c.get('name')}?",
@@ -21218,6 +21307,49 @@ class ModernOrderApp(tk.Frame):
         win.chat_remove, win.chat_reload = _take_down, _load_chats
         win.chat_state, win.chats_tree, win.messages_tree = state, chats, msgs
         win.chat_note, win.chat_entry = note, entry
+        win.chat_direct = _direct
+        return win
+
+    def _pick_person(self, parent, done):
+        """Pick one person to message."""
+        win = tk.Toplevel(parent, bg=CBG)
+        win.title("Message someone")
+        win.transient(parent)
+        _centre_on_parent(win, parent, px(380), px(460))
+        body = tk.Frame(win, bg=CBG, padx=px(16), pady=px(12))
+        body.pack(fill="both", expand=True)
+        find = tk.StringVar()
+        field_entry(body, textvariable=find).pack(fill="x")
+        box = tk.Listbox(body, height=14, font=F_BODY, exportselection=False,
+                         relief="flat", highlightthickness=1, highlightbackground=CBR)
+        box.pack(fill="both", expand=True, pady=(px(8), 0))
+        people = [p for p in _db.staff_people() if p["id"] != _db.current_user_id()]
+        shown = []
+
+        def _fill(*_a):
+            q = find.get().strip().lower()
+            box.delete(0, "end")
+            shown[:] = [p for p in people if q in p["name"].lower()]
+            for p in shown:
+                box.insert("end", f"{p['name']}  ({p['role']})")
+
+        def _go(*_a):
+            sel = box.curselection()
+            if not sel:
+                return None
+            person = shown[sel[0]]
+            win.destroy()
+            return done(person)
+
+        find.trace_add("write", _fill)
+        box.bind("<Double-1>", _go)
+        box.bind("<Return>", _go)
+        row = tk.Frame(win, bg=CBG, padx=px(16), pady=px(10))
+        row.pack(fill="x")
+        flat_btn(row, "Message", _go, bg=CA, pady=px(6)).pack(side="left")
+        flat_btn(row, "Cancel", win.destroy, bg=CNE, pady=px(6)).pack(side="right")
+        _fill()
+        win.person_find, win.person_box, win.person_go = find, box, _go
         return win
 
     def _people_picker(self, parent, chosen=()):
