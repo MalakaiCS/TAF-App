@@ -399,9 +399,52 @@ def line_quantity(item: Dict[str, Any]) -> int:
         return 0
 
 
-def line_part_number(item: Dict[str, Any]) -> str:
+# The part number each product sells as (migrate_part_links.sql, step 52):
+# {code the app makes for a line: part number in the price list and Xero}.
+# Loaded with the prices; empty until step 52 is run, when every code is
+# simply itself.
+LINKS: Dict[str, str] = {}
+# The Tier 1 price of every part in the price list, as last loaded - so a
+# screen without the prices to hand can still say whether a code sells.
+KNOWN: Dict[str, float] = {}
+
+
+def set_known(prices: Optional[Dict[str, float]]) -> None:
+    KNOWN.clear()
+    KNOWN.update({str(k).strip().upper(): v for k, v in (prices or {}).items()})
+
+
+def link_status(code: str) -> Dict[str, Any]:
+    """What a code sells as: {"code", "part", "linked", "price"} - `price`
+    None when the part it sells as is not in the price list."""
+    code = str(code or "").strip().upper()
+    part = LINKS.get(code, code)
+    return {"code": code, "part": part, "linked": part != code,
+            "price": KNOWN.get(part)}
+
+
+def set_links(rows: Iterable[Dict[str, Any]]) -> Dict[str, str]:
+    """Take part_links rows ({code, part_number}) as the links in force."""
+    LINKS.clear()
+    for r in rows or []:
+        code = str(r.get("code") or "").strip().upper()
+        part = str(r.get("part_number") or "").strip().upper()
+        if code and part and code != part:
+            LINKS[code] = part
+    return dict(LINKS)
+
+
+def raw_part_number(item: Dict[str, Any]) -> str:
+    """The code on the line itself, as the app made it or somebody typed."""
     return str(item.get("Part Number") or item.get("part_number")
                or "").strip().upper()
+
+
+def line_part_number(item: Dict[str, Any]) -> str:
+    """The part number a line is priced, costed and invoiced as: the one its
+    code is linked to, or the code itself."""
+    code = raw_part_number(item)
+    return LINKS.get(code, code)
 
 
 # ── Price tiers (migrate_price_tiers.sql) ────────────────────────────────────

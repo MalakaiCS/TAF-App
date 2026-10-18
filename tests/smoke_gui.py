@@ -1329,6 +1329,75 @@ def _steps(app, gui, root):
     add("bag dialog: header sizes and Custom Bag Filter",
         _bag_header_in_the_dialog)
 
+    def _part_links():
+        """The part number each product sells as: listed, linked by a
+        manager, and shown beside a bag's code in its dialog."""
+        from taf_order_app import pricing as _pr
+        links, opened = [], []
+        saved = (gui._db.part_links, gui._db.save_part_link,
+                 gui._db.remove_part_link, gui.messagebox.showinfo)
+        gui._db.part_links = lambda: [dict(r) for r in links]
+        gui._db.save_part_link = lambda c, p: (
+            [links.remove(r) for r in list(links) if r["code"] == c],
+            links.append({"code": c, "part_number": p}))
+        gui._db.remove_part_link = lambda c: [links.remove(r) for r in list(links)
+                                              if r["code"] == c]
+        gui.messagebox.showinfo = lambda *a, **k: opened.append(a)
+        manager = gui._db.can_manage_prices()
+        try:
+            dlg, tree, foot = app._part_links_window()
+            for _ in range(80):
+                root.update()
+                if tree.get_children():
+                    break
+                time.sleep(0.05)
+            code = "3PG4-610610570"
+            assert tree.exists(code), tree.get_children()[:5]
+            assert tree.item(code, "values")[2] == "Not linked", tree.item(code, "values")
+            pick = dlg.links_link(code, dlg)
+            if not manager:
+                assert pick is None and opened, opened
+                dlg.destroy()
+                return
+            root.update()
+            assert pick.pick_box.size() >= 1, pick.pick_box.size()
+            pick.pick_box.selection_set(0)
+            pick.pick_go()
+            root.update()
+            assert links == [{"code": code, "part_number": "PPF50-1.8-G4"}], links
+            assert _pr.link_status(code)["part"] == "PPF50-1.8-G4"
+            for _ in range(40):
+                root.update()
+                time.sleep(0.02)
+            # Saved, the list opens again to show it linked.
+            for w in root.winfo_children():
+                if isinstance(w, gui.tk.Toplevel) and "sells as" in w.title():
+                    w.destroy()
+
+            # In the bag dialog: what its code sells as.
+            bag = gui.BagLineItemDialog(root, title="Bag")
+            try:
+                bag.var_pt.set("3-Peak")
+                bag._on_type_change()
+                bag.var_w.set("610"); bag.var_h.set("610"); bag.var_d.set("570")
+                bag.var_media.set("G4")
+                bag._regen_pn()
+                root.update()
+                text = bag.lbl_sells.cget("text")
+                assert bag.var_pn.get() == code, bag.var_pn.get()
+                assert text.startswith("Sells as PPF50-1.8-G4 - $48.50"), text
+                bag.var_pn.set("3PF8-999999999")
+                root.update()
+                assert "Not in the price list" in bag.lbl_sells.cget("text")
+                assert bag.btn_link.winfo_ismapped()
+            finally:
+                bag.destroy()
+        finally:
+            (gui._db.part_links, gui._db.save_part_link,
+             gui._db.remove_part_link, gui.messagebox.showinfo) = saved
+            _pr.set_links([])
+    add("products: the part number each product sells as", _part_links)
+
     def _closed_before_its_list_arrives():
         """A list window worked out on another thread, closed before the
         answer comes back. On a slow Windows build machine this happened by

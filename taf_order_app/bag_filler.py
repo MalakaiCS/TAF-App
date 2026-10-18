@@ -280,6 +280,36 @@ def generate_part_number(item: dict) -> str:
     return ""
 
 
+def standard_products() -> List[Dict[str, Any]]:
+    """Every standard size of every bag and roll, in each media it comes in,
+    with the code the app makes for it: [{"code", "product", "item"}]. What
+    the part-number links screen lists, so each can be linked before it is
+    first ordered."""
+    out, seen = [], set()
+
+    def add(item, product):
+        code = generate_part_number(item).strip().upper()
+        if code and code not in seen:
+            seen.add(code)
+            out.append({"code": code, "product": product, "item": item})
+
+    for pt, sizes in STANDARD_SIZES.items():
+        medias = (BAG_MEDIA_TYPES if pt in _MEDIA_TYPES_BAG or pt in _MEDIA_TYPES_MPHE
+                  else [""])
+        for label, w, h, d in sizes:
+            if w is None:
+                continue
+            size = " ".join(label.split())
+            for m in medias:
+                add({"product_type": pt, "media": m, "width": w, "height": h,
+                     "depth": d}, f"{pt} {m} {size}".replace("  ", " ").strip())
+    for m in ROLL_MEDIA_TYPES:
+        for rw in ROLL_WIDTHS:
+            add({"product_type": "Media Roll", "media": m, "roll_width": rw},
+                f"Media Roll {m} {rw}")
+    return out
+
+
 # ── Description / display helpers ─────────────────────────────────────────────
 
 def build_label_line(item: dict) -> str:

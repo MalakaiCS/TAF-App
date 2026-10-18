@@ -215,7 +215,10 @@ WITH checks(step, file, purpose, needed, present) AS (VALUES
   (51, 'migrate_cash_sales.sql', 'The cash sale account: an email asked for each time it is invoiced', 'recommended',
       EXISTS (SELECT 1 FROM information_schema.columns
                WHERE table_schema='public' AND table_name='customers'
-                 AND column_name='cash_sale'))
+                 AND column_name='cash_sale')),
+
+  (52, 'migrate_part_links.sql', 'The part number each product sells as', 'recommended',
+      to_regclass('public.part_links') IS NOT NULL)
 )
 SELECT step,
        CASE WHEN present THEN 'already done' ELSE 'RUN THIS' END AS status,

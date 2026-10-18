@@ -69,6 +69,10 @@ from taf_order_app.bag_filler import (
     generate_part_number, build_label_line, build_dims_line,
     item_summary_short, generate_bag_docket, generate_unified_docket,
 )
+from taf_order_app import bag_filler as _bag_filler
+
+# The running app, for a dialog that needs one of its screens.
+_APP: dict = {}
 
 # ── App info ──────────────────────────────────────────────────────────────
 APP_TITLE   = "Total Air Filtration  ·  Filter Order Entry"
@@ -4458,6 +4462,17 @@ class BagLineItemDialog(tk.Toplevel):
                  bg=CNE, pady=4, padx=8, font=F_SM).pack(side="left")
         tk.Label(pn_frame, text="Edit the field above to override, or click ↺ to regenerate.",
                  bg=CBG, fg=CMU, font=F_SM).pack(anchor="w", pady=(4, 0))
+        # What this code sells as: in the price list as it is, linked to a
+        # part number, or neither - with a way to link it there and then.
+        sells = tk.Frame(pn_frame, bg=CBG)
+        sells.pack(fill="x", pady=(4, 0))
+        self.lbl_sells = tk.Label(sells, text="", bg=CBG, fg=CMU, font=F_SM,
+                                  anchor="w", justify="left")
+        self.lbl_sells.pack(side="left")
+        self.btn_link = flat_btn(sells, "Link to a part number…", self._link_part,
+                                 bg=CNE, variant="secondary", pady=2, padx=8, font=F_SM)
+        self.var_pn.trace_add("write", lambda *_: self._show_sells())
+        self._show_sells()
         # mark as overridden when user edits manually
         self.var_pn.trace_add("write", lambda *_: self._mark_pn_override())
         self._pn_updating = False   # guard to suppress trace during auto-update
@@ -4807,6 +4822,56 @@ class BagLineItemDialog(tk.Toplevel):
     def _regen_pn(self):
         self._pn_override = False
         self._auto_pn()
+
+    def _show_sells(self):
+        """What the code on this line sells as, beneath it."""
+        st = _pricing.link_status(self.var_pn.get())
+        can = _db.is_ready() and _db.can_manage_prices()
+        if not st["code"]:
+            text, colour, offer = "", CMU, False
+        elif st["linked"]:
+            text = (f"Sells as {st['part']}"
+                    + (f" - ${st['price']:,.2f}" if st["price"] is not None
+                       else " - which is not in the price list"))
+            colour, offer = (CGR if st["price"] is not None else CRD), can
+        elif st["price"] is not None:
+            text, colour, offer = f"In the price list - ${st['price']:,.2f}", CGR, False
+        else:
+            text = "Not in the price list, so it will have no price."
+            colour, offer = CRD, can
+        self.lbl_sells.config(text=text, fg=colour)
+        if offer:
+            self.btn_link.pack(side="left", padx=(8, 0))
+        else:
+            self.btn_link.pack_forget()
+
+    def _link_part(self):
+        """Link this line's code to the part number it sells as, for every
+        line with it from now on."""
+        code = self.var_pn.get().strip().upper()
+        if not code:
+            return None
+        app = _APP.get("app")
+        if app is None:
+            return None
+        st = _pricing.link_status(code)
+
+        def _save(part):
+            try:
+                if part:
+                    _db.save_part_link(code, part)
+                else:
+                    _db.remove_part_link(code)
+                _pricing.set_links(_db.part_links())
+            except Exception as exc:
+                messagebox.showerror("Part number", f"Could not save it:\n{exc}",
+                                     parent=self)
+                return
+            self._show_sells()
+        return app._pick_price_part(self, f"{code} sells as…",
+                                    self.var_pt.get(),
+                                    current=st["part"] if st["linked"] else "",
+                                    done=_save)
 
     def _mark_pn_override(self):
         if not self._pn_updating:
@@ -9287,6 +9352,7 @@ class ModernOrderApp(tk.Frame):
     def __init__(self, master):
         super().__init__(master, bg=CBG)
         self.master = master
+        _APP["app"] = self
         _install_dropdown_rules(master)
         _install_ui_pump(master.winfo_toplevel())
         # Anchor order storage to APP_DIR (never cwd — see OrderService).
@@ -12948,6 +13014,7 @@ class ModernOrderApp(tk.Frame):
                 ("Edit",                  self._edit_product,       CNE, True),
                 ("Delete",                self._delete_product,     CRD, True),
                 ("📥 Import Price Files", self._import_price_files, None, True),
+                ("🔗 Part numbers…",      self._part_links_window, None, False),
                 ("Refresh",               self._refresh_products_list, CNE, False)):
             b = (flat_btn(bot, label, cmd, variant="secondary", pady=7)
                  if colour is None else
@@ -18162,6 +18229,169 @@ class ModernOrderApp(tk.Frame):
 
         var.set("Prices loaded: checking…")
         threading.Thread(target=_work, daemon=True).start()
+
+    # ── The part number each product sells as (step 52) ───────────────────
+
+    def _part_links_window(self):
+        """Every product the app makes a code for - each standard bag and
+        roll, and every code used on an order - and the part number it sells
+        as. A manager double-clicks one to link it to a part in the price
+        list."""
+        manager = _db.is_ready() and _db.can_manage_prices()
+        cache = {}
+
+        def build():
+            prices, _rates = self._load_prices(force=True)
+            names = {}
+            try:
+                names = {str(r.get("part_number") or "").strip().upper():
+                         r.get("name") or "" for r in _db.get_price_rows()}
+            except Exception:
+                names = {}
+            rows = {p["code"]: p["product"] for p in _bag_filler.standard_products()}
+            # And every code actually on an order, whatever made it.
+            try:
+                for o in _db.get_all_orders(limit=1500):
+                    for it in o.get("items") or []:
+                        if not isinstance(it, dict):
+                            continue
+                        code = _pricing.raw_part_number(it)
+                        if code and code not in rows:
+                            rows[code] = (_pricing.describe_item(it) or code).split("\n")[0]
+            except Exception:
+                pass
+            groups = {"not": [], "linked": [], "listed": []}
+            for code, product in rows.items():
+                st = _pricing.link_status(code)
+                cache[code] = dict(st, product=product)
+                if st["linked"]:
+                    where = (f"${st['price']:,.2f}" if st["price"] is not None
+                             else "not in the price list")
+                    groups["linked"].append(((f"    {code}", product, f"→ {st['part']}",
+                                              names.get(st["part"], ""), where),
+                                             None if st["price"] is not None else "late", code))
+                elif st["price"] is not None:
+                    groups["listed"].append(((f"    {code}", product, "In the price list",
+                                              names.get(code, ""), f"${st['price']:,.2f}"),
+                                             None, code))
+                else:
+                    groups["not"].append(((f"    {code}", product, "Not linked", "", ""),
+                                          "late", code))
+            out = []
+            for key, title in (("not", "Not in the price list - link these"),
+                               ("linked", "Linked to a part number"),
+                               ("listed", "Already in the price list as they are")):
+                if groups[key]:
+                    out.append(((f"{title} ({len(groups[key])})", "", "", "", ""),
+                                "head", f"h-{key}"))
+                    out += sorted(groups[key], key=lambda r: r[2])
+            return out, (f"{len(groups['not'])} not priced, {len(groups['linked'])} "
+                         f"linked, {len(groups['listed'])} in the price list as they are."
+                         + ("  Double-click one to link it to a part number."
+                            if manager else ""))
+
+        def _link(code, dlg):
+            if code not in cache:
+                return None
+            if not manager:
+                messagebox.showinfo("Part numbers", "Only a manager can link a "
+                                    "product to a part number.", parent=dlg)
+                return None
+            st = cache[code]
+            return self._pick_price_part(
+                dlg, f"{code} sells as…", st["product"],
+                current=st["part"] if st["linked"] else "",
+                done=lambda part: _save(code, part, dlg))
+
+        def _save(code, part, dlg):
+            try:
+                if part:
+                    _db.save_part_link(code, part)
+                else:
+                    _db.remove_part_link(code)
+            except Exception as exc:
+                messagebox.showerror("Part numbers", f"Could not save it:\n{exc}",
+                                     parent=dlg)
+                return
+            dlg.destroy()
+            self._part_links_window()
+
+        dlg, tree, foot = self._table_window(
+            "The part number each product sells as",
+            "The app makes a code for every line from its type, media and size. "
+            "Where that is not the part number in your price list and Xero, link "
+            "it once: every line with that code is then priced, costed and "
+            "invoiced as that part.",
+            [("c", "Code the app makes", 190, "w"), ("p", "Product", 260, "w"),
+             ("s", "Sells as", 170, "w"), ("n", "Part name", 200, "w"),
+             ("x", "Price", 130, "e")], build, width=1000, on_row=_link)
+        dlg.links_cache, dlg.links_link = cache, _link
+        return dlg, tree, foot
+
+    def _pick_price_part(self, parent, title, product, current="", done=None):
+        """Pick a part from the price list (or take the link off)."""
+        win = tk.Toplevel(parent, bg=CBG)
+        win.title(title)
+        win.transient(parent)
+        _centre_on_parent(win, parent, px(620), px(520))
+        body = tk.Frame(win, bg=CBG, padx=px(16), pady=px(12))
+        body.pack(fill="both", expand=True)
+        tk.Label(body, text=title, bg=CBG, fg=CA, font=F_TTL).pack(anchor="w")
+        tk.Label(body, text=product, bg=CBG, fg=CMU, font=F_SM).pack(anchor="w")
+        find = tk.StringVar()
+        ent = field_entry(body, textvariable=find)
+        ent.pack(fill="x", pady=(px(8), 0))
+        box = tk.Listbox(body, height=14, font=F_BODY, exportselection=False,
+                         relief="flat", highlightthickness=1, highlightbackground=CBR)
+        box.pack(fill="both", expand=True, pady=(px(8), 0))
+        note = tk.Label(body, text="Type part of the part number or its name.",
+                        bg=CBG, fg=CMU, font=F_SM)
+        note.pack(anchor="w", pady=(px(4), 0))
+        shown = []
+
+        def _fill(*_a):
+            q = find.get().strip()
+            try:
+                rows = _db.get_price_rows(q, limit=300) if q else _db.get_price_rows(limit=300)
+            except Exception as exc:
+                note.config(text=f"Could not read the price list: {exc}", fg=CRD)
+                return
+            box.delete(0, "end")
+            shown[:] = rows
+            for r in rows:
+                price = r.get("unit_price")
+                box.insert("end", f"{r.get('part_number')}   {r.get('name') or ''}"
+                           + (f"   ${float(price):,.2f}" if price not in (None, "") else ""))
+
+        def _go(*_a):
+            sel = box.curselection()
+            if not sel:
+                note.config(text="Pick the part it sells as.", fg=CRD)
+                return None
+            part = str(shown[sel[0]].get("part_number") or "").strip().upper()
+            win.destroy()
+            if done:
+                done(part)
+            return part
+
+        def _unlink():
+            win.destroy()
+            if done:
+                done("")
+
+        find.trace_add("write", _fill)
+        box.bind("<Double-1>", _go)
+        row = tk.Frame(win, bg=CBG, padx=px(16), pady=px(10))
+        row.pack(fill="x")
+        flat_btn(row, "Sells as this", _go, bg=CA, pady=px(6)).pack(side="left")
+        if current:
+            flat_btn(row, f"Unlink from {current}", _unlink, bg=CNE, variant="secondary",
+                     pady=px(6)).pack(side="left", padx=(px(8), 0))
+        flat_btn(row, "Cancel", win.destroy, bg=CNE, pady=px(6)).pack(side="right")
+        _fill()
+        ent.focus_set()
+        win.pick_find, win.pick_box, win.pick_go, win.pick_unlink = find, box, _go, _unlink
+        return win
 
     def _import_price_files(self):
         """Read one or more price spreadsheets into the shared price list."""
@@ -27234,6 +27464,12 @@ class ModernOrderApp(tk.Frame):
             except Exception:
                 pass
             import time as _time
+            # The part number each product sells as, and what is in the list.
+            try:
+                _pricing.set_links(_db.part_links())
+            except Exception:
+                pass
+            _pricing.set_known(prices)
             self._price_cache = (prices, rates)
             self._tier_cache = tiers or {1: (prices, rates)}
             self._cost_cache = (costs, cost_rates)

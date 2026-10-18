@@ -1703,6 +1703,31 @@ def run_cash_sale_checks(pg: Postgres) -> None:
     q(pg, f"UPDATE customers SET cash_sale = false WHERE id = '{cust}';")
 
 
+def run_part_link_checks(pg: Postgres) -> None:
+    print("\n── the part number each product sells as (step 52) ──")
+    for _ in range(2):
+        ok, _o, err = pg.psql((ROOT / "migrate_part_links.sql").read_text(
+            encoding="utf-8"), "f")
+        check("step 52 runs, and runs again cleanly", ok, err)
+    ok, _o, err = as_in(pg, "f", DAVE, "INSERT INTO part_links (code, part_number) "
+                        "VALUES ('3PG4-610610570', 'TAF-3P-G4-FL');")
+    check("somebody on the floor cannot link a product to a part number", not ok)
+    ok, _o, err = as_in(pg, "f", SARAH, "INSERT INTO part_links (code, part_number) "
+                        "VALUES ('3PG4-610610570', 'TAF-3P-G4-FL');")
+    check("a manager can", ok, err)
+    ok, out, err = as_in(pg, "f", DAVE, "SELECT part_number FROM part_links "
+                         "WHERE code = '3PG4-610610570';")
+    check("and everybody on staff reads it", ok and out == "TAF-3P-G4-FL", out or err)
+    ok, _o, err = as_in(pg, "f", SARAH, "INSERT INTO part_links (code, part_number) "
+                        "VALUES ('3pg4-610610340', 'TAF-3P-G4-FS');")
+    check("codes are kept in capitals, as the app compares them", not ok)
+    ok, _o, err = as_in(pg, "f", SARAH, "INSERT INTO part_links (code, part_number) "
+                        "VALUES ('X1', 'X1');")
+    check("and a code is not linked to itself", not ok)
+    ok, out, err = as_in(pg, "f", STRANGER, "SELECT count(*) FROM part_links;")
+    check("an account nobody approved reads none", ok and out == "0", out or err)
+
+
 def _skip(why: str) -> int:
     """Skipping is fine on a laptop. In CI it is not: a workflow that goes
     green having checked nothing is worse than no workflow, because it is
@@ -1738,6 +1763,7 @@ def main() -> int:
         run_staff_board_checks(pg)
         run_direct_message_checks(pg)
         run_cash_sale_checks(pg)
+        run_part_link_checks(pg)
     finally:
         pg.stop()
     print(f"\n{len(FAILURES)} FAILED" if FAILURES

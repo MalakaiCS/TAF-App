@@ -598,6 +598,7 @@ just run it — nothing is lost and nothing is duplicated.
 | 49 | `migrate_staff_board.sql` | How we do things, and talking to each other: the how-to library with "I've read this" per version, the noticeboard and group chats, and who may post, pin, start groups and take messages down | recommended |
 | 50 | `migrate_direct_messages.sql` | Private messages: a conversation between any two people on staff, only they can see it - one per pair (needs step 49) | recommended |
 | 51 | `migrate_cash_sales.sql` | Cash sales: the account walk-in buyers go under, whose invoices are emailed to an address asked for each time, not the one on file (needs step 39) | recommended |
+| 52 | `migrate_part_links.sql` | The part number each product sells as: a code the app makes for a line (a 3-Peak bag's, say) linked to the part number in the price list and Xero | recommended |
 
 **Step 16 is the one that matters most.** Every policy in the older scripts is
 `TO authenticated USING (true)` — meaning *anyone Supabase counts as signed
@@ -1040,6 +1041,25 @@ Optional function secrets: `XERO_PURCHASE_ACCOUNT` (default `310`, Cost of Goods
 `XERO_PURCHASE_TAX` (default `INPUT`). To have the app email purchase orders
 itself instead of Xero, set `PO_EMAIL_VIA=app` with `RESEND_API_KEY` and
 `MAIL_FROM` (optionally `MAIL_REPLY_TO` and `COMPANY_NAME`).
+
+### The part number each product sells as
+
+The app makes a code for every line from its type, media and size - a full
+long G4 3-Peak bag is `3PG4-610610570`, an F7 8-pocket MPHE
+`MPHE-F78P595595560`. When that is the part number in your price list (and
+Xero), the line is priced as it is. When it is not, link it once (step 52):
+
+- **Products → 🔗 Part numbers…** lists every standard bag and roll in each
+  media, and every code used on an order, under *Not in the price list -
+  link these*, *Linked to a part number* and *Already in the price list as
+  they are*. A manager double-clicks one and picks the part it sells as
+  from the price list (or takes the link off).
+- On a bag line, under its part number, the dialog says what it sells as
+  and at what price - or that it is not in the price list, with *Link to a
+  part number…* right there for a manager.
+
+From then on every line with that code is priced, costed and sent to Xero as
+the linked part. The worksheet keeps the code the floor knows.
 
 ### Price tiers
 

@@ -3455,6 +3455,31 @@ def leave_group(channel_id: str) -> None:
     get_client().rpc("leave_group", {"p_channel": channel_id}).execute()
 
 
+# ── The part number each product sells as (step 52) ─────────────────────────
+
+def part_links() -> list:
+    """[{code, part_number}] - empty when step 52 has not been run."""
+    try:
+        return list(get_client().table("part_links").select("code,part_number")
+                    .execute().data or [])
+    except Exception:
+        return []
+
+
+def save_part_link(code: str, part_number: str) -> None:
+    get_client().table("part_links").upsert({
+        "code": str(code).strip().upper(),
+        "part_number": str(part_number).strip().upper(),
+        "updated_at": _utc_now(),
+        "updated_by": current_full_name() or current_username() or "",
+    }).execute()
+
+
+def remove_part_link(code: str) -> None:
+    get_client().table("part_links").delete().eq(
+        "code", str(code).strip().upper()).execute()
+
+
 def _now_stamp() -> str:
     import datetime as _dt
     d = _dt.datetime.now()
