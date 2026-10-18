@@ -190,6 +190,19 @@ def is_header_line(item: Dict[str, Any]) -> bool:
     return bool(item.get("Bag Header"))
 
 
+def docket_line(item: Dict[str, Any]) -> Dict[str, Any]:
+    """A price-list line in the shape the docket prints: "4 x <what it is>",
+    with its part number."""
+    what = (str(item.get("Description") or "").strip()
+            or str(item.get("Part Number") or "").strip() or "Item")
+    unit = str(item.get("Unit") or "").strip()
+    return {"item_kind": "bag", "product_type": "Other",
+            "description": what + (f" ({unit})" if unit and unit != "each" else ""),
+            "quantity": item.get("Quantity") or item.get("quantity") or 1,
+            "part_number": str(item.get("Part Number") or ""),
+            "notes": str(item.get("Notes") or ""), "from_price_list": True}
+
+
 def worksheet_split(items: List[Dict[str, Any]]):
     """(filter pages, bag lines, total pages) for printing an order.
 
@@ -197,8 +210,12 @@ def worksheet_split(items: List[Dict[str, Any]]):
     that has a header; the bag docket follows them. Header pages count in
     the page total ("page 4 of 9").
     """
-    filters = [i for i in items if i.get("item_kind", "filter") != "bag"]
-    bags = [i for i in items if i.get("item_kind") == "bag"]
+    # A line from the price list is not made here: it goes on the docket
+    # with the bags, as a product line, never on the filter worksheet.
+    filters = [i for i in items
+               if i.get("item_kind", "filter") not in ("bag", "catalogue")]
+    bags = [docket_line(i) if i.get("item_kind") == "catalogue" else i
+            for i in items if i.get("item_kind") in ("bag", "catalogue")]
     with_header = [b for b in bags if header_size(b) is not None]
     first_bag_page = len(filters) + len(with_header) + 1
     headers = []

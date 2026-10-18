@@ -3954,7 +3954,8 @@ class CatalogueLineDialog(tk.Toplevel):
     """
 
     def __init__(self, master, title="Add Product", initial=None,
-                 product_types=None, on_lookup=None):
+                 product_types=None, on_lookup=None, save_text="Add to Quote",
+                 tier=1, on_new_product=None):
         super().__init__(master)
         self.title(title)
         self.configure(bg=CBG, padx=px(18), pady=px(16))
@@ -3962,6 +3963,8 @@ class CatalogueLineDialog(tk.Toplevel):
         self.transient(master)
         self.result = None
         self._on_lookup = on_lookup          # (search) -> [price rows]
+        self._tier = tier if tier in (1, 2, 3) else 1   # the customer's prices
+        self._on_new_product = on_new_product   # (dialog, done(row)) for managers
         self._matches = []
         initial = initial or {}
 
@@ -3979,8 +3982,16 @@ class CatalogueLineDialog(tk.Toplevel):
         se = field_entry(self, textvariable=self.search_var, width=38)
         se.grid(row=2, column=0, columnspan=2, sticky="ew")
         se.bind("<Return>", lambda _e: self._search())
-        flat_btn(self, "Search", self._search, bg=CA,
-                 pady=px(5)).grid(row=2, column=2, sticky="w", padx=(px(8), 0))
+        sbtns = tk.Frame(self, bg=CBG)
+        sbtns.grid(row=2, column=2, sticky="w", padx=(px(8), 0))
+        flat_btn(sbtns, "Search", self._search, bg=CA,
+                 pady=px(5)).pack(side="left")
+        if on_new_product:
+            # Not in the list yet: add it to Products, and use it here.
+            flat_btn(sbtns, "＋ New product…",
+                     lambda: on_new_product(self, self._use_new_product),
+                     bg=CNE, variant="secondary",
+                     pady=px(5)).pack(side="left", padx=(px(6), 0))
 
         self.results = tk.Listbox(self, height=7, width=58, font=F_BODY,
                                   bg=CCA, fg=CTX, highlightthickness=1,
@@ -4057,7 +4068,7 @@ class CatalogueLineDialog(tk.Toplevel):
         btns.grid(row=row, column=0, columnspan=3, sticky="e", pady=(px(10), 0))
         flat_btn(btns, "Cancel", self.destroy, bg=CNE,
                  pady=px(6)).pack(side="left", padx=(0, px(8)))
-        flat_btn(btns, "Add to Quote", self._save, bg=CGR,
+        flat_btn(btns, save_text, self._save, bg=CGR,
                  pady=px(6)).pack(side="left")
 
         self.columnconfigure(1, weight=1)
@@ -4103,12 +4114,31 @@ class CatalogueLineDialog(tk.Toplevel):
         sel = self.results.curselection()
         if not sel or sel[0] >= len(self._matches):
             return
-        row = self._matches[sel[0]]
+        self._use_row(self._matches[sel[0]])
+
+    def _use_row(self, row):
+        """A part from the price list onto the line, at the customer's tier's
+        price (Tier 1's where the tier has none)."""
         self.vars["Part Number"].set(row.get("part_number", ""))
         self.vars["Description"].set(
             (row.get("name") or row.get("description") or "").replace("\n", " "))
-        self.vars["Unit Price"].set(f'{float(row.get("unit_price") or 0):.2f}')
+        price = row.get({1: "unit_price", 2: "unit_price_2",
+                         3: "unit_price_3"}[self._tier])
+        if price in (None, ""):
+            price = row.get("unit_price")
+        self.vars["Unit Price"].set(f'{float(price or 0):.2f}')
         self._retotal()
+
+    def _use_new_product(self, row):
+        """Just added to Products: find it, and put it on the line."""
+        try:
+            if not self.winfo_exists():
+                return
+        except tk.TclError:
+            return
+        self.search_var.set(row.get("part_number", ""))
+        self._search()
+        self._use_row(row)
 
     def _type_changed(self, _event=None):
         # Only fill the unit in if it hasn't been touched — never overwrite
@@ -10654,6 +10684,7 @@ class ModernOrderApp(tk.Frame):
         self._add_line_btn = menu_btn(tb, "＋ Add Line  ▾", [
             ("Filter — made to measure", self._add_filter_item),
             ("Bag filter or media roll", self._add_bag_item),
+            ("From the price list…",     self._add_catalogue_item),
             None,
             ("Dedicated compressor filters…", self._open_compressor_presets),
         ], bg=CA, pady=5, padx=10)
@@ -12083,7 +12114,8 @@ class ModernOrderApp(tk.Frame):
             self.master,
             title="Edit Product Line" if index is not None else "Add Product",
             initial=initial, product_types=product_type_names(),
-            on_lookup=self._price_list_lookup)
+            on_lookup=self._price_list_lookup,
+            on_new_product=self._new_product_from_line())
         self.master.wait_window(dlg)
         if not dlg.result:
             return
@@ -13105,10 +13137,11 @@ class ModernOrderApp(tk.Frame):
             return
         self._product_dialog(row)
 
-    def _product_dialog(self, row):
-        """Add or correct one priced part number."""
+    def _product_dialog(self, row, parent=None, on_saved=None):
+        """Add or correct one priced part number. `on_saved(row)` hears of it
+        - how a new order's line uses a product added there and then."""
         editing = row is not None
-        dlg = tk.Toplevel(self.master)
+        dlg = tk.Toplevel(parent or self.master)
         dlg.title("Edit Product" if editing else "Add Product")
         dlg.configure(bg=CBG)
         dlg.transient(self.master)
@@ -13218,6 +13251,9 @@ class ModernOrderApp(tk.Frame):
             dlg.destroy()
             self._refresh_products_list()
             self.status_var.set(f"{part} saved at ${price:,.2f}.")
+            if on_saved:
+                on_saved({"part_number": part, "name": v_name.get().strip(),
+                          "unit_price": price, **tier_prices})
 
         flat_btn(foot, "Cancel", dlg.destroy, variant="secondary",
                  pady=7).pack(side="right", padx=(8, 0))
@@ -26332,6 +26368,46 @@ class ModernOrderApp(tk.Frame):
             n = len(self.items)
             self.status_var.set(f"Bag item added — {n} item{'s' if n != 1 else ''} total.")
 
+    def _new_product_from_line(self):
+        """For a manager: "＋ New product…" in the price-list line window,
+        which adds the product to Products and puts it on the line."""
+        if not (_db.is_ready() and _db.can_manage_prices()):
+            return None
+        return lambda dlg, done: self._product_dialog(None, parent=dlg, on_saved=done)
+
+    def _order_tier(self) -> int:
+        """The price tier of the customer on the New Order form."""
+        try:
+            name = self.hvars["Customer Name"].get().strip()
+            return _pricing.tier_of(self._customer_record(name)) if name else 1
+        except Exception:
+            return 1
+
+    def _add_catalogue_item(self, initial=None, index=None):
+        """A product from the price list (or typed in) as a line on the
+        order - a bought-in item, a part, anything not made here. It goes on
+        the docket with the bags, at its own price."""
+        dlg = CatalogueLineDialog(
+            self.master,
+            title="Edit Product Line" if index is not None else "Add from the Price List",
+            initial=initial, product_types=product_type_names(),
+            on_lookup=self._price_list_lookup, save_text="Add to Order",
+            tier=self._order_tier(), on_new_product=self._new_product_from_line())
+        self.master.wait_window(dlg)
+        if not dlg.result:
+            return None
+        line = dict(dlg.result)
+        self._stamp_item(line)
+        if index is None:
+            self.items.append(line)
+        else:
+            self.items[index] = line
+        self._refresh_items_tree()
+        n = len(self.items)
+        self.status_var.set(f"{line.get('Part Number') or 'Product'} added - "
+                            f"{n} item{'s' if n != 1 else ''} total.")
+        return line
+
     def _open_compressor_presets(self):
         dlg = CompressorFilterDialog(self.master)
         self.master.wait_window(dlg)
@@ -26373,6 +26449,10 @@ class ModernOrderApp(tk.Frame):
             messagebox.showinfo("Edit", "Select a line item to edit first.")
             return
         item = self.items[idx]
+        if item.get("item_kind") == "catalogue":
+            self._add_catalogue_item(initial=item, index=idx)
+            self.tree.selection_set(str(idx))
+            return
         if item.get("item_kind") == "bag":
             dlg = BagLineItemDialog(self.master, title="Edit Bag / Roll Item",
                                     initial=item,
@@ -26439,7 +26519,18 @@ class ModernOrderApp(tk.Frame):
             self.tree.delete(iid)
         for i, item in enumerate(self.items):
             kind = item.get("item_kind", "filter")
-            if kind == "bag":
+            if kind == "catalogue":
+                qty      = item.get("Quantity", "")
+                pt       = item.get("Product Type", "") or "Product"
+                size     = (item.get("Description", "") or "—")[:60]
+                sqm      = "—"
+                media    = ""
+                opt_str  = item.get("Unit", "") or "—"
+                notes    = (item.get("Notes", "") or "")[:140]
+                kind_lbl = "Product"
+                tag      = "bag_e" if i % 2 == 0 else "bag_o"
+                partno   = item.get("Part Number", "") or "—"
+            elif kind == "bag":
                 pt    = item.get("product_type", "")
                 qty   = item.get("quantity", "")
                 media = item.get("media", "")

@@ -1061,6 +1061,17 @@ Xero), the line is priced as it is. When it is not, link it once (step 52):
 From then on every line with that code is priced, costed and sent to Xero as
 the linked part. The worksheet keeps the code the floor knows.
 
+**Anything else you sell** - clips, gaskets, a bought-in filter, a part -
+goes on the price list as a product (**Products → ＋ Add Product**: part
+number, name, price for each tier, cost) and onto an order from **New Order
+→ ＋ Add Line → From the price list…**: search by part number or name, pick
+it, and it comes at the customer's tier price. A manager who can't find it
+presses **＋ New product…** right there, adds it to Products, and it goes on
+the line. Those lines print on the docket with the bags (quantity,
+description and P/N) - never on the filter worksheet - and are invoiced in
+Xero under their part number. Quotes have had the same line all along; a
+quote's product lines now print on the docket too when it becomes an order.
+
 ### Price tiers
 
 Run `migrate_price_tiers.sql` (step 38). Then:

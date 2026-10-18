@@ -1398,6 +1398,71 @@ def _steps(app, gui, root):
             _pr.set_links([])
     add("products: the part number each product sells as", _part_links)
 
+    def _price_list_line_on_an_order():
+        """New Order -> Add Line -> From the price list: searched, picked at
+        the customer's tier price, edited again, and a product added to
+        Products there and then (managers)."""
+        app._show_tab("new_order")
+        root.update()
+        before = list(app.items)
+        state = {}
+
+        def _drive(action):
+            def go():
+                dlg = next((w for w in root.winfo_children()
+                            if isinstance(w, gui.CatalogueLineDialog)), None)
+                if dlg is None:
+                    root.after(100, go)
+                    return
+                state["dlg"] = dlg
+                action(dlg)
+            root.after(200, go)
+
+        def pick(dlg):
+            dlg.search_var.set("PPF50")
+            dlg._search()
+            dlg.results.selection_set(0)
+            dlg._take_match()
+            dlg.vars["Quantity"].set("3")
+            state["new"] = dlg._on_new_product
+            dlg._save()
+
+        try:
+            _drive(pick)
+            line = app._add_catalogue_item()
+            assert line and line["item_kind"] == "catalogue", line
+            assert line["Part Number"] == "PPF50-1.8-G4" and line["Quantity"] == 3
+            assert line["Unit Price"] == 48.5, line
+            assert app.items[-1] is line or app.items[-1] == line
+            row = app.tree.item(str(len(app.items) - 1), "values")
+            assert row[5] == "PPF50-1.8-G4" and row[0] in ("3", 3), row
+            assert (state["new"] is not None) == gui._db.can_manage_prices()
+
+            # Edited again in the same window, from Edit.
+            app.tree.selection_set(str(len(app.items) - 1))
+
+            def change(dlg):
+                assert dlg.vars["Part Number"].get() == "PPF50-1.8-G4"
+                dlg.vars["Quantity"].set("5")
+                dlg._save()
+            _drive(change)
+            app._edit_item()
+            assert app.items[-1]["Quantity"] == 5, app.items[-1]
+
+            # Added to Products from the line: the line takes it straight away.
+            def new_one(dlg):
+                dlg._use_new_product({"part_number": "TAF-CLIP-10",
+                                      "name": "Bag clips", "unit_price": 12.0})
+                assert dlg.vars["Part Number"].get() == "TAF-CLIP-10"
+                assert dlg.vars["Unit Price"].get() == "12.00"
+                dlg.destroy()
+            _drive(new_one)
+            assert app._add_catalogue_item() is None
+        finally:
+            app.items[:] = before
+            app._refresh_items_tree()
+    add("new order: a line from the price list", _price_list_line_on_an_order)
+
     def _closed_before_its_list_arrives():
         """A list window worked out on another thread, closed before the
         answer comes back. On a slow Windows build machine this happened by

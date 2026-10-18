@@ -79,3 +79,16 @@ def test_xero_gets_the_part_it_sells_as():
     assert built["invoice"]["lines"][0]["item_code"] == "TAF-3P-G4-FL"
     assert built["invoice"]["lines"][0]["unit_amount"] == 21.5
     _reset()
+
+
+def test_a_line_from_the_price_list_goes_on_the_docket_not_the_filter_worksheet():
+    from taf_order_app import bag_headers as bh
+    cat = {"item_kind": "catalogue", "Product Type": "Hardware",
+           "Part Number": "TAF-CLIP-10", "Description": "Bag clips",
+           "Quantity": 4, "Unit": "box", "Unit Price": 5.0}
+    filt = {"item_kind": "filter", "Filter Type": "V-form", "Quantity": 1}
+    filters, bags, total = bh.worksheet_split([filt, cat, dict(BAG)])
+    assert filters == [filt] and total == 3
+    assert bags[0]["product_type"] == "Other" and bags[0]["part_number"] == "TAF-CLIP-10"
+    assert bf.build_label_line(bags[0]) == "4 x Bag clips (box)"
+    assert bags[1]["product_type"] == "3-Peak"
