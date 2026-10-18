@@ -13,6 +13,11 @@ Data model for a single bag line-item (dict keys):
   on_wire       : bool
   gelled        : bool
   special_size  : bool
+  header        : bool  – the bag hangs from a header (adds H to the code);
+                          made on the filter worksheet, see bag_headers
+  header_width, header_height, header_depth : int – the header's size when
+                          it was set on the line (else bag - 15, 25 deep)
+  pockets       : int   – Custom Bag Filter only: pockets in each frame
   label_suffix  : str   – "LONG" | "SHORT" | ""
   efficiency    : str   – MPHE only: "60-65%" etc.
   roll_width    : str   – e.g. "2100mm"   (Media Roll only)
@@ -96,15 +101,30 @@ def prewarm_word():
     """Call on a background thread at app startup to hide Word's first-launch cost."""
     _ensure_word_app()
 
-try:
-    from docx import Document
-    from docx.shared import Pt, Inches, Cm, RGBColor
-    from docx.enum.text import WD_ALIGN_PARAGRAPH
-    from docx.oxml.ns import qn
-    from docx.oxml import OxmlElement
+# python-docx is loaded the first time a docket is written, not when the app
+# starts: it was a noticeable share of start-up for something used once an
+# order. _docx() puts its names in this module's globals on first use.
+_DOCX_AVAILABLE = None
+
+
+def _docx() -> bool:
+    global _DOCX_AVAILABLE
+    if _DOCX_AVAILABLE is not None:
+        return _DOCX_AVAILABLE
+    try:
+        from docx import Document
+        from docx.shared import Pt, Inches, Cm, RGBColor
+        from docx.enum.text import WD_ALIGN_PARAGRAPH
+        from docx.oxml.ns import qn
+        from docx.oxml import OxmlElement
+    except ImportError:
+        _DOCX_AVAILABLE = False
+        return False
+    globals().update(Document=Document, Pt=Pt, Inches=Inches, Cm=Cm,
+                     RGBColor=RGBColor, WD_ALIGN_PARAGRAPH=WD_ALIGN_PARAGRAPH,
+                     qn=qn, OxmlElement=OxmlElement)
     _DOCX_AVAILABLE = True
-except ImportError:
-    _DOCX_AVAILABLE = False
+    return True
 
 
 # ── Catalogue constants ───────────────────────────────────────────────────────
@@ -116,6 +136,7 @@ BAG_PRODUCT_TYPES = [
     "MPHE 8-Pocket",
     "MPHE 4-Pocket",
     "HEPA",
+    "Custom Bag Filter",
     "Mounting Frame",
     "Media Roll",
     "Cut Pads",
@@ -129,9 +150,10 @@ ROLL_LENGTHS     = ["8m", "20m", "40m"]
 MPHE_EFFICIENCIES = ["", "60-65%", "80-85%", "90-95%"]
 
 # product types that are "bag" filters (need W/H/D + media)
-_BAG_TYPES  = {"3-Peak", "2-Wedge", "4-Point", "MPHE 8-Pocket", "MPHE 4-Pocket", "HEPA"}
+_BAG_TYPES  = {"3-Peak", "2-Wedge", "4-Point", "MPHE 8-Pocket", "MPHE 4-Pocket", "HEPA",
+               "Custom Bag Filter"}
 # types that use bag media dropdown
-_MEDIA_TYPES_BAG  = {"3-Peak", "2-Wedge", "4-Point", "HEPA"}
+_MEDIA_TYPES_BAG  = {"3-Peak", "2-Wedge", "4-Point", "HEPA", "Custom Bag Filter"}
 _MEDIA_TYPES_MPHE = {"MPHE 8-Pocket", "MPHE 4-Pocket"}
 
 # Standard size presets: {product_type: [(label, width, height, depth|None), ...]}
@@ -173,6 +195,10 @@ STANDARD_SIZES: Dict[str, list] = {
         ("Full  610×610×292",            610, 610, 292),
         ("Custom",                       None, None, None),
     ],
+    # Ordered by its header size, pockets and pocket depth: no standard ones.
+    "Custom Bag Filter": [
+        ("Custom",                       None, None, None),
+    ],
     "Mounting Frame": [
         ("610×610  Standard",            610, 610, None),
         ("Custom",                       None, None, None),
@@ -192,8 +218,11 @@ def generate_part_number(item: dict) -> str:
     on_wire = bool(item.get("on_wire"))
     gelled  = bool(item.get("gelled"))
     special = bool(item.get("special_size"))
+    header  = bool(item.get("header"))
 
-    bag_sfx  = ("W" if on_wire else "") + ("G" if gelled else "")
+    # H follows the W: on wire with a header is "WH".
+    bag_sfx  = (("W" if on_wire else "") + ("H" if header else "")
+                + ("G" if gelled else ""))
     spec_sfx = " SPEC" if special else ""
 
     # helper
@@ -225,6 +254,12 @@ def generate_part_number(item: dict) -> str:
     if pt == "HEPA":
         dims = _d3()
         return f"GSHEP99-{dims}" if dims else ""
+
+    if pt == "Custom Bag Filter":
+        dims = _d3()
+        pockets = int(item.get("pockets") or 0)
+        pk = f"-{pockets}P" if pockets else ""
+        return f"CBF{media}-{dims}{pk}{bag_sfx}{spec_sfx}" if dims else ""
 
     if pt == "Mounting Frame":
         dims = _d2()
@@ -276,6 +311,8 @@ def build_label_line(item: dict) -> str:
         pockets = "8-Pocket" if "8" in pt else "4-Pocket"
         eff_str = f" {eff}" if eff else ""
         name = f"{half_pfx}{pockets} {media}{eff_str}"
+    elif pt == "Custom Bag Filter":
+        name = f"Custom Bag Filter {media}"
     elif pt == "Mounting Frame":
         return f"{qty} x Gal Steel Mounting Frame"
     elif pt == "Media Roll":
@@ -306,6 +343,18 @@ def build_dims_line(item: dict) -> str:
     h = item.get("height") or 0
     d = item.get("depth")  or 0
 
+    if pt == "Custom Bag Filter":
+        # As the order reads: "855mm x 570mm x 5 Pockets, 480mm pocket depth"
+        if not (w and h):
+            return ""
+        pockets = int(item.get("pockets") or 0)
+        text = f"{int(w)}mm x {int(h)}mm"
+        if pockets:
+            text += f" x {pockets} Pockets"
+        if d:
+            text += f", {int(d)}mm pocket depth"
+        return text
+
     if pt == "Mounting Frame" or not d:
         return f"{int(w)}mm x {int(h)}mm" if (w and h) else ""
 
@@ -327,6 +376,10 @@ def item_summary_short(item: dict) -> str:
         return f"{item.get('roll_width','')} × {item.get('roll_length','')}"
     if pt == "Mounting Frame":
         return f"{w}×{h}" if (w and h) else ""
+    if pt == "Custom Bag Filter":
+        pockets = int(item.get("pockets") or 0)
+        base = f"{w}×{h}×{d}" if (w and h and d) else (f"{w}×{h}" if w and h else "")
+        return f"{base} {pockets}P" if (base and pockets) else base
     return f"{w}×{h}×{d}" if (w and h and d) else ""
 
 
@@ -372,7 +425,7 @@ def generate_bag_docket(header: dict, items: List[dict], out_path: str,
     item_start / grand_total set the stock-number range within the full order
     (e.g. item_start=3, grand_total=5 → items numbered 3/5, 4/5, 5/5).
     """
-    if not _DOCX_AVAILABLE:
+    if not _docx():
         raise RuntimeError(
             "python-docx is not installed.  "
             "Run:  pip install python-docx")
@@ -659,6 +712,22 @@ def generate_bag_docket(header: dict, items: List[dict], out_path: str,
     return out_path
 
 
+def due_text(value) -> str:
+    """The due date as the floor reads it: "FRI 16 OCT 2026", "ASAP", or
+    "NOT GIVEN"."""
+    import datetime as _dt
+    text = str(value or "").strip()
+    if not text:
+        return "NOT GIVEN"
+    for fmt in ("%d/%m/%y", "%d/%m/%Y", "%Y-%m-%d", "%d-%m-%y", "%d-%m-%Y"):
+        try:
+            day = _dt.datetime.strptime(text, fmt).date()
+        except ValueError:
+            continue
+        return day.strftime("%a %d %b %Y").upper()
+    return text.upper()
+
+
 def _generate_bag_pdf_reportlab(header: dict, items: list, pdf_path: str,
                                  item_start: int = 1,
                                  grand_total: int = None) -> bool:
@@ -712,8 +781,13 @@ def _generate_bag_pdf_reportlab(header: dict, items: list, pdf_path: str,
             c.setLineWidth(lw)
             c.line(MARGIN, y, MARGIN + C_W, y)
 
+        # The due date, large and bold at the foot of every page, and the
+        # notes above it. Lines stop above both.
+        DUE_H  = 34
+        FOOT_H = DUE_H + 22
+
         def _new_page(y, need=80):
-            if y < MARGIN + need:
+            if y - need < MARGIN + FOOT_H:
                 _draw_footer(y)
                 c.showPage()
                 return _draw_page_header()
@@ -775,12 +849,18 @@ def _generate_bag_pdf_reportlab(header: dict, items: list, pdf_path: str,
             return y - 18
 
         def _draw_footer(y):
-            fy = MARGIN + 20
+            fy = MARGIN + DUE_H + 18
             _hrule(fy, lw=0.5, col=K30)
-            parts = []
-            if notes: parts.append(f"NOTES: {notes}")
-            if parts:
-                _txt(MARGIN, fy - 10, "   ".join(parts), size=8, col=K70)
+            if notes:
+                _txt(MARGIN, fy - 11, f"NOTES: {notes}"[:150], size=8, col=K70)
+            # Big enough to be noticed: plain black type, no box.
+            due = due_text(d_due)
+            size = 24
+            while size > 14 and c.stringWidth(f"DUE  {due}", "Helvetica-Bold",
+                                              size) > C_W:
+                size -= 1
+            _txt(MARGIN, MARGIN + 8, f"DUE  {due}", size=size, bold=True,
+                 col=K100)
 
         # ── First page header ────────────────────────────────────────────────
         y = _draw_page_header()
@@ -793,6 +873,15 @@ def _generate_bag_pdf_reportlab(header: dict, items: list, pdf_path: str,
             stock_num  = item_start + i
             label      = build_label_line(item)
             dims       = build_dims_line(item)
+            if item.get("header") or item.get("on_wire"):
+                # The header (made on the filter worksheet) and the wire:
+                # their sizes, so the bag is made to match them.
+                try:
+                    from .bag_headers import extras_text
+                    extra = extras_text(item)
+                except Exception:
+                    extra = "Header" if item.get("header") else ""
+                dims = "   ·   ".join(p for p in (dims, extra) if p)
             pn         = (item.get("part_number") or "").strip()
             item_notes = (item.get("notes") or "").strip()
 
@@ -891,8 +980,21 @@ def _build_bag_options(item: dict) -> str:
     """Options flags for a bag / roll item."""
     opts = []
     if item.get("on_wire"):      opts.append("On Wire")
+    if item.get("half_size"):    opts.append("Half Size")
     if item.get("gelled"):       opts.append("Gelled")
     if item.get("special_size"): opts.append("Special Size")
+    if item.get("header") or item.get("on_wire"):
+        # The header is made on the filter worksheet; the docket says what
+        # size it and the wire are, so the bag is made to match.
+        try:
+            from .bag_headers import extras_text
+            extra = extras_text(item)
+        except Exception:
+            extra = ""
+        if extra:
+            opts.append(extra)
+        elif item.get("header"):
+            opts.append("Header")
     ls = (item.get("label_suffix") or "").strip()
     if ls:                       opts.append(ls)
     return "  ·  ".join(opts)
@@ -932,7 +1034,7 @@ def generate_unified_docket(header: dict, items: List[dict], out_path: str) -> s
     Saves to out_path, attempts PDF export via PowerShell Word COM,
     opens the result, and returns the opened path.
     """
-    if not _DOCX_AVAILABLE:
+    if not _docx():
         raise RuntimeError(
             "python-docx is not installed.  Run:  pip install python-docx")
 
