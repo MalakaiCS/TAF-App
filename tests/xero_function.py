@@ -85,6 +85,9 @@ class World:
             "C-VUL": {"ContactID": "C-VUL", "Name": "Vulcan",
                       "EmailAddress": "", "ContactStatus": "ACTIVE",
                       "IsSupplier": True},
+            "C-CASH": {"ContactID": "C-CASH", "Name": "Cash Sales",
+                       "EmailAddress": "last.buyer@example.com",
+                       "ContactStatus": "ACTIVE"},
             "C-OLD": {"ContactID": "C-OLD", "Name": "Gone Co",
                       "EmailAddress": "x@gone.example",
                       "ContactStatus": "ARCHIVED"},
@@ -101,6 +104,12 @@ class World:
         self.invoices: dict = {}
         self.idempotent: dict = {}
         self.emails: list = []
+        # The app's orders and customers, as far as a cash sale needs them.
+        self.orders: dict = {}
+        self.customers = [{"id": "cu-cash", "name": "Cash Sales", "short_name": "Cash",
+                           "cash_sale": True},
+                          {"id": "cu-bells", "name": "Bells Pty Ltd", "short_name": "Bells",
+                           "cash_sale": False}]
         self.email_fail = 0          # how many sends Xero fails before one goes
         self.calls: list = []
 
@@ -213,6 +222,13 @@ def xero_api(method: str, path: str, query: dict, body, headers):
         W.xero_pos[made["PurchaseOrderID"]] = made
         W.idempotent[headers.get("Idempotency-Key", "")] = made["PurchaseOrderID"]
         return 200, {"PurchaseOrders": [made]}
+    if kind == "Contacts" and ident and method == "POST":
+        c = W.contacts.get(ident)
+        if not c:
+            return 404, {}
+        c.update({k: v for k, v in (body or {}).get("Contacts", [{}])[0].items()
+                  if k == "EmailAddress"})
+        return 200, {"Contacts": [c]}
     if kind == "Contacts":
         if ident:
             c = W.contacts.get(ident)
@@ -456,6 +472,18 @@ class Fake(BaseHTTPRequestHandler):
             if auth != f"Bearer {SERVICE}":
                 return self._send(401, {"message": "service role only"})
             return self._rest(method, url, body)
+        if url.path in ("/rest/v1/orders", "/rest/v1/customers"):
+            if auth != f"Bearer {SERVICE}":
+                return self._send(401, {"message": "service role only"})
+            query = urllib.parse.parse_qs(url.query)
+            with LOCK:
+                if url.path.endswith("orders"):
+                    o = W.orders.get(query.get("id", [""])[0].removeprefix("eq."))
+                    return self._send(200, [o] if o else [])
+                if "id" in query:
+                    cid = query["id"][0].removeprefix("eq.")
+                    return self._send(200, [c for c in W.customers if c["id"] == cid])
+                return self._send(200, [])
         if url.path == "/rest/v1/xero_invoices":
             if auth != f"Bearer {SERVICE}":
                 return self._send(401, {"message": "service role only"})
@@ -668,6 +696,49 @@ def run_checks() -> None:
     check("a line with no price stops the invoice, before anything is made",
           code == 422 and "no price" in out.get("error", "") and
           not W.rows[t2]["invoice_id"], str(out))
+    print("\n── cash sales: emailed to the buyer on the order ──")
+    cash_names = ("Cash Sales", "Cash")
+    c1, c2, c3 = (str(uuid.uuid4()) for _ in range(3))
+    W.orders[c1] = {"customer_id": "cu-cash", "customer_name": "Cash Sales",
+                    "header": {"Invoice Email": "jo@buyer.example"}}
+    W.orders[c2] = {"customer_id": "cu-cash", "customer_name": "Cash Sales",
+                    "header": {"Invoice Email": "sam@other.example"}}
+    W.orders[c3] = {"customer_id": "cu-cash", "customer_name": "Cash Sales",
+                    "header": {}}
+    code, out = call("draft", {"order_id": c1, "invoice": invoice(
+        number="TAF-ON-0951", names=cash_names), "hash": "c1", "invoice_now": True})
+    check("a cash sale is invoiced like any other, and emailed to the buyer on "
+          "the order", code == 200 and out.get("state") == "sent"
+          and ("TAF-ON-0951", "jo@buyer.example") in W.emails
+          and out.get("emailed_to") == "jo@buyer.example", f"{out} {W.emails[-1:]}")
+    code, out = call("draft", {"order_id": c2, "invoice": invoice(
+        number="TAF-ON-0952", names=cash_names), "hash": "c2", "invoice_now": True})
+    check("the next cash sale goes to its own buyer, not the last one",
+          out.get("state") == "sent"
+          and ("TAF-ON-0952", "sam@other.example") in W.emails
+          and W.contacts["C-CASH"]["EmailAddress"] == "sam@other.example",
+          f"{out} {W.emails[-2:]}")
+    sent = len(W.emails)
+    code, out = call("draft", {"order_id": c3, "invoice": invoice(
+        number="TAF-ON-0953", names=cash_names), "hash": "c3", "invoice_now": True})
+    check("with no email on the order, it is approved but sent to nobody",
+          out.get("state") == "approved" and "no email address" in out.get("error", "")
+          and len(W.emails) == sent
+          and xinv(c3).get("Status") == "AUTHORISED", str(out))
+    W.orders[c3]["header"]["Invoice Email"] = "pat@third.example"
+    code, out = call("retry", {"order_id": c3})
+    check("once the email is on the order, Retry sends it there",
+          out.get("state") == "sent" and ("TAF-ON-0953", "pat@third.example") in W.emails,
+          str(out))
+    b1 = str(uuid.uuid4())
+    W.orders[b1] = {"customer_id": "cu-bells", "customer_name": "Bells Pty Ltd",
+                    "header": {"Invoice Email": "ignored@example.com"}}
+    code, out = call("draft", {"order_id": b1, "invoice": invoice(
+        number="TAF-ON-0954"), "hash": "b1", "invoice_now": True})
+    check("any other customer's invoice still goes to their contact on file",
+          ("TAF-ON-0954", "accounts@bells.example") in W.emails
+          and W.contacts["C-BELLS"]["EmailAddress"] == "accounts@bells.example", str(out))
+
     code, out = call("mode", {"mode": "automatic"})
     check("somebody on the floor cannot publish it", code == 403, str(out))
     code, out = call("mode", {"mode": "sometimes"}, auth="Bearer boss")

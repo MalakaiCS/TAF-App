@@ -40,6 +40,7 @@ import hashlib
 import json as _json
 import urllib.error
 import urllib.request
+import re as _re
 from typing import Any, Dict, Iterable, List, Optional
 
 from . import db as _db
@@ -450,3 +451,24 @@ class Sync:
             except Exception:
                 pass
         return self.last
+
+
+# ── Cash sales (migrate_cash_sales.sql, step 51) ─────────────────────────────
+# The account walk-in buyers go under. Its invoice goes to the buyer, whose
+# email is asked for each time it is invoiced and kept on the order; the
+# xero function sends it there. The function holds the same rule, so an
+# order with no address is approved and sent to nobody, whichever PC.
+
+INVOICE_EMAIL = "Invoice Email"
+
+_EMAIL = _re.compile(r"^[^\s@]+@[^\s@]+\.[^\s@]+$")
+
+
+def is_cash_sale(customer: Optional[Dict[str, Any]]) -> bool:
+    return bool((customer or {}).get("cash_sale") is True)
+
+
+def clean_email(text: Any) -> str:
+    """The address as typed, trimmed - or "" when it is not one."""
+    text = str(text or "").strip().strip("<>").strip()
+    return text if _EMAIL.match(text) else ""

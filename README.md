@@ -597,6 +597,7 @@ just run it — nothing is lost and nothing is duplicated.
 | 48 | `migrate_delivery_money.sql` | Out the door, and what it made: the order the van goes round in, which proof of delivery was emailed, what each order is worth, monthly sales targets, and which owner's report went out | recommended |
 | 49 | `migrate_staff_board.sql` | How we do things, and talking to each other: the how-to library with "I've read this" per version, the noticeboard and group chats, and who may post, pin, start groups and take messages down | recommended |
 | 50 | `migrate_direct_messages.sql` | Private messages: a conversation between any two people on staff, only they can see it - one per pair (needs step 49) | recommended |
+| 51 | `migrate_cash_sales.sql` | Cash sales: the account walk-in buyers go under, whose invoices are emailed to an address asked for each time, not the one on file (needs step 39) | recommended |
 
 **Step 16 is the one that matters most.** Every policy in the older scripts is
 `TO authenticated USING (true)` — meaning *anyone Supabase counts as signed
@@ -879,6 +880,18 @@ slip** for one going out (the docket - the customer's copy and the copy they
 sign). View Order → Actions → **Invoice & packing slip (PDF)** makes it again
 for an order already invoiced. (It opens for now, while it is being tried;
 switching `INVOICE_PAPERWORK_PRINTS` on sends it straight to the printer.)
+
+**Cash sales** (step 51): tick *Cash sale account* on the customer walk-in
+and one-off buyers go under (managers only). **Send to Xero & invoice
+customer** on one of its orders then asks who to email the invoice to -
+every time, offering the address already on that order - and keeps it on the
+order. The invoice is the same Xero invoice and email as anybody else's: just
+before Xero sends it, the cash sale contact's email in Xero is set to that
+buyer's, so it never goes to whoever bought last. Cancel the question and
+that order is not invoiced. An order of that account invoiced any other way
+(automatic mode, say) with no email on it is approved in Xero but sent to
+nobody, and says so on the Xero screen; put the email on the order and press
+Retry.
 
 Xero numbers each invoice itself, carrying on from its own sequence, and the
 order number on the worksheet (the customer's purchase order) goes in the

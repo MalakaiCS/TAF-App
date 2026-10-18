@@ -1547,6 +1547,20 @@ def customer_extras_ready() -> bool:
     return _CUSTOMER_EXTRAS["ok"]
 
 
+_CASH_SALES: dict = {}
+
+
+def cash_sales_ready() -> bool:
+    """Whether migrate_cash_sales.sql (step 51) has been run. Asked once."""
+    if "ok" not in _CASH_SALES:
+        try:
+            get_client().table("customers").select("cash_sale").limit(1).execute()
+            _CASH_SALES["ok"] = True
+        except Exception:
+            _CASH_SALES["ok"] = False
+    return _CASH_SALES["ok"]
+
+
 def customer_wants_labels(customer: "dict | None") -> bool:
     """On unless the customer's account says off. No account, no column:
     on, as it always was."""

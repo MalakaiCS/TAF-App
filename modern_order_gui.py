@@ -14496,6 +14496,22 @@ class ModernOrderApp(tk.Frame):
                        selectcolor=CCA, activebackground=CBG).grid(
             row=_row, column=1, sticky="w", pady=4)
         _row += 1
+        # The cash sale account: its invoices go to whoever bought, asked for
+        # each time. A manager's decision (the database holds that too).
+        cash_on = _db.is_ready() and _db.cash_sales_ready()
+        v_cash = tk.BooleanVar(value=_xero.is_cash_sale(g))
+        if cash_on:
+            tk.Label(body, text="Cash sales", bg=CBG, fg=CTX,
+                     font=F_BODY, width=18, anchor="w").grid(
+                row=_row, column=0, sticky="w", pady=4)
+            cash_box = tk.Checkbutton(
+                body, text="Cash sale account - ask for the buyer's email each "
+                "time it is invoiced", variable=v_cash, bg=CBG, fg=CTX,
+                font=F_BODY, selectcolor=CCA, activebackground=CBG)
+            cash_box.grid(row=_row, column=1, columnspan=2, sticky="w", pady=4)
+            if not _db.can_manage_prices():
+                cash_box.config(state="disabled")
+            _row += 1
 
         # ── Their contact in Xero ─────────────────────────────────────────
         # Type to search Xero's contacts, as the customer name does on an
@@ -14669,6 +14685,8 @@ class ModernOrderApp(tk.Frame):
                    if tiers_on and _db.can_manage_prices() else {}),
                 **({"delivery_fee": _fee_value(v_fee.get())}
                    if extras_on and _db.can_manage_prices() else {}),
+                **({"cash_sale": bool(v_cash.get())}
+                   if cash_on and _db.can_manage_prices() else {}),
                 **({"xero_contact_id": xero_link["id"]}
                    if extras_on and xero_link["changed"] else {}),
                 "notes":            txt_notes.get("1.0", "end").strip(),
@@ -27613,6 +27631,10 @@ class ModernOrderApp(tk.Frame):
                 "manager connects it on the Xero screen.")
             return
         prepared, problems = [], []
+        if invoice:
+            # Read the accounts afresh: which one is the cash sale account may
+            # have changed since this PC last looked.
+            self._invoice_cust_cache = {}
         for r in rows:
             number = r.get("order_no") or "—"
             if r.get("source") != "db" or not r.get("db_id"):
@@ -27640,6 +27662,14 @@ class ModernOrderApp(tk.Frame):
                                 "work order first.")
                 continue
             total = sum(l["quantity"] * l["unit_amount"] for l in inv["lines"])
+            if invoice and _xero.is_cash_sale(customer):
+                # A cash sale: emailed to this buyer, asked for every time.
+                email = self._ask_invoice_email(r, header, total)
+                if not email:
+                    problems.append(f"{number}: a cash sale - not invoiced, "
+                                    "as no email address was given for it.")
+                    continue
+                header[_xero.INVOICE_EMAIL] = email
             prepared.append((r, header, built, total))
         if not prepared:
             messagebox.showwarning(title, "Nothing was sent.\n\n"
@@ -27648,6 +27678,7 @@ class ModernOrderApp(tk.Frame):
         listed = "\n".join(
             f"  • {h.get('Order Number') or r.get('order_no') or '—'}  "
             f"{h.get('Customer Name', '')}  —  ${t:,.2f} ex GST"
+            f"{'  →  ' + h[_xero.INVOICE_EMAIL] if h.get(_xero.INVOICE_EMAIL) else ''}"
             f"{'  (' + str(b['unpriced']) + ' line(s) with no price)' if b['unpriced'] else ''}"
             for r, h, b, t in prepared[:12])
         if len(prepared) > 12:
@@ -27657,7 +27688,8 @@ class ModernOrderApp(tk.Frame):
             ask = (f"Invoice {n} order{'s' if n != 1 else ''} through Xero?\n\n"
                    f"{listed}\n\nEach is made in Xero, approved, dated "
                    "today and emailed by Xero to the customer's contact on "
-                   "file. The order is then marked Complete.")
+                   "file - a cash sale to the email given for it. The order "
+                   "is then marked Complete.")
         else:
             ask = (f"Send {n} draft invoice{'s' if n != 1 else ''} to Xero?"
                    f"\n\n{listed}\n\nThey wait in Xero as drafts - "
@@ -27673,6 +27705,17 @@ class ModernOrderApp(tk.Frame):
         def _work():
             results = []
             for r, header, built, _t in prepared:
+                email = header.get(_xero.INVOICE_EMAIL) if invoice else ""
+                if email:
+                    # Kept on the order first: it is where the function
+                    # reads it from, and what Retry sends to later.
+                    try:
+                        _db.merge_order_header(str(r["db_id"]),
+                                               {_xero.INVOICE_EMAIL: email})
+                    except Exception as exc:
+                        results.append((r, header, {"error": "the buyer's email "
+                                        f"could not be saved on the order: {exc}"}, False))
+                        continue
                 out = _xero.push_draft(r["db_id"], built, invoice_now=invoice)
                 completed = False
                 if invoice and out.get("state") in ("sent", "approved"):
@@ -27750,6 +27793,26 @@ class ModernOrderApp(tk.Frame):
                 on_done()
 
         threading.Thread(target=_work, daemon=True).start()
+
+    def _ask_invoice_email(self, row, header, total) -> str:
+        """The buyer's email for a cash sale, before it is invoiced. The one
+        already on the order is offered; Cancel invoices nothing."""
+        number = header.get("Order Number") or row.get("order_no") or "—"
+        was = header.get(_xero.INVOICE_EMAIL) or ""
+        prompt = (f"Order {number} is a cash sale (${total:,.2f} ex GST).\n\n"
+                  "Who should the invoice be emailed to?")
+        while True:
+            text = simpledialog.askstring("Cash sale - email the invoice to",
+                                          prompt, initialvalue=was,
+                                          parent=self.master)
+            if text is None:
+                return ""
+            email = _xero.clean_email(text)
+            if email:
+                return email
+            was = text
+            prompt = (f"\"{text.strip()}\" is not an email address.\n\n"
+                      f"Who should the invoice for order {number} be emailed to?")
 
     # Invoice and packing slip, together. Opened for now; once it has been
     # tried, True sends it to the printer instead (as the dockets are).

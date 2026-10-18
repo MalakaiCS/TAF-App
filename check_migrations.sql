@@ -210,7 +210,12 @@ WITH checks(step, file, purpose, needed, present) AS (VALUES
       AND to_regclass('public.chat_rules') IS NOT NULL),
 
   (50, 'migrate_direct_messages.sql', 'Private messages between two people', 'recommended',
-      to_regprocedure('public.open_direct(uuid)') IS NOT NULL)
+      to_regprocedure('public.open_direct(uuid)') IS NOT NULL),
+
+  (51, 'migrate_cash_sales.sql', 'The cash sale account: an email asked for each time it is invoiced', 'recommended',
+      EXISTS (SELECT 1 FROM information_schema.columns
+               WHERE table_schema='public' AND table_name='customers'
+                 AND column_name='cash_sale'))
 )
 SELECT step,
        CASE WHEN present THEN 'already done' ELSE 'RUN THIS' END AS status,

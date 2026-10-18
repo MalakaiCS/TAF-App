@@ -695,12 +695,62 @@ async function approveOne(row: Row) {
   return await emailOne(row, inv, contact);
 }
 
+// A cash sale (migrate_cash_sales.sql, step 51): the account walk-in buyers
+// go under. Its invoices go to the address on the order ("Invoice Email",
+// asked for each time it is invoiced), never to whoever bought last - so
+// with no address on the order, nothing is sent. No step 51, or no such
+// order: not a cash sale.
+const EMAIL = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
+async function cashSale(orderId: string): Promise<{ cash: boolean; email: string }> {
+  try {
+    const orders = await rest("GET", `orders?id=eq.${orderId}` +
+                              "&select=customer_id,customer_name,header");
+    const o = orders?.[0];
+    if (!o) return { cash: false, email: "" };
+    let cust: Row[] = [];
+    if (o.customer_id) {
+      cust = await rest("GET", `customers?id=eq.${o.customer_id}&select=cash_sale`);
+    }
+    if (!cust?.length && o.customer_name) {
+      const name = encodeURIComponent(String(o.customer_name));
+      cust = await rest("GET", `customers?or=(name.eq.${name},short_name.eq.${name})` +
+                               "&select=cash_sale&limit=1");
+    }
+    const email = String((o.header ?? {})["Invoice Email"] ?? "").trim();
+    return { cash: cust?.[0]?.cash_sale === true, email: EMAIL.test(email) ? email : "" };
+  } catch {
+    return { cash: false, email: "" };
+  }
+}
+
 async function emailOne(row: Row, inv: Row | null, contact: Row | null = null) {
   if (inv?.SentToContact) {
     await put(row.order_id, { state: "sent", emailed_at: nowIso(),
                               emailed_to: "sent from Xero", error: null,
                               claimed_until: null });
     return { state: "sent", number: row.invoice_number };
+  }
+  // A cash sale goes to the buyer on the order: Xero emails an invoice to
+  // its contact's address, so the cash sale contact's address is set to the
+  // buyer's first - the same Xero invoice and email as anybody else's.
+  const cash = await cashSale(row.order_id);
+  if (cash.cash) {
+    if (!cash.email) {
+      const error = "A cash sale with no email address on the order, so the " +
+        "invoice was approved but not sent. Put the buyer's email on the " +
+        "order (Send to Xero & invoice asks for it) and press Retry.";
+      await put(row.order_id, { error, claimed_until: null });
+      return { state: "approved", error };
+    }
+    contact = contact ?? await getContact(inv?.Contact?.ContactID);
+    if (contact?.ContactID &&
+        String(contact.EmailAddress ?? "").toLowerCase() !== cash.email.toLowerCase()) {
+      await xero("POST", `/api.xro/2.0/Contacts/${contact.ContactID}`, {
+        Contacts: [{ ContactID: contact.ContactID, EmailAddress: cash.email }],
+      });
+      contact = { ...contact, EmailAddress: cash.email };
+    }
   }
   // Xero's email sending fails now and then on its side ("An error occurred
   // in Xero", a 5xx) straight after approving; another go a moment later

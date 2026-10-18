@@ -1680,6 +1680,29 @@ def run_direct_message_checks(pg: Postgres) -> None:
     check("the noticeboard still comes first", ok and out == "board", out or err)
 
 
+def run_cash_sale_checks(pg: Postgres) -> None:
+    print("\n── cash sales (step 51) ──")
+    for _ in range(2):
+        ok, _o, err = pg.psql((ROOT / "migrate_cash_sales.sql").read_text(
+            encoding="utf-8"), "f")
+        check("step 51 runs, and runs again cleanly", ok, err)
+    cust = q(pg, "SELECT id FROM customers ORDER BY name LIMIT 1;")
+    got = q(pg, f"SELECT cash_sale FROM customers WHERE id = '{cust}';")
+    check("no account is the cash sale account until somebody says so", got == "f", got)
+    ok, _o, err = as_in(pg, "f", DAVE, "UPDATE customers SET cash_sale = true "
+                        f"WHERE id = '{cust}' RETURNING id;")
+    check("somebody on the floor cannot make an account the cash sale account",
+          not ok and "Only a manager" in err, err)
+    ok, out, err = as_in(pg, "f", SARAH, "UPDATE customers SET cash_sale = true "
+                         f"WHERE id = '{cust}' RETURNING id;")
+    check("a manager can", ok and out, err)
+    ok, out, err = as_in(pg, "f", DAVE, "UPDATE customers SET phone = '07 5555 0000' "
+                         f"WHERE id = '{cust}' RETURNING id;")
+    check("and the rest of the account is still anybody's to keep up to date",
+          ok and out, err)
+    q(pg, f"UPDATE customers SET cash_sale = false WHERE id = '{cust}';")
+
+
 def _skip(why: str) -> int:
     """Skipping is fine on a laptop. In CI it is not: a workflow that goes
     green having checked nothing is worse than no workflow, because it is
@@ -1714,6 +1737,7 @@ def main() -> int:
         run_delivery_money_checks(pg)
         run_staff_board_checks(pg)
         run_direct_message_checks(pg)
+        run_cash_sale_checks(pg)
     finally:
         pg.stop()
     print(f"\n{len(FAILURES)} FAILED" if FAILURES

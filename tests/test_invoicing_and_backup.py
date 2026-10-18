@@ -287,3 +287,17 @@ def test_the_inbox_sweep_skips_batches_this_pc_already_read():
     assert "skip=already" in source
     assert "_download_photos" in source
     assert "ThreadPoolExecutor" in inspect.getsource(po_import._download_photos)
+
+
+def test_a_cash_sale_is_only_the_account_marked_so():
+    from taf_order_app import xero as _x
+    assert _x.is_cash_sale({"cash_sale": True})
+    assert not _x.is_cash_sale({"cash_sale": "yes"})
+    assert not _x.is_cash_sale({}) and not _x.is_cash_sale(None)
+
+
+def test_the_buyers_email_is_checked_before_anything_is_invoiced():
+    from taf_order_app import xero as _x
+    assert _x.clean_email("  <jo@buyer.example> ") == "jo@buyer.example"
+    for bad in ("", "jo", "jo@buyer", "jo @buyer.example", "@buyer.example", None):
+        assert _x.clean_email(bad) == "", bad

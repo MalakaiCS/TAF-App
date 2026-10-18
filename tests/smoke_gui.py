@@ -2533,6 +2533,75 @@ def _steps(app, gui, root):
             app._tab_loaded.update(loaded)
     add("orders: Send to Xero & invoice customer", _send_to_xero)
 
+    def _cash_sale_invoice():
+        """The cash sale account: the buyer's email asked for, a wrong one
+        asked again, kept on the order, and Cancel invoicing nothing."""
+        from taf_order_app import features as _feat
+        from taf_order_app import xero as _x
+        sent, headers, said, answers = [], [], [], []
+        saved = (_x.push_draft, gui._db.set_order_status, gui._db.match_customer,
+                 gui._db.merge_order_header, gui.messagebox.askyesno,
+                 gui.messagebox.showinfo, gui.messagebox.showwarning,
+                 gui.simpledialog.askstring, dict(_feat._switches))
+        _x.push_draft = lambda oid, built, md5="", invoice_now=False: (
+            sent.append(oid) or {"state": "sent", "number": "INV-9",
+                                 "emailed_to": "jo@buyer.example"})
+        gui._db.set_order_status = lambda oid, st: None
+        gui._db.match_customer = lambda name: {"name": "Cash Sales", "cash_sale": True}
+        gui._db.merge_order_header = lambda oid, patch: headers.append((oid, dict(patch)))
+        gui.messagebox.askyesno = lambda *a, **k: said.append(a) or True
+        gui.messagebox.showinfo = lambda *a, **k: said.append(a)
+        gui.messagebox.showwarning = lambda *a, **k: said.append(a)
+        gui.simpledialog.askstring = lambda *a, **k: answers.pop(0) if answers else None
+        _feat._switches = {"xero_live": True}
+        app._output_invoice_paperwork = lambda path: None
+        app._invoice_paperwork = lambda *a, **k: (None, "")
+        app._refresh_orders_list = lambda: None
+        loaded = dict(app._tab_loaded)
+        order = {"source": "db", "db_id": "o-cash", "order_no": "21700",
+                 "customer": "Cash Sales", "status": "Pending",
+                 "db_header": {"Order Number": "21700", "Customer Name": "Cash Sales"},
+                 "db_items": [{"item_kind": "filter", "Filter Type": "V-form",
+                               "Media Type": "G4", "Short": 595, "Long": 595,
+                               "Channel": 45, "Quantity": 1, "Unit Price": 40.0,
+                               "Price Source": "manual"}]}
+
+        def _run():
+            said.clear()
+            app._xero_send_orders([order], True)
+            for _ in range(200):
+                root.update()
+                if len(said) >= 2 or (said and not sent and "Nothing" in str(said[0])):
+                    break
+                time.sleep(0.05)
+
+        try:
+            answers[:] = ["not an email", "  Jo@Buyer.example "]
+            _run()
+            assert not answers, answers
+            assert headers == [("o-cash", {"Invoice Email": "Jo@Buyer.example"})], headers
+            assert sent == ["o-cash"], sent
+            assert "→  Jo@Buyer.example" in str(said[0]), said[0]
+            assert "emailed to jo@buyer.example" in str(said[-1]), said[-1]
+            sent.clear()
+            headers.clear()
+            answers[:] = [None]                       # Cancel
+            _run()
+            assert sent == [] and headers == [], (sent, headers)
+            assert "no email address was given" in str(said[0]), said[0]
+        finally:
+            (_x.push_draft, gui._db.set_order_status, gui._db.match_customer,
+             gui._db.merge_order_header, gui.messagebox.askyesno,
+             gui.messagebox.showinfo, gui.messagebox.showwarning,
+             gui.simpledialog.askstring, _feat._switches) = saved
+            for name in ("_output_invoice_paperwork", "_invoice_paperwork",
+                         "_refresh_orders_list"):
+                app.__dict__.pop(name, None)
+            app._invoice_cust_cache = {}
+            app._tab_loaded.clear()
+            app._tab_loaded.update(loaded)
+    add("orders: a cash sale asks who to email the invoice to", _cash_sale_invoice)
+
     def _press(win, text):
         for w in _walk(win):
             if isinstance(w, gui.PillButton) and w.cget("text") == text:
