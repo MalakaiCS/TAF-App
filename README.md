@@ -196,6 +196,33 @@ log, stock management and a customer database.
     through it the month's orders are and what each working day left needs.
     What an order is worth (priced lines plus delivery, ex GST) is worked out
     in the database, so every screen and the report agree.
+- **How we do things, and talking to each other** (step 49, switched on in
+  Settings → Features):
+  - **How-to library** — *How-to library…* on the PC and *How to* on the
+    phone: a procedure for each job or filter type, with the words, a video
+    link and a file (PDF, photo). Managers add and change them; changing what
+    one says makes a new version. *I've read this* signs off the version
+    there now, and a manager sees who has read the latest, who read an older
+    one and who has not read it at all. A line on an order on the phone
+    offers 📘 how to make that filter type.
+  - **Noticeboard and group chats** — *Messages…* on the PC and *Messages*
+    on the phone (with a count of what is new, and a tile on Today): one
+    noticeboard everybody reads, and group chats only their members see.
+    Pinned messages stay at the top. Who may do what is a minimum role for
+    each, set by a director or admin in *Who can do what…*:
+
+    | | Out of the box |
+    |---|---|
+    | Post on the noticeboard | Managers and above |
+    | Pin a message | Directors and admins |
+    | Start a group chat | Managers and above |
+    | Take down anybody's message | Directors and admins |
+
+    Everybody can take down their own. A group also says who can post in it
+    (everybody in it, or managers and above, or directors and admins);
+    whoever started it, or an admin, changes who is in it. The database
+    holds all of these rules - a message cannot be posted, pinned or taken
+    down around them from any screen.
 - **Delivery labels** — one A4 landscape sheet per wrapped bundle, with the
   TAF logo, the company's base address as From, the delivery address, filter
   size, the quantity in that wrap (and the line's ordered quantity), the
@@ -565,6 +592,7 @@ just run it — nothing is lost and nothing is duplicated.
 | 46 | `migrate_sales.sql` | Winning the work: when a quote was chased and why one was lost, how often a customer's filters are changed (for reminders), and price changes previewed and applied once from a date (needs the quotes, quote portal, pricing and price tier steps) | recommended |
 | 47 | `migrate_stock_insight.sql` | Stock you can trust: counting on the phone during a stocktake, what open orders have spoken for, what each supplier has charged, and how long each takes (needs steps 3, 40 and the more-features step) | recommended |
 | 48 | `migrate_delivery_money.sql` | Out the door, and what it made: the order the van goes round in, which proof of delivery was emailed, what each order is worth, monthly sales targets, and which owner's report went out | recommended |
+| 49 | `migrate_staff_board.sql` | How we do things, and talking to each other: the how-to library with "I've read this" per version, the noticeboard and group chats, and who may post, pin, start groups and take messages down | recommended |
 
 **Step 16 is the one that matters most.** Every policy in the older scripts is
 `TO authenticated USING (true)` — meaning *anyone Supabase counts as signed

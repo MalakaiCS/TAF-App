@@ -279,6 +279,16 @@ CATALOGUE: List[Feature] = [
             "A target for each month, and how far through it the orders are "
             "on Today, on the PC and the phone.",
             "Money", built=True),
+
+    # ── How we do things, and talking to each other (step 49) ───────────
+    Feature("sops", "How-to library",
+            "Procedures for each job and filter type - words, a video, a "
+            "file - on the PC and the phone, with who has read the latest.",
+            "The floor", built=True),
+    Feature("staff_chat", "Noticeboard and group chats",
+            "A noticeboard everybody reads and group chats, with who may "
+            "post, pin, start a group or take a message down set by role.",
+            "Admin", built=True),
 ]
 
 BY_KEY: Dict[str, Feature] = {f.key: f for f in CATALOGUE}

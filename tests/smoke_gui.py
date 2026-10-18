@@ -167,6 +167,44 @@ OVERRIDES = {
     "add_fault":           lambda row, photo="": ADDED_FAULTS.append(dict(row))
                                                  or row,
     "orders_with_finished_photo": lambda ids: set(),
+    "current_user_id":     lambda *a, **k: "u-me",
+    "list_sops":           lambda *a, **k: [dict(s) for s in SMOKE_SOPS],
+    "sop_reads":           lambda *a, **k: [
+        {"sop_id": "s1", "user_id": "u-me", "version": 1, "person": "Smoke Test"}],
+    "read_sop":            lambda sid: READ_SOPS.append(sid) or 2,
+    "save_sop":            lambda row, path="": SAVED_SOPS.append(dict(row)) or row,
+    "sop_file_url":        lambda *a, **k: "https://files.example/sop.pdf",
+    "staff_people":        lambda *a, **k: [
+        {"id": "u-me", "name": "Smoke Test", "role": "Manager"},
+        {"id": "u2", "name": "Dave Floor", "role": "Employee"}],
+    "chat_rules":          lambda *a, **k: {"post_board": "Manager", "pin": "Admin",
+                                            "make_group": "Manager",
+                                            "remove_any": "Admin"},
+    "set_chat_rule":       lambda a, r: CHAT_DONE.append(("rule", a, r)),
+    "my_chats":            lambda *a, **k: [
+        {"id": "ch-board", "name": "Noticeboard", "kind": "board", "unread": 1,
+         "can_post": __import__("taf_order_app.db",
+                                fromlist=["db"]).can_handle_supplies(),
+         "members": 0},
+        {"id": "ch-g", "name": "Night shift", "kind": "group", "unread": 0,
+         "can_post": True, "members": 2, "created_by": "u-me",
+         "post_min_role": "Employee"}],
+    "chat_messages":       lambda cid, *a, **k: [
+        {"id": "m1", "channel_id": cid, "user_id": "u9", "author": "Amy Admin",
+         "body": "Toolbox talk Friday", "pinned": True,
+         "created_at": "2026-10-16T00:00:00+00:00"},
+        {"id": "m2", "channel_id": cid, "user_id": "u-me", "author": "Smoke Test",
+         "body": "On my way", "pinned": False,
+         "created_at": "2026-10-16T01:00:00+00:00"}],
+    "post_message":        lambda cid, body: CHAT_DONE.append(("post", cid, body)) or {},
+    "pin_message":         lambda mid, on=True: CHAT_DONE.append(("pin", mid, on)),
+    "remove_message":      lambda mid: CHAT_DONE.append(("remove", mid)),
+    "mark_chat_read":      lambda cid: CHAT_DONE.append(("read", cid)),
+    "make_group":          lambda name, ids, role="Employee": CHAT_DONE.append(
+        ("group", name, list(ids), role)) or "g-new",
+    "set_group_members":   lambda cid, ids: CHAT_DONE.append(("members", cid, list(ids))) or 2,
+    "group_members":       lambda cid: ["u-me", "u2"],
+    "leave_group":         lambda cid: CHAT_DONE.append(("leave", cid)),
     "delivery_run":        lambda *a, **k: list(SAVED_RUNS[-1][1]) if SAVED_RUNS else [],
     "save_delivery_run":   lambda day, stops: SAVED_RUNS.append((day, list(stops))),
     "delivery_proof":      lambda *a, **k: {
@@ -522,6 +560,15 @@ STOCK_LINKS = [
 ]
 SAVED_LINKS: list = []
 SAVED_RUNS: list = []
+SMOKE_SOPS = [
+    {"id": "s1", "title": "Making a V-form", "category": "Floor",
+     "filter_type": "V-Form", "body": "Cut, pleat, frame.", "version": 2,
+     "video_url": "https://youtu.be/abc", "file_path": "x.pdf"},
+    {"id": "s2", "title": "Answering the phone", "category": "Office",
+     "body": "Say who we are.", "version": 1, "video_url": "", "file_path": ""}]
+READ_SOPS: list = []
+SAVED_SOPS: list = []
+CHAT_DONE: list = []
 SET_TARGETS: list = []
 SENT_SUPPLIES: list = []
 SAVED_POS: list = []
@@ -2108,6 +2155,93 @@ def _steps(app, gui, root):
             gui.simpledialog.askstring = real_ask
             _feat._switches = {}
     add("dialogs: out the door, and what it made", _delivery_money_windows)
+
+    def _staff_board_windows():
+        """The how-to library, and the noticeboard and group chats - with
+        what each role is offered."""
+        import webbrowser
+        from taf_order_app import features as _feat
+        _feat._switches = {"sops": True, "staff_chat": True}
+        manager = gui._db.can_handle_supplies()
+        opened, real = [], webbrowser.open
+        webbrowser.open = lambda url, *a, **k: opened.append(url)
+
+        def _wait(tree, n=1):
+            for _ in range(80):
+                root.update()
+                if len(tree.get_children()) >= n:
+                    return
+                time.sleep(0.05)
+
+        try:
+            dlg, tree, foot = app._sop_library()
+            _wait(tree, 4)
+            assert tree.item("s1", "values")[3] == "Changed since you read it", \
+                tree.item("s1", "values")
+            assert tree.item("s2", "values")[3] == "Not read"
+            if manager:
+                assert tree.item("s1", "values")[4] == "0 of 2", tree.item("s1", "values")
+            win = dlg.sop_open("s1", dlg)
+            READ_SOPS.clear()
+            win.sop_read()
+            assert READ_SOPS == ["s1"] and "version 2" in win.sop_status.cget("text")
+            if manager:
+                got = win.sop_who()
+                assert got == {"read": [], "behind": ["Smoke Test"], "not": ["Dave Floor"]}, got
+            win.destroy()
+            if manager:
+                ed = app._edit_sop(None, dlg)
+                assert ed.sop_save() is None and "title" in ed.sop_status.cget("text")
+                ed.sop_fields["title"].set("Cleaning the saw")
+                ed.sop_fields["video_url"].set("ftp://nope")
+                assert ed.sop_save() is None
+                ed.sop_fields["video_url"].set("https://youtu.be/saw")
+                ed.sop_text.insert("1.0", "Unplug it first.")
+                SAVED_SOPS.clear()
+                ed.sop_save()
+                assert SAVED_SOPS and SAVED_SOPS[0]["title"] == "Cleaning the saw" \
+                    and SAVED_SOPS[0]["body"] == "Unplug it first.", SAVED_SOPS
+            dlg.destroy()
+
+            CHAT_DONE.clear()
+            win = app._messages_window()
+            root.update()
+            assert win.chats_tree.get_children() == ("ch-board", "ch-g"), \
+                win.chat_note.cget("text")
+            rows = win.messages_tree.get_children()
+            assert rows == ("m1", "m2"), rows
+            assert ("read", "ch-board") in CHAT_DONE
+            if manager:
+                assert win.chat_send("Forklift at 2") and \
+                    ("post", "ch-board", "Forklift at 2") in CHAT_DONE
+            else:
+                assert str(win.chat_entry.cget("state")) == "disabled"
+                assert win.chat_note.cget("text") == "Only managers and above can post here."
+            win.chat_remove(win.chat_state["messages"][1], ask=False)
+            assert ("remove", "m2") in CHAT_DONE
+            win.chat_open("ch-g")
+            assert win.chat_send("Who has the van?")
+            assert ("post", "ch-g", "Who has the van?") in CHAT_DONE
+            if manager:
+                grp = app._new_group(win)
+                grp.group_name.set("Office")
+                grp.group_box.selection_set(0)
+                grp.group_make()
+                assert CHAT_DONE[-1] == ("group", "Office", ["u2"], "Employee"), CHAT_DONE[-1]
+            ppl = app._group_people(win.chat_state["chats"][1], win)
+            ppl.group_box.selection_clear(0, "end")
+            ppl.group_save()
+            assert CHAT_DONE[-1] == ("members", "ch-g", []), CHAT_DONE[-1]
+            rules = app._chat_rules_window(win)
+            rules.rule_boxes["pin"].set("Managers and above")
+            assert rules.rule_save() and ("rule", "pin", "Manager") in CHAT_DONE
+            win.destroy()
+            app._refresh_dashboard()
+            root.update()
+        finally:
+            webbrowser.open = real
+            _feat._switches = {}
+    add("dialogs: how-tos, the noticeboard and groups", _staff_board_windows)
 
     def _answer_waiting_dialogs(before):
         """Say yes to a dialog that has stopped and asked something.

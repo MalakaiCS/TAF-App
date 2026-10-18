@@ -68,6 +68,7 @@ ORDER = [
     "migrate_sales.sql",
     "migrate_stock_insight.sql",
     "migrate_delivery_money.sql",
+    "migrate_staff_board.sql",
 ]
 
 

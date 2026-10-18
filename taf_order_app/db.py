@@ -3296,6 +3296,145 @@ def owner_report(month: str, send: bool = False, timeout: int = 60) -> dict:
         return {"error": str(exc)}
 
 
+# ── How we do things, and talking to each other (step 49) ───────────────────
+
+SOP_BUCKET = "sops"
+
+
+def current_user_id() -> str:
+    return str(getattr(_current_user, "id", "") or "")
+
+
+def list_sops(include_archived: bool = False) -> list:
+    q = get_client().table("sops").select("*").order("title")
+    if not include_archived:
+        q = q.eq("archived", False)
+    return list(q.execute().data or [])
+
+
+def save_sop(row: dict, file_path: str = "") -> dict:
+    """Add or change a how-to; with `file_path`, its file goes up to the
+    sops bucket and replaces the one it had."""
+    data = {k: row[k] for k in ("title", "category", "filter_type", "body",
+                                "video_url", "archived") if k in row}
+    data["updated_by"] = current_full_name() or current_username() or ""
+    if file_path:
+        import uuid as _uuid
+        from pathlib import Path as _P
+        src = _P(file_path)
+        name = f"{_uuid.uuid4()}{src.suffix.lower()}"
+        import mimetypes as _m
+        get_client().storage.from_(SOP_BUCKET).upload(
+            name, src.read_bytes(),
+            file_options={"content-type": _m.guess_type(src.name)[0]
+                          or "application/octet-stream"})
+        data["file_path"] = name
+    if row.get("id"):
+        resp = get_client().table("sops").update(data).eq("id", row["id"]).execute()
+    else:
+        resp = get_client().table("sops").insert(data).execute()
+    return (resp.data or [data])[0]
+
+
+def sop_file_url(path: str, seconds: int = 3600) -> str:
+    got = get_client().storage.from_(SOP_BUCKET).create_signed_url(path, seconds)
+    if isinstance(got, dict):
+        return got.get("signedURL") or got.get("signedUrl") or ""
+    return str(got or "")
+
+
+def sop_reads() -> list:
+    """Your own sign-offs - or, for a manager, everybody's."""
+    return list(get_client().table("sop_reads").select("*").execute().data or [])
+
+
+def read_sop(sop_id: str) -> int:
+    resp = get_client().rpc("read_sop", {"p_id": sop_id}).execute()
+    return int(resp.data or 0)
+
+
+def staff_people() -> list:
+    """Everybody approved: [{"id", "name", "role"}], by name."""
+    out = []
+    for p in get_all_profiles():
+        if p.get("approved") is False:
+            continue
+        out.append({"id": str(p.get("id")),
+                    "name": p.get("full_name") or p.get("username") or "",
+                    "role": p.get("role") or "Employee"})
+    return sorted(out, key=lambda p: p["name"].lower())
+
+
+def chat_rules() -> dict:
+    from . import staff_board as _sb
+    try:
+        rows = get_client().table("chat_rules").select("*").execute().data or []
+    except Exception:
+        rows = []
+    return _sb.rules_with_defaults(rows)
+
+
+def set_chat_rule(action: str, min_role: str) -> None:
+    get_client().table("chat_rules").update({
+        "min_role": min_role, "updated_at": _utc_now(),
+        "updated_by": current_full_name() or current_username() or "",
+    }).eq("action", action).execute()
+
+
+def my_chats() -> list:
+    return list(get_client().rpc("my_chats", {}).execute().data or [])
+
+
+def chat_messages(channel_id: str, limit: int = 200) -> list:
+    """The last `limit` messages, oldest first."""
+    resp = (get_client().table("chat_messages").select("*")
+            .eq("channel_id", channel_id).order("created_at", desc=True)
+            .limit(limit).execute())
+    return list(reversed(resp.data or []))
+
+
+def post_message(channel_id: str, body: str) -> dict:
+    resp = get_client().table("chat_messages").insert({
+        "channel_id": channel_id, "body": body, "user_id": current_user_id(),
+    }).execute()
+    return (resp.data or [{}])[0]
+
+
+def pin_message(message_id: str, on: bool = True) -> None:
+    get_client().rpc("pin_message", {"p_id": message_id, "p_on": bool(on)}).execute()
+
+
+def remove_message(message_id: str) -> None:
+    get_client().rpc("remove_message", {"p_id": message_id}).execute()
+
+
+def mark_chat_read(channel_id: str) -> None:
+    get_client().rpc("mark_chat_read", {"p_channel": channel_id}).execute()
+
+
+def make_group(name: str, members: list, post_min_role: str = "Employee") -> str:
+    resp = get_client().rpc("make_group", {
+        "p_name": name, "p_members": [str(m) for m in members],
+        "p_post_min_role": post_min_role}).execute()
+    return str(resp.data or "")
+
+
+def set_group_members(channel_id: str, members: list) -> int:
+    resp = get_client().rpc("set_group_members", {
+        "p_channel": channel_id, "p_members": [str(m) for m in members]}).execute()
+    return int(resp.data or 0)
+
+
+def group_members(channel_id: str) -> list:
+    resp = (get_client().table("chat_members").select("user_id")
+            .eq("channel_id", channel_id).execute())
+    return [str(r["user_id"]) for r in resp.data or []]
+
+
+def leave_group(channel_id: str) -> None:
+    get_client().rpc("leave_group", {"p_channel": channel_id}).execute()
+
+
 def _now_stamp() -> str:
     import datetime as _dt
     d = _dt.datetime.now()

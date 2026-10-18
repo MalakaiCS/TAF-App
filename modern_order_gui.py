@@ -36,6 +36,7 @@ from taf_order_app import planning as _planning
 from taf_order_app import sales as _sales
 from taf_order_app import stock_insight as _stock_insight
 from taf_order_app import money as _money
+from taf_order_app import staff_board as _board
 from taf_order_app import records as _records
 from taf_order_app import xero as _xero
 from taf_order_app import invoice_wording as _wording
@@ -13739,6 +13740,13 @@ class ModernOrderApp(tk.Frame):
         if staff:
             tiles.append(("Staff to approve", staff, CRD,
                           self._open_user_management))
+        if _features.is_on("staff_chat"):
+            try:
+                unread = sum(int(c.get("unread") or 0) for c in _db.my_chats())
+            except Exception:
+                unread = 0
+            if unread:
+                tiles.append(("Unread messages", unread, CA, self._messages_window))
         # How the month is going (step 48), when there is a target for it.
         if _features.is_on("sales_targets"):
             try:
@@ -18418,6 +18426,8 @@ class ModernOrderApp(tk.Frame):
         ("job_profit",         "What jobs made…",         "_job_profit_window"),
         ("sales_targets",      "Sales targets…",          "_sales_targets_window"),
         ("owner_report",       "Owner's report…",         "_owner_report_window"),
+        ("sops",               "How-to library…",         "_sop_library"),
+        ("staff_chat",         "Messages…",               "_messages_window"),
         ("customer_display",   "Enable second screen display…",
                                                          "_customer_screen_from_menu"),
     ]
@@ -20751,6 +20761,596 @@ class ModernOrderApp(tk.Frame):
                  variant="secondary", pady=px(6)).pack(side="left")
         dlg.report_pick, dlg.report_run, dlg.report_status = pick, _run, status
         return dlg
+
+    # ── How we do things, and talking to each other (step 49) ────────────
+
+    def _sop_library(self):
+        """Every how-to, by category, and whether you have read the version
+        there now. A manager also sees how many have, and adds or changes
+        them."""
+        manager = _db.can_handle_supplies()
+        cache = {}
+
+        def build():
+            sops = _db.list_sops()
+            reads = _db.sop_reads()
+            me = _db.current_user_id()
+            mine = {str(r.get("sop_id")): r for r in reads if str(r.get("user_id")) == me}
+            people = [p["name"] for p in _db.staff_people()] if manager else []
+            cache.clear()
+            out = []
+            for cat, rows in _board.by_category(sops):
+                out.append(((cat, "", "", "", ""), "head", None))
+                for s in rows:
+                    cache[str(s["id"])] = s
+                    state = _board.read_state(s, mine.get(str(s["id"])))
+                    seen = ""
+                    if manager:
+                        got = _board.sign_offs(s, reads, people)
+                        seen = f"{len(got['read'])} of {len(people)}"
+                    out.append(((f"    {s.get('title') or ''}", s.get("filter_type") or "",
+                                 f"v{s.get('version') or 1}",
+                                 {"new": "Not read", "changed": "Changed since you read it",
+                                  "read": "✓ Read"}[state], seen),
+                                "late" if state != "read" else None, str(s["id"])))
+            return out, ("No how-tos yet." + ("  Add the first with New how-to…" if manager
+                                               else "") if not cache else
+                         f"{len(cache)} how-to{'s' if len(cache) != 1 else ''}. "
+                         "Double-click one to read it.")
+
+        def _open(iid, dlg):
+            return self._open_sop(cache[iid], dlg) if iid in cache else None
+
+        dlg, tree, foot = self._table_window(
+            "How-to library", "How we do things here, by job and filter type.",
+            [("t", "How-to", 300, "w"), ("f", "Filter type", 130, "w"),
+             ("v", "Version", 70, "center"), ("s", "You", 190, "w"),
+             ("r", "Read the latest" if manager else "", 120, "center")],
+            build, width=900, on_row=_open)
+        if manager:
+            bottom = dlg.winfo_children()[-1]
+            flat_btn(bottom, "New how-to…", lambda: self._edit_sop(None, dlg), bg=CA,
+                     pady=px(6)).pack(side="left")
+        dlg.sop_cache, dlg.sop_open = cache, _open
+        return dlg, tree, foot
+
+    def _open_sop(self, sop: dict, parent=None):
+        """One how-to: what it says, its video and file, and "I've read this"."""
+        import webbrowser
+        win = tk.Toplevel(parent or self.master, bg=CBG)
+        win.title(sop.get("title") or "How-to")
+        win.transient(parent or self.master)
+        _centre_on_parent(win, parent or self.master, px(720), px(620))
+        body = tk.Frame(win, bg=CBG, padx=px(18), pady=px(14))
+        body.pack(fill="both", expand=True)
+        tk.Label(body, text=sop.get("title") or "", bg=CBG, fg=CA, font=F_TTL,
+                 wraplength=px(660), justify="left").pack(anchor="w")
+        meta = [b for b in (sop.get("category"), sop.get("filter_type"),
+                            f"version {sop.get('version') or 1}",
+                            f"by {sop['updated_by']}" if sop.get("updated_by") else "") if b]
+        tk.Label(body, text="  ·  ".join(meta), bg=CBG, fg=CMU,
+                 font=F_SM).pack(anchor="w", pady=(px(2), px(8)))
+        text = tk.Text(body, wrap="word", font=F_BODY, relief="flat",
+                       highlightthickness=1, highlightbackground=CBR, bg=CCA, fg=CTX,
+                       padx=px(10), pady=px(8))
+        text.insert("1.0", sop.get("body") or "Nothing written yet.")
+        text.config(state="disabled")
+        text.pack(fill="both", expand=True)
+        status = tk.Label(body, text="", bg=CBG, fg=CMU, font=F_SM)
+        status.pack(anchor="w", pady=(px(6), 0))
+        row = tk.Frame(win, bg=CBG, padx=px(18), pady=px(12))
+        row.pack(fill="x")
+
+        def _read():
+            try:
+                v = _db.read_sop(str(sop["id"]))
+            except Exception as exc:
+                status.config(text=f"Could not sign it off: {exc}", fg=CRD)
+                return
+            status.config(text=f"Signed off as read - version {v}.", fg=CGR)
+
+        def _file():
+            try:
+                url = _db.sop_file_url(sop["file_path"])
+            except Exception as exc:
+                status.config(text=f"Could not open the file: {exc}", fg=CRD)
+                return
+            if url:
+                webbrowser.open(url)
+
+        flat_btn(row, "I've read this", _read, bg=CA, pady=px(6)).pack(side="left")
+        if _board.video_ok(sop.get("video_url")):
+            flat_btn(row, "Watch the video", lambda: webbrowser.open(sop["video_url"]),
+                     bg=CNE, variant="secondary", pady=px(6)).pack(side="left", padx=(px(8), 0))
+        if sop.get("file_path"):
+            flat_btn(row, "Open the file", _file, bg=CNE, variant="secondary",
+                     pady=px(6)).pack(side="left", padx=(px(8), 0))
+        if _db.can_handle_supplies():
+            def _who():
+                try:
+                    got = _board.sign_offs(sop, _db.sop_reads(),
+                                           [p["name"] for p in _db.staff_people()])
+                except Exception as exc:
+                    status.config(text=str(exc), fg=CRD)
+                    return None
+                status.config(text=("Read this version: " + (", ".join(got["read"]) or "nobody")
+                                    + (".  An older one: " + ", ".join(got["behind"])
+                                       if got["behind"] else "")
+                                    + (".  Not at all: " + ", ".join(got["not"])
+                                       if got["not"] else "") + "."),
+                              fg=CTX, wraplength=px(660), justify="left")
+                return got
+            flat_btn(row, "Who has read it", _who, bg=CNE, variant="secondary",
+                     pady=px(6)).pack(side="left", padx=(px(8), 0))
+            flat_btn(row, "Edit…", lambda: (win.destroy(), self._edit_sop(sop, parent)),
+                     bg=CNE, variant="secondary", pady=px(6)).pack(side="left", padx=(px(8), 0))
+            win.sop_who = _who
+        flat_btn(row, "Close", win.destroy, bg=CNE, pady=px(6)).pack(side="right")
+        win.sop_read, win.sop_status = _read, status
+        return win
+
+    def _edit_sop(self, sop, parent=None):
+        """Add a how-to, or change one (a change is a new version)."""
+        sop = dict(sop or {})
+        win = tk.Toplevel(parent or self.master, bg=CBG)
+        win.title("Edit how-to" if sop.get("id") else "New how-to")
+        win.transient(parent or self.master)
+        _centre_on_parent(win, parent or self.master, px(720), px(640))
+        body = tk.Frame(win, bg=CBG, padx=px(18), pady=px(14))
+        body.pack(fill="both", expand=True)
+        body.columnconfigure(1, weight=1)
+        known = sorted({str(t) for t in getattr(self, "_filter_types", []) or []}
+                       | {"V-Form", "Flat Panel", "Pleated Panel", "Bag Filter",
+                          "Mini Pleat", "Flyscreen"})
+        fields = {}
+        for r, (key, label) in enumerate((("title", "Title *"), ("category", "Category"),
+                                          ("filter_type", "Filter type"),
+                                          ("video_url", "Video link"))):
+            tk.Label(body, text=label, bg=CBG, fg=CTX, font=F_BODY).grid(
+                row=r, column=0, sticky="w", pady=px(3))
+            var = tk.StringVar(value=sop.get(key) or "")
+            w = (ttk.Combobox(body, textvariable=var, values=[""] + known)
+                 if key == "filter_type" else field_entry(body, textvariable=var))
+            w.grid(row=r, column=1, sticky="ew", pady=px(3))
+            fields[key] = var
+        tk.Label(body, text="What to do", bg=CBG, fg=CTX, font=F_BODY).grid(
+            row=4, column=0, sticky="nw", pady=px(3))
+        text = tk.Text(body, wrap="word", font=F_BODY, height=14, relief="flat",
+                       highlightthickness=1, highlightbackground=CBR, bg=CCA, fg=CTX)
+        text.insert("1.0", sop.get("body") or "")
+        text.grid(row=4, column=1, sticky="nsew", pady=px(3))
+        body.rowconfigure(4, weight=1)
+        picked = {"path": ""}
+        file_lbl = tk.Label(body, text=("Has a file" if sop.get("file_path") else "No file"),
+                            bg=CBG, fg=CMU, font=F_SM)
+        file_lbl.grid(row=5, column=1, sticky="w")
+
+        def _pick():
+            path = filedialog.askopenfilename(parent=win, title="A file for this how-to")
+            if path:
+                picked["path"] = path
+                file_lbl.config(text=Path(path).name)
+
+        status = tk.Label(body, text="", bg=CBG, fg=CRD, font=F_SM)
+        status.grid(row=6, column=0, columnspan=2, sticky="w")
+
+        def _save():
+            row = {k: v.get().strip() for k, v in fields.items()}
+            row["body"] = text.get("1.0", "end").strip()
+            if not row["title"]:
+                status.config(text="Give it a title.")
+                return None
+            if row["video_url"] and not _board.video_ok(row["video_url"]):
+                status.config(text="The video link has to start with https://")
+                return None
+            if sop.get("id"):
+                row["id"] = sop["id"]
+            try:
+                saved = _db.save_sop(row, picked["path"])
+            except Exception as exc:
+                status.config(text=f"Could not save it: {exc}")
+                return None
+            win.destroy()
+            return saved
+
+        def _archive():
+            if not messagebox.askyesno("How-to", "Take this how-to out of the library?",
+                                       parent=win):
+                return
+            try:
+                _db.save_sop({"id": sop["id"], "archived": True})
+            except Exception as exc:
+                status.config(text=f"Could not: {exc}")
+                return
+            win.destroy()
+
+        row = tk.Frame(win, bg=CBG, padx=px(18), pady=px(12))
+        row.pack(fill="x")
+        flat_btn(row, "Save", _save, bg=CA, pady=px(6)).pack(side="left")
+        flat_btn(row, "Attach a file…", _pick, bg=CNE, variant="secondary",
+                 pady=px(6)).pack(side="left", padx=(px(8), 0))
+        if sop.get("id"):
+            flat_btn(row, "Take it out", _archive, bg=CNE, variant="secondary",
+                     pady=px(6)).pack(side="left", padx=(px(8), 0))
+        flat_btn(row, "Cancel", win.destroy, bg=CNE, pady=px(6)).pack(side="right")
+        win.sop_fields, win.sop_text, win.sop_save, win.sop_status = fields, text, _save, status
+        return win
+
+    def _messages_window(self):
+        """The noticeboard and your group chats. What you may do - post,
+        pin, start a group, take a message down - is the company's rules
+        (Who can do what…), held by the database whatever this offers."""
+        role = _db.current_role()
+        win = tk.Toplevel(self.master, bg=CBG)
+        win.title("Messages")
+        win.transient(self.master)
+        _centre_on_parent(win, self.master, px(1000), px(660))
+        state = {"chats": [], "on": None, "messages": [], "rules": {}, "busy": False}
+
+        left = tk.Frame(win, bg=CBG, padx=px(14), pady=px(12))
+        left.pack(side="left", fill="y")
+        tk.Label(left, text="Messages", bg=CBG, fg=CA, font=F_TTL).pack(anchor="w")
+        chats = ttk.Treeview(left, columns=("n",), show="tree headings",
+                             style="TAF.Treeview", selectmode="browse", height=18)
+        chats.heading("#0", text="Chat", anchor="w")
+        chats.heading("n", text="New")
+        chats.column("#0", width=px(200))
+        chats.column("n", width=px(50), anchor="center")
+        chats.pack(fill="y", expand=True, pady=(px(8), 0))
+        side = tk.Frame(left, bg=CBG)
+        side.pack(fill="x", pady=(px(8), 0))
+
+        right = tk.Frame(win, bg=CBG, padx=px(4), pady=px(12))
+        right.pack(side="left", fill="both", expand=True)
+        title = tk.Label(right, text="", bg=CBG, fg=CTX, font=F_BOLD, anchor="w")
+        title.pack(fill="x")
+        wrap = tk.Frame(right, bg=CCA, highlightbackground=CBR, highlightthickness=1)
+        wrap.pack(fill="both", expand=True, pady=(px(6), 0))
+        msgs = ttk.Treeview(wrap, columns=("w", "a", "m"), show="headings",
+                            style="TAF.Treeview", selectmode="browse")
+        for key, label, wd in (("w", "When", 90), ("a", "Who", 140), ("m", "Message", 460)):
+            msgs.heading(key, text=label, anchor="w")
+            msgs.column(key, width=px(wd), anchor="w", stretch=(key == "m"))
+        msgs.tag_configure("pinned", background="#FFF4D6")
+        msgs.tag_configure("gone", foreground=CMU)
+        bar = ttk.Scrollbar(wrap, orient="vertical", command=msgs.yview)
+        msgs.configure(yscrollcommand=bar.set)
+        bar.pack(side="right", fill="y")
+        msgs.pack(fill="both", expand=True)
+
+        acts = tk.Frame(right, bg=CBG)
+        acts.pack(fill="x", pady=(px(6), 0))
+        compose = tk.Frame(right, bg=CBG)
+        compose.pack(fill="x", pady=(px(8), 0))
+        entry_var = tk.StringVar()
+        entry = field_entry(compose, textvariable=entry_var)
+        entry.pack(side="left", fill="x", expand=True)
+        note = tk.Label(right, text="", bg=CBG, fg=CMU, font=F_SM, anchor="w",
+                        wraplength=px(640), justify="left")
+        note.pack(fill="x", pady=(px(4), 0))
+
+        def _alive():
+            try:
+                return bool(win.winfo_exists())
+            except tk.TclError:
+                return False
+
+        def _chat(cid):
+            return next((c for c in state["chats"] if str(c.get("id")) == str(cid)), None)
+
+        def _load_chats(select=None):
+            try:
+                state["rules"] = _db.chat_rules()
+                state["chats"] = _db.my_chats()
+            except Exception as exc:
+                note.config(text=f"Could not load the chats: {exc}", fg=CRD)
+                return
+            for iid in chats.get_children():
+                chats.delete(iid)
+            for c in state["chats"]:
+                n = int(c.get("unread") or 0)
+                chats.insert("", "end", iid=str(c["id"]),
+                             text=("📌 " if c.get("kind") == "board" else "👥 ") + str(c.get("name")),
+                             values=(n or "",))
+            want = select or state["on"] or (state["chats"][0]["id"] if state["chats"] else None)
+            if want and chats.exists(str(want)):
+                chats.selection_set(str(want))
+                _open(str(want))
+            _side()
+
+        def _open(cid):
+            c = _chat(cid)
+            if not c:
+                return
+            state["on"] = str(cid)
+            title.config(text=str(c.get("name")) + (
+                "" if c.get("kind") == "board" else f"   ·   {c.get('members') or 0} people"))
+            try:
+                state["messages"] = _db.chat_messages(str(cid))
+                _db.mark_chat_read(str(cid))
+            except Exception as exc:
+                note.config(text=f"Could not load it: {exc}", fg=CRD)
+                return
+            if chats.exists(str(cid)):
+                chats.set(str(cid), "n", "")
+            _draw()
+
+        def _draw():
+            for iid in msgs.get_children():
+                msgs.delete(iid)
+            now = datetime.datetime.now()
+            ordered = ([m for m in state["messages"] if m.get("pinned")]
+                       + [m for m in state["messages"] if not m.get("pinned")])
+            for m in ordered:
+                gone = bool(m.get("removed_at"))
+                text = ("Taken down" + (f" by {m['removed_by']}" if m.get("removed_by") else "")
+                        if gone else str(m.get("body") or "").replace("\n", "  "))
+                msgs.insert("", "end", iid=str(m["id"]),
+                            values=(_board.message_time(m.get("created_at"), now),
+                                    m.get("author") or "",
+                                    ("📌 " if m.get("pinned") else "") + text),
+                            tags=(("pinned",) if m.get("pinned") else (("gone",) if gone else ())))
+            kids = msgs.get_children()
+            if kids:
+                msgs.see(kids[-1])
+            c = _chat(state["on"]) or {}
+            if c.get("can_post"):
+                entry.config(state="normal")
+                note.config(text="Enter sends.", fg=CMU)
+            else:
+                entry.config(state="disabled")
+                who = (_board.WHO.get(state["rules"].get("post_board"), "")
+                       if c.get("kind") == "board" else _board.WHO.get(c.get("post_min_role"), ""))
+                note.config(text=f"Only {who.lower()} can post here." if who else
+                            "You cannot post here.", fg=CMU)
+            _acts()
+
+        def _acts():
+            for w in acts.winfo_children():
+                w.destroy()
+            if _board.may("pin", role, state["rules"]):
+                flat_btn(acts, "📌 Pin / unpin", _toggle_pin, bg=CNE, variant="secondary",
+                         pady=px(4)).pack(side="left", padx=(0, px(8)))
+            flat_btn(acts, "Take down", _take_down, bg=CNE, variant="secondary",
+                     pady=px(4)).pack(side="left")
+
+        def _side():
+            for w in side.winfo_children():
+                w.destroy()
+            if _board.may("make_group", role, state["rules"]):
+                flat_btn(side, "New group…", lambda: self._new_group(win, _load_chats),
+                         bg=CA, pady=px(5)).pack(fill="x")
+            c = _chat(state["on"]) or {}
+            if c.get("kind") == "group":
+                if str(c.get("created_by")) == _db.current_user_id() or \
+                        _db.role_level() >= 4:
+                    flat_btn(side, "People in it…",
+                             lambda: self._group_people(c, win, _load_chats), bg=CNE,
+                             variant="secondary", pady=px(5)).pack(fill="x", pady=(px(6), 0))
+                flat_btn(side, "Leave this group", _leave, bg=CNE, variant="secondary",
+                         pady=px(5)).pack(fill="x", pady=(px(6), 0))
+            if _db.role_level() >= 4:
+                flat_btn(side, "Who can do what…", lambda: self._chat_rules_window(win, _load_chats),
+                         bg=CNE, variant="secondary", pady=px(5)).pack(fill="x", pady=(px(6), 0))
+
+        def _send(text=None):
+            text = (entry_var.get() if text is None else text).strip()
+            if not text or not state["on"]:
+                return False
+            try:
+                _db.post_message(state["on"], text[:4000])
+            except Exception as exc:
+                note.config(text=f"Not sent: {exc}", fg=CRD)
+                return False
+            entry_var.set("")
+            _open(state["on"])
+            return True
+
+        def _selected():
+            mid = msgs.focus() or (msgs.selection() or [None])[0]
+            return next((m for m in state["messages"] if str(m["id"]) == str(mid)), None)
+
+        def _toggle_pin(m=None):
+            m = m or _selected()
+            if not m:
+                note.config(text="Pick a message first.", fg=CMU)
+                return
+            try:
+                _db.pin_message(str(m["id"]), not m.get("pinned"))
+            except Exception as exc:
+                note.config(text=str(exc), fg=CRD)
+                return
+            _open(state["on"])
+
+        def _take_down(m=None, ask=True):
+            m = m or _selected()
+            if not m:
+                note.config(text="Pick a message first.", fg=CMU)
+                return
+            if ask and not messagebox.askyesno("Messages", "Take this message down?",
+                                               parent=win):
+                return
+            try:
+                _db.remove_message(str(m["id"]))
+            except Exception as exc:
+                note.config(text=str(exc), fg=CRD)
+                return
+            _open(state["on"])
+
+        def _leave():
+            c = _chat(state["on"])
+            if not c or not messagebox.askyesno("Messages", f"Leave {c.get('name')}?",
+                                                parent=win):
+                return
+            try:
+                _db.leave_group(str(c["id"]))
+            except Exception as exc:
+                note.config(text=str(exc), fg=CRD)
+                return
+            state["on"] = None
+            _load_chats()
+
+        def _tick():
+            # New messages without anybody pressing anything, while it is open.
+            if not _alive():
+                return
+            if state["on"] and not entry_var.get():
+                try:
+                    fresh = _db.chat_messages(state["on"])
+                    if [m.get("id") for m in fresh] != [m.get("id") for m in state["messages"]]:
+                        state["messages"] = fresh
+                        _db.mark_chat_read(state["on"])
+                        _draw()
+                except Exception:
+                    pass
+            win.after(15000, _tick)
+
+        chats.bind("<<TreeviewSelect>>",
+                   lambda _e: chats.selection() and chats.selection()[0] != state["on"]
+                   and _open(chats.selection()[0]))
+        entry.bind("<Return>", lambda _e: _send())
+        flat_btn(compose, "Send", _send, bg=CA, pady=px(5)).pack(side="left", padx=(px(8), 0))
+        flat_btn(compose, "Close", win.destroy, bg=CNE, pady=px(5)).pack(side="right",
+                                                                        padx=(px(8), 0))
+        _load_chats()
+        win.after(15000, _tick)
+        win.chat_open, win.chat_send, win.chat_pin = _open, _send, _toggle_pin
+        win.chat_remove, win.chat_reload = _take_down, _load_chats
+        win.chat_state, win.chats_tree, win.messages_tree = state, chats, msgs
+        win.chat_note, win.chat_entry = note, entry
+        return win
+
+    def _people_picker(self, parent, chosen=()):
+        """A list of everybody on staff to tick; returns (frame, listbox, people)."""
+        people = [p for p in _db.staff_people() if p["id"] != _db.current_user_id()]
+        box = tk.Listbox(parent, selectmode="multiple", height=12, font=F_BODY,
+                         exportselection=False, relief="flat", highlightthickness=1,
+                         highlightbackground=CBR)
+        for i, p in enumerate(people):
+            box.insert("end", f"{p['name']}  ({p['role']})")
+            if p["id"] in chosen:
+                box.selection_set(i)
+        return box, people
+
+    def _new_group(self, parent, done=None):
+        win = tk.Toplevel(parent, bg=CBG)
+        win.title("New group")
+        win.transient(parent)
+        _centre_on_parent(win, parent, px(440), px(520))
+        body = tk.Frame(win, bg=CBG, padx=px(16), pady=px(12))
+        body.pack(fill="both", expand=True)
+        tk.Label(body, text="Name", bg=CBG, fg=CTX, font=F_BODY).pack(anchor="w")
+        name = tk.StringVar()
+        field_entry(body, textvariable=name).pack(fill="x")
+        tk.Label(body, text="Who can post in it", bg=CBG, fg=CTX,
+                 font=F_BODY).pack(anchor="w", pady=(px(8), 0))
+        who = ttk.Combobox(body, values=list(_board.WHO.values()), state="readonly")
+        who.set(_board.WHO["Employee"])
+        who.pack(fill="x")
+        tk.Label(body, text="Who is in it", bg=CBG, fg=CTX,
+                 font=F_BODY).pack(anchor="w", pady=(px(8), 0))
+        box, people = self._people_picker(body)
+        box.pack(fill="both", expand=True)
+        status = tk.Label(body, text="", bg=CBG, fg=CRD, font=F_SM)
+        status.pack(anchor="w")
+
+        def _make():
+            if not name.get().strip():
+                status.config(text="Give the group a name.")
+                return None
+            role = next(k for k, v in _board.WHO.items() if v == who.get())
+            ids = [people[i]["id"] for i in box.curselection()]
+            try:
+                gid = _db.make_group(name.get().strip(), ids, role)
+            except Exception as exc:
+                status.config(text=f"Could not: {exc}")
+                return None
+            win.destroy()
+            if done:
+                done(gid)
+            return gid
+
+        row = tk.Frame(win, bg=CBG, padx=px(16), pady=px(10))
+        row.pack(fill="x")
+        flat_btn(row, "Start it", _make, bg=CA, pady=px(6)).pack(side="left")
+        flat_btn(row, "Cancel", win.destroy, bg=CNE, pady=px(6)).pack(side="right")
+        win.group_name, win.group_who, win.group_box, win.group_make = name, who, box, _make
+        win.group_people = people
+        return win
+
+    def _group_people(self, chat, parent, done=None):
+        win = tk.Toplevel(parent, bg=CBG)
+        win.title(f"People in {chat.get('name')}")
+        win.transient(parent)
+        _centre_on_parent(win, parent, px(420), px(480))
+        body = tk.Frame(win, bg=CBG, padx=px(16), pady=px(12))
+        body.pack(fill="both", expand=True)
+        try:
+            current = set(_db.group_members(str(chat["id"])))
+        except Exception:
+            current = set()
+        box, people = self._people_picker(body, current)
+        box.pack(fill="both", expand=True)
+
+        def _save():
+            ids = [people[i]["id"] for i in box.curselection()]
+            try:
+                _db.set_group_members(str(chat["id"]), ids)
+            except Exception as exc:
+                messagebox.showerror("Group", str(exc), parent=win)
+                return
+            win.destroy()
+            if done:
+                done(str(chat["id"]))
+
+        row = tk.Frame(win, bg=CBG, padx=px(16), pady=px(10))
+        row.pack(fill="x")
+        flat_btn(row, "Save", _save, bg=CA, pady=px(6)).pack(side="left")
+        flat_btn(row, "Cancel", win.destroy, bg=CNE, pady=px(6)).pack(side="right")
+        win.group_box, win.group_save = box, _save
+        return win
+
+    def _chat_rules_window(self, parent, done=None):
+        """Who may do what. Directors and admins change it."""
+        win = tk.Toplevel(parent, bg=CBG)
+        win.title("Who can do what")
+        win.transient(parent)
+        _centre_on_parent(win, parent, px(520), px(320))
+        body = tk.Frame(win, bg=CBG, padx=px(16), pady=px(12))
+        body.pack(fill="both", expand=True)
+        body.columnconfigure(1, weight=1)
+        rules = _db.chat_rules()
+        boxes = {}
+        for r, (action, (label, _d)) in enumerate(_board.RULES.items()):
+            tk.Label(body, text=label, bg=CBG, fg=CTX, font=F_BODY).grid(
+                row=r, column=0, sticky="w", pady=px(4), padx=(0, px(12)))
+            cb = ttk.Combobox(body, values=list(_board.WHO.values()), state="readonly")
+            cb.set(_board.WHO[rules[action]])
+            cb.grid(row=r, column=1, sticky="ew", pady=px(4))
+            boxes[action] = cb
+        status = tk.Label(body, text="", bg=CBG, fg=CMU, font=F_SM)
+        status.grid(row=len(boxes), column=0, columnspan=2, sticky="w", pady=(px(8), 0))
+
+        def _save():
+            back = {v: k for k, v in _board.WHO.items()}
+            try:
+                for action, cb in boxes.items():
+                    if back[cb.get()] != rules[action]:
+                        _db.set_chat_rule(action, back[cb.get()])
+            except Exception as exc:
+                status.config(text=f"Could not save: {exc}", fg=CRD)
+                return False
+            win.destroy()
+            if done:
+                done()
+            return True
+
+        row = tk.Frame(win, bg=CBG, padx=px(16), pady=px(10))
+        row.pack(fill="x")
+        flat_btn(row, "Save", _save, bg=CA, pady=px(6)).pack(side="left")
+        flat_btn(row, "Cancel", win.destroy, bg=CNE, pady=px(6)).pack(side="right")
+        win.rule_boxes, win.rule_save = boxes, _save
+        return win
 
     def _outstanding_orders(self):
         """Every live order, with its lines. Read fresh rather than from the

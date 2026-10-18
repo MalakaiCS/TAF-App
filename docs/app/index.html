@@ -568,6 +568,30 @@
            color:#fff; display:inline-flex; align-items:center;
            justify-content:center; flex:0 0 auto; font-size:13px; }
   a.btn.maps-link { text-decoration:none; display:inline-flex; align-items:center; }
+  .howto-row, .chat-row { padding:10px 0; border-top:1px solid var(--line); cursor:pointer; }
+  .howto-row:first-child, .chat-row:first-child { border-top:0; }
+  .howto-row b { display:block; }
+  .howto-row.new .muted, .howto-row.changed .muted { color:var(--amber); }
+  .sop-body { white-space:pre-wrap; line-height:1.55; margin:12px 0;
+              background:var(--tint); border-radius:10px; padding:12px; }
+  .chat-row { display:flex; align-items:center; gap:10px; }
+  .chat-row .chat-what { flex:1 1 auto; min-width:0; }
+  .chat-row .chat-what .muted { white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .tab-count { background:var(--brand); color:#fff; border-radius:10px; min-width:20px;
+               padding:1px 6px; font-size:12px; text-align:center; }
+  #tabs button { position:relative; }
+  #tabs .tab-count { position:absolute; top:2px; right:10%; }
+  .chat-msg { padding:8px 10px; margin:6px 0; border-radius:10px; background:var(--tint); }
+  .chat-msg.mine { background:#E6F4FC; }
+  .chat-msg.pinned { box-shadow:inset 3px 0 0 var(--amber); }
+  .chat-msg.gone .chat-body { color:var(--muted); font-style:italic; }
+  .chat-body { white-space:pre-wrap; margin-top:2px; }
+  .chat-acts { display:flex; gap:6px; margin-top:6px; }
+  .chat-acts .btn { padding:4px 10px; font-size:13px; }
+  .chat-compose { display:flex; gap:8px; align-items:flex-end; margin-top:10px; }
+  .chat-compose textarea { flex:1 1 auto; min-width:0; }
+  .group-people { max-height:240px; overflow:auto; margin:8px 0; }
+  .group-people .check { display:flex; gap:8px; align-items:center; padding:4px 0; }
   .target-n { font-size:34px; font-weight:700; line-height:1.1; }
   .target-bar { height:10px; border-radius:6px; background:var(--line);
                 overflow:hidden; margin:8px 0; }

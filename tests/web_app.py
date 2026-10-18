@@ -180,6 +180,29 @@ SWITCHES: list = []
 QC_LISTS = [{"filter_type": "*", "checks": ["Size checked", "Label on"]}]
 TIMERS: list = []
 FAULTS: list = []
+# Step 49: how-tos, sign-offs, chats and what was done in them.
+SOPS = [{"id": "sop1", "title": "Making a V-form", "category": "Floor",
+         "filter_type": "V-form", "body": "Cut the media.\nPleat it.",
+         "video_url": "https://youtu.be/abc", "version": 2, "file_path": ""},
+        {"id": "sop2", "title": "Bracing", "category": "Floor",
+         "filter_type": "", "body": "Brace every 300mm.", "version": 1,
+         "file_path": ""}]
+SOP_READS: list = []
+CHAT_RULES = [{"action": "post_board", "min_role": "Manager"},
+              {"action": "pin", "min_role": "Admin"}]
+CHATS = [{"id": "ch-board", "name": "Noticeboard", "kind": "board",
+          "post_min_role": "Employee", "unread": 2, "can_post": True,
+          "last_body": "Toolbox talk Friday", "last_author": "Amy"},
+         {"id": "ch-g", "name": "Office only", "kind": "group",
+          "post_min_role": "Manager", "unread": 0, "can_post": False}]
+CHAT_MSGS = [{"id": "m1", "channel_id": "ch-board", "user_id": "u9",
+              "author": "Amy Admin", "body": "Toolbox talk Friday", "pinned": True,
+              "created_at": "2026-10-16T00:00:00Z"},
+             {"id": "m2", "channel_id": "ch-board", "user_id": "u9",
+              "author": "Amy Admin", "body": "Bins out", "pinned": False,
+              "created_at": "2026-10-16T01:00:00Z"}]
+CHAT_CALLS: list = []
+
 # Out the door (step 48): the saved run, the target, and proofs asked for.
 RUNS: dict = {}
 POD_CALLS: list = []
@@ -250,6 +273,24 @@ class Stub:
                          "user": {"id": "u1", "email": "kai@taf.local"}})
         if "/auth/v1/logout" in url:
             return send({})
+        if "/rest/v1/profiles" in url and "approved=eq.true" in url:
+            return send([PROFILE, {"id": "u2", "full_name": "Dave Floor",
+                                   "role": "Employee", "approved": True}])
+        if "/rest/v1/sops" in url:
+            return send(SOPS)
+        if "/rest/v1/sop_reads" in url:
+            return send(SOP_READS)
+        if "/rest/v1/chat_rules" in url:
+            return send(CHAT_RULES)
+        if "/rest/v1/chat_messages" in url and req.method == "POST":
+            row = dict(body, id="m" + str(len(CHAT_MSGS) + 1), author="Kai Brown",
+                       pinned=False, created_at="2026-10-17T00:00:00Z")
+            CHAT_MSGS.append(row)
+            return send([row], 201)
+        if "/rest/v1/chat_messages" in url:
+            cid = url.split("channel_id=eq.", 1)[1].split("&")[0]
+            rows = [m for m in CHAT_MSGS if m["channel_id"] == cid]
+            return send(sorted(rows, key=lambda m: m["created_at"], reverse=True))
         if "/rest/v1/profiles" in url:
             return send([PROFILE])
         if "/rest/v1/notify_settings" in url:
@@ -444,6 +485,28 @@ class Stub:
                         t["minutes"] = 3.5
                         out.append(t)
                 return send(out)
+            if name == "read_sop":
+                sop = next(s for s in SOPS if s["id"] == body.get("p_id"))
+                SOP_READS.append({"sop_id": sop["id"], "user_id": "u1",
+                                  "version": sop["version"]})
+                return send(sop["version"])
+            if name == "my_chats":
+                return send(CHATS)
+            if name == "mark_chat_read":
+                for c in CHATS:
+                    if c["id"] == body.get("p_channel"):
+                        c["unread"] = 0
+                return send(None)
+            if name in ("pin_message", "remove_message", "make_group"):
+                CHAT_CALLS.append((name, dict(body)))
+                for m in CHAT_MSGS:
+                    if m["id"] == body.get("p_id"):
+                        if name == "pin_message":
+                            m["pinned"] = body.get("p_on")
+                        else:
+                            m.update(body="", removed_at="2026-10-17T01:00:00Z",
+                                     removed_by="Kai Brown")
+                return send("g-new" if name == "make_group" else True)
             if name == "count_stock":
                 take = next((t for t in TAKES if t["id"] == body.get("p_stocktake")
                              and not t.get("finished_at")), None)
@@ -1598,6 +1661,144 @@ def run() -> int:
         SWITCHES.clear()
         page.evaluate("TAFAPP._floor.setFeatures({})")
         page.evaluate("TAFAPP._stale()")
+
+        print("\n── how we do things, and talking to each other ──")
+        from taf_order_app import staff_board as _sb
+        rule_sets = [{}, {"post_board": "Employee", "pin": "Manager"},
+                     {"make_group": "Admin", "remove_any": "Employee"}]
+        same = all(page.evaluate("a => TAFAPP._board.may(a[0], a[1], a[2])",
+                                 [act, role, rules]) == _sb.may(act, role, rules)
+                   for act in list(_sb.RULES) + ["nonsense"]
+                   for role in ("Employee", "Manager", "Admin", "Director", "", "Owner")
+                   for rules in rule_sets)
+        rows = [{"action": "pin", "min_role": "Employee"},
+                {"action": "pin", "min_role": "Director"}, {"action": "x", "min_role": "Admin"}]
+        check("the phone and the PC agree on who may do what", same and page.evaluate(
+            "r => TAFAPP._board.rulesWithDefaults(r)", rows) == _sb.rules_with_defaults(rows))
+        now = "2026-10-16T15:00:00"
+        stamps = ["2026-10-16T10:42:00", "2026-10-15T23:59:00", "2026-10-10T08:05:00",
+                  "2026-10-09T08:05:00", "2026-09-01T00:00:00", "nonsense"]
+        nowd = dt.datetime.fromisoformat(now)
+        check("and say when a message was sent the same way",
+              [page.evaluate("a => TAFAPP._board.messageTime(a[0], a[1])", [s, now])
+               for s in stamps] == [_sb.message_time(s, nowd) for s in stamps])
+        sops = SOPS + [{"id": "x", "title": "Old", "filter_type": "v-form", "archived": True},
+                       {"id": "y", "title": "answer phone", "category": ""},
+                       {"id": "z", "title": "Alpha", "category": "office"}]
+        check("and on which how-tos go with a filter type, and how they are filed",
+              page.evaluate("a => TAFAPP._board.sopsForType(a[0], a[1])", [sops, " V-FORM"])
+              == [s["id"] for s in _sb.sops_for_type(sops, " V-FORM")]
+              and page.evaluate("s => TAFAPP._board.byCategory(s)", sops)
+              == [[c, [s["id"] for s in rows]] for c, rows in _sb.by_category(sops)]
+              and all(page.evaluate("a => TAFAPP._board.readState(a[0], a[1])", [s, m])
+                      == _sb.read_state(s, m)
+                      for s in SOPS for m in (None, {"version": 1}, {"version": 2})))
+
+        on = ("sops", "staff_chat")
+        SWITCHES[:] = [{"key": k, "enabled": True} for k in on]
+        page.evaluate("(on) => TAFAPP._floor.setFeatures("
+                      "Object.fromEntries(on.map(k => [k, true])))", list(on))
+        page.click('#tabs button[data-tab="howto"]')
+        page.wait_for_selector("#screen .howto-row")
+        check("the how-to library lists every how-to, saying which are not read",
+              page.locator("#screen .howto-row.new").count() == 2)
+        page.fill("#howto-find", "brace")
+        check("and finds one by what it says",
+              page.locator("#screen .howto-row").count() == 1)
+        page.fill("#howto-find", "")
+        page.locator('#screen .howto-row[data-sop="sop1"]').click()
+        page.wait_for_selector("#sop-read")
+        check("a how-to shows what to do and its video",
+              "Pleat it." in page.locator("#sheet-body").inner_text()
+              and page.locator('#sheet-body a[href="https://youtu.be/abc"]').count() == 1)
+        page.click("#sop-read")
+        wait_for_text(page, "#sheet-body", "version 2")
+        check("and is signed off as read, at the version there now",
+              SOP_READS == [{"sop_id": "sop1", "user_id": "u1", "version": 2}])
+        page.keyboard.press("Escape")
+        page.wait_for_selector("#sheet.hidden", state="attached")
+        page.click('#tabs button[data-tab="orders"]')
+        page.wait_for_selector("#screen table")
+        page.locator("#screen tbody tr", has_text="PO-8842").first.click()
+        page.wait_for_selector("#sheet-body button.howto")
+        check("a V-form line on an order offers how to make it",
+              page.locator("#sheet-body button.howto").count() == 1)
+        page.locator("#sheet-body button.howto").click()
+        wait_for_text(page, "#sheet-body", "Making a V-form")
+        U_close = page.locator("#sheet-body button", has_text="Close")
+        U_close.last.click()
+        page.keyboard.press("Escape")
+        page.wait_for_selector("#sheet.hidden", state="attached")
+
+        page.click('#tabs button[data-tab="chat"]')
+        page.wait_for_selector("#chat-list .chat-row")
+        check("Messages lists the noticeboard and my groups, with what is new",
+              page.locator("#chat-list .chat-row").count() == 2
+              and page.locator('#tabs button[data-tab="chat"] .tab-count').inner_text() == "2")
+        check("a manager is offered a new group, as the rules say",
+              page.locator("#chat-new").count() == 1)
+        page.locator('#chat-list .chat-row[data-chat="ch-board"]').click()
+        page.wait_for_selector("#chat-msgs .chat-msg")
+        check("the noticeboard shows its messages, the pinned one at the top",
+              page.locator("#chat-pinned .chat-msg").count() == 1
+              and page.locator("#chat-msgs .chat-msg").count() == 2)
+        page.wait_for_timeout(400)
+        check("opening it clears what is new",
+              page.locator('#tabs button[data-tab="chat"] .tab-count').count() == 0)
+        check("out of the box a manager cannot pin, or take down other people's",
+              page.locator("#sheet-body .msg-pin").count() == 0
+              and page.locator("#sheet-body .msg-remove").count() == 0)
+        page.fill("#chat-text", "Forklift booked for 2pm")
+        page.click("#chat-send")
+        page.wait_for_selector('#chat-msgs .chat-msg.mine')
+        check("a manager posts on the noticeboard, as themselves",
+              CHAT_MSGS[-1]["body"] == "Forklift booked for 2pm"
+              and CHAT_MSGS[-1]["user_id"] == "u1"
+              and page.locator("#chat-msgs .chat-msg.mine .msg-remove").count() == 1)
+        page.on("dialog", lambda d: d.accept())
+        page.locator("#chat-msgs .chat-msg.mine .msg-remove").click()
+        page.wait_for_timeout(400)
+        check("and can take their own message down",
+              CHAT_CALLS[-1] == ("remove_message", {"p_id": CHAT_MSGS[-1]["id"]})
+              and "Taken down" in page.locator("#chat-msgs").inner_text())
+        page.locator("#sheet-body button", has_text="Close").last.click()
+        page.wait_for_selector("#sheet.hidden", state="attached")
+        CHAT_RULES.append({"action": "pin", "min_role": "Manager"})
+        page.click('#tabs button[data-tab="orders"]')
+        page.click('#tabs button[data-tab="chat"]')
+        page.wait_for_selector("#chat-list .chat-row")
+        page.locator('#chat-list .chat-row[data-chat="ch-board"]').click()
+        page.wait_for_selector("#chat-msgs .msg-pin")
+        page.locator('#chat-msgs .chat-msg[data-msg="m2"] .msg-pin').click()
+        page.wait_for_timeout(400)
+        check("when an admin lets managers pin, a manager can",
+              CHAT_CALLS[-1] == ("pin_message", {"p_id": "m2", "p_on": True})
+              and page.locator("#chat-pinned .chat-msg").count() == 2)
+        page.locator("#sheet-body button", has_text="Close").last.click()
+        page.wait_for_selector("#sheet.hidden", state="attached")
+        page.locator('#chat-list .chat-row[data-chat="ch-g"]').click()
+        page.wait_for_selector("#chat-readonly")
+        check("a group only managers post in says so to those who cannot",
+              page.locator("#chat-readonly").inner_text()
+              == "Only managers and above can post here."
+              and page.locator("#chat-text").count() == 0)
+        page.locator("#sheet-body button", has_text="Close").last.click()
+        page.wait_for_selector("#sheet.hidden", state="attached")
+        page.click("#chat-new")
+        page.wait_for_selector("#group-make")
+        page.fill("#group-name", "Night shift")
+        page.locator("#sheet-body .group-people input").first.check()
+        page.select_option("#group-who", "Manager")
+        page.click("#group-make")
+        page.wait_for_timeout(400)
+        check("a new group is started with the people ticked",
+              CHAT_CALLS[-1] == ("make_group", {"p_name": "Night shift",
+                                                "p_members": ["u2"],
+                                                "p_post_min_role": "Manager"}),
+              str(CHAT_CALLS[-1:]))
+        SWITCHES.clear()
+        page.evaluate("TAFAPP._floor.setFeatures({})")
+        page.evaluate("TAFAPP._board.forgetSops()")
 
         print("\n── quotes ──")
         page.click('#tabs button[data-tab="quotes"]')

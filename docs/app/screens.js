@@ -29,6 +29,8 @@ var TAFAPP = (function () {
     { key: "supplies",    label: "Supplies",  icon: "bag" },
     { key: "board",       label: "Board",     icon: "board", feature: "tv_board" },
     { key: "count",       label: "Stocktake", icon: "count", feature: "stocktake" },
+    { key: "chat",        label: "Messages",  icon: "chat",  feature: "staff_chat" },
+    { key: "howto",       label: "How to",    icon: "book",  feature: "sops" },
     { key: "log",         label: "Log",       icon: "clock", from: 3 }
   ];
   var BAR = 4;
@@ -53,6 +55,9 @@ var TAFAPP = (function () {
     board:  ["M3 4h18v13H3z", "M8 21h8", "M12 17v4", "M8 8v5", "M12 8v3",
              "M16 8v6"],
     count:  ["M9 3.5h6v3H9z", "M7 5H5.5v16h13V5H17", "M9 13l2 2 4-4"],
+    chat:   ["M4 5h16v11H9l-5 4z", "M8 9.5h8", "M8 12.5h5"],
+    book:   ["M4 4.5h6a2 2 0 0 1 2 2V20a2 2 0 0 0-2-2H4z",
+             "M20 4.5h-6a2 2 0 0 0-2 2V20a2 2 0 0 1 2-2h6z"],
     more:   ["M5 12h.01", "M12 12h.01", "M19 12h.01"]
   };
 
@@ -544,7 +549,9 @@ var TAFAPP = (function () {
         attr: { role: "tab", type: "button",
                 "aria-selected": String(t.key === active),
                 "data-tab": t.key },
-        kids: [icon(t.icon), U.el("span", { text: t.label })],
+        kids: [icon(t.icon), U.el("span", { text: t.label })].concat(
+          t.key === "chat" && CHAT_UNREAD
+            ? [U.el("b", { cls: "tab-count", text: String(CHAT_UNREAD) })] : []),
         on: { click: function () { show(t.key); } }
       }));
     });
@@ -932,7 +939,9 @@ var TAFAPP = (function () {
 
     // Timing a line and recording a fault each want a button on the line,
     // when they are switched on.
-    var extras = feature("job_timer") || feature("fault_log");
+    var extras = feature("job_timer") || feature("fault_log")
+      || (feature("sops") && items.some(function (it) {
+        return sopsForType(SOPS || [], it["Filter Type"]).length > 0; }));
     var rows = items.map(function (it, idx) {
       var tick = U.el("button", {
         cls: "tick", text: it.made ? "✓" : "",
@@ -941,6 +950,12 @@ var TAFAPP = (function () {
       });
       var more = U.el("div", { cls: "line-acts" });
       drawTimer(more, row, it);
+      var howtos = feature("sops") ? sopsForType(SOPS || [], it["Filter Type"]) : [];
+      if (howtos.length) {
+        more.appendChild(U.button("📘", function () { openSop(howtos[0]); },
+                                  "quiet howto"));
+        more.lastChild.setAttribute("aria-label", "How to make line " + (idx + 1));
+      }
       if (feature("fault_log")) {
         more.appendChild(U.button("⚠", function () {
           reportFault(row, it, items);
@@ -3596,6 +3611,348 @@ var TAFAPP = (function () {
     }).catch(function () { card.remove(); });
   }
 
+  /* ── How-tos ─────────────────────────────────────────────────────────
+     The same rules as taf_order_app/staff_board.py (read_state,
+     sops_for_type, by_category), held to them by tests/web_app.py. */
+
+  var SOPS = null;
+
+  function loadSops() {
+    return D.select("sops", { "select": "*", "archived": "eq.false",
+                              "order": "title.asc" }).then(function (rows) {
+      SOPS = rows || [];
+      return SOPS;
+    });
+  }
+
+  function lower(s) { return String(s || "").trim().toLowerCase(); }
+  function byTitle(a, b) {
+    var x = lower(a.title), y = lower(b.title);
+    return x < y ? -1 : x > y ? 1 : 0;
+  }
+
+  function readState(sop, mine) {
+    if (!mine) { return "new"; }
+    return Number(mine.version || 0) >= Number(sop.version || 1) ? "read" : "changed";
+  }
+
+  function sopsForType(sops, type) {
+    var want = lower(type);
+    if (!want) { return []; }
+    return (sops || []).filter(function (s) {
+      return !s.archived && lower(s.filter_type) === want;
+    }).sort(byTitle);
+  }
+
+  function byCategory(sops) {
+    var groups = {};
+    (sops || []).forEach(function (s) {
+      if (s.archived) { return; }
+      var c = String(s.category || "").trim() || "Other";
+      (groups[c] = groups[c] || []).push(s);
+    });
+    return Object.keys(groups).sort(function (a, b) {
+      var x = a === "Other", y = b === "Other";
+      if (x !== y) { return x ? 1 : -1; }
+      return lower(a) < lower(b) ? -1 : lower(a) > lower(b) ? 1 : 0;
+    }).map(function (c) { return [c, groups[c].sort(byTitle)]; });
+  }
+
+  var READ_TEXT = { "new": "Not read", changed: "Changed since you read it",
+                    read: "✓ Read" };
+
+  function myReads() {
+    var me = (D.whoami() || {}).id;
+    return D.select("sop_reads", { "select": "sop_id,version,user_id",
+                                   "user_id": "eq." + me })
+      .catch(function () { return []; }).then(function (rows) {
+        var out = {};
+        rows.forEach(function (r) { out[r.sop_id] = r; });
+        return out;
+      });
+  }
+
+  SCREENS.howto = function (main) {
+    Promise.all([loadSops(), myReads()]).then(function (got) {
+      var mine = got[1];
+      U.clear(main);
+      var find = U.el("input", { attr: { type: "search", id: "howto-find",
+                                         placeholder: "Find a how-to" } });
+      var out = U.el("div");
+      main.appendChild(U.card(null, [find]));
+      main.appendChild(out);
+      function draw() {
+        var q = lower(find.value);
+        U.clear(out);
+        var groups = byCategory(SOPS.filter(function (s) {
+          return !q || [s.title, s.category, s.filter_type, s.body].join(" ")
+            .toLowerCase().indexOf(q) !== -1;
+        }));
+        if (!groups.length) {
+          out.appendChild(U.card(null, [U.empty(q ? "Nothing matches"
+            : "No how-tos yet", "A manager adds them on the PC.")]));
+          return;
+        }
+        groups.forEach(function (g) {
+          out.appendChild(U.card(g[0], g[1].map(function (s) {
+            var state = readState(s, mine[s.id]);
+            return U.el("div", { cls: "howto-row " + state, attr: { "data-sop": s.id },
+              on: { click: function () { openSop(s, mine); } },
+              kids: [U.el("b", { text: s.title }),
+                     U.el("div", { cls: "muted", text: [s.filter_type,
+                       READ_TEXT[state]].filter(Boolean).join(" · ") })] });
+          })));
+        });
+      }
+      find.addEventListener("input", draw);
+      draw();
+    }).catch(function (err) { U.clear(main); U.notice(main, err.message); });
+  };
+
+  function openSop(sop, mine) {
+    U.openSheet(function (body, close) {
+      body.appendChild(U.el("h2", { cls: "title", text: sop.title }));
+      body.appendChild(U.el("div", { cls: "muted", text: [sop.category, sop.filter_type,
+        "version " + (sop.version || 1)].filter(Boolean).join(" · ") }));
+      body.appendChild(U.el("div", { cls: "sop-body",
+                                     text: sop.body || "Nothing written yet." }));
+      var acts = U.el("div", { cls: "row-actions" });
+      if (/^https?:\/\//i.test(sop.video_url || "")) {
+        acts.appendChild(U.el("a", { cls: "btn quiet", text: "▶  Watch the video",
+          attr: { href: sop.video_url, target: "_blank", rel: "noopener" } }));
+      }
+      if (sop.file_path) {
+        acts.appendChild(U.button("📄  Open the file", function () {
+          D.signedUrl("sops", sop.file_path, 3600).then(function (url) {
+            window.open(url, "_blank", "noopener");
+          }).catch(function (err) { U.notice(body, err.message); });
+        }, "quiet"));
+      }
+      var read = U.button("I've read this", function () {
+        read.disabled = true;
+        D.rpc("read_sop", { p_id: sop.id }).then(function (v) {
+          if (mine) { mine[sop.id] = { sop_id: sop.id, version: v }; }
+          U.notice(body, "Signed off - version " + v + ".", "ok");
+        }).catch(function (err) {
+          read.disabled = false;
+          U.notice(body, err.message);
+        });
+      }, "go");
+      read.setAttribute("id", "sop-read");
+      acts.appendChild(read);
+      acts.appendChild(U.button("Close", close, "quiet"));
+      body.appendChild(acts);
+    });
+  }
+
+  /* ── The noticeboard and group chats ─────────────────────────────────
+     The same rules as taf_order_app/staff_board.py (may, message_time),
+     held to them by tests/web_app.py. The database holds the real ones
+     (step 49): these only decide which buttons to offer. */
+
+  var CHAT_UNREAD = 0;
+  var RANK = { Employee: 1, Manager: 3, Admin: 4, Director: 4 };
+  var WHO = { Employee: "Everybody", Manager: "Managers and above",
+              Admin: "Directors and admins" };
+  var CHAT_DEFAULTS = { post_board: "Manager", pin: "Admin", make_group: "Manager",
+                        remove_any: "Admin" };
+  var DAY_NAMES = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+
+  function rulesWithDefaults(rows) {
+    var out = Object.assign({}, CHAT_DEFAULTS);
+    (rows || []).forEach(function (r) {
+      if (out.hasOwnProperty(r.action) && WHO.hasOwnProperty(r.min_role)) {
+        out[r.action] = r.min_role;
+      }
+    });
+    return out;
+  }
+
+  function chatMay(action, role, rules) {
+    var need = (rules || {})[action] || CHAT_DEFAULTS[action] || "Admin";
+    var mine = RANK[role] || 0;
+    return mine > 0 && mine >= (RANK[need] || 0);
+  }
+
+  function messageTime(iso, now) {
+    var d = new Date(String(iso || "").replace(/\+00:00$/, "Z"));
+    if (isNaN(d.getTime())) { return ""; }
+    now = now || new Date();
+    var day = new Date(d.getFullYear(), d.getMonth(), d.getDate());
+    var today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+    var days = Math.round((today - day) / 86400000);
+    var hm = pad2(d.getHours()) + ":" + pad2(d.getMinutes());
+    if (days === 0) { return hm; }
+    if (days > 0 && days < 7) { return DAY_NAMES[d.getDay()] + " " + hm; }
+    return pad2(d.getDate()) + "/" + pad2(d.getMonth() + 1) + "/" + d.getFullYear();
+  }
+
+  function pollChats() {
+    return D.rpc("my_chats", {}).then(function (rows) {
+      var n = (rows || []).reduce(function (t, c) { return t + (c.unread || 0); }, 0);
+      if (n !== CHAT_UNREAD) { CHAT_UNREAD = n; buildTabs(); }
+      return rows || [];
+    }).catch(function () { return []; });
+  }
+
+  function myRole() { return D.cachedProfile().role || "Employee"; }
+
+  SCREENS.chat = function (main) {
+    Promise.all([pollChats(),
+                 D.select("chat_rules", { "select": "action,min_role" })
+                   .catch(function () { return []; })]).then(function (got) {
+      var chats = got[0], rules = rulesWithDefaults(got[1]);
+      U.clear(main);
+      if (chatMay("make_group", myRole(), rules)) {
+        var add = U.button("+  New group", function () { newGroup(rules); }, "go");
+        add.setAttribute("id", "chat-new");
+        main.appendChild(U.el("div", { cls: "row-actions", kids: [add] }));
+      }
+      var list = U.el("div", { attr: { id: "chat-list" } });
+      chats.forEach(function (c) {
+        list.appendChild(U.el("div", { cls: "chat-row", attr: { "data-chat": c.id },
+          on: { click: function () { openChat(c, rules); } },
+          kids: [U.el("div", { cls: "chat-what", kids: [
+                   U.el("b", { text: (c.kind === "board" ? "📌 " : "👥 ") + c.name }),
+                   U.el("div", { cls: "muted", text: c.last_body
+                     ? (c.last_author ? c.last_author + ": " : "") + c.last_body
+                     : "Nothing yet" })] }),
+                 c.unread ? U.el("b", { cls: "tab-count", text: String(c.unread) })
+                          : U.el("span")] }));
+      });
+      main.appendChild(U.card(null, chats.length ? [list]
+        : [U.empty("No chats", "The noticeboard appears once step 49 is run.")]));
+    }).catch(function (err) { U.clear(main); U.notice(main, err.message); });
+  };
+
+  function openChat(chat, rules) {
+    U.openSheet(function (body, close) {
+      body.appendChild(U.el("h2", { cls: "title", text: chat.name }));
+      var pinned = U.el("div", { attr: { id: "chat-pinned" } });
+      var list = U.el("div", { attr: { id: "chat-msgs" } });
+      body.appendChild(pinned);
+      body.appendChild(list);
+      var role = myRole(), me = (D.whoami() || {}).id;
+      if (chat.can_post) {
+        var text = U.el("textarea", { attr: { id: "chat-text", rows: "2",
+                                              placeholder: "Write a message" } });
+        var send = U.button("Send", function () {
+          var words = text.value.trim();
+          if (!words) { return; }
+          send.disabled = true;
+          D.insert("chat_messages", { channel_id: chat.id, body: words.slice(0, 4000),
+                                      user_id: me }).then(function () {
+            text.value = "";
+            load();
+          }).catch(function (err) { U.notice(body, err.message); })
+            .then(function () { send.disabled = false; });
+        }, "go");
+        send.setAttribute("id", "chat-send");
+        body.appendChild(U.el("div", { cls: "chat-compose", kids: [text, send] }));
+      } else {
+        var who = chat.kind === "board" ? WHO[rules.post_board] : WHO[chat.post_min_role];
+        body.appendChild(U.el("div", { cls: "muted", attr: { id: "chat-readonly" },
+          text: who ? "Only " + who.toLowerCase() + " can post here." : "You cannot post here." }));
+      }
+      body.appendChild(U.el("div", { cls: "row-actions",
+                                     kids: [U.button("Close", close, "quiet")] }));
+
+      function act(name, args) {
+        D.rpc(name, args).then(load).catch(function (err) { U.notice(body, err.message); });
+      }
+
+      function message(m) {
+        var gone = !!m.removed_at;
+        var kids = [U.el("div", { cls: "muted", text: (m.author || "") + " · "
+                      + messageTime(m.created_at) }),
+                    U.el("div", { cls: "chat-body", text: gone
+                      ? "Taken down" + (m.removed_by ? " by " + m.removed_by : "") : m.body })];
+        var acts = U.el("div", { cls: "chat-acts" });
+        if (!gone && chatMay("pin", role, rules)) {
+          acts.appendChild(U.button(m.pinned ? "Unpin" : "📌 Pin", function () {
+            act("pin_message", { p_id: m.id, p_on: !m.pinned });
+          }, "quiet msg-pin"));
+        }
+        if (!gone && (m.user_id === me || chatMay("remove_any", role, rules))) {
+          acts.appendChild(U.button("Take down", function () {
+            if (window.confirm("Take this message down?")) {
+              act("remove_message", { p_id: m.id });
+            }
+          }, "quiet msg-remove"));
+        }
+        if (acts.childNodes.length) { kids.push(acts); }
+        return U.el("div", { cls: "chat-msg" + (m.pinned ? " pinned" : "")
+                               + (gone ? " gone" : "") + (m.user_id === me ? " mine" : ""),
+                             attr: { "data-msg": m.id }, kids: kids });
+      }
+
+      function load() {
+        return D.select("chat_messages", { "select": "*", "channel_id": "eq." + chat.id,
+                                           "order": "created_at.desc", "limit": 200 })
+          .then(function (rows) {
+            rows = (rows || []).slice().reverse();
+            U.clear(pinned);
+            U.clear(list);
+            var pins = rows.filter(function (m) { return m.pinned; });
+            if (pins.length) {
+              pinned.appendChild(U.card("Pinned", pins.map(message)));
+            }
+            rows.forEach(function (m) { list.appendChild(message(m)); });
+            if (!rows.length) { list.appendChild(U.empty("Nothing said yet")); }
+            D.rpc("mark_chat_read", { p_channel: chat.id }).then(pollChats)
+              .catch(function () {});
+          }).catch(function (err) { U.notice(body, err.message); });
+      }
+      load();
+      // New messages while it is open; stops when the sheet is closed.
+      var timer = setInterval(function () {
+        if (!document.body.contains(body)) { clearInterval(timer); return; }
+        var t = document.getElementById("chat-text");
+        if (!t || !t.value) { load(); }
+      }, 10000);
+    });
+  }
+
+  function newGroup(rules) {
+    D.select("profiles", { "select": "id,full_name,username,role,approved",
+                           "approved": "eq.true", "order": "full_name.asc" })
+      .then(function (people) {
+        var me = (D.whoami() || {}).id;
+        U.openSheet(function (body, close) {
+          body.appendChild(U.el("h2", { cls: "title", text: "New group" }));
+          var name = U.el("input", { attr: { type: "text", id: "group-name",
+                                             placeholder: "Name" } });
+          var who = U.el("select", { attr: { id: "group-who" },
+            kids: Object.keys(WHO).map(function (k) {
+              return U.el("option", { text: WHO[k], attr: { value: k } }); }) });
+          body.appendChild(U.el("label", { cls: "f", kids: [
+            U.el("span", { text: "Name" }), name] }));
+          body.appendChild(U.el("label", { cls: "f", kids: [
+            U.el("span", { text: "Who can post in it" }), who] }));
+          var boxes = U.el("div", { cls: "group-people" });
+          people.filter(function (p) { return p.id !== me; }).forEach(function (p) {
+            boxes.appendChild(U.el("label", { cls: "check", kids: [
+              U.el("input", { attr: { type: "checkbox", value: p.id } }),
+              U.el("span", { text: (p.full_name || p.username) + "  (" + p.role + ")" })] }));
+          });
+          body.appendChild(boxes);
+          var make = U.button("Start it", function () {
+            if (!name.value.trim()) { U.notice(body, "Give the group a name."); return; }
+            var ids = Array.prototype.slice.call(
+              boxes.querySelectorAll("input:checked")).map(function (b) { return b.value; });
+            D.rpc("make_group", { p_name: name.value.trim(), p_members: ids,
+                                  p_post_min_role: who.value }).then(function () {
+              close();
+              show("chat");
+            }).catch(function (err) { U.notice(body, err.message); });
+          }, "go");
+          make.setAttribute("id", "group-make");
+          body.appendChild(U.el("div", { cls: "row-actions",
+                                         kids: [make, U.button("Cancel", close, "quiet")] }));
+        });
+      }).catch(function (err) { U.notice(document.getElementById("screen"), err.message); });
+  }
+
   /* ── Quotes ──────────────────────────────────────────────────────────
      Read here, written on the desktop. Pricing a line means deriving a
      part number and an area from its dimensions, which lives in Python
@@ -4558,6 +4915,8 @@ var TAFAPP = (function () {
     D.rpc("my_unread_count", {}).then(function (n) {
       setBell(n);
     }).catch(function () {});
+    if (feature("staff_chat")) { pollChats(); }
+    if (feature("sops") && SOPS === null) { loadSops().catch(function () {}); }
   }
 
   function watchBell() {
@@ -4955,6 +5314,16 @@ var TAFAPP = (function () {
                      next_free: r.next_free ? U.parseDate(r.next_free) : null }));
                  },
                  repeatItems: repeatItems },
+    _board: { may: chatMay, rulesWithDefaults: rulesWithDefaults,
+              messageTime: function (iso, now) {
+                return messageTime(iso, new Date(now)); },
+              readState: readState,
+              sopsForType: function (s, t) {
+                return sopsForType(s, t).map(function (x) { return x.id; }); },
+              byCategory: function (s) {
+                return byCategory(s).map(function (g) {
+                  return [g[0], g[1].map(function (x) { return x.id; })]; }); },
+              forgetSops: function () { SOPS = null; } },
     _route: { suggest: function (s) { return suggestRoute(s).map(function (x) { return x.id; }); },
               apply: function (s, saved) {
                 return applyRoute(s, saved).map(function (x) { return x.id; }); },

@@ -1504,6 +1504,140 @@ def run_delivery_money_checks(pg: Postgres) -> None:
           ok and out == "0" and ok2 and out2 == "1", f"{out} {out2} {err}{err2}")
 
 
+def run_staff_board_checks(pg: Postgres) -> None:
+    print("\n── how-tos, the noticeboard and groups (step 49) ──")
+    for _ in range(2):
+        ok, _o, err = pg.psql((ROOT / "migrate_staff_board.sql").read_text(
+            encoding="utf-8"), "f")
+        check("step 49 runs, and runs again cleanly", ok, err)
+    got = q(pg, "SELECT count(*) FROM chat_channels WHERE kind = 'board';")
+    check("there is one noticeboard, however many times it runs", got == "1", got)
+
+    # ── How-tos ──
+    ok, _o, err = as_in(pg, "f", DAVE, "INSERT INTO sops (title) VALUES ('Mine');")
+    check("somebody on the floor cannot write a how-to", not ok)
+    ok, out, err = as_in(pg, "f", SARAH, "INSERT INTO sops (title, filter_type, body) "
+                         "VALUES ('Making a V-form', 'V-form', 'Step 1') RETURNING id;")
+    sop = out.splitlines()[0] if ok and out else ""
+    check("a manager can", ok and sop, err)
+    ok, _o, err = as_in(pg, "f", SARAH, "INSERT INTO sops (title, video_url) "
+                        "VALUES ('Bad', 'javascript:alert(1)');")
+    check("a video link has to be a web address", not ok)
+    ok, out, err = as_in(pg, "f", DAVE, f"SELECT read_sop('{sop}');")
+    check("reading it signs off the version that is there", ok and out == "1", out or err)
+    q(pg, f"UPDATE sops SET category = 'Floor' WHERE id = '{sop}';")
+    got = q(pg, f"SELECT version FROM sops WHERE id = '{sop}';")
+    check("a new category is not a new version", got == "1", got)
+    ok, _o, err = as_in(pg, "f", SARAH, f"UPDATE sops SET body = 'Step 1, then 2' "
+                        f"WHERE id = '{sop}';")
+    got = q(pg, f"SELECT version FROM sops WHERE id = '{sop}';")
+    check("changing what it says is", ok and got == "2", got or err)
+    ok, out, err = as_in(pg, "f", DAVE, "SELECT count(*) FROM sop_reads;")
+    ok2, out2, err2 = as_in(pg, "f", SARAH, "SELECT person || ' v' || version FROM sop_reads;")
+    check("people see their own sign-offs, managers see everybody's",
+          ok and out == "1" and ok2 and out2 == "Dave Floor v1", f"{out} {out2} {err}{err2}")
+    ok, _o, err = as_in(pg, "f", DAVE, "INSERT INTO sop_reads (sop_id, user_id, version) "
+                        f"VALUES ('{sop}', '{DAVE}', 2);")
+    check("nobody can sign off a version by hand", not ok)
+    ok, _o, err = as_in(pg, "f", STRANGER, f"SELECT read_sop('{sop}');")
+    check("an account nobody approved cannot sign anything off", not ok)
+
+    # ── The noticeboard ──
+    board = q(pg, "SELECT id FROM chat_channels WHERE kind = 'board';")
+    ok, _o, err = as_in(pg, "f", DAVE, "INSERT INTO chat_messages (channel_id, body) "
+                        f"VALUES ('{board}', 'hello all');")
+    check("out of the box, somebody on the floor cannot post on the noticeboard", not ok)
+    ok, out, err = as_in(pg, "f", SARAH, "INSERT INTO chat_messages (channel_id, body, "
+                         f"user_id) VALUES ('{board}', 'Toolbox talk Friday', '{SARAH}') "
+                         "RETURNING id, author;")
+    msg, author = (out.split("|") + ["", ""])[:2] if ok else ("", "")
+    check("a manager can, under their own name", ok and author == "Sarah Boss", out or err)
+    ok, _o, err = as_in(pg, "f", SARAH, "INSERT INTO chat_messages (channel_id, body, "
+                        f"user_id) VALUES ('{board}', 'as Kai', '{KAI}');")
+    check("nobody posts as somebody else", not ok)
+    ok, _o, err = as_in(pg, "f", SARAH, "INSERT INTO chat_messages (channel_id, body, "
+                        f"pinned) VALUES ('{board}', 'pinned on the way in', true);")
+    check("nor sneaks a pin in with the message", not ok)
+    ok, out, err = as_in(pg, "f", DAVE, "SELECT body FROM chat_messages "
+                         f"WHERE channel_id = '{board}';")
+    check("everybody on staff reads the noticeboard", ok and out == "Toolbox talk Friday",
+          out or err)
+    ok, out, err = as_in(pg, "f", STRANGER, "SELECT count(*) FROM chat_messages;")
+    check("an account nobody approved reads nothing", ok and out == "0", out or err)
+    ok, _o, err = as_in(pg, "f", SARAH, f"SELECT pin_message('{msg}', true);")
+    check("out of the box a manager cannot pin", not ok)
+    ok, _o, err = as_in(pg, "f", KAI, f"SELECT pin_message('{msg}', true);")
+    got = q(pg, f"SELECT pinned || '|' || pinned_by FROM chat_messages WHERE id = '{msg}';")
+    check("a director can, and is named for it", ok and got == "true|Kai Brown", got or err)
+    ok, _o, err = as_in(pg, "f", SARAH, "UPDATE chat_messages SET pinned = false;")
+    got = q(pg, f"SELECT pinned FROM chat_messages WHERE id = '{msg}';")
+    check("a message cannot be changed directly", got == "t", got)
+
+    ok, _o, err = as_in(pg, "f", SARAH, "UPDATE chat_rules SET min_role = 'Employee' "
+                        "WHERE action = 'post_board';")
+    got = q(pg, "SELECT min_role FROM chat_rules WHERE action = 'post_board';")
+    check("a manager cannot change who may do what", got == "Manager", got)
+    ok, _o, err = as_in(pg, "f", AMY, "UPDATE chat_rules SET min_role = 'Employee' "
+                        "WHERE action = 'post_board';")
+    ok2, _o, err2 = as_in(pg, "f", DAVE, "INSERT INTO chat_messages (channel_id, body, "
+                          f"user_id) VALUES ('{board}', 'thanks!', '{DAVE}');")
+    check("an admin can - and then the floor can post", ok and ok2, err or err2)
+    ok, _o, err = as_in(pg, "f", AMY, "UPDATE chat_rules SET min_role = 'Director' "
+                        "WHERE action = 'pin';")
+    check("a rule is one of the three roles", not ok)
+
+    # ── Groups ──
+    ok, _o, err = as_in(pg, "f", DAVE, "SELECT make_group('Floor crew', "
+                        f"ARRAY['{SARAH}']::uuid[]);")
+    check("out of the box, somebody on the floor cannot start a group", not ok)
+    ok, out, err = as_in(pg, "f", SARAH, "SELECT make_group('Night shift', "
+                         f"ARRAY['{DAVE}', '{STRANGER}']::uuid[]);")
+    grp = out if ok else ""
+    got = q(pg, f"SELECT count(*) FROM chat_members WHERE channel_id = '{grp}';")
+    check("a manager can, with the people they name who are approved", ok and got == "2",
+          got or err)
+    ok, _o, err = as_in(pg, "f", DAVE, "INSERT INTO chat_messages (channel_id, body, "
+                        f"user_id) VALUES ('{grp}', 'running late', '{DAVE}');")
+    check("its members can post in it", ok, err)
+    ok, out, err = as_in(pg, "f", AMY, "SELECT count(*) FROM chat_messages "
+                         f"WHERE channel_id = '{grp}';")
+    check("people not in it cannot read it, admins included", ok and out == "0", out or err)
+    ok, _o, err = as_in(pg, "f", AMY, "INSERT INTO chat_messages (channel_id, body, "
+                        f"user_id) VALUES ('{grp}', 'hi', '{AMY}');")
+    check("or post in it", not ok)
+    ok, out, err = as_in(pg, "f", DAVE, "SELECT name || '|' || unread FROM my_chats() "
+                         "ORDER BY kind;")
+    check("my chats lists the noticeboard and my groups, with what I have not read",
+          ok and out.splitlines() == ["Noticeboard|1", "Night shift|0"], out or err)
+    ok, _o, err = as_in(pg, "f", DAVE, f"SELECT mark_chat_read('{board}');")
+    ok2, out, err2 = as_in(pg, "f", DAVE, "SELECT unread FROM my_chats() "
+                           "WHERE kind = 'board';")
+    check("reading it clears the count", ok and ok2 and out == "0", out or err or err2)
+    ok, _o, err = as_in(pg, "f", DAVE, "SELECT set_group_members("
+                        f"'{grp}', ARRAY['{DAVE}', '{AMY}']::uuid[]);")
+    check("somebody who did not start a group cannot change who is in it", not ok)
+    ok, out, err = as_in(pg, "f", SARAH, "SELECT set_group_members("
+                         f"'{grp}', ARRAY['{AMY}']::uuid[]);")
+    got = q(pg, f"SELECT count(*) FROM chat_members WHERE channel_id = '{grp}' "
+                f"AND user_id = '{DAVE}';")
+    check("whoever started it can, and keeps their own place", ok and out == "2" and got == "0",
+          f"{out} {got} {err}")
+
+    # ── Taking down ──
+    dave_msg = q(pg, f"SELECT id FROM chat_messages WHERE user_id = '{DAVE}' "
+                     f"AND channel_id = '{board}';")
+    ok, _o, err = as_in(pg, "f", DAVE, f"SELECT remove_message('{msg}');")
+    check("you cannot take down somebody else's message", not ok)
+    ok, _o, err = as_in(pg, "f", DAVE, f"SELECT remove_message('{dave_msg}');")
+    got = q(pg, f"SELECT body = '' AND removed_at IS NOT NULL FROM chat_messages "
+                f"WHERE id = '{dave_msg}';")
+    check("but you can take down your own - what it said is gone", ok and got == "t", got or err)
+    ok, _o, err = as_in(pg, "f", AMY, f"SELECT remove_message('{msg}');")
+    got = q(pg, f"SELECT pinned FROM chat_messages WHERE id = '{msg}';")
+    check("an admin can take down anybody's, and it is no longer pinned",
+          ok and got == "f", got or err)
+
+
 def _skip(why: str) -> int:
     """Skipping is fine on a laptop. In CI it is not: a workflow that goes
     green having checked nothing is worse than no workflow, because it is
@@ -1536,6 +1670,7 @@ def main() -> int:
         run_sales_checks(pg)
         run_stock_insight_checks(pg)
         run_delivery_money_checks(pg)
+        run_staff_board_checks(pg)
     finally:
         pg.stop()
     print(f"\n{len(FAILURES)} FAILED" if FAILURES

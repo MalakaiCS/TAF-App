@@ -202,7 +202,12 @@ WITH checks(step, file, purpose, needed, present) AS (VALUES
   (48, 'migrate_delivery_money.sql', 'Route order, proof of delivery, order values, sales targets, owner''s report', 'recommended',
       to_regclass('public.delivery_runs') IS NOT NULL
       AND to_regclass('public.order_values') IS NOT NULL
-      AND to_regclass('public.owner_reports') IS NOT NULL)
+      AND to_regclass('public.owner_reports') IS NOT NULL),
+
+  (49, 'migrate_staff_board.sql', 'How-to library, noticeboard and group chats with who-may-do-what', 'recommended',
+      to_regclass('public.sops') IS NOT NULL
+      AND to_regclass('public.chat_messages') IS NOT NULL
+      AND to_regclass('public.chat_rules') IS NOT NULL)
 )
 SELECT step,
        CASE WHEN present THEN 'already done' ELSE 'RUN THIS' END AS status,
