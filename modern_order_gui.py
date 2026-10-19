@@ -28369,7 +28369,7 @@ class ModernOrderApp(tk.Frame):
             if missing:
                 text += "\n\nInvoice & packing slip: " + " ".join(missing)
             (messagebox.showwarning if bad else messagebox.showinfo)(title, text)
-            for path in papers:
+            for path in self._combine_invoice_paperwork(papers):
                 self._output_invoice_paperwork(path)
             self._tab_loaded.pop("prev_orders", None)
             try:
@@ -28452,6 +28452,20 @@ class ModernOrderApp(tk.Frame):
             return None, "The invoice and packing slip could not be put together."
         return str(out), ("Missing " + " and ".join(problems) + "."
                           if problems else "")
+
+    def _combine_invoice_paperwork(self, papers):
+        """Several orders invoiced at once: their invoices and slips, one
+        after another in a single PDF, so they print in one go. Each order
+        keeps its own file as well. Returns the files to open or print - the
+        one, or every one of them if they could not be put together."""
+        papers = [p for p in papers if p]
+        if len(papers) < 2:
+            return papers
+        stamp = datetime.datetime.now().strftime("%Y-%m-%d %H%M%S")
+        out = self._invoice_dir() / f"Invoices {stamp} ({len(papers)} orders).pdf"
+        if _ProgressDialog._merge(papers, str(out)):
+            return [str(out)]
+        return papers
 
     def _output_invoice_paperwork(self, path):
         """Open it - or, once INVOICE_PAPERWORK_PRINTS is on, print it."""

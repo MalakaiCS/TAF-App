@@ -883,7 +883,10 @@ After **Send to Xero & invoice customer**, one PDF is put together in the
 app's `invoices` folder and opened: the invoice as Xero prints it, then our
 **collection slip** for an order whose Location is *Pick Up*, or **delivery
 slip** for one going out (the docket - the customer's copy and the copy they
-sign). View Order → Actions → **Invoice & packing slip (PDF)** makes it again
+sign). Invoice several orders at once and they all go into **one PDF**,
+`Invoices <date time> (<n> orders).pdf`, each invoice followed by its slip,
+to print in one go; each order's own PDF is kept beside it as well.
+View Order → Actions → **Invoice & packing slip (PDF)** makes it again
 for an order already invoiced. (It opens for now, while it is being tried;
 switching `INVOICE_PAPERWORK_PRINTS` on sends it straight to the printer.)
 

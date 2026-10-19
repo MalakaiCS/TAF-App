@@ -2667,6 +2667,82 @@ def _steps(app, gui, root):
             app._tab_loaded.update(loaded)
     add("orders: Send to Xero & invoice customer", _send_to_xero)
 
+    def _invoice_several_one_pdf():
+        """Two orders invoiced together: one PDF holding both invoices and
+        their slips, opened once - and each order's own file still kept."""
+        from taf_order_app import features as _feat
+        from taf_order_app import xero as _x
+        opened, said = [], []
+        saved = (_x.push_draft, gui._db.set_order_status,
+                 gui.messagebox.askyesno, gui.messagebox.showinfo,
+                 gui.messagebox.showwarning, dict(_feat._switches),
+                 _x.invoice_pdf)
+        import io
+        from reportlab.pdfgen import canvas as _canvas
+        numbers = {"o-11": "INV-11", "o-12": "INV-12"}
+
+        def _pdf(oid, timeout=60):
+            buf = io.BytesIO()
+            c = _canvas.Canvas(buf)
+            c.drawString(72, 720, f"TAX INVOICE {numbers[oid]}")
+            c.showPage()
+            c.save()
+            return {"pdf": buf.getvalue(), "number": numbers[oid]}
+        _x.invoice_pdf = _pdf
+        app._output_invoice_paperwork = lambda path: opened.append(path)
+        _x.push_draft = lambda oid, built, md5="", invoice_now=False: {
+            "state": "sent", "number": numbers[oid],
+            "emailed_to": "a@b.example"}
+        gui._db.set_order_status = lambda oid, st: None
+        gui.messagebox.askyesno = lambda *a, **k: said.append(a) or True
+        gui.messagebox.showinfo = lambda *a, **k: said.append(a)
+        gui.messagebox.showwarning = lambda *a, **k: said.append(a)
+        _feat._switches = {"xero_live": True}
+        loaded = dict(app._tab_loaded)
+        app._refresh_orders_list = lambda: None
+        try:
+            def _order(oid, no):
+                return {"source": "db", "db_id": oid, "order_no": no,
+                        "customer": "BATARE", "status": "Pending",
+                        "db_header": {"Order Number": no,
+                                      "Customer Name": "BATARE",
+                                      "Date Ordered": "16/10/26"},
+                        "db_items": [{"item_kind": "filter",
+                                      "Filter Type": "V-form",
+                                      "Media Type": "G4", "Short": 595,
+                                      "Long": 595, "Channel": 45,
+                                      "Quantity": 2, "Unit Price": 30.0,
+                                      "Price Source": "tier 1"}]}
+            app._xero_send_orders([_order("o-11", "21711"),
+                                   _order("o-12", "21712")], True)
+            for _ in range(200):
+                root.update()
+                if len(said) >= 2 and opened:
+                    break
+                time.sleep(0.05)
+            from pypdf import PdfReader
+            assert len(opened) == 1 and "(2 orders)" in opened[0], opened
+            text = [pg.extract_text() for pg in PdfReader(opened[0]).pages]
+            firsts = [i for i, t in enumerate(text) if "TAX INVOICE" in t]
+            assert len(firsts) == 2 and "INV-11" in text[firsts[0]] \
+                and "INV-12" in text[firsts[1]], text
+            # Each invoice is followed by its own slip, before the next one.
+            assert firsts[0] == 0 and firsts[1] >= 3, firsts
+            folder = app._invoice_dir()
+            for one in ("Invoice INV-11 - 21711.pdf",
+                        "Invoice INV-12 - 21712.pdf"):
+                assert (folder / one).exists(), one
+        finally:
+            (_x.push_draft, gui._db.set_order_status, gui.messagebox.askyesno,
+             gui.messagebox.showinfo, gui.messagebox.showwarning,
+             _feat._switches, _x.invoice_pdf) = saved
+            del app._refresh_orders_list
+            del app._output_invoice_paperwork
+            app._tab_loaded.clear()
+            app._tab_loaded.update(loaded)
+    add("orders: several invoiced at once print as one PDF",
+        _invoice_several_one_pdf)
+
     def _cash_sale_invoice():
         """The cash sale account: the buyer's email asked for, a wrong one
         asked again, kept on the order, and Cancel invoicing nothing."""
