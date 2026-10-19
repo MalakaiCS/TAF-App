@@ -4409,6 +4409,15 @@ var TAFAPP = (function () {
                           kids: list.slice(0, 400).map(card) })] }));
         }
         U.onPick([search, lowOnly], redraw);
+        // A manager makes stock items here as on the PC (the same rule as
+        // db.can_manage_stock); the database lets approved staff write them.
+        if (D.roleLevel() >= 3) {
+          var add = U.button("＋  New stock item", function () {
+            newStockItem(rows);
+          }, "go");
+          add.setAttribute("id", "stock-new");
+          main.appendChild(U.el("div", { cls: "row-actions", kids: [add] }));
+        }
         main.appendChild(U.card(null, [
           U.el("label", { cls: "f", kids: [
             U.el("span", { text: "Search" }), search] }),
@@ -4828,6 +4837,163 @@ var TAFAPP = (function () {
     });
   }
 
+  /* ── Making a stock item on the phone ────────────────────────────────
+     The same fields and the same choices as the desktop's Add Stock Item
+     (db.STOCK_PRODUCT_TYPES, db.STOCK_UNITS - tests/web_app.py holds the
+     two lists together), and a photo straight from the camera, made small
+     before it goes up as the desktop does (photos.py). */
+
+  var STOCK_TYPES = ["Stepped Filter", "V-form Filter", "Panel Filter",
+    "Bag Filter", "Flyscreen", "Media Roll", "Wire", "Channel", "Spline",
+    "Flyscreen Corner", "Frame / Housing", "Hardware / Fasteners",
+    "Consumables", "Other"];
+  var STOCK_UNITS = ["each", "m2", "metre", "roll", "kg", "box", "pack",
+    "sheet", "pair", "set"];
+  var PHOTO_SIDE = 1600;
+
+  // A camera photo is 4000 pixels and several megabytes; a stock card needs
+  // a fraction of that. Anything the browser cannot draw goes up as it is.
+  function shrinkPhoto(file) {
+    return new Promise(function (resolve) {
+      if (!file || !/^image\//.test(file.type || "")) { resolve(file); return; }
+      var url = URL.createObjectURL(file);
+      var img = new Image();
+      img.onload = function () {
+        var scale = Math.min(1, PHOTO_SIDE / Math.max(img.width, img.height));
+        var c = document.createElement("canvas");
+        c.width = Math.max(1, Math.round(img.width * scale));
+        c.height = Math.max(1, Math.round(img.height * scale));
+        c.getContext("2d").drawImage(img, 0, 0, c.width, c.height);
+        URL.revokeObjectURL(url);
+        c.toBlob(function (blob) { resolve(blob || file); }, "image/jpeg", 0.85);
+      };
+      img.onerror = function () { URL.revokeObjectURL(url); resolve(file); };
+      img.src = url;
+    });
+  }
+
+  // The photo up to stock-images as <id>.jpg, and the item pointed at it -
+  // with ?v= so every phone and PC shows the new one, not one it kept.
+  function sendStockPhoto(id, file) {
+    return shrinkPhoto(file).then(function (blob) {
+      var path = id + ".jpg";
+      return D.upload("stock-images", path, blob, "image/jpeg").then(function () {
+        var url = D.publicUrl("stock-images", path) + "?v=" + Math.floor(Date.now() / 1000);
+        return D.update("stock_items", { "id": "eq." + id },
+                        { image_url: url, updated_at: new Date().toISOString() })
+          .then(function () { return url; });
+      });
+    });
+  }
+
+  function stockDuplicate(rows, name, sku) {
+    var n = lower(name), k = lower(sku);
+    return (rows || []).filter(function (s) {
+      return (n && lower(s.name) === n) || (k && lower(s.sku) === k);
+    })[0] || null;
+  }
+
+  function newStockItem(rows) {
+    U.openSheet(function (body, close) {
+      body.appendChild(U.el("h2", { cls: "title", text: "New stock item" }));
+      function field(label, input) {
+        body.appendChild(U.el("label", { cls: "f", kids: [
+          U.el("span", { text: label }), input] }));
+        return input;
+      }
+      function select(id, values, chosen) {
+        return U.el("select", { attr: { id: id }, kids: values.map(function (v) {
+          var o = U.el("option", { text: v, attr: { value: v } });
+          if (v === chosen) { o.selected = true; }
+          return o;
+        }) });
+      }
+      var name = field("Name *", U.el("input", { attr: { type: "text", id: "ns-name",
+        placeholder: "e.g. G4 media roll 1m" } }));
+      var sku = field("SKU / barcode", U.el("input", { attr: { type: "text", id: "ns-sku" } }));
+      var type = field("Type", select("ns-type", STOCK_TYPES, "Other"));
+      var unit = field("Counted in", select("ns-unit", STOCK_UNITS, "each"));
+      var row = U.el("div", { cls: "ns-two" });
+      body.appendChild(row);
+      var onHand = U.el("input", { attr: { type: "number", id: "ns-on", inputmode: "decimal",
+                                           min: "0", step: "any", value: "0" } });
+      var least = U.el("input", { attr: { type: "number", id: "ns-min", inputmode: "decimal",
+                                          min: "0", step: "any", value: "0" } });
+      row.appendChild(U.el("label", { cls: "f", kids: [U.el("span", { text: "On hand" }), onHand] }));
+      row.appendChild(U.el("label", { cls: "f", kids: [U.el("span", { text: "Minimum" }), least] }));
+      var where = field("Location", U.el("input", { attr: { type: "text", id: "ns-loc",
+        placeholder: "e.g. Rack A1" } }));
+      var supplier = field("Supplier", U.el("input", { attr: { type: "text", id: "ns-sup" } }));
+      var desc = field("Description", U.el("textarea", { attr: { id: "ns-desc", rows: "2" } }));
+
+      var picked = { file: null };
+      var pick = U.el("input", { attr: { type: "file", accept: "image/*",
+        capture: "environment", id: "ns-photo", style: "display:none" } });
+      var preview = U.el("div", { cls: "ns-preview" });
+      pick.addEventListener("change", function () {
+        picked.file = pick.files && pick.files[0];
+        U.clear(preview);
+        if (picked.file) {
+          preview.appendChild(U.el("img", { attr: { alt: "",
+            src: URL.createObjectURL(picked.file) } }));
+        }
+      });
+      body.appendChild(pick);
+      body.appendChild(U.el("div", { cls: "row-actions", kids: [
+        U.button("📷  Take a photo", function () { pick.click(); }, "quiet")] }));
+      body.appendChild(preview);
+
+      var save = U.button("Save item", function () {
+        var n = name.value.trim();
+        if (!n) { U.notice(body, "Give it a name."); name.focus(); return; }
+        var on = Number(onHand.value || 0), min = Number(least.value || 0);
+        if (!isFinite(on) || !isFinite(min) || on < 0 || min < 0) {
+          U.notice(body, "On hand and minimum are numbers, nought or more.");
+          return;
+        }
+        var same = stockDuplicate(rows, n, sku.value.trim());
+        if (same && !window.confirm("There is already a stock item \"" + same.name
+            + "\"" + (same.sku ? " (SKU " + same.sku + ")" : "")
+            + ". Make another one anyway?")) {
+          return;
+        }
+        save.disabled = true;
+        var who = D.cachedProfile().full_name || D.cachedProfile().username || "";
+        D.insert("stock_items", {
+          name: n, sku: sku.value.trim(), product_type: type.value,
+          unit: unit.value, stock_on_hand: on, minimum_on_hand: min,
+          location: where.value.trim(), supplier: supplier.value.trim(),
+          description: desc.value.trim(), created_by_name: who,
+          updated_at: new Date().toISOString()
+        }).then(function (made) {
+          var item = (made && made[0]) || {};
+          D.insert("audit_log", { user_id: (D.whoami() || {}).id, username: who,
+            action: "stock_created", details: ("Item: " + n + "  Type: " + type.value
+            + "  (from a phone)").slice(0, 500) }, true).catch(function () {});
+          if (!picked.file || !item.id) { return item; }
+          return sendStockPhoto(item.id, picked.file).then(function (url) {
+            item.image_url = url;
+            return item;
+          }).catch(function (err) {
+            U.notice(body, "Saved, but the photo did not go up: " + err.message);
+            return item;
+          });
+        }).then(function (item) {
+          close();
+          show("stock");
+          U.toast("Made " + (item.name || n) + ".");
+        }).catch(function (err) {
+          save.disabled = false;
+          U.notice(body, err.message);
+        });
+      }, "go");
+      save.setAttribute("id", "ns-save");
+      body.appendChild(U.el("div", { cls: "row-actions", kids: [
+        save, U.button("Cancel", close, "quiet")] }));
+      name.focus();
+    });
+  }
+
   function openStock(item, all) {
     U.openSheet(function (body, close) {
       body.appendChild(U.el("h2", { cls: "title",
@@ -4840,6 +5006,27 @@ var TAFAPP = (function () {
       if (item.image_url) {
         body.appendChild(U.el("img", { cls: "stock-photo",
           attr: { src: item.image_url, alt: item.name || "" } }));
+      }
+      if (D.roleLevel() >= 3) {
+        // A manager photographs the item where it sits.
+        var snap = U.el("input", { attr: { type: "file", accept: "image/*",
+          capture: "environment", id: "stock-photo-pick", style: "display:none" } });
+        snap.addEventListener("change", function () {
+          var file = snap.files && snap.files[0];
+          if (!file) { return; }
+          U.notice(body, "Sending the photo…", "ok");
+          sendStockPhoto(item.id, file).then(function (url) {
+            item.image_url = url;
+            U.closeAllSheets();
+            show("stock");
+            U.toast("Photo saved for " + (item.name || "the item") + ".");
+          }).catch(function (err) { U.notice(body, err.message); });
+        });
+        body.appendChild(snap);
+        var change = U.button(item.image_url ? "📷  Change photo" : "📷  Add a photo",
+                              function () { snap.click(); }, "quiet");
+        change.setAttribute("id", "stock-photo");
+        body.appendChild(U.el("div", { cls: "row-actions", kids: [change] }));
       }
       if (item.description) {
         body.appendChild(U.el("p", { text: item.description,
@@ -5412,6 +5599,8 @@ var TAFAPP = (function () {
                   return [g[0], g[1].map(function (x) { return x.id; })]; }); },
               forgetSops: function () { SOPS = null; },
               pollChats: pollChats },
+    _stock: { types: STOCK_TYPES, units: STOCK_UNITS, duplicate: function (r, n, k) {
+                var hit = stockDuplicate(r, n, k); return hit ? hit.id : null; } },
     _route: { suggest: function (s) { return suggestRoute(s).map(function (x) { return x.id; }); },
               apply: function (s, saved) {
                 return applyRoute(s, saved).map(function (x) { return x.id; }); },

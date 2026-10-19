@@ -128,6 +128,7 @@ AUDIT = [
 RAISED: list = []      # orders the web app raised
 FILES: list = []       # photos and signatures kept against an order
 UPLOADED: list = []    # what actually reached Storage
+MADE_STOCK: list = []  # stock items made from the phone
 
 QUOTES = [
     {"id": "q1", "quote_number": "Q-1041", "customer_name": "Bells Creek",
@@ -408,6 +409,17 @@ class Stub:
             return send(ORDERS)
         if "/rest/v1/customers" in url:
             return send(CUSTOMERS)
+        if "/rest/v1/stock_items" in url and req.method == "POST":
+            row = dict(body, id="s-new-" + str(len(STOCK)), image_url="")
+            STOCK.append(row)
+            MADE_STOCK.append(row)
+            return send([row], 201)
+        if "/rest/v1/stock_items" in url and req.method == "PATCH":
+            sid = url.split("id=eq.", 1)[1].split("&")[0]
+            for s in STOCK:
+                if s["id"] == sid:
+                    s.update(body)
+            return send([s for s in STOCK if s["id"] == sid])
         if "/rest/v1/stock_items" in url:
             return send(STOCK)
         if "/rest/v1/quotes" in url and req.method == "PATCH":
@@ -1513,6 +1525,66 @@ def run() -> int:
         COUNTS.clear()
         SWITCHES.clear()
         page.evaluate("TAFAPP._floor.setFeatures({})")
+
+        print("\n── making a stock item on the phone ──")
+        from taf_order_app import db as _sdb
+        check("the phone offers the same types and units as the PC",
+              page.evaluate("TAFAPP._stock.types") == _sdb.STOCK_PRODUCT_TYPES
+              and page.evaluate("TAFAPP._stock.units") == _sdb.STOCK_UNITS)
+        page.click('#tabs button[data-tab="orders"]')
+        page.click('#tabs button[data-tab="stock"]')
+        page.wait_for_selector("#stock-new")
+        n_before = len(STOCK)
+        page.click("#stock-new")
+        page.wait_for_selector("#ns-save")
+        page.click("#ns-save")
+        page.wait_for_timeout(200)
+        check("an item needs a name", len(MADE_STOCK) == 0
+              and "Give it a name" in page.locator("#sheet-body").inner_text())
+        page.fill("#ns-name", "Hose clamps 40mm")
+        page.fill("#ns-sku", "HC-40")
+        page.select_option("#ns-type", "Hardware / Fasteners")
+        page.select_option("#ns-unit", "box")
+        page.fill("#ns-on", "12")
+        page.fill("#ns-min", "4")
+        page.fill("#ns-loc", "Rack C2")
+        page.set_input_files("#ns-photo", files=[{
+            "name": "clamps.png", "mimeType": "image/png", "buffer": _png(2400, 1800)}])
+        uploads = len(UPLOADED)
+        page.click("#ns-save")
+        page.wait_for_selector(f'#screen .stock-card[data-stock="s-new-{n_before}"]')
+        made = MADE_STOCK[-1] if MADE_STOCK else {}
+        check("a manager makes a stock item from the phone, with what was typed",
+              made.get("name") == "Hose clamps 40mm" and made.get("sku") == "HC-40"
+              and made.get("product_type") == "Hardware / Fasteners"
+              and made.get("unit") == "box" and made.get("stock_on_hand") == 12
+              and made.get("minimum_on_hand") == 4 and made.get("location") == "Rack C2"
+              and made.get("created_by_name") == "Kai Brown", str(made))
+        check("and its photo, from the camera, goes up under the item's id",
+              len(UPLOADED) == uploads + 1
+              and UPLOADED[-1] == f"stock-images/s-new-{n_before}.jpg"
+              and "stock-images/s-new-" in (made.get("image_url") or "")
+              and "?v=" in made.get("image_url", ""), f"{UPLOADED[-1:]} {made.get('image_url')}")
+        page.click("#stock-new")
+        page.wait_for_selector("#ns-save")
+        page.fill("#ns-name", "x")
+        page.fill("#ns-sku", "hc-40")
+        said = []
+        page.once("dialog", lambda d: (said.append(d.message), d.dismiss()))
+        page.click("#ns-save")
+        page.wait_for_timeout(300)
+        check("the same SKU twice is asked about first, and not made when declined",
+              said and "Hose clamps 40mm" in said[0] and len(MADE_STOCK) == 1, str(said))
+        page.keyboard.press("Escape")
+        page.wait_for_selector("#sheet.hidden", state="attached")
+        page.locator(f'#screen .stock-card[data-stock="s-new-{n_before}"]').click()
+        page.wait_for_selector("#stock-photo")
+        page.set_input_files("#stock-photo-pick", files=[{
+            "name": "again.png", "mimeType": "image/png", "buffer": _png(800, 600)}])
+        page.wait_for_selector("#sheet.hidden", state="attached")
+        check("a manager can change an item's photo from its card",
+              len(UPLOADED) == uploads + 2 and UPLOADED[-1] == f"stock-images/s-new-{n_before}.jpg")
+        STOCK[:] = [s for s in STOCK if not str(s["id"]).startswith("s-new-")]
 
         print("\n── delivery ──")
         page.click('#tabs button[data-tab="delivery"]')
@@ -2683,6 +2755,10 @@ def run() -> int:
         page.wait_for_selector("#app:not(.hidden)")
         check("an employee is not offered the log",
               page.locator('#tabs button[data-tab="log"]').count() == 0)
+        page.click('#tabs button[data-tab="stock"]')
+        page.wait_for_selector("#screen .stock-card")
+        check("nor making stock items, as on the PC",
+              page.locator("#stock-new").count() == 0)
         check("but everything they do use is still there",
               page.locator('#tabs button[data-tab="orders"]').count() == 1
               and page.locator('#tabs button[data-tab="scan"]').count() == 1)

@@ -332,7 +332,12 @@ log, stock management and a customer database.
   screen, four, three, then two and one on a phone, by the room there is.
   Click a card to pick it for Open Item, Adjust Stock and the Item menu
   (Ctrl/⌘-click for several); double-click to open it. The phone and browser
-  app's Stock page shows the same cards.
+  app's Stock page shows the same cards. On the phone a manager makes stock
+  items too - **＋ New stock item**: name, SKU, type, unit, on hand, minimum,
+  location, supplier, description, and a photo straight from the camera
+  (made small before it goes up) - and **Add / Change photo** on an item's
+  card. An item with the same name or SKU as one already there is asked
+  about first.
 - **C-channel weights** — every channel from 10 to 250 mm deep: its actual
   size (23 × centre × 23 × 2440 mm), what one length weighs and what stacks
   of 1, 2, 5, 10 or any number weigh, rounded up to the next 0.1 kg. Search,
