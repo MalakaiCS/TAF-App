@@ -6,10 +6,38 @@
 # In one-dir mode all files live permanently next to the exe — no temp folder,
 # no cleanup, no warning.
 #
-from PyInstaller.utils.hooks import collect_data_files
+import os
+import sys
 
-# Collect all babel locale data files properly (1000+ .dat files + global.dat)
-babel_datas = collect_data_files('babel', include_py_files=False)
+WINDOWS = sys.platform == 'win32'
+MACOS   = sys.platform == 'darwin'
+
+# No Babel: its 1000+ locale files came in for tkcalendar's date picker,
+# which the app no longer uses (its own picker starts instantly). Fewer files
+# to install, and fewer for antivirus to look through on every launch.
+
+# SumatraPDF.exe lets us print PDFs without a PDF viewer. CI fetches it (from
+# the pinned pdf-to-printer npm package) before the build; if it's absent
+# (e.g. a local source build) we simply don't bundle it and the app falls back
+# to the Windows shell 'print' verb. It is a Windows program: on a Mac the
+# printing path is lpr, which is already there, so there is nothing to bundle.
+pdf_helper_datas = ([('SumatraPDF.exe', '.')]
+                    if WINDOWS and os.path.exists('SumatraPDF.exe') else [])
+
+# pywin32 is not installed off Windows and never will be. Listing it as a
+# hidden import there is not a warning, it is a build that stops.
+windows_imports = ['win32com', 'win32com.client', 'win32print', 'win32api',
+                   'pywintypes'] if WINDOWS else []
+
+# The icon: Windows wants .ico, macOS wants .icns, and PyInstaller refuses a
+# format the platform does not take. CI makes the .icns from the same PNG the
+# rest of the app uses, so it is one logo rather than two that can drift.
+if WINDOWS:
+    app_icon = ['TAF_logo.ico']
+elif MACOS and os.path.exists('TAF_logo.icns'):
+    app_icon = ['TAF_logo.icns']
+else:
+    app_icon = None
 
 a = Analysis(
     ['modern_order_gui.py'],
@@ -19,11 +47,15 @@ a = Analysis(
         ('TAF_logo.ico',            '.'),
         ('TAF_logo.png',            '.'),
         ('TAF_logo_horizontal.png', '.'),
+        ('TAF_logo_header.png',     '.'),       # the logos at screen size
+        ('TAF_logo_login.png',      '.'),
         ('TAF_logo_circular.png',   '.'),
+        ('TAF_logo_badge.png',      '.'),       # the round badge that turns
         ('Templates.xlsx',          '.'),
         ('settings.json',           '.'),
         ('fonts',                   'fonts'),   # bundled Public Sans .ttf files
-    ] + babel_datas,
+        ('THIRD_PARTY_NOTICES.txt', '.'),       # SumatraPDF GPLv3 notice
+    ] + pdf_helper_datas,
     hiddenimports=[
         # supabase + deps
         'supabase',
@@ -55,14 +87,25 @@ a = Analysis(
         'taf_order_app.order_service',
         'taf_order_app.models',
         'taf_order_app.validation',
+        'taf_order_app.quiet',
+        'taf_order_app.tls',
+        'taf_order_app.db_session',
         'taf_order_app.bag_filler',
-        # Calendar picker
-        'tkcalendar',
-        'babel',
-        'babel.numbers',
-        'babel.dates',
-        'babel.core',
-        'babel.localedata',
+        'taf_order_app.po_import',
+        'taf_order_app.phone_page',
+        # Reached only from inside functions (the worksheet's blocks under
+        # Notes, the labels), so named here rather than left to discovery.
+        'taf_order_app.worksheet_blocks',
+        'taf_order_app.cchannel',
+        'taf_order_app.pallet_labels',
+        'taf_order_app.order_packing',
+        'taf_order_app.delivery_labels',
+        'taf_order_app.filter_calc',
+        'taf_order_app.calc_settings',
+        'reportlab.lib.utils',
+        # Phone-pairing QR code
+        'qrcode',
+        'qrcode.image.pil',
         # PDF generation
         'reportlab',
         'reportlab.platypus',
@@ -87,9 +130,6 @@ a = Analysis(
         'pypdf',
         'docx',
         'docx.oxml',
-        'win32com',
-        'win32com.client',
-        'pywintypes',
         # stdlib extras sometimes missed
         'tkinter',
         'tkinter.ttk',
@@ -98,11 +138,14 @@ a = Analysis(
         'queue',
         'threading',
         'calendar',
-    ],
+    ] + windows_imports,
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
-    excludes=[],
+    # Never used by the app; left out so the bundle is smaller and starts
+    # faster.
+    excludes=['tkcalendar', 'babel', 'matplotlib', 'pandas', 'IPython',
+              'pytest'],
     noarchive=False,
     optimize=0,
 )
@@ -117,7 +160,11 @@ exe = EXE(
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
-    upx=True,
+    # No UPX anywhere. On a Mac it breaks the signature every arm64 program
+    # must carry; on Windows every compressed DLL is unpacked again at every
+    # launch, and antivirus looks harder at packed files - both slow start-up
+    # for a smaller download nobody needed.
+    upx=False,
     upx_exclude=[],
     console=False,
     disable_windowed_traceback=False,
@@ -125,7 +172,7 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
-    icon=['TAF_logo.ico'],
+    icon=app_icon,
 )
 
 coll = COLLECT(
@@ -133,7 +180,30 @@ coll = COLLECT(
     a.binaries,
     a.datas,
     strip=False,
-    upx=True,
+    upx=False,
     upx_exclude=[],
     name='TAFOrderEntry',   # output folder: dist/TAFOrderEntry/
 )
+
+# A folder full of files is how Windows ships. A Mac ships one thing you drag
+# to Applications, and a plain executable there has no Dock icon, no name in
+# the menu bar, and no way to be the default for anything. BUNDLE wraps the
+# same COLLECT output in TAF Order Entry.app, which is that one thing.
+if MACOS:
+    app = BUNDLE(
+        coll,
+        name='TAF Order Entry.app',
+        icon='TAF_logo.icns' if os.path.exists('TAF_logo.icns') else None,
+        bundle_identifier='au.com.totalairfiltration.orderentry',
+        info_plist={
+            'CFBundleName':             'TAF Order Entry',
+            'CFBundleDisplayName':      'TAF Order Entry',
+            'CFBundleShortVersionString': os.environ.get('TAF_VERSION', '0.0.0'),
+            'CFBundleVersion':            os.environ.get('TAF_VERSION', '0.0.0'),
+            # Retina. Without it the whole window is drawn at half resolution
+            # and then scaled up, which looks like a screenshot of itself.
+            'NSHighResolutionCapable':  True,
+            'NSRequiresAquaSystemAppearance': False,
+            'LSMinimumSystemVersion':   '11.0',
+        },
+    )

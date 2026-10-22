@@ -107,7 +107,7 @@ class UserManagementDialog(tk.Toplevel):
                   background=[("selected", CSL)],
                   foreground=[("selected", CTX)])
 
-        cols = ("username", "full_name", "email", "role")
+        cols = ("username", "full_name", "email", "role", "approved")
         self.tree = ttk.Treeview(tree_wrap, columns=cols,
                                  show="headings", style="UM.Treeview",
                                  selectmode="browse")
@@ -118,6 +118,7 @@ class UserManagementDialog(tk.Toplevel):
             "full_name": ("Full Name",   170, "w"),
             "email":     ("Email",       210, "w"),
             "role":      ("Role",        100, "center"),
+            "approved":  ("Access",      110, "center"),
         }
         for col, (hd, wd, anc) in col_defs.items():
             self.tree.heading(col, text=hd)
@@ -125,6 +126,10 @@ class UserManagementDialog(tk.Toplevel):
 
         self.tree.tag_configure("even", background=CRE)
         self.tree.tag_configure("odd",  background=CCA)
+        # An account nobody has approved can sign in and see nothing. It
+        # should be the most obvious thing on this screen.
+        self.tree.tag_configure("pending", background="#FDEBD0",
+                                foreground="#7E5109")
 
         vsb = ttk.Scrollbar(tree_wrap, orient="vertical",
                             command=self.tree.yview)
@@ -141,6 +146,8 @@ class UserManagementDialog(tk.Toplevel):
 
         # Directors/Admins only
         if self._db.role_level() >= 4:
+            _flat_btn(foot, "Approve / Block…", self._toggle_approved,
+                      bg="#1E8E5A", pady=8, padx=16).pack(side="left", padx=(8, 0))
             _flat_btn(foot, "Edit Profile…", self._edit_profile,
                       bg="#5D6D7E", pady=8, padx=16).pack(side="left", padx=(8, 0))
             _flat_btn(foot, "Delete User", self._delete_user,
@@ -187,15 +194,67 @@ class UserManagementDialog(tk.Toplevel):
         self._profiles = profiles
         for iid in self.tree.get_children():
             self.tree.delete(iid)
+        pending = 0
         for i, p in enumerate(profiles):
-            tag = "even" if i % 2 == 0 else "odd"
+            # A database from before the staff-access migration has no
+            # `approved` column; there, everyone is staff, as they were.
+            waiting = ("approved" in p) and not p.get("approved")
+            if waiting:
+                pending += 1
+            tag = "pending" if waiting else ("even" if i % 2 == 0 else "odd")
             self.tree.insert("", "end", iid=str(i), tags=(tag,), values=(
                 p.get("username", ""),
                 p.get("full_name", ""),
                 p.get("email", ""),
                 p.get("role", "Employee"),
+                "Waiting" if waiting else "Approved",
             ))
-        self._status.set(f"{len(profiles)} user{'s' if len(profiles) != 1 else ''} loaded.")
+        note = f"{len(profiles)} user{'s' if len(profiles) != 1 else ''} loaded."
+        if pending:
+            note = (f"{pending} account{'s' if pending != 1 else ''} waiting for "
+                    f"approval  ·  {note}")
+        self._status.set(note)
+
+    def _toggle_approved(self):
+        """Let an account in, or shut it out.
+
+        Approval is the whole of the staff boundary: anyone holding the
+        publishable key can create an account, and this is what decides
+        whether that account can see a single thing.
+        """
+        profile = self._get_selected_profile()
+        if not profile:
+            messagebox.showinfo("Approve", "Select a user first.", parent=self)
+            return
+        if "approved" not in profile:
+            messagebox.showinfo(
+                "Approve",
+                "This database doesn't have staff approval yet.\n\n"
+                "Run migrate_staff_access.sql in the Supabase SQL Editor. "
+                "Until then, anyone who can create an account can read "
+                "everything.", parent=self)
+            return
+        approved = bool(profile.get("approved"))
+        who = profile.get("full_name") or profile.get("email") or "this user"
+        if approved:
+            question = (f"Block {who}?\n\n"
+                        "They stay signed in but every screen goes empty until "
+                        "they are approved again.")
+        else:
+            question = (f"Approve {who}?\n\n"
+                        "They get the access their role allows.")
+        if not messagebox.askyesno("Approve / Block", question, parent=self):
+            return
+        try:
+            self._db.set_user_approved(profile["id"], not approved)
+            self._db.log_action(
+                "staff_access",
+                f"{'Blocked' if approved else 'Approved'} {who}")
+        except Exception as exc:
+            messagebox.showerror("Approve / Block",
+                                 f"Could not change access:\n{exc}", parent=self)
+            return
+        self._load()
 
     def _get_selected_profile(self) -> dict | None:
         sel = self.tree.selection()

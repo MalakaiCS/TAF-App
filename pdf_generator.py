@@ -17,6 +17,53 @@ LW_THIN   = 0.5
 LW_MEDIUM = 1.5
 
 
+def draw_order_barcode(c, order_number: str) -> bool:
+    """Print the order number as a scannable barcode at the foot of the page.
+
+    The grid above fills about three quarters of the sheet, so this sits in
+    the empty band underneath it and cannot land on top of anything.
+
+    Code 128 because it takes the characters these numbers actually use -
+    "PO-8842", "TAF-ON-0007" - without needing a check digit worked out by
+    hand, and every 1D scanner reads it out of the box.
+
+    Returns False when there is nothing worth printing, so a worksheet for an
+    order with no number is simply left alone.
+    """
+    text = (order_number or "").strip().upper()
+    if not text:
+        return False
+    try:
+        from reportlab.graphics.barcode import code128
+    except Exception:
+        return False          # an old reportlab: a worksheet without a
+                              # barcode still beats no worksheet
+    # barWidth is the narrow-bar width, and it is the difference between a
+    # barcode and a picture of one. Measured by printing these and decoding
+    # them back: at 0.5pt one code in three read, at 0.35pt none did. 1.0pt
+    # (0.353mm) is the first width that reads every time, and it is the
+    # X-dimension handheld imagers are specified against. 0.75pt is the floor
+    # - narrower than that and a scanner in someone's hand starts failing.
+    NARROW, NARROW_MIN = 1.0, 0.75
+    try:
+        bar = code128.Code128(text, barWidth=NARROW, barHeight=26,
+                              humanReadable=False)
+        w   = bar.width
+        if w > (PAGE_W - 2 * MARGIN) * 0.45:      # an unusually long number
+            bar = code128.Code128(text, barWidth=NARROW_MIN, barHeight=26,
+                                  humanReadable=False)
+            w   = bar.width
+        x = PAGE_W - MARGIN - w
+        y = MARGIN + 14
+        bar.drawOn(c, x, y)
+        c.setFont("Helvetica", 7)
+        c.setFillColor(BLACK)
+        c.drawRightString(PAGE_W - MARGIN, MARGIN + 5, text)
+        return True
+    except Exception:
+        return False          # never lose a worksheet over its barcode
+
+
 def _get_logo_path():
     """Return path to TAF_logo.png whether running frozen or from source."""
     import sys
@@ -82,18 +129,10 @@ def _markings(short, long_):
 
 
 def _wire_media(short, long_, channel, label, qty):
-    lbl = str(label).upper()
-    if lbl.startswith("F"):
-        ws, wl, ms, ml = short-10, long_-10, short, long_
-    elif lbl.startswith("V"):
-        d = min(channel, 100)
-        if   30 <= d <= 60:  ws = short-15; wl = int(round(long_*1.36))
-        elif 65 <= d <= 80:  ws = short-10; wl = int(round(long_*1.55))
-        elif 85 <= d <= 100: ws = short-10; wl = int(round(long_*1.785))
-        else:                ws, wl = short, long_
-        ms, ml = ws+60, wl+40
-    else:
-        ws, wl, ms, ml = short, long_, short, long_
+    # The formulas live in filter_calc's worksheet profiles, which the weight
+    # calculator uses too - one rule, not two copies that can drift apart.
+    from taf_order_app.filter_calc import worksheet_cuts
+    ws, wl, ms, ml = worksheet_cuts(short, long_, channel, label)
     return dict(wc=f"{ws}*{wl}", wq=qty*2, mc=f"{ms}*{ml}", mq=qty)
 
 
@@ -135,6 +174,87 @@ def _txt(c, x, y, w, h, text, bold=False, size=8, align="left", valign="center",
         if align == "center": c.drawCentredString(x + w/2, ty, line)
         elif align == "right": c.drawRightString(x + w - 2, ty, line)
         else: c.drawString(x + 2, ty, line)
+
+
+# ── The blocks under Notes ────────────────────────────────────────────────────
+
+def _block(c, x, top, w, title, lines, floor, size=7.5):
+    """A boxed block: a bold title, then lines wrapped to the width. Stops at
+    `floor` rather than drawing over whatever is below, and says so.
+    Returns the y of its bottom edge."""
+    from reportlab.lib.utils import simpleSplit
+    pad, lead = 3.0, size + 1.6
+    rows = []
+    for text, bold in lines:
+        font = "Helvetica-Bold" if bold else "Helvetica"
+        for part in simpleSplit(text, font, size, w - 2 * pad):
+            rows.append((part, font))
+    room = int((top - floor - 2 * pad - 11) // lead)
+    if len(rows) > room:
+        rows = rows[:max(0, room - 1)] + [("(more on screen in the app)",
+                                           "Helvetica-Oblique")]
+    h = 2 * pad + 11 + lead * len(rows)
+    bottom = top - h
+    _box(c, x, bottom, w, h)
+    c.setFillColor(BLACK)
+    c.setFont("Helvetica-Bold", 8)
+    c.drawString(x + pad, top - pad - 7, title)
+    y = top - pad - 11 - size
+    for text, font in rows:
+        c.setFont(font, size)
+        c.drawString(x + pad, y, text)
+        y -= lead
+    return bottom
+
+
+def _under_notes(c, x, top, w, ctx, calculator, item=None, prefer=""):
+    """Wrapping Instructions, then (Flat and Pleated Panel pages) the filter
+    calculator - which way to make the frame - each in its own box below the
+    Notes line."""
+    if ctx is None:
+        return
+    try:
+        from taf_order_app import worksheet_blocks as wb
+    except Exception:
+        return
+    floor = MARGIN + 46            # clear of the barcode at the foot
+    try:
+        bottom = _block(c, x, top, w, "WRAPPING INSTRUCTIONS",
+                        wb.wrapping_lines(ctx), floor)
+        if calculator and item is not None:
+            try:
+                from taf_order_app import features as _features
+                workshop = _features.workshop()
+            except Exception:
+                workshop = None
+            lines = wb.frame_lines(item, prefer, workshop,
+                                   ctx.get("order_method") or "") + \
+                list(ctx.get("channel_lines") or [])
+            if lines:
+                _block(c, x, bottom - 4, w, "FILTER CALCULATOR", lines, floor)
+    except Exception:
+        pass                       # never lose a worksheet over its extras
+
+
+def _brace(c, cx, ry, cw, rh, ctx):
+    """BRACE REQ?: the calculated answer in the box, the exact notice
+    beside it. A sheet with nothing calculated keeps the Y/N to circle."""
+    short, message = "", ""
+    if ctx is not None:
+        try:
+            from taf_order_app import worksheet_blocks as wb
+            short, message = wb.brace_cell(ctx)
+        except Exception:
+            short, message = "", ""
+    if not short:
+        _txt(c, cx('E'), ry(22), cw('E'), rh(22), "Y/N", size=8, align="center")
+        return
+    _txt(c, cx('E'), ry(22), cw('E'), rh(22), short, bold=True, size=7,
+         align="center")
+    if message:
+        from reportlab.lib.utils import simpleSplit
+        lines = simpleSplit(message, "Helvetica", 6, cw('F') - 3)[:3]
+        _txt(c, cx('F'), ry(22), cw('F'), rh(22), lines, size=6)
 
 
 # ── Geometry ──────────────────────────────────────────────────────────────────
@@ -221,7 +341,8 @@ def _draw_header(c, col_x, col_w, row_y, row_h,
 
 # ── VorF page ─────────────────────────────────────────────────────────────────
 
-def _draw_vorf(c, header, item, page_num, total_pages, d_ord, d_due):
+def _draw_vorf(c, header, item, page_num, total_pages, d_ord, d_due,
+               ctx=None):
     col_x, col_w, row_y, row_h = _geom(_VORF_CHARS, _VORF_ROW_H)
     CI = {l:i for i,l in enumerate("ABCDEFGHIJKLMNOPQ")}
     cx  = lambda l: col_x[CI[l]]
@@ -249,7 +370,11 @@ def _draw_vorf(c, header, item, page_num, total_pages, d_ord, d_due):
     cust = (header.get("Customer Name","") or "").upper()
     ord_n = header.get("Order Number","") or ""
     attn  = (header.get("Attention","") or "").upper()
-    label = f"F{channel}" if ftype == "flat panel" else f"V{channel}"
+    bag_hdr = bool(item.get("Bag Header"))
+    if bag_hdr:
+        label = f"H{channel}"
+    else:
+        label = f"F{channel}" if ftype == "flat panel" else f"V{channel}"
     item_xtra  = (item.get("item_notes") or "")
     notes      = (item.get("Notes") or "")
     hdr_notes  = (header.get("Notes") or "")
@@ -299,7 +424,14 @@ def _draw_vorf(c, header, item, page_num, total_pages, d_ord, d_due):
 
     # Wire Cut/Qty & Media Cut/Qty — required for pleat inserts too,
     # so shown whenever NOT a stock item and NOT header-only.
-    if not use_sv and not is_hdr:
+    if bag_hdr:
+        # A bag's header: the wire it takes (header - 15, on a wire header
+        # only) and no media - the bag is the media.
+        for col, val in [("N", item.get("Header Wire Cut") or "-"),
+                         ("O", item.get("Header Wire Qty") or "-"),
+                         ("P", "-"), ("Q", "-")]:
+            _txt(c, cx(col), ry(6), cw(col), rh(6), val, size=9, align="center", valign="top", offset=2)
+    elif not use_sv and not is_hdr:
         wm = _wire_media(short, long_, channel, label, int(qty))
         for col, val in [("N",wm["wc"]),("O",wm["wq"]),("P",wm["mc"]),("Q",wm["mq"])]:
             _txt(c, cx(col), ry(6), cw(col), rh(6), val, size=9, align="center", valign="top", offset=2)
@@ -347,7 +479,13 @@ def _draw_vorf(c, header, item, page_num, total_pages, d_ord, d_due):
 
     # ── Row 22: BRACE REQ? ────────────────────────────────────────────────
     _txt(c, cx('B'), ry(22), cw('B','C','D'), rh(22), "BRACE REQ?", bold=True, size=8)
-    _txt(c, cx('E'), ry(22), cw('E'),         rh(22), "Y/N", size=8, align="center")
+    _brace(c, cx, ry, cw, rh, ctx)
+
+    # ── Under Notes: wrapping, then the calculator ────────────────────────
+    _under_notes(c, cx('G'), yb(18) - 3,
+                 cw('G','H','I','J','K','L','M','N','O','P','Q'), ctx,
+                 calculator=can_mark, item=item,
+                 prefer=header.get("_frame_prefer", ""))
 
     # ── Bottom table rows 24-26 (B-F) — exact borders ─────────────────────
     # Row 24: single cell B-F
@@ -361,10 +499,13 @@ def _draw_vorf(c, header, item, page_num, total_pages, d_ord, d_due):
     _box(c, cx('B'), ry(26), cw('B','C','D','E','F'), rh(26))
     _txt(c, cx('B'), ry(26), cw('B','C','D','E','F'), rh(26), "INVOICED", size=7, align="center")
 
+    draw_order_barcode(c, ord_n)
+
 
 # ── FS page ───────────────────────────────────────────────────────────────────
 
-def _draw_fs(c, header, item, page_num, total_pages, d_ord, d_due):
+def _draw_fs(c, header, item, page_num, total_pages, d_ord, d_due,
+             ctx=None):
     col_x, col_w, row_y, row_h = _geom(_FS_CHARS, _FS_ROW_H)
     CI = {l:i for i,l in enumerate("ABCDEFGHIJKL")}
     cx  = lambda l: col_x[CI[l]]
@@ -439,7 +580,11 @@ def _draw_fs(c, header, item, page_num, total_pages, d_ord, d_due):
 
     # ── Row 22: BRACE REQ? (matches VorF row 22) ─────────────────────────
     _txt(c, cx('B'), ry(22), cw('B','C','D'), rh(22), "BRACE REQ?", bold=True, size=8)
-    _txt(c, cx('E'), ry(22), cw('E'),         rh(22), "Y/N", size=8, align="center")
+    _brace(c, cx, ry, cw, rh, ctx)
+
+    # ── Under Notes: wrapping (a flyscreen has no calculator block) ───────
+    _under_notes(c, cx('G'), yb(18) - 3, cw('G','H','I','J','K','L'), ctx,
+                 calculator=False)
 
     # ── Bottom table rows 24-26 (B-F) — matches VorF ─────────────────────
     _box(c, cx('B'), ry(24), cw('B','C','D','E','F'), rh(24))
@@ -450,8 +595,25 @@ def _draw_fs(c, header, item, page_num, total_pages, d_ord, d_due):
     _box(c, cx('B'), ry(26), cw('B','C','D','E','F'), rh(26))
     _txt(c, cx('B'), ry(26), cw('B','C','D','E','F'), rh(26), "INVOICED", size=7, align="center")
 
+    draw_order_barcode(c, ord_n)
+
 
 # ── Main entry point ──────────────────────────────────────────────────────────
+
+def _frame_preference(header) -> str:
+    """The way this customer has asked for their frames made, if the company
+    has that switched on - '' for whichever is cheapest."""
+    if header.get("_frame_prefer") is not None:
+        return str(header.get("_frame_prefer") or "")
+    try:
+        from taf_order_app import features as _features
+        from taf_order_app import db as _db
+        if not (_features.is_on("frame_preference") and _db.is_ready()):
+            return ""
+        return _db.frame_preference(header.get("Customer Name", "")) or ""
+    except Exception:
+        return ""
+
 
 def generate_pdf(header_data, items, output_path, page_start=1, grand_total=None):
     d_ord, d_due = _fmt_dates(header_data.get("Date Ordered",""),
@@ -459,22 +621,70 @@ def generate_pdf(header_data, items, output_path, page_start=1, grand_total=None
     total_pages  = grand_total if grand_total is not None else len(items)
     page_counter = page_start
     c = rl_canvas.Canvas(output_path, pagesize=landscape(A4))
+    header_data = dict(header_data, _frame_prefer=_frame_preference(header_data))
+    # Packing plans, wrap codes and calculations for the whole order at once,
+    # so a sheet's wrap codes are the ones on the delivery labels.
+    try:
+        from taf_order_app import worksheet_blocks as _wb
+        contexts = _wb.order_context(items)
+    except Exception:
+        _wb, contexts = None, [None] * len(items)
+    # The channel for the whole order, and which pages share a length: on
+    # every page's FILTER CALCULATOR.
+    channel_plan = None
+    try:
+        from taf_order_app import order_channel as _oc
+        try:
+            from taf_order_app import features as _features
+            workshop = _features.workshop()
+        except Exception:
+            workshop = None
+        channel_plan = _oc.order_plan(
+            [dict(it, page=page_start + i) for i, it in enumerate(items)],
+            workshop, header_data.get("_frame_prefer", ""))
+    except Exception:
+        channel_plan = None
 
     for i, item in enumerate(items):
         ftype = (item.get("Filter Type") or "").lower()
+        ctx = contexts[i] if i < len(contexts) else None
+        if ctx is not None and channel_plan is not None:
+            try:
+                framed = _oc.framed(item)
+                ctx = dict(ctx, channel_lines=_oc.page_lines(
+                    channel_plan, page_counter) if framed else [],
+                    order_method=(channel_plan.get("methods", {}).get(
+                        page_counter) or {}).get("method", "")
+                    if framed else "")
+            except Exception:
+                pass
         if ftype == "stepped filter":
-            _draw_fs(c, header_data, item, page_counter, total_pages, d_ord, d_due)
+            _draw_fs(c, header_data, item, page_counter, total_pages, d_ord, d_due,
+                     ctx)
             c.showPage()
             inner = {**item,
                      "Short":       max(0, int(item.get("Short",   0)) - 25),
                      "Long":        max(0, int(item.get("Long",    0)) - 25),
                      "Channel":     max(0, int(item.get("Channel", 0)) - 10),
                      "Filter Type": "V-form"}
-            _draw_vorf(c, header_data, inner, page_counter, total_pages, d_ord, d_due)
+            inner_ctx = ctx
+            if ctx is not None and _wb is not None:
+                # Same wraps; the V-form inside is calculated at its own size.
+                try:
+                    from taf_order_app import filter_calc as _fc
+                    from taf_order_app import calc_settings as _cs
+                    inner_ctx = dict(ctx, calc=_fc.calculate_item(
+                        inner, _cs.cached()))
+                except Exception:
+                    inner_ctx = ctx
+            _draw_vorf(c, header_data, inner, page_counter, total_pages, d_ord, d_due,
+                       inner_ctx)
         elif ftype == "flyscreen":
-            _draw_fs(c, header_data, item, page_counter, total_pages, d_ord, d_due)
+            _draw_fs(c, header_data, item, page_counter, total_pages, d_ord, d_due,
+                     ctx)
         else:
-            _draw_vorf(c, header_data, item, page_counter, total_pages, d_ord, d_due)
+            _draw_vorf(c, header_data, item, page_counter, total_pages, d_ord, d_due,
+                       ctx)
         page_counter += 1
         if i < len(items) - 1:
             c.showPage()

@@ -1,0 +1,1550 @@
+// Supabase Edge Function: xero
+//
+// Xero, linked for good. One connection for the whole company, made once by
+// a manager; every staff account works through it from then on. It runs one
+// of two ways (xero_connection.mode):
+//
+//   TRIAL ('manual', where it starts): nothing goes by itself. The button on
+//   an order sends it - as a draft, or invoiced there and then (approved and
+//   emailed by Xero to the contact on file), after which the app marks the
+//   order Complete.
+//
+//   AUTOMATIC ('automatic', published by a manager after the trial):
+//   * Each order goes to Xero as a DRAFT sales invoice, dated the day on the
+//     work order, and is kept up to date while it is still a draft.
+//   * When the job is marked Complete (or Dispatched) - from any PC, phone or
+//     screen - the invoice is dated that day, approved, and emailed by Xero to
+//     the contact on file there.
+//
+// A part number Xero has no item for is made an item in Xero (code, name and
+// sales description), so every line carries an item code.
+//
+// Everything about Xero that is a secret lives here and only here. The client
+// secret is a function secret; the sign-in (access and refresh tokens) is in
+// the xero_connection table, which no app account can read or write - only
+// this function, with the service role. Neither goes near the installer or a
+// browser. These are the keys that move money.
+//
+// Pricing an order needs the price list and the part-number rules, which live
+// in the desktop app, so the app prices each order and hands the lines here
+// (do=draft). Completion is noted by a trigger on orders (migrate_xero_link.sql,
+// step 37), so it does not matter which screen marked the job; do=sweep then
+// approves and emails whatever is waiting.
+//
+// Actions (?do=...):
+//
+//   status      connected or not, to which organisation, mode  staff
+//   mode        trial ('manual') or 'automatic'                 manager
+//   start       the URL a manager signs in to Xero at           manager
+//   finish      where Xero sends them back                      (Xero)
+//   disconnect  end the link                                    manager
+//   draft       make or update one order's draft invoice; with
+//               invoice_now, approve and email it there and then staff
+//   sweep       approve and email completed jobs; take deleted
+//               orders' drafts back out                         staff, or the
+//                                                               service role
+//   retry       try one order again now                         staff
+//   list        where each order's invoice is up to             staff
+//   pdf         an order's invoice as Xero prints it            staff
+//   suppliers_pull  Xero's supplier contacts into the app       manager
+//   items_pull  every Xero item into the app                    manager
+//   po_send     make a purchase order in Xero, approved, and email
+//               Xero's PDF of it to the supplier from the company's
+//               Gmail (GMAIL_USER, GMAIL_APP_PASSWORD) - Xero's API
+//               cannot email one itself. Without Gmail it is opened
+//               in Xero to be emailed from there.            manager
+//   po_pdf      a purchase order as Xero prints it              staff
+//   contacts    Xero contacts matching a search, to link a
+//               customer to theirs                              staff
+//   owing       what is outstanding in Xero                     staff
+//
+// Deploy:
+//   supabase secrets set XERO_CLIENT_ID=...
+//   supabase secrets set XERO_CLIENT_SECRET=...
+//   supabase secrets set XERO_REDIRECT_URI=https://<project>.supabase.co/functions/v1/xero
+//   supabase functions deploy xero --no-verify-jwt
+//
+// --no-verify-jwt because Xero sends the person back to `finish` in a
+// browser, with no app sign-in. Every other action checks the caller here.
+//
+// Optional secrets: XERO_ACCOUNT_CODE (default 200, Sales), XERO_TAX_TYPE
+// (default OUTPUT, GST on Income), XERO_CREATE_ITEMS=false to stop part
+// numbers being made items in Xero, and XERO_SCOPES. Purchase orders:
+// GMAIL_USER and GMAIL_APP_PASSWORD (a Google app password) to email them
+// from the company's Gmail, XERO_PURCHASE_ACCOUNT (default 310) and
+// XERO_PURCHASE_TAX (default INPUT).
+
+const CORS = {
+  "Access-Control-Allow-Origin": "*",
+  "Access-Control-Allow-Headers":
+    "authorization, x-client-info, apikey, content-type",
+  "Access-Control-Allow-Methods": "POST, GET, OPTIONS",
+};
+
+// What the app may do in Xero, asked for once when a manager connects.
+// Xero's granular scopes - an app made since 2 March 2026 is refused the old
+// broad accounting.transactions ("invalid_scope"), and older apps must move
+// by September 2027:
+//   accounting.invoices  sales invoices (make, approve, email) and, later,
+//                        purchase orders
+//   accounting.contacts  find customers now; create them later
+//   accounting.settings  items (made for new part numbers) and the
+//                        organisation's payment terms
+// Asking for all of it now means adding those later needs no reconnecting.
+// XERO_SCOPES overrides it.
+const SCOPES = () => env("XERO_SCOPES",
+  "offline_access accounting.invoices accounting.contacts " +
+  "accounting.settings");
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const DAY = /^\d{4}-\d{2}-\d{2}$/;
+const MINUTE = 60_000;
+
+const env = (k: string, d = "") => Deno.env.get(k) ?? d;
+const SB = () => env("SUPABASE_URL").replace(/\/+$/, "");
+const SERVICE = () => env("SUPABASE_SERVICE_ROLE_KEY");
+const API = () => env("XERO_API_BASE", "https://api.xero.com").replace(/\/+$/, "");
+const IDENTITY = () =>
+  env("XERO_IDENTITY_BASE", "https://identity.xero.com").replace(/\/+$/, "");
+const LOGIN = () =>
+  env("XERO_LOGIN_URL", "https://login.xero.com/identity/connect/authorize");
+const ACCOUNT = () => env("XERO_ACCOUNT_CODE", "200");
+const TAX = () => env("XERO_TAX_TYPE", "OUTPUT");
+
+// deno-lint-ignore no-explicit-any
+type Any = any;
+type Row = Record<string, Any>;
+
+function json(payload: unknown, status = 200): Response {
+  return new Response(JSON.stringify(payload), {
+    status, headers: { ...CORS, "Content-Type": "application/json" },
+  });
+}
+
+function text(body: string, status = 200): Response {
+  return new Response(body, {
+    status, headers: { ...CORS, "Content-Type": "text/plain; charset=utf-8" },
+  });
+}
+
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+const nowIso = () => new Date().toISOString();
+const later = (ms: number) => new Date(Date.now() + ms).toISOString();
+
+/** Today in Brisbane (no daylight saving, so always UTC+10). */
+function today(): string {
+  return new Date(Date.now() + 10 * 3600_000).toISOString().slice(0, 10);
+}
+
+/** A problem that is not a fault - not connected, no contact, and so on. */
+class Problem extends Error {
+  status: number;
+  constructor(message: string, status = 0) {
+    super(message);
+    this.status = status;
+  }
+}
+
+
+// ── The database, as the service role ───────────────────────────────────────
+
+async function rpc<T = Any>(name: string, args: Row = {}): Promise<T> {
+  const res = await fetch(`${SB()}/rest/v1/rpc/${name}`, {
+    method: "POST",
+    headers: {
+      apikey: SERVICE(), Authorization: `Bearer ${SERVICE()}`,
+      "Content-Type": "application/json", Accept: "application/json",
+    },
+    body: JSON.stringify(args),
+  });
+  const body = await res.text();
+  if (!res.ok) {
+    throw new Error(`The database said ${res.status}: ${body.slice(0, 200)}` +
+      (body.includes("xero_") ? " - has migrate_xero_link.sql (step 37) been run?" : ""));
+  }
+  return (body ? JSON.parse(body) : null) as T;
+}
+
+const conn = async (): Promise<Row> => (await rpc<Row>("xero_conn_get")) ?? {};
+const connPut = (patch: Row) => rpc("xero_conn_put", { p_patch: patch });
+
+async function put(order: string, patch: Row): Promise<Row> {
+  const rows = await rpc<Row[]>("xero_invoice_put", { p_order: order, p_patch: patch });
+  return rows?.[0] ?? {};
+}
+
+async function claim(order: string, seconds = 120): Promise<Row | null> {
+  const rows = await rpc<Row[]>("xero_claim", { p_order: order, p_seconds: seconds });
+  return rows?.[0] ?? null;
+}
+
+
+// ── Who is asking ───────────────────────────────────────────────────────────
+
+type Who = { id: string; staff: boolean; manager: boolean; system: boolean };
+
+async function caller(req: Request): Promise<Who | null> {
+  const auth = req.headers.get("Authorization") ?? "";
+  if (!auth.startsWith("Bearer ")) return null;
+  if (SERVICE() && auth === `Bearer ${SERVICE()}`) {
+    return { id: "", staff: false, manager: false, system: true };
+  }
+  const res = await fetch(`${SB()}/auth/v1/user`, {
+    headers: { apikey: env("SUPABASE_ANON_KEY"), Authorization: auth },
+  });
+  if (!res.ok) return null;
+  const user = await res.json().catch(() => ({}));
+  if (!user?.id) return null;
+  const who = await rpc<Row>("xero_who", { p_uid: user.id });
+  return { id: user.id, staff: !!who?.staff, manager: !!who?.manager, system: false };
+}
+
+
+// ── The sign-in to Xero ─────────────────────────────────────────────────────
+
+function basic(): string {
+  return btoa(`${env("XERO_CLIENT_ID")}:${env("XERO_CLIENT_SECRET")}`);
+}
+
+const NOT_CONNECTED =
+  "Xero is not connected yet. A manager connects it from the Xero screen.";
+const ENDED =
+  "Xero ended the connection - it was disconnected in Xero, or not used for " +
+  "60 days. A manager needs to press Connect again. Orders keep queuing and " +
+  "go through once it is back.";
+
+/** A live access token. `stale` is one Xero has just refused.
+ *
+ *  Xero's refresh tokens work once: every renewal hands back a new one and
+ *  ends the old. Two requests renewing at the same moment would have the
+ *  second end the connection - the old version of this did exactly that, and
+ *  then wiped the token. So one renewal at a time (xero_conn_begin_refresh),
+ *  the others wait for its result, and a refusal only ends the connection
+ *  when nobody has renewed in the meantime. */
+async function token(stale = ""): Promise<string> {
+  for (let i = 0; i < 40; i++) {
+    const c = await conn();
+    if (!c.refresh_token) throw new Problem(c.problem || NOT_CONNECTED);
+    const expires = c.expires_at ? Date.parse(c.expires_at) : 0;
+    if (c.access_token && c.access_token !== stale && expires > Date.now() + MINUTE) {
+      return c.access_token;
+    }
+    const old = await rpc<string | null>("xero_conn_begin_refresh", { p_seconds: 30 });
+    if (!old) {
+      await sleep(500);
+      continue;
+    }
+    let res: Response;
+    try {
+      res = await fetch(`${IDENTITY()}/connect/token`, {
+        method: "POST",
+        headers: { Authorization: `Basic ${basic()}`,
+                   "Content-Type": "application/x-www-form-urlencoded" },
+        body: new URLSearchParams({ grant_type: "refresh_token", refresh_token: old }),
+      });
+    } catch {
+      await rpc("xero_conn_end_refresh", { p_old: old, p_patch: {} });
+      throw new Problem("Could not reach Xero to renew the connection. It will try again.");
+    }
+    const got = await res.json().catch(() => ({}));
+    if (res.ok && got.access_token && got.refresh_token) {
+      await rpc("xero_conn_end_refresh", { p_old: old, p_patch: {
+        access_token: got.access_token,
+        refresh_token: got.refresh_token,
+        expires_at: later(Number(got.expires_in ?? 1800) * 1000),
+        refreshed_at: nowIso(),
+        problem: null,
+      } });
+      return String(got.access_token);
+    }
+    if (got?.error === "invalid_grant") {
+      const now = await conn();
+      if (now.refresh_token && now.refresh_token !== old) continue;
+      await rpc("xero_conn_end_refresh", { p_old: old, p_patch: {
+        access_token: null, refresh_token: null, expires_at: null, problem: ENDED,
+      } });
+      throw new Problem(ENDED);
+    }
+    await rpc("xero_conn_end_refresh", { p_old: old, p_patch: {} });
+    throw new Problem(`Xero would not renew the connection just now (${res.status}). ` +
+                      "It will try again.");
+  }
+  throw new Problem("Another request is renewing the Xero connection. It will try again.");
+}
+
+async function tenant(access: string): Promise<string> {
+  const c = await conn();
+  if (c.tenant_id) return String(c.tenant_id);
+  const res = await fetch(`${API()}/connections`, {
+    headers: { Authorization: `Bearer ${access}`, Accept: "application/json" },
+  });
+  const rows = await res.json().catch(() => []);
+  const first = Array.isArray(rows) ? rows[0] : null;
+  if (!first?.tenantId) throw new Problem("No Xero organisation is connected.");
+  await connPut({ tenant_id: first.tenantId, tenant_name: first.tenantName ?? "" });
+  return String(first.tenantId);
+}
+
+function why(out: Any, status: number): string {
+  const v = (out?.Elements ?? []).flatMap((e: Any) =>
+    (e?.ValidationErrors ?? []).map((x: Any) => x?.Message)).filter(Boolean);
+  if (v.length) return [...new Set(v)].join("; ");
+  if (status === 429) return "Xero is busy (too many requests). It will try again shortly.";
+  return out?.Message || out?.Detail || out?.Title || `Xero said ${status}`;
+}
+
+/** One call to Xero's accounting API, as the connected organisation. */
+async function xero(method: string, path: string, body?: unknown,
+                    extra: Record<string, string> = {}): Promise<Any> {
+  let access = await token();
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const org = await tenant(access);
+    const res = await fetch(`${API()}${path}`, {
+      method,
+      headers: {
+        Authorization: `Bearer ${access}`, "Xero-tenant-id": org,
+        Accept: "application/json",
+        ...(body === undefined ? {} : { "Content-Type": "application/json" }),
+        ...extra,
+      },
+      body: body === undefined ? undefined : JSON.stringify(body),
+    });
+    if (res.status === 401 && attempt === 0) {
+      access = await token(access);
+      continue;
+    }
+    const raw = await res.text();
+    let out: Any = {};
+    try {
+      out = raw ? JSON.parse(raw) : {};
+    } catch {
+      out = { Message: raw.slice(0, 200) };
+    }
+    if (!res.ok) throw new Problem(why(out, res.status), res.status);
+    return out;
+  }
+  throw new Problem("Xero would not accept the connection's sign-in.", 401);
+}
+
+
+// ── Xero's records ──────────────────────────────────────────────────────────
+
+/** The invoice as Xero prints it - the PDF the customer gets. */
+async function invoicePdf(id: string): Promise<ArrayBuffer> {
+  let access = await token();
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const org = await tenant(access);
+    const res = await fetch(`${API()}/api.xro/2.0/Invoices/${encodeURIComponent(id)}`, {
+      headers: { Authorization: `Bearer ${access}`, "Xero-tenant-id": org,
+                 Accept: "application/pdf" },
+    });
+    if (res.status === 401 && attempt === 0) {
+      access = await token(access);
+      continue;
+    }
+    if (!res.ok) {
+      const raw = await res.text();
+      let out: Any = {};
+      try { out = JSON.parse(raw); } catch { out = { Message: raw.slice(0, 200) }; }
+      throw new Problem(why(out, res.status), res.status);
+    }
+    return await res.arrayBuffer();
+  }
+  throw new Problem("Xero would not accept the connection's sign-in.", 401);
+}
+
+async function getInvoice(id: string): Promise<Row | null> {
+  try {
+    const out = await xero("GET", `/api.xro/2.0/Invoices/${encodeURIComponent(id)}`);
+    return out?.Invoices?.[0] ?? null;
+  } catch (e) {
+    if ((e as Problem).status === 404) return null;
+    throw e;
+  }
+}
+
+async function getContact(id: string | undefined): Promise<Row | null> {
+  if (!id) return null;
+  try {
+    const out = await xero("GET", `/api.xro/2.0/Contacts/${encodeURIComponent(id)}`);
+    return out?.Contacts?.[0] ?? null;
+  } catch (e) {
+    if ((e as Problem).status === 404) return null;
+    throw e;
+  }
+}
+
+/** The contact an order's customer is in Xero: by name, ignoring case,
+ *  trying the legal name, the name and the short name in turn. A contact is
+ *  never made up here - one with no email address would only fail later,
+ *  when the invoice is to be sent. */
+async function findContact(names: string[]): Promise<Row | null> {
+  const seen = new Set<string>();
+  for (const raw of names) {
+    const name = String(raw ?? "").trim().toLowerCase();
+    if (!name || seen.has(name)) continue;
+    seen.add(name);
+    const out = await xero("GET", "/api.xro/2.0/Contacts?searchTerm=" +
+      encodeURIComponent(name));
+    const found = (out?.Contacts ?? []).filter((c: Row) =>
+      c?.ContactStatus !== "ARCHIVED" &&
+      String(c?.Name ?? "").trim().toLowerCase() === name);
+    if (found.length) return found[0];
+  }
+  return null;
+}
+
+let itemCache: { at: number; codes: Map<string, string> } | null = null;
+
+/** Xero's item codes, upper-cased to the code as Xero has it. A code Xero
+ *  does not know would fail the whole invoice, so only known ones are sent;
+ *  the description says what the line is either way. */
+async function itemCodes(): Promise<Map<string, string>> {
+  if (itemCache && Date.now() - itemCache.at < 10 * MINUTE) return itemCache.codes;
+  const codes = new Map<string, string>();
+  try {
+    const out = await xero("GET", "/api.xro/2.0/Items");
+    for (const it of out?.Items ?? []) {
+      if (it?.Code) codes.set(String(it.Code).toUpperCase(), String(it.Code));
+    }
+  } catch {
+    return codes;           // none sent rather than none invoiced
+  }
+  itemCache = { at: Date.now(), codes };
+  return codes;
+}
+
+let orgTermsCache: { at: number; terms: Row | null } | null = null;
+
+async function orgTerms(): Promise<Row | null> {
+  if (orgTermsCache && Date.now() - orgTermsCache.at < 30 * MINUTE) {
+    return orgTermsCache.terms;
+  }
+  let terms: Row | null = null;
+  try {
+    const out = await xero("GET", "/api.xro/2.0/Organisation");
+    terms = out?.Organisations?.[0]?.PaymentTerms?.Sales ?? null;
+  } catch {
+    terms = null;
+  }
+  orgTermsCache = { at: Date.now(), terms };
+  return terms;
+}
+
+
+// ── Due dates ───────────────────────────────────────────────────────────────
+
+/** The app's own wording of a customer's terms, for when Xero has none for
+ *  the contact or the organisation: "Net 30", "COD", "EOM", "Prepaid". */
+function appTerms(words: unknown): Row | null {
+  const t = String(words ?? "").trim().toUpperCase();
+  const net = t.match(/(\d+)/);
+  if (t.startsWith("NET") && net) return { Type: "DAYSAFTERBILLDATE", Day: Number(net[1]) };
+  if (t === "COD" || t === "PREPAID") return { Type: "DAYSAFTERBILLDATE", Day: 0 };
+  if (t === "EOM") return { Type: "OFFOLLOWINGMONTH", Day: 31 };
+  return null;
+}
+
+/** When an invoice dated `date` is due, by Xero's kinds of terms. */
+function dueDate(date: string, terms: Row | null): string {
+  const [y, m, d] = date.split("-").map(Number);
+  const day = Math.max(0, Number(terms?.Day ?? 30));
+  const last = (yy: number, mm: number) => new Date(Date.UTC(yy, mm + 1, 0)).getUTCDate();
+  let out: Date;
+  switch (terms ? String(terms.Type ?? "") : "") {
+    case "DAYSAFTERBILLMONTH":
+      out = new Date(Date.UTC(y, m - 1, last(y, m - 1) + day));
+      break;
+    case "OFCURRENTMONTH":
+      out = new Date(Date.UTC(y, m - 1, Math.max(d, Math.min(day || 1, last(y, m - 1)))));
+      break;
+    case "OFFOLLOWINGMONTH":
+      out = new Date(Date.UTC(y, m, Math.min(day || 1, last(y, m))));
+      break;
+    case "DAYSAFTERBILLDATE":
+      out = new Date(Date.UTC(y, m - 1, d + day));
+      break;
+    default:
+      out = new Date(Date.UTC(y, m - 1, d + 30));
+  }
+  return out.toISOString().slice(0, 10);
+}
+
+async function dueFor(date: string, contact: Row | null, words: unknown) {
+  return dueDate(date, contact?.PaymentTerms?.Sales ?? await orgTerms() ?? appTerms(words));
+}
+
+
+// ── One order ───────────────────────────────────────────────────────────────
+
+const FINISHED = ["approved", "sent", "deleted", "gone"];
+
+type Line = { description: string; quantity: number; unit_amount: number;
+              item_code?: string };
+
+function readInvoice(raw: Any): { ok: true; inv: Row } | { ok: false; error: string } {
+  if (!raw || typeof raw !== "object") return { ok: false, error: "No invoice was given." };
+  const clean = (list: Any, priced: boolean): Line[] | null => {
+    if (!Array.isArray(list) || list.length > 500) return null;
+    const out: Line[] = [];
+    for (const l of list) {
+      const q = Number(l?.quantity), u = Number(priced ? l?.unit_amount : 0);
+      if (!Number.isFinite(q) || q <= 0 || !Number.isFinite(u) || u < 0) return null;
+      out.push({ description: String(l?.description ?? "").slice(0, 3900) || "Filter",
+                 quantity: q, unit_amount: Math.round(u * 10000) / 10000,
+                 // Never shortened: a cut-down code is a different item.
+                 // One too long for Xero (30) just goes without.
+                 item_code: String(l?.item_code ?? "").trim().slice(0, 64) });
+    }
+    return out;
+  };
+  const lines = clean(raw.lines ?? [], true);
+  const unpriced = clean(raw.unpriced ?? [], false);
+  if (!lines || !unpriced) return { ok: false, error: "The invoice lines are not right." };
+  if (!lines.length && !unpriced.length) return { ok: false, error: "The order has no lines." };
+  return { ok: true, inv: {
+    // The customer's own link to their Xero contact, when they have one.
+    contact_id: /^[0-9a-f-]{36}$/i.test(String(raw.contact_id ?? ""))
+      ? String(raw.contact_id) : "",
+    contact_names: (Array.isArray(raw.contact_names) ? raw.contact_names : [])
+      .slice(0, 6).map((n: unknown) => String(n ?? "").slice(0, 200)),
+    date: DAY.test(String(raw.date ?? "")) ? String(raw.date) : today(),
+    number: String(raw.number ?? "").trim().slice(0, 255),
+    reference: String(raw.reference ?? "").trim().slice(0, 255),
+    terms: String(raw.terms ?? "").slice(0, 40),
+    lines, unpriced,
+  } };
+}
+
+/** Make the part numbers Xero has no item for into items, so the line can
+ *  carry its code. Never a reason for the invoice to fail: an item Xero will
+ *  not take is simply left off the line, as before. */
+async function makeItems(lines: Line[], codes: Map<string, string>) {
+  if (env("XERO_CREATE_ITEMS", "true").toLowerCase() === "false") return;
+  const wanted = new Map<string, Line>();
+  for (const l of lines) {
+    const code = (l.item_code ?? "").trim();
+    if (!code || code.length > 30 || codes.has(code.toUpperCase())) continue;
+    wanted.set(code.toUpperCase(), { ...l, item_code: code });
+  }
+  if (!wanted.size) return;
+  const items = [...wanted.values()].map((l) => ({
+    Code: l.item_code,
+    Name: (l.description.split("\n")[0] || l.item_code!).slice(0, 50),
+    Description: l.description.slice(0, 4000),
+    IsSold: true,
+    IsPurchased: false,
+    SalesDetails: { AccountCode: ACCOUNT(), TaxType: TAX() },
+  }));
+  try {
+    const out = await xero("POST", "/api.xro/2.0/Items?summarizeErrors=false",
+                           { Items: items });
+    for (const it of out?.Items ?? []) {
+      const failed = (it?.ValidationErrors ?? []).length > 0;
+      if (it?.Code && !failed) codes.set(String(it.Code).toUpperCase(), String(it.Code));
+    }
+  } catch {
+    // No permission to make items (an older connection), or Xero refused:
+    // the lines go without codes.
+  }
+}
+
+async function lineItems(inv: Row) {
+  const codes = await itemCodes();
+  await makeItems(inv.lines, codes);
+  const one = (l: Line, desc: string) => {
+    const item: Row = { Description: desc, Quantity: l.quantity,
+                        UnitAmount: l.unit_amount, AccountCode: ACCOUNT(),
+                        TaxType: TAX() };
+    const code = codes.get((l.item_code ?? "").toUpperCase());
+    if (code) item.ItemCode = code;
+    return item;
+  };
+  return [
+    ...inv.lines.map((l: Line) => one(l, l.description)),
+    ...inv.unpriced.map((l: Line) => one(l, `NO PRICE - ${l.description}`)),
+  ];
+}
+
+/** Hand an invoice somebody has taken over in Xero back to them. */
+async function handOver(row: Row, cur: Row | null) {
+  const status = String(cur?.Status ?? "deleted").toLowerCase();
+  const error = cur
+    ? `It was ${status} by hand in Xero, so the app has left it alone.`
+    : "The invoice is no longer in Xero, so the app has left it alone.";
+  await put(row.order_id, { state: "gone", error, claimed_until: null });
+  return { state: "gone", error };
+}
+
+async function draftOne(row: Row, inv: Row, hash: string, md5: string | null,
+                        now = false) {
+  if (FINISHED.includes(row.state) || row.delete_wanted) {
+    await put(row.order_id, { claimed_until: null });
+    if (now && row.state === "gone") {
+      throw new Problem(row.error || "Its invoice was changed by hand in Xero.");
+    }
+    return { state: row.state, unchanged: true, already: true,
+             number: row.invoice_number ?? "", emailed_to: row.emailed_to ?? "" };
+  }
+  const unpriced = inv.unpriced.length;
+  if (now && unpriced) {
+    throw new Problem(`${unpriced} line${unpriced === 1 ? " has" : "s have"} no ` +
+      "price. Put the price on the work order, then send it again.");
+  }
+  if (now) {
+    // Invoiced from its button: the job is done today.
+    row = await put(row.order_id, { complete_wanted: true,
+                                    completed_on: row.completed_on ?? today() });
+  }
+  if (row.invoice_id && row.lines_hash === hash) {
+    row = await put(row.order_id, { source_md5: md5 });
+    if (row.complete_wanted && row.state === "draft" && !row.unpriced) {
+      return await approveOne(row);
+    }
+    await put(row.order_id, { claimed_until: null });
+    return { state: row.state, unchanged: true, number: row.invoice_number };
+  }
+
+  // The contact the customer is linked to wins; then the one this order's
+  // invoice already has; then a search by name.
+  let contact = inv.contact_id ? await getContact(inv.contact_id) : null;
+  if (!contact && row.contact_id) contact = await getContact(row.contact_id);
+  if (!contact) contact = await findContact(inv.contact_names);
+  if (!contact) {
+    const name = inv.contact_names.find((n: string) => n.trim()) ?? "this customer";
+    throw new Problem(`Xero has no contact called "${name}". Add them in Xero, with ` +
+      "the email address their invoices go to (or give them the same name in " +
+      "both) - it goes through on its own after that.");
+  }
+  const items = await lineItems(inv);
+  const due = await dueFor(inv.date, contact, inv.terms);
+  const fields = { Contact: { ContactID: contact.ContactID }, Date: inv.date,
+                   DueDate: due, Reference: inv.reference,
+                   LineAmountTypes: "Exclusive", LineItems: items };
+  let made: Row | undefined;
+  if (row.invoice_id) {
+    const cur = await getInvoice(row.invoice_id);
+    if (!cur || !["DRAFT", "SUBMITTED"].includes(cur.Status)) return await handOver(row, cur);
+    const out = await xero("POST", `/api.xro/2.0/Invoices/${row.invoice_id}`,
+                           { Invoices: [{ InvoiceID: row.invoice_id, ...fields }] });
+    made = out?.Invoices?.[0];
+  } else {
+    const base = { Type: "ACCREC", Status: "DRAFT", ...fields };
+    const key = `taf-${row.order_id}-${hash}`.slice(0, 120);
+    try {
+      const out = await xero("POST", "/api.xro/2.0/Invoices",
+        { Invoices: [{ ...base, InvoiceNumber: inv.number || undefined }] },
+        { "Idempotency-Key": key });
+      made = out?.Invoices?.[0];
+    } catch (e) {
+      // Our order number is already an invoice number in Xero (another
+      // customer's purchase order, say): let Xero number it, and keep ours
+      // in the reference.
+      if (!inv.number || !/unique/i.test(String((e as Error).message))) throw e;
+      const out = await xero("POST", "/api.xro/2.0/Invoices",
+        { Invoices: [{ ...base,
+          Reference: [inv.number, inv.reference].filter(Boolean).join(" - ").slice(0, 255) }] },
+        { "Idempotency-Key": `${key}-n` });
+      made = out?.Invoices?.[0];
+    }
+  }
+  if (!made?.InvoiceID) throw new Problem("Xero did not say which invoice it made.");
+
+  row = await put(row.order_id, {
+    state: "draft", invoice_id: made.InvoiceID,
+    invoice_number: made.InvoiceNumber ?? "", contact_id: contact.ContactID,
+    contact_name: contact.Name ?? "", lines_hash: hash, source_md5: md5,
+    unpriced, total: Number(made.Total ?? 0), invoice_date: inv.date,
+    terms: inv.terms || null, next_try_at: null,
+    error: unpriced
+      ? `${unpriced} line${unpriced === 1 ? " has" : "s have"} no price - on the ` +
+        "draft at $0, marked NO PRICE. It is not approved or emailed until the " +
+        "price is on the order (or finish it in Xero by hand)."
+      : null,
+  });
+  if (row.complete_wanted && !unpriced) return await approveOne(row);
+  await put(row.order_id, { claimed_until: null });
+  return { state: "draft", number: row.invoice_number, unpriced };
+}
+
+/** The job is finished: date the invoice that day, approve it, email it. */
+async function approveOne(row: Row) {
+  const cur = await getInvoice(row.invoice_id);
+  if (!cur) return await handOver(row, null);
+  let inv = cur;
+  let contact: Row | null = null;
+  if (["DRAFT", "SUBMITTED"].includes(cur.Status)) {
+    const date = row.completed_on ?? today();
+    contact = await getContact(cur.Contact?.ContactID);
+    const due = await dueFor(date, contact, row.terms);
+    const out = await xero("POST", `/api.xro/2.0/Invoices/${row.invoice_id}`, {
+      Invoices: [{ InvoiceID: row.invoice_id, Status: "AUTHORISED",
+                   Date: date, DueDate: due }],
+    });
+    inv = out?.Invoices?.[0] ?? cur;
+    row = await put(row.order_id, {
+      state: "approved", approved_at: nowIso(), invoice_date: date,
+      invoice_number: inv.InvoiceNumber ?? row.invoice_number,
+      total: Number(inv.Total ?? row.total ?? 0), error: null,
+    });
+  } else if (cur.Status === "AUTHORISED") {
+    row = await put(row.order_id, { state: "approved",
+                                    approved_at: row.approved_at ?? nowIso() });
+  } else {
+    return await handOver(row, cur);
+  }
+  return await emailOne(row, inv, contact);
+}
+
+// A cash sale (migrate_cash_sales.sql, step 51): the account walk-in buyers
+// go under. Its invoices go to the address on the order ("Invoice Email",
+// asked for each time it is invoiced), never to whoever bought last - so
+// with no address on the order, nothing is sent. No step 51, or no such
+// order: not a cash sale.
+const EMAIL = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
+async function cashSale(orderId: string): Promise<{ cash: boolean; email: string }> {
+  try {
+    const orders = await rest("GET", `orders?id=eq.${orderId}` +
+                              "&select=customer_id,customer_name,header");
+    const o = orders?.[0];
+    if (!o) return { cash: false, email: "" };
+    let cust: Row[] = [];
+    if (o.customer_id) {
+      cust = await rest("GET", `customers?id=eq.${o.customer_id}&select=cash_sale`);
+    }
+    if (!cust?.length && o.customer_name) {
+      const name = encodeURIComponent(String(o.customer_name));
+      cust = await rest("GET", `customers?or=(name.eq.${name},short_name.eq.${name})` +
+                               "&select=cash_sale&limit=1");
+    }
+    const email = String((o.header ?? {})["Invoice Email"] ?? "").trim();
+    return { cash: cust?.[0]?.cash_sale === true, email: EMAIL.test(email) ? email : "" };
+  } catch {
+    return { cash: false, email: "" };
+  }
+}
+
+async function emailOne(row: Row, inv: Row | null, contact: Row | null = null) {
+  if (inv?.SentToContact) {
+    await put(row.order_id, { state: "sent", emailed_at: nowIso(),
+                              emailed_to: "sent from Xero", error: null,
+                              claimed_until: null });
+    return { state: "sent", number: row.invoice_number };
+  }
+  // A cash sale goes to the buyer on the order: Xero emails an invoice to
+  // its contact's address, so the cash sale contact's address is set to the
+  // buyer's first - the same Xero invoice and email as anybody else's.
+  const cash = await cashSale(row.order_id);
+  if (cash.cash) {
+    if (!cash.email) {
+      const error = "A cash sale with no email address on the order, so the " +
+        "invoice was approved but not sent. Put the buyer's email on the " +
+        "order (Send to Xero & invoice asks for it) and press Retry.";
+      await put(row.order_id, { error, claimed_until: null });
+      return { state: "approved", error };
+    }
+    contact = contact ?? await getContact(inv?.Contact?.ContactID);
+    if (contact?.ContactID &&
+        String(contact.EmailAddress ?? "").toLowerCase() !== cash.email.toLowerCase()) {
+      await xero("POST", `/api.xro/2.0/Contacts/${contact.ContactID}`, {
+        Contacts: [{ ContactID: contact.ContactID, EmailAddress: cash.email }],
+      });
+      contact = { ...contact, EmailAddress: cash.email };
+    }
+  }
+  // Xero's email sending fails now and then on its side ("An error occurred
+  // in Xero", a 5xx) straight after approving; another go a moment later
+  // usually sends it. A refusal about the invoice or contact (4xx) is said
+  // as Xero says it.
+  let failure: Problem | null = null;
+  for (const wait of [0, 2000, 5000]) {
+    if (wait) await sleep(wait);
+    try {
+      await xero("POST", `/api.xro/2.0/Invoices/${row.invoice_id}/Email`, {});
+      failure = null;
+      break;
+    } catch (e) {
+      failure = e as Problem;
+      if (failure.status && failure.status < 500 && failure.status !== 429) break;
+    }
+  }
+  if (failure) {
+    const theirs = !failure.status || failure.status >= 500 || failure.status === 429;
+    const error = theirs
+      ? "Approved in Xero, but Xero could not send the email just now (a " +
+        "problem on Xero's side, not the invoice). Press Retry on the Xero " +
+        "screen in a few minutes, or send it from Xero."
+      : `Approved in Xero, but Xero would not email it: ${failure.message}. ` +
+        "Check the contact's email address in Xero and press Retry, or send it " +
+        "from Xero.";
+    await put(row.order_id, { error, claimed_until: null });
+    return { state: "approved", error };
+  }
+  contact = contact ?? await getContact(inv?.Contact?.ContactID).catch(() => null);
+  await put(row.order_id, { state: "sent", emailed_at: nowIso(),
+                            emailed_to: contact?.EmailAddress ?? "", error: null,
+                            claimed_until: null });
+  return { state: "sent", number: row.invoice_number,
+           emailed_to: contact?.EmailAddress ?? "" };
+}
+
+/** The order was deleted: take its draft back out of Xero. */
+async function deleteOne(row: Row) {
+  if (!row.invoice_id) {
+    await put(row.order_id, { state: "deleted", error: null, claimed_until: null });
+    return { state: "deleted" };
+  }
+  const cur = await getInvoice(row.invoice_id);
+  if (cur && ["DRAFT", "SUBMITTED"].includes(cur.Status)) {
+    await xero("POST", `/api.xro/2.0/Invoices/${row.invoice_id}`,
+               { Invoices: [{ InvoiceID: row.invoice_id, Status: "DELETED" }] });
+  } else if (cur && !["DELETED", "VOIDED"].includes(cur.Status)) {
+    const error = "The order was deleted, but its invoice had already been " +
+      "approved in Xero. Void it there if it should not stand.";
+    await put(row.order_id, { state: "gone", error, claimed_until: null });
+    return { state: "gone", error };
+  }
+  await put(row.order_id, { state: "deleted", error: null, claimed_until: null });
+  return { state: "deleted" };
+}
+
+/** Something stopped it: say why on the row, and wait before trying again
+ *  (Xero allows 60 calls a minute; an order that cannot go should not use
+ *  them all up every few minutes). */
+async function failed(row: Row, err: unknown, md5?: string | null) {
+  const e = err as Problem;
+  const wait = e?.status === 429 ? 2 * MINUTE : 30 * MINUTE;
+  const patch: Row = { error: String(e?.message ?? err).slice(0, 1000),
+                       next_try_at: later(wait), claimed_until: null };
+  if (md5 !== undefined) patch.source_md5 = md5;
+  await put(row.order_id, patch).catch(() => {});
+  return { state: row.state, error: patch.error };
+}
+
+async function sweep() {
+  const c = await conn();
+  if (!c.refresh_token) return { done: 0, problems: [], connected: false };
+  const work = await rpc<Row[]>("xero_due_work", { p_limit: 8 });
+  const problems: string[] = [];
+  let done = 0;
+  for (const w of work ?? []) {
+    const row = await claim(w.order_id);
+    if (!row) continue;
+    try {
+      const out: Row = row.delete_wanted ? await deleteOne(row) : await approveOne(row);
+      if (out.error) problems.push(out.error);
+      else done++;
+    } catch (e) {
+      const out = await failed(row, e);
+      problems.push(out.error);
+      if ((e as Problem).status === 429) break;
+    }
+  }
+  return { done, problems, connected: true };
+}
+
+
+// ── Buying (migrate_purchasing.sql) ─────────────────────────────────────────
+
+/** A table, read or written as the service role. */
+async function rest(method: string, path: string, body?: unknown,
+                    prefer = ""): Promise<Any> {
+  const res = await fetch(`${SB()}/rest/v1/${path}`, {
+    method,
+    headers: {
+      apikey: SERVICE(), Authorization: `Bearer ${SERVICE()}`,
+      "Content-Type": "application/json", Accept: "application/json",
+      ...(prefer ? { Prefer: prefer } : {}),
+    },
+    body: body === undefined ? undefined : JSON.stringify(body),
+  });
+  const raw = await res.text();
+  if (!res.ok) {
+    throw new Error(`The database said ${res.status}: ${raw.slice(0, 200)}` +
+      (raw.includes("suppliers") || raw.includes("xero_items")
+        ? " - has migrate_purchasing.sql (step 40) been run?" : ""));
+  }
+  return raw ? JSON.parse(raw) : null;
+}
+
+/** Xero's supplier contacts, into the app's suppliers. Only what Xero
+ *  knows is written - a supplier's code prefix, set in the app, stays. */
+async function pullSuppliers() {
+  const rows: Row[] = [];
+  for (let page = 1; page <= 20; page++) {
+    const out = await xero("GET", "/api.xro/2.0/Contacts?where=" +
+      encodeURIComponent("IsSupplier==true") + `&page=${page}`);
+    const list = (out?.Contacts ?? []).filter((c: Row) => c?.ContactStatus !== "ARCHIVED");
+    for (const c of list) {
+      const phone = (c.Phones ?? []).find((p: Row) => p?.PhoneNumber) ?? {};
+      rows.push({ xero_contact_id: c.ContactID, name: String(c.Name ?? "").slice(0, 200),
+                  email: String(c.EmailAddress ?? ""),
+                  phone: [phone.PhoneAreaCode, phone.PhoneNumber].filter(Boolean).join(" "),
+                  updated_at: nowIso() });
+    }
+    if ((out?.Contacts ?? []).length < 100) break;
+  }
+  if (rows.length) {
+    await rest("POST", "suppliers?on_conflict=xero_contact_id", rows,
+               "resolution=merge-duplicates,return=minimal");
+  }
+  return { suppliers: rows.length };
+}
+
+/** Every item in Xero, into the app's xero_items. Which supplier and stock
+ *  item one is stays as set in the app; an item with no supplier yet is
+ *  given the one whose code prefix it starts with (FDG... is FD Greenwood). */
+async function pullItems() {
+  const out = await xero("GET", "/api.xro/2.0/Items");
+  const items = (out?.Items ?? []).filter((it: Row) => it?.Code);
+  const have = new Map<string, string | null>();
+  for (let from = 0; ; from += 1000) {
+    const got = await rest("GET", `xero_items?select=code,supplier_id&order=code&offset=${from}&limit=1000`);
+    for (const r of got ?? []) have.set(String(r.code), r.supplier_id ?? null);
+    if (!got || got.length < 1000) break;
+  }
+  const suppliers = (await rest("GET", "suppliers?select=id,code_prefix&code_prefix=neq.")) ?? [];
+  const prefixOf = (code: string) => {
+    let best: Row | null = null;
+    for (const sup of suppliers) {
+      const pre = String(sup.code_prefix ?? "").trim().toUpperCase();
+      if (pre && code.toUpperCase().startsWith(pre) &&
+          (!best || pre.length > String(best.code_prefix).length)) best = sup;
+    }
+    return best?.id ?? null;
+  };
+  const base = (it: Row) => ({
+    code: String(it.Code), xero_item_id: it.ItemID ?? null,
+    name: String(it.Name ?? ""), description: String(it.Description ?? ""),
+    purchase_description: String(it.PurchaseDescription ?? ""),
+    purchase_price: it.PurchaseDetails?.UnitPrice ?? null,
+    sales_price: it.SalesDetails?.UnitPrice ?? null,
+    tracked: !!it.IsTrackedAsInventory, updated_at: nowIso(),
+  });
+  const keep: Row[] = [], assign: Row[] = [];
+  for (const it of items) {
+    const code = String(it.Code);
+    if (have.get(code)) keep.push(base(it));
+    else assign.push({ ...base(it), supplier_id: prefixOf(code) });
+  }
+  for (const batch of [keep, assign]) {
+    for (let i = 0; i < batch.length; i += 500) {
+      await rest("POST", "xero_items?on_conflict=code", batch.slice(i, i + 500),
+                 "resolution=merge-duplicates,return=minimal");
+    }
+  }
+  return { items: items.length,
+           matched: assign.filter((r) => r.supplier_id).length };
+}
+
+async function poPdf(id: string): Promise<ArrayBuffer> {
+  let access = await token();
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const org = await tenant(access);
+    const res = await fetch(`${API()}/api.xro/2.0/PurchaseOrders/${encodeURIComponent(id)}`, {
+      headers: { Authorization: `Bearer ${access}`, "Xero-tenant-id": org,
+                 Accept: "application/pdf" },
+    });
+    if (res.status === 401 && attempt === 0) {
+      access = await token(access);
+      continue;
+    }
+    if (!res.ok) throw new Problem(`Xero would not give the purchase order (${res.status}).`, res.status);
+    return await res.arrayBuffer();
+  }
+  throw new Problem("Xero would not accept the connection's sign-in.", 401);
+}
+
+function base64(buf: ArrayBuffer): string {
+  const bytes = new Uint8Array(buf);
+  let bin = "";
+  for (let i = 0; i < bytes.length; i += 0x8000) {
+    bin += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
+  }
+  return btoa(bin);
+}
+
+/** Make the purchase order in Xero (approved, Xero's number) if it is not
+ *  there yet, then email its PDF to the supplier through the app's own mail
+ *  provider - not Xero's emailing, which an organisation can have off. */
+async function sendPo(poId: string) {
+  const pos = await rest("GET", `purchase_orders?id=eq.${poId}&select=*`);
+  const po = pos?.[0];
+  if (!po) throw new Problem("That purchase order is not there any more.", 404);
+  if (["received", "cancelled"].includes(po.status)) {
+    throw new Problem(`That purchase order is already ${po.status}.`);
+  }
+  const sups = po.supplier_id
+    ? await rest("GET", `suppliers?id=eq.${po.supplier_id}&select=*`) : [];
+  const sup: Row = sups?.[0] ?? { name: po.supplier, email: po.supplier_email ?? "" };
+  const note = async (patch: Row) =>
+    await rest("PATCH", `purchase_orders?id=eq.${poId}`, patch, "return=minimal");
+
+  let xeroId = po.xero_po_id as string | null;
+  let number = po.po_number as string | null;
+  if (!xeroId) {
+    let contactId = sup.xero_contact_id as string | undefined;
+    if (!contactId) {
+      const c = await findContact([sup.name ?? po.supplier]);
+      if (!c) {
+        throw new Problem(`Xero has no contact called "${sup.name ?? po.supplier}". ` +
+          "Pull suppliers from Xero, or add them in Xero first.");
+      }
+      contactId = c.ContactID;
+    }
+    const known = await purchasableCodes();
+    const lines = (po.lines ?? []).map((l: Row) => {
+      const item: Row = {
+        Description: String(l.description ?? l.name ?? "").slice(0, 3900) || "Item",
+        Quantity: Number(l.quantity ?? 0) || 1,
+        UnitAmount: Math.round(Number(l.unit_price ?? 0) * 10000) / 10000,
+        AccountCode: env("XERO_PURCHASE_ACCOUNT", "310"),
+        TaxType: env("XERO_PURCHASE_TAX", "INPUT"),
+      };
+      const code = known.get(String(l.item_code ?? l.sku ?? "").toUpperCase());
+      if (code) item.ItemCode = code;
+      return item;
+    });
+    if (!lines.length) throw new Problem("The purchase order has no lines.");
+    const out = await xero("POST", "/api.xro/2.0/PurchaseOrders", {
+      PurchaseOrders: [{
+        Contact: { ContactID: contactId }, Date: today(),
+        ...(po.expected ? { DeliveryDate: String(po.expected).slice(0, 10) } : {}),
+        Reference: String(po.reference ?? "").slice(0, 255),
+        Status: "AUTHORISED", LineAmountTypes: "Exclusive", LineItems: lines,
+      }],
+    }, { "Idempotency-Key": `taf-po-${poId}` });
+    const made = out?.PurchaseOrders?.[0];
+    if (!made?.PurchaseOrderID) throw new Problem("Xero did not say which purchase order it made.");
+    xeroId = made.PurchaseOrderID;
+    number = made.PurchaseOrderNumber ?? "";
+    await note({ xero_po_id: xeroId, po_number: number, status: "sent",
+                 sent_at: nowIso(), error: null });
+  }
+
+  // Xero's API cannot email a purchase order - only invoices. So the app
+  // emails Xero's own PDF of it: from the company's Gmail when GMAIL_USER and
+  // GMAIL_APP_PASSWORD are set, or through Resend when PO_EMAIL_VIA=app. With
+  // neither, the order is opened in Xero for a person to press Email there.
+  const gmail = !!(env("GMAIL_USER") && env("GMAIL_APP_PASSWORD"));
+  const resend = env("PO_EMAIL_VIA").trim().toLowerCase() === "app";
+  if (!gmail && !resend) {
+    await note({ error: null });
+    return { po_number: number, emailed: false, send_in_xero: true, xero_po_id: xeroId };
+  }
+
+  // The address on the order, when somebody typed one, beats the one Xero has.
+  const to = String(po.supplier_email || sup.email || "").trim();
+  if (!to) {
+    const error = `Purchase order ${number} is approved in Xero, but ${sup.name ?? po.supplier} ` +
+      "has no email address to send it to. Add one in Xero (and pull suppliers again), " +
+      "or type it on the order, then press Send again.";
+    await note({ error });
+    return { po_number: number, emailed: false, error, xero_po_id: xeroId };
+  }
+  const company = env("COMPANY_NAME", "Total Air Filtration");
+  const subject = `Purchase order ${number} from ${company}`;
+  const html = `<p>Hello ${escapeHtml(sup.name ?? "")},</p><p>Please find attached purchase order ` +
+    `<b>${escapeHtml(number ?? "")}</b> from ${escapeHtml(company)}` +
+    (po.reference ? ` (our reference ${escapeHtml(po.reference)})` : "") +
+    `.</p><p>Please reply to confirm, and let us know of any changes.</p>` +
+    `<p>Thank you,<br>${escapeHtml(company)}</p>`;
+  const filename = `Purchase order ${number}.pdf`;
+  const pdf = await poPdf(xeroId!);
+
+  if (gmail) {
+    try {
+      await gmailSend({ to, subject, html, filename, pdf });
+    } catch (e) {
+      const error = `Purchase order ${number} is approved in Xero, but Gmail did not send it ` +
+        `(${(e as Error).message}). Press Send again, or send it from Xero.`;
+      await note({ error });
+      return { po_number: number, emailed: false, error, xero_po_id: xeroId };
+    }
+  } else {
+    const key = env("RESEND_API_KEY"), from = env("MAIL_FROM");
+    if (!key || !from) {
+      const error = `Purchase order ${number} is approved in Xero, but no mail provider is ` +
+        "set up (GMAIL_USER and GMAIL_APP_PASSWORD function secrets). Send it from Xero.";
+      await note({ error });
+      return { po_number: number, emailed: false, error, xero_po_id: xeroId };
+    }
+    const sent = await fetch(env("RESEND_API_URL", "https://api.resend.com/emails"), {
+      method: "POST",
+      headers: { Authorization: `Bearer ${key}`, "Content-Type": "application/json" },
+      body: JSON.stringify({
+        from, to: [to], reply_to: env("MAIL_REPLY_TO") || undefined, subject, html,
+        attachments: [{ filename, content: base64(pdf) }],
+      }),
+    });
+    if (!sent.ok) {
+      const error = `Purchase order ${number} is approved in Xero, but the email did not go ` +
+        `(${sent.status}: ${(await sent.text()).slice(0, 160)}). Press Send again, or send it from Xero.`;
+      await note({ error });
+      return { po_number: number, emailed: false, error, xero_po_id: xeroId };
+    }
+  }
+  // Emailing again after some has arrived leaves it part received.
+  await note({ emailed_at: nowIso(), emailed_to: to, error: null,
+               ...(po.status === "draft" ? { status: "sent", sent_at: nowIso() } : {}) });
+  return { po_number: number, emailed: true, emailed_to: to };
+}
+
+// ── Gmail ────────────────────────────────────────────────────────────────────
+// Mail from the company's own Google Workspace account, so a supplier's reply
+// comes back to it and what was sent is in its Sent folder. Gmail's SMTP on
+// port 465 (TLS from the start - Supabase functions may not use 25 or 587),
+// signed in with an app password, which is a function secret and never on a
+// PC. SMTP_HOST / SMTP_PORT / SMTP_TLS are for the tests.
+
+type Mail = { to: string; subject: string; html: string; filename: string; pdf: ArrayBuffer };
+
+function mimeWord(text: string): string {
+  return /^[\x20-\x7e]*$/.test(text) ? text
+    : `=?UTF-8?B?${base64(new TextEncoder().encode(text).buffer as ArrayBuffer)}?=`;
+}
+
+function wrap76(b64: string): string {
+  return b64.replace(/.{1,76}/g, "$&\r\n");
+}
+
+function mimeMessage(from: string, m: Mail): string {
+  const boundary = `taf-${crypto.randomUUID()}`;
+  const html64 = base64(new TextEncoder().encode(m.html).buffer as ArrayBuffer);
+  const domain = from.split("@")[1] ?? "localhost";
+  return [
+    `From: ${mimeWord(env("COMPANY_NAME", "Total Air Filtration"))} <${from}>`,
+    `To: <${m.to}>`,
+    `Subject: ${mimeWord(m.subject)}`,
+    `Date: ${new Date().toUTCString().replace("GMT", "+0000")}`,
+    `Message-ID: <${crypto.randomUUID()}@${domain}>`,
+    "MIME-Version: 1.0",
+    `Content-Type: multipart/mixed; boundary="${boundary}"`,
+    "",
+    `--${boundary}`,
+    "Content-Type: text/html; charset=UTF-8",
+    "Content-Transfer-Encoding: base64",
+    "",
+    wrap76(html64),
+    `--${boundary}`,
+    `Content-Type: application/pdf; name="${m.filename}"`,
+    "Content-Transfer-Encoding: base64",
+    `Content-Disposition: attachment; filename="${m.filename}"`,
+    "",
+    wrap76(base64(m.pdf)),
+    `--${boundary}--`,
+    "",
+  ].join("\r\n");
+}
+
+async function gmailSend(m: Mail): Promise<void> {
+  const user = env("GMAIL_USER").trim();
+  const pass = env("GMAIL_APP_PASSWORD").replace(/\s+/g, "");
+  if (/[\r\n<>]/.test(m.to) || !m.to.includes("@")) {
+    throw new Error(`"${m.to}" is not an email address`);
+  }
+  const host = env("SMTP_HOST", "smtp.gmail.com");
+  const port = Number(env("SMTP_PORT", "465"));
+  const conn = env("SMTP_TLS", "true") === "false"
+    ? await Deno.connect({ hostname: host, port })
+    : await Deno.connectTls({ hostname: host, port });
+  const enc = new TextEncoder(), dec = new TextDecoder();
+  let buffered = "";
+  const timeout = <T>(p: Promise<T>) => Promise.race([p, new Promise<T>((_, no) =>
+    setTimeout(() => no(new Error("Gmail did not answer in time")), 30_000))]);
+
+  // One reply, which may run over several lines ("250-..." then "250 ...").
+  async function reply(): Promise<{ code: number; text: string }> {
+    const lines: string[] = [];
+    for (;;) {
+      const nl = buffered.indexOf("\r\n");
+      if (nl >= 0) {
+        const line = buffered.slice(0, nl);
+        buffered = buffered.slice(nl + 2);
+        lines.push(line);
+        if (line.length < 4 || line[3] !== "-") {
+          return { code: Number(line.slice(0, 3)), text: lines.join(" ") };
+        }
+        continue;
+      }
+      const chunk = new Uint8Array(4096);
+      const n = await timeout(conn.read(chunk));
+      if (n === null) throw new Error("Gmail closed the connection");
+      buffered += dec.decode(chunk.subarray(0, n));
+    }
+  }
+  async function say(line: string, want: number, why: string) {
+    await conn.write(enc.encode(line + "\r\n"));
+    const r = await reply();
+    if (r.code !== want) throw new Error(`${why}: ${r.text.slice(0, 160)}`);
+  }
+
+  try {
+    const hello = await reply();
+    if (hello.code !== 220) throw new Error(`Gmail said ${hello.text.slice(0, 120)}`);
+    await say("EHLO taf-order-entry", 250, "Gmail did not say hello");
+    await say(`AUTH PLAIN ${btoa(`\u0000${user}\u0000${pass}`)}`, 235,
+              "Gmail refused the sign-in - check GMAIL_USER and the app password");
+    await say(`MAIL FROM:<${user}>`, 250, "Gmail refused the sender");
+    await say(`RCPT TO:<${m.to}>`, 250, `Gmail refused ${m.to}`);
+    await say("DATA", 354, "Gmail would not take the message");
+    // A line that starts with a dot gets another, so it is not the end.
+    const body = mimeMessage(user, m).replace(/\r\n\./g, "\r\n..");
+    await say(body + "\r\n.", 250, "Gmail did not accept the message");
+    try { await say("QUIT", 221, "bye"); } catch { /* sent already */ }
+  } finally {
+    try { conn.close(); } catch { /* closed */ }
+  }
+}
+
+function escapeHtml(text: string): string {
+  return String(text).replace(/[&<>"']/g, (c) =>
+    ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]!);
+}
+
+let purchasableCache: { at: number; codes: Map<string, string> } | null = null;
+
+/** Item codes Xero will take on a purchase order: only items marked as
+ *  bought - anything else would fail the order, so it goes without. */
+async function purchasableCodes(): Promise<Map<string, string>> {
+  if (purchasableCache && Date.now() - purchasableCache.at < 10 * MINUTE) {
+    return purchasableCache.codes;
+  }
+  const codes = new Map<string, string>();
+  try {
+    const out = await xero("GET", "/api.xro/2.0/Items");
+    for (const it of out?.Items ?? []) {
+      if (it?.Code && it?.IsPurchased) codes.set(String(it.Code).toUpperCase(), String(it.Code));
+    }
+  } catch {
+    return codes;
+  }
+  purchasableCache = { at: Date.now(), codes };
+  return codes;
+}
+
+
+// ── Requests ────────────────────────────────────────────────────────────────
+
+Deno.serve(async (req: Request) => {
+  if (req.method === "OPTIONS") return new Response("ok", { headers: CORS });
+  const url = new URL(req.url);
+  // Xero sends the manager back with ?code=...&state=... (or ?error=... if
+  // they cancelled), so the redirect URI can be the function's plain address.
+  const back = url.searchParams.has("state") &&
+    (url.searchParams.has("code") || url.searchParams.has("error"));
+  const action = url.searchParams.get("do") ?? (back ? "finish" : "status");
+
+  if (!env("XERO_CLIENT_ID") || !env("XERO_CLIENT_SECRET") || !env("XERO_REDIRECT_URI")) {
+    return json({ error: "This Supabase project has no Xero app set up. Set " +
+      "XERO_CLIENT_ID, XERO_CLIENT_SECRET and XERO_REDIRECT_URI as function " +
+      "secrets." }, 503);
+  }
+
+  try {
+    // Xero itself sends the person here, in a browser, with a code.
+    if (action === "finish") {
+      if (url.searchParams.has("error")) {
+        return text("Xero was not connected (" + (url.searchParams.get("error") ?? "") +
+                    "). Press Connect in the app to try again.", 400);
+      }
+      const code = url.searchParams.get("code") ?? "";
+      const state = url.searchParams.get("state") ?? "";
+      const c = await conn();
+      const fresh = c.state_at && Date.now() - Date.parse(c.state_at) < 30 * MINUTE;
+      if (!code || !state || state !== c.state || !fresh) {
+        return text("That link is not one the app started, or it is too old. " +
+                    "Press Connect in the app again.", 400);
+      }
+      const res = await fetch(`${IDENTITY()}/connect/token`, {
+        method: "POST",
+        headers: { Authorization: `Basic ${basic()}`,
+                   "Content-Type": "application/x-www-form-urlencoded" },
+        body: new URLSearchParams({ grant_type: "authorization_code", code,
+                                    redirect_uri: env("XERO_REDIRECT_URI") }),
+      });
+      const got = await res.json().catch(() => ({}));
+      if (!res.ok || !got.refresh_token) {
+        return text("Xero refused that. Press Connect in the app again.", 400);
+      }
+      const orgs = await fetch(`${API()}/connections`, {
+        headers: { Authorization: `Bearer ${got.access_token}`, Accept: "application/json" },
+      }).then((r) => r.json()).catch(() => []);
+      const org = Array.isArray(orgs) ? orgs[0] : null;
+      await connPut({
+        access_token: got.access_token, refresh_token: got.refresh_token,
+        expires_at: later(Number(got.expires_in ?? 1800) * 1000),
+        refreshed_at: nowIso(), refreshing_until: null,
+        tenant_id: org?.tenantId ?? null, tenant_name: org?.tenantName ?? "",
+        state: null, state_by: null, state_at: null,
+        connected_by: c.state_by ?? null, connected_at: nowIso(),
+        problem: null,
+      });
+      return text(`Xero is connected${org?.tenantName ? ` to ${org.tenantName}` : ""}. ` +
+                  "You can close this window and go back to the app.");
+    }
+
+    const who = await caller(req);
+    if (!who) return json({ error: "Not signed in." }, 401);
+    if (!who.staff && !(who.system && ["sweep", "status"].includes(action))) {
+      return json({ error: "Only staff can use Xero from the app." }, 403);
+    }
+    const body: Row = req.method === "POST"
+      ? await req.json().catch(() => ({})) : {};
+
+    if (action === "status") {
+      let c = await conn();
+      // Keep the link alive: Xero ends a sign-in not renewed for 60 days.
+      const renewed = c.refreshed_at ? Date.parse(c.refreshed_at) : 0;
+      if (c.refresh_token && Date.now() - renewed > 7 * 24 * 60 * MINUTE) {
+        await token(c.access_token ?? "").catch(() => {});
+        c = await conn();
+      }
+      return json({ connected: !!c.refresh_token, organisation: c.tenant_name ?? "",
+                    connected_at: c.connected_at ?? null,
+                    mode: c.mode ?? "manual",
+                    drafts_from: c.drafts_from ?? null, problem: c.problem ?? "" });
+    }
+
+    if (action === "mode") {
+      if (!who.manager) return json({ error: "Only a manager can change how Xero is used." }, 403);
+      const mode = String(body.mode ?? "");
+      if (mode !== "manual" && mode !== "automatic") {
+        return json({ error: "The mode is 'manual' (trial) or 'automatic'." }, 400);
+      }
+      const c = await conn();
+      // Going automatic: orders from now on go by themselves. Not the orders
+      // of the trial, which were sent by hand or not at all.
+      const patch: Row = { mode };
+      if (mode === "automatic" && c.mode !== "automatic") patch.drafts_from = nowIso();
+      const after = await connPut(patch);
+      return json({ mode: after?.mode ?? mode, drafts_from: after?.drafts_from ?? null });
+    }
+
+    if (action === "start" || action === "disconnect") {
+      if (!who.manager) return json({ error: "Only a manager can connect or disconnect Xero." }, 403);
+    }
+
+    if (action === "start") {
+      // Checked when Xero sends the person back, so a link somebody was sent
+      // cannot connect a different Xero to the app.
+      const state = crypto.randomUUID();
+      await connPut({ state, state_by: who.id, state_at: nowIso() });
+      const go = new URL(LOGIN());
+      go.searchParams.set("response_type", "code");
+      go.searchParams.set("client_id", env("XERO_CLIENT_ID"));
+      go.searchParams.set("redirect_uri", env("XERO_REDIRECT_URI"));
+      go.searchParams.set("scope", SCOPES());
+      go.searchParams.set("state", state);
+      return json({ url: go.toString() });
+    }
+
+    if (action === "disconnect") {
+      const c = await conn();
+      if (c.refresh_token) {
+        await fetch(`${IDENTITY()}/connect/revocation`, {
+          method: "POST",
+          headers: { Authorization: `Basic ${basic()}`,
+                     "Content-Type": "application/x-www-form-urlencoded" },
+          body: new URLSearchParams({ token: c.refresh_token }),
+        }).catch(() => {});
+      }
+      await connPut({ access_token: null, refresh_token: null, expires_at: null,
+                      tenant_id: null, tenant_name: null, drafts_from: null,
+                      refreshing_until: null, problem: null });
+      return json({ connected: false });
+    }
+
+    if (action === "draft") {
+      const order = String(body.order_id ?? "");
+      if (!UUID.test(order)) return json({ error: "Which order?" }, 400);
+      const read = readInvoice(body.invoice);
+      if (!read.ok) return json({ error: read.error }, 400);
+      const hash = String(body.hash ?? "").replace(/[^0-9a-zA-Z]/g, "").slice(0, 64);
+      if (!hash) return json({ error: "No hash was given." }, 400);
+      const md5 = body.source_md5 ? String(body.source_md5).slice(0, 64) : null;
+      const now = body.invoice_now === true;
+      const row = await claim(order);
+      if (!row) return json({ busy: true });
+      try {
+        return json(await draftOne(row, read.inv, hash, md5, now));
+      } catch (e) {
+        return json(await failed(row, e, md5), 422);
+      }
+    }
+
+    if (action === "sweep") return json(await sweep());
+
+    if (action === "retry") {
+      const order = String(body.order_id ?? "");
+      if (!UUID.test(order)) return json({ error: "Which order?" }, 400);
+      const row = await claim(order);
+      if (!row) return json({ busy: true });
+      try {
+        if (row.state === "approved") {
+          return json(await emailOne(row, await getInvoice(row.invoice_id)));
+        }
+        if (row.delete_wanted && ["waiting", "draft"].includes(row.state)) {
+          return json(await deleteOne(row));
+        }
+        if (row.state === "draft" && row.complete_wanted && !row.unpriced) {
+          return json(await approveOne(row));
+        }
+        // Anything else is made by a PC from the order: let the next one at it.
+        await put(order, { next_try_at: null, source_md5: null, claimed_until: null });
+        return json({ state: row.state, queued: true });
+      } catch (e) {
+        return json(await failed(row, e), 422);
+      }
+    }
+
+    if (["suppliers_pull", "items_pull", "po_send"].includes(action) && !who.manager) {
+      return json({ error: "Only a manager can do that." }, 403);
+    }
+    if (action === "suppliers_pull") return json(await pullSuppliers());
+    if (action === "items_pull") return json(await pullItems());
+    if (action === "po_send") {
+      const po = String(body.po_id ?? "");
+      if (!UUID.test(po)) return json({ error: "Which purchase order?" }, 400);
+      return json(await sendPo(po));
+    }
+    if (action === "po_pdf") {
+      const po = String(body.po_id ?? "");
+      if (!UUID.test(po)) return json({ error: "Which purchase order?" }, 400);
+      const rows = await rest("GET", `purchase_orders?id=eq.${po}&select=xero_po_id,po_number`);
+      const row = rows?.[0];
+      if (!row?.xero_po_id) return json({ error: "That purchase order has not gone to Xero yet." }, 404);
+      return new Response(await poPdf(String(row.xero_po_id)), { status: 200, headers: {
+        ...CORS, "Content-Type": "application/pdf",
+        "X-Invoice-Number": String(row.po_number ?? ""),
+      } });
+    }
+
+    if (action === "pdf") {
+      // An order's invoice as a PDF, to print or keep. Only invoices this
+      // app made, found through the order they belong to.
+      const order = String(body.order_id ?? "");
+      if (!UUID.test(order)) return json({ error: "Which order?" }, 400);
+      const res = await fetch(`${SB()}/rest/v1/xero_invoices?order_id=eq.${order}` +
+                              "&select=invoice_id,invoice_number,state", {
+        headers: { apikey: SERVICE(), Authorization: `Bearer ${SERVICE()}`,
+                   Accept: "application/json" },
+      });
+      const rows = res.ok ? await res.json().catch(() => []) : [];
+      const row = Array.isArray(rows) ? rows[0] : null;
+      if (!row?.invoice_id) return json({ error: "This order has no invoice in Xero." }, 404);
+      const pdf = await invoicePdf(String(row.invoice_id));
+      return new Response(pdf, { status: 200, headers: {
+        ...CORS, "Content-Type": "application/pdf",
+        "X-Invoice-Number": String(row.invoice_number ?? ""),
+      } });
+    }
+
+    if (action === "contacts") {
+      // Finding a customer's contact in Xero, to link them.
+      const term = String(body.term ?? "").trim().slice(0, 100);
+      if (!term) return json({ contacts: [] });
+      const out = await xero("GET", "/api.xro/2.0/Contacts?searchTerm=" +
+        encodeURIComponent(term));
+      const contacts = (out?.Contacts ?? [])
+        .filter((c: Row) => c?.ContactStatus !== "ARCHIVED")
+        .slice(0, 25)
+        .map((c: Row) => ({ id: c.ContactID, name: c.Name ?? "",
+                            email: c.EmailAddress ?? "" }));
+      return json({ contacts });
+    }
+
+    if (action === "contacts_read") {
+      // Contacts in full, for their payment terms and to see what is
+      // missing from them: up to 500 at a time, 50 to a request.
+      const ids = (Array.isArray(body.ids) ? body.ids : [])
+        .map((x: unknown) => String(x ?? "")).filter((x: string) => UUID.test(x))
+        .slice(0, 500);
+      const contacts: Row[] = [];
+      for (let i = 0; i < ids.length; i += 50) {
+        const out = await xero("GET", "/api.xro/2.0/Contacts?IDs=" +
+          encodeURIComponent(ids.slice(i, i + 50).join(",")));
+        for (const c of out?.Contacts ?? []) {
+          contacts.push({
+            id: c.ContactID, name: c.Name ?? "", status: c.ContactStatus ?? "",
+            EmailAddress: c.EmailAddress ?? "", FirstName: c.FirstName ?? "",
+            LastName: c.LastName ?? "", TaxNumber: c.TaxNumber ?? "",
+            Phones: c.Phones ?? [], Addresses: c.Addresses ?? [],
+            PaymentTerms: c.PaymentTerms?.Sales ?? null,
+          });
+        }
+      }
+      return json({ contacts, default_terms: await orgTerms() });
+    }
+
+    if (action === "contact_save") {
+      // Make a customer's contact in Xero, or fill in what one is missing.
+      // Only these fields, and only what is given: nothing here clears
+      // anything in Xero.
+      const raw = (body.contact ?? {}) as Row;
+      const c: Row = {};
+      const id = String(raw.ContactID ?? "");
+      if (id && !UUID.test(id)) return json({ error: "Which contact?" }, 400);
+      for (const k of ["Name", "EmailAddress", "FirstName", "LastName", "TaxNumber"]) {
+        const v = String(raw[k] ?? "").trim();
+        if (v) c[k] = v.slice(0, k === "Name" ? 255 : 120);
+      }
+      if (Array.isArray(raw.Phones) && raw.Phones.length) c.Phones = raw.Phones.slice(0, 4);
+      if (Array.isArray(raw.Addresses) && raw.Addresses.length) {
+        c.Addresses = raw.Addresses.slice(0, 2);
+      }
+      const t = raw.PaymentTerms as Row | undefined;
+      if (t && typeof t === "object" && t.Sales) c.PaymentTerms = { Sales: t.Sales };
+      if (!id && !c.Name) return json({ error: "A new contact needs a name." }, 400);
+      if (id && !Object.keys(c).length) return json({ id, unchanged: true });
+      try {
+        const out = id
+          ? await xero("POST", `/api.xro/2.0/Contacts/${id}`,
+                       { Contacts: [{ ContactID: id, ...c }] })
+          : await xero("POST", "/api.xro/2.0/Contacts", { Contacts: [c] });
+        const made = out?.Contacts?.[0] ?? {};
+        return json({ id: made.ContactID ?? id, name: made.Name ?? c.Name ?? "",
+                      email: made.EmailAddress ?? "" });
+      } catch (e) {
+        const msg = String((e as Error).message ?? e);
+        if (!id && /already|unique|exists/i.test(msg)) {
+          return json({ error: `Xero already has a contact called "${c.Name}". ` +
+                        "Link the customer to that one instead.", exists: true }, 409);
+        }
+        return json({ error: msg }, 422);
+      }
+    }
+
+    if (action === "list") {
+      return json({ rows: await rpc<Row[]>("xero_list", { p_limit: 300 }) });
+    }
+
+    if (action === "owing") {
+      const rows: Row[] = [];
+      const now = Date.now();
+      for (let page = 1; page <= 10; page++) {
+        const out = await xero("GET", "/api.xro/2.0/Invoices?where=" +
+          encodeURIComponent('Type=="ACCREC" AND Status=="AUTHORISED"') +
+          `&order=DueDate&page=${page}`);
+        const list = out?.Invoices ?? [];
+        for (const inv of list) {
+          const due = String(inv.DueDateString ?? "").slice(0, 10);
+          const days = due ? Math.floor((now - Date.parse(due)) / 86400000) : 0;
+          const owing = Number(inv.AmountDue ?? 0);
+          if (owing > 0) {
+            rows.push({ number: inv.InvoiceNumber ?? "", customer: inv.Contact?.Name ?? "",
+                        due, total: Number(inv.Total ?? 0), owing,
+                        days_late: days > 0 ? days : 0 });
+          }
+        }
+        if (list.length < 100) break;
+      }
+      return json({ rows, owed: rows.reduce((n, r) => n + r.owing, 0) });
+    }
+
+    return json({ error: `There is nothing called ${action}.` }, 400);
+  } catch (err) {
+    const e = err as Problem;
+    return json({ error: String(e?.message ?? err) }, e instanceof Problem ? 409 : 500);
+  }
+});
