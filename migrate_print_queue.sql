@@ -10,7 +10,7 @@
 --
 --   print_stations   the PCs at work that print, and the printers each has
 --   print_jobs       what is waiting, printing, printed or failed
---   print-jobs       (Storage, private) the PDFs and photos sent to print
+--   print-jobs       (Storage, private) the files sent to print
 --
 -- Only somebody on staff, signed in to the app, can send anything. Making a
 -- PC a print station is a manager's decision; once it is one, whoever is
@@ -253,8 +253,8 @@ GRANT EXECUTE ON FUNCTION public.cancel_print_job(uuid) TO authenticated;
 
 
 -- ── The files ──────────────────────────────────────────────────────────────
--- Private: an invoice or a worksheet is nobody else's business. PDFs and
--- photos only, 25 MB at most. Each sender puts theirs in a folder named
+-- Private: an invoice or a worksheet is nobody else's business. PDFs,
+-- photos, and Word, Excel and text files, 25 MB at most. Each sender puts theirs in a folder named
 -- after themselves; the station, signed in as anybody on staff, reads and
 -- removes them once printed.
 
@@ -266,10 +266,18 @@ BEGIN
   END IF;
   INSERT INTO storage.buckets (id, name, public, file_size_limit, allowed_mime_types)
   VALUES ('print-jobs', 'print-jobs', false, 26214400,
-          ARRAY['application/pdf', 'image/jpeg', 'image/png'])
+          ARRAY['application/pdf', 'image/jpeg', 'image/png', 'text/plain',
+                'application/msword',
+                'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+                'application/vnd.ms-excel',
+                'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'])
   ON CONFLICT (id) DO UPDATE
      SET public = false, file_size_limit = 26214400,
-         allowed_mime_types = ARRAY['application/pdf', 'image/jpeg', 'image/png'];
+         allowed_mime_types = ARRAY['application/pdf', 'image/jpeg', 'image/png', 'text/plain',
+                'application/msword',
+                'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+                'application/vnd.ms-excel',
+                'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'];
 
   EXECUTE 'DROP POLICY IF EXISTS "Staff send files to print" ON storage.objects';
   EXECUTE 'DROP POLICY IF EXISTS "Staff read files to print" ON storage.objects';

@@ -10150,6 +10150,17 @@ class ModernOrderApp(tk.Frame):
             self.master.after(1500, self._poll_notifications)
             self.master.after(6000, self._apply_due_price_changes)
 
+        # Print a File at work: from home, the road or the office, on the
+        # printers at work, through the print station.
+        pw = tk.Label(inner, text="🖨  Print a File at work", bg=CCA, fg=CMU,
+                      font=F_SM, cursor="hand2", padx=px(10))
+        pw.pack(side="right", padx=(0, px(2)))
+        pw.bind("<Button-1>", lambda _e: self._print_file_at_work_dialog())
+        pw.bind("<Enter>", lambda _e: pw.config(fg=CA))
+        pw.bind("<Leave>", lambda _e: pw.config(fg=CMU))
+        _Tooltip(pw, "Attach a file and print it on a printer at work")
+        self._print_at_work_link = pw
+
         # A shortcut nobody knows about saves nobody any time, so there is a
         # way in that doesn't require already knowing the shortcut.
         kb = tk.Label(inner, text="⌨  Shortcuts", bg=CCA, fg=CMU,
@@ -30761,15 +30772,18 @@ class ModernOrderApp(tk.Frame):
             return []
 
     def _send_to_work_printer(self, path: str, title: str = "",
-                              watch: bool = True) -> str:
-        """Queue a file for the printer at work chosen in Settings. "" once
-        it is queued, or why it could not be. Not on the window's thread."""
+                              watch: bool = True, where=None,
+                              copies: int = 1) -> str:
+        """Queue a file for a printer at work: `where` as (station id,
+        printer), or the one chosen in Settings. "" once it is queued, or
+        why it could not be. Not on the window's thread."""
         title = title or Path(str(path)).stem.replace("_", " ")
+        station, printer = where or (
+            self._settings.get("print_work_station", ""),
+            self._settings.get("print_work_printer", ""))
         try:
-            job = _db.send_print_file(
-                str(path), title,
-                printer=self._settings.get("print_work_printer", ""),
-                station_id=self._settings.get("print_work_station", ""))
+            job = _db.send_print_file(str(path), title, printer=printer,
+                                      station_id=station, copies=copies)
         except Exception as exc:
             text = str(exc)
             if "print_jobs" in text or "print-jobs" in text or "Bucket" in text:
@@ -30871,6 +30885,163 @@ class ModernOrderApp(tk.Frame):
             self._flag_printed(db_id=order_id)
         return paths, ""
 
+    PRINT_FILE_TYPES = [
+        ("Anything that prints",
+         "*.pdf *.jpg *.jpeg *.png *.doc *.docx *.xls *.xlsx *.txt"),
+        ("PDF", "*.pdf"), ("Photo", "*.jpg *.jpeg *.png"),
+        ("Word", "*.doc *.docx"), ("Excel", "*.xls *.xlsx"), ("Text", "*.txt")]
+
+    def _print_file_at_work_dialog(self, on_sent=None):
+        """Print a File at work: attach one or more files, pick the printer
+        at work and how many copies, and send. Each is printed by the print
+        station and you are told when it has printed - or why not."""
+        win = tk.Toplevel(self.master)
+        win.title("Print a File at work")
+        win.configure(bg=CBG)
+        win.transient(self.master)
+        win.minsize(px(520), px(360))
+        box = tk.Frame(win, bg=CCA, padx=16, pady=14, highlightthickness=1,
+                       highlightbackground=CBR)
+        box.pack(fill="both", expand=True, padx=12, pady=12)
+        tk.Label(box, text="🖨  Print a File at work", bg=CCA, fg=CA,
+                 font=F_SEC, anchor="w").pack(anchor="w")
+        station_var = tk.StringVar(value="Looking for the print station…")
+        tk.Label(box, textvariable=station_var, bg=CCA, fg=CMU, font=F_SM,
+                 justify="left", anchor="w", wraplength=px(480)
+                 ).pack(anchor="w", pady=(2, 10))
+
+        tk.Label(box, text="Files", bg=CCA, fg=CTX, font=F_BOLD,
+                 anchor="w").pack(anchor="w")
+        files_lb = tk.Listbox(box, height=5, font=F_SM, activestyle="none",
+                              selectmode="extended", relief="flat",
+                              highlightthickness=1, highlightbackground=CBR)
+        files_lb.pack(fill="both", expand=True, pady=(2, 6))
+        files = []
+
+        def _show_files():
+            files_lb.delete(0, "end")
+            for f in files:
+                files_lb.insert("end", "  " + Path(f).name)
+            if not files:
+                files_lb.insert("end", "  Nothing attached yet - press "
+                                       "📎 Attach a file…")
+            send_btn.configure(state="normal" if files else "disabled")
+
+        def _attach():
+            picked = filedialog.askopenfilenames(
+                parent=win, title="Attach a file to print at work",
+                filetypes=self.PRINT_FILE_TYPES)
+            for f in picked or ():
+                if f not in files:
+                    files.append(f)
+            _show_files()
+
+        def _remove():
+            for i in sorted(files_lb.curselection(), reverse=True):
+                if i < len(files):
+                    files.pop(i)
+            _show_files()
+
+        frow = tk.Frame(box, bg=CCA)
+        frow.pack(anchor="w", fill="x")
+        flat_btn(frow, "📎 Attach a file…", _attach, bg=CA, pady=4, padx=10,
+                 font=F_SM).pack(side="left")
+        flat_btn(frow, "Remove", _remove, bg=CNE, pady=4, padx=10,
+                 font=F_SM).pack(side="left", padx=(8, 0))
+        tk.Label(box, text="PDFs and photos, or Word, Excel and text files "
+                           "(the PC at work needs Word and Excel for those). "
+                           "25 MB at most each.",
+                 bg=CCA, fg=CMU, font=F_SM, justify="left", anchor="w",
+                 wraplength=px(480)).pack(anchor="w", pady=(4, 10))
+
+        prow = tk.Frame(box, bg=CCA)
+        prow.pack(anchor="w", fill="x")
+        tk.Label(prow, text="Printer:", bg=CCA, fg=CTX,
+                 font=F_SM).pack(side="left", padx=(0, 6))
+        printer_cb = ttk.Combobox(prow, state="readonly", width=44)
+        printer_cb.pack(side="left")
+        tk.Label(prow, text="Copies:", bg=CCA, fg=CTX,
+                 font=F_SM).pack(side="left", padx=(12, 6))
+        copies_var = tk.StringVar(value="1")
+        tk.Spinbox(prow, from_=1, to=20, width=4, textvariable=copies_var,
+                   font=F_SM).pack(side="left")
+        choices = []
+
+        def _stations():
+            stations = _db.print_stations()
+            found = _pstation.printer_choices(stations)
+            on = [st["name"] for st in stations if _pstation.is_online(st)]
+
+            def _fill():
+                if not win.winfo_exists():
+                    return
+                choices[:] = found
+                labels = [c[0] for c in found] or ["(no print station yet)"]
+                printer_cb.configure(values=labels)
+                want = (self._settings.get("print_work_station", ""),
+                        self._settings.get("print_work_printer", ""))
+                printer_cb.set(next((c[0] for c in found
+                                     if (c[1], c[2]) == want), labels[0]))
+                station_var.set(
+                    ("The print station is on: " + ", ".join(on)) if on else
+                    ("No print station is on right now - what you send "
+                     "prints when it is back on." if stations else
+                     "No print station yet. On a PC at work, a manager ticks "
+                     "\"This PC prints for everybody\" in Settings → Printing."))
+            win.after(0, _fill)
+        threading.Thread(target=_stations, daemon=True).start()
+
+        def _send():
+            if not files:
+                return
+            hit = next((c for c in choices if c[0] == printer_cb.get()), None)
+            where = (hit[1], hit[2]) if hit else ("", "")
+            try:
+                copies = max(1, min(20, int(copies_var.get())))
+            except ValueError:
+                copies = 1
+            todo = list(files)
+            send_btn.configure(state="disabled", text="Sending…")
+
+            def _work():
+                problems = [e for e in (
+                    self._send_to_work_printer(f, where=where, copies=copies)
+                    for f in todo) if e]
+
+                def _done():
+                    if problems:
+                        messagebox.showerror("Print a File at work",
+                                             "\n\n".join(problems), parent=win)
+                    sent = len(todo) - len(problems)
+                    if sent:
+                        self.status_var.set(
+                            f"Sent {sent} file{'s' if sent != 1 else ''} to the "
+                            f"work printer: {printer_cb.get()}")
+                    if on_sent:
+                        on_sent()
+                    if not problems and win.winfo_exists():
+                        win.destroy()
+                    elif win.winfo_exists():
+                        send_btn.configure(state="normal",
+                                           text="🖨 Send to print")
+                self.master.after(0, _done)
+            threading.Thread(target=_work, daemon=True).start()
+
+        brow = tk.Frame(box, bg=CCA)
+        brow.pack(fill="x", pady=(14, 0))
+        send_btn = flat_btn(brow, "🖨 Send to print", _send, bg=CGR, pady=6,
+                            padx=14, font=F_BOLD)
+        send_btn.pack(side="right")
+        flat_btn(brow, "Close", win.destroy, bg=CNE, pady=6, padx=14,
+                 font=F_SM).pack(side="right", padx=(0, 8))
+        flat_btn(brow, "Print queue…", self._print_queue_window, bg=CNE,
+                 pady=6, padx=10, font=F_SM).pack(side="left")
+        _show_files()
+        win._files = files            # for the smoke test
+        win._send = _send
+        win._printer_cb = printer_cb
+        return win
+
     def _print_queue_window(self):
         """What has been sent to the work printers: yours, or everybody's
         for a manager. Cancel one still waiting; send a file from here."""
@@ -30938,22 +31109,11 @@ class ModernOrderApp(tk.Frame):
             _load()
 
         def _send_file():
-            path = filedialog.askopenfilename(
-                parent=win, title="Print a file at work",
-                filetypes=[("PDF or photo", "*.pdf *.jpg *.jpeg *.png")])
-            if not path:
-                return
-
-            def _work():
-                err = self._send_to_work_printer(path)
-                win.after(0, lambda: (messagebox.showerror(
-                    "Printing at work", err, parent=win) if err else None,
-                    _load()))
-            threading.Thread(target=_work, daemon=True).start()
+            self._print_file_at_work_dialog(on_sent=_load)
 
         bar = tk.Frame(win, bg=CBG, padx=12, pady=10)
         bar.pack(fill="x")
-        flat_btn(bar, "📄 Print a file at work…", _send_file, bg=CGR,
+        flat_btn(bar, "📎 Print a File at work…", _send_file, bg=CGR,
                  pady=4, padx=10, font=F_SM).pack(side="left")
         flat_btn(bar, "Cancel job", _cancel, bg=CNE, pady=4, padx=10,
                  font=F_SM).pack(side="left", padx=(8, 0))

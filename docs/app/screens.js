@@ -2697,20 +2697,37 @@ var TAFAPP = (function () {
     })();
   }
 
+  // What can be printed at work, by extension. Word, Excel and text files
+  // are printed by whatever opens them on the station PC.
+  var PRINT_TYPES = {
+    pdf: "application/pdf", jpg: "image/jpeg", jpeg: "image/jpeg",
+    png: "image/png", txt: "text/plain", doc: "application/msword",
+    docx: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    xls: "application/vnd.ms-excel",
+    xlsx: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+  };
+  var PRINT_ACCEPT = Object.keys(PRINT_TYPES).map(function (e) { return "." + e; })
+    .concat(["image/*"]).join(",");
+
   function sendPrintFile(file, copies) {
-    if (!file) { return Promise.reject(new Error("Pick a PDF or a photo.")); }
-    var pdf = /pdf$/i.test(file.type || "") || /\.pdf$/i.test(file.name || "");
-    if (!pdf && !/^image\//.test(file.type || "")) {
-      return Promise.reject(new Error("Only a PDF or a photo can be printed at work."));
+    if (!file) { return Promise.reject(new Error("Attach a file first.")); }
+    var ext = String(file.name || "").split(".").pop().toLowerCase();
+    var photo = /^image\//.test(file.type || "");
+    if (!PRINT_TYPES[ext] && !photo) {
+      return Promise.reject(new Error((file.name || "That file") + ": only a PDF, "
+        + "a photo, or a Word, Excel or text file can be printed at work."));
     }
     if (file.size > 25 * 1024 * 1024) {
-      return Promise.reject(new Error("That file is over 25 MB - too big to send."));
+      return Promise.reject(new Error((file.name || "That file")
+                                      + " is over 25 MB - too big to send."));
     }
-    var ready = pdf ? Promise.resolve(file) : shrinkPhoto(file);
+    // A photo is shrunk and sent as a JPEG; anything else as it is.
+    var asPhoto = photo || ext === "jpg" || ext === "jpeg" || ext === "png";
+    var ready = asPhoto ? shrinkPhoto(file) : Promise.resolve(file);
     return ready.then(function (blob) {
-      var ext = pdf ? ".pdf" : ".jpg";
-      var path = D.whoami().id + "/" + randomName() + ext;
-      return D.upload("print-jobs", path, blob, pdf ? "application/pdf" : "image/jpeg")
+      var suffix = asPhoto ? "jpg" : ext;
+      var path = D.whoami().id + "/" + randomName() + "." + suffix;
+      return D.upload("print-jobs", path, blob, PRINT_TYPES[suffix])
         .then(function () {
           return sendPrint({ kind: "file", file_path: path, copies: copies,
                              title: (file.name || "Photo").replace(/\.[^.]+$/, "") });
@@ -2756,8 +2773,8 @@ var TAFAPP = (function () {
                                            min: "1", max: "20", value: "1",
                                            inputmode: "numeric" } });
       var pickFile = U.el("input", { attr: { id: "print-file", type: "file",
-        accept: "application/pdf,image/*", style: "display:none" } });
-      var sendBtn = U.button("📄  Send a PDF or photo", function () {
+        multiple: "multiple", accept: PRINT_ACCEPT, style: "display:none" } });
+      var sendBtn = U.button("📎  Print a File at work", function () {
         pickFile.click();
       }, "go");
       sendBtn.setAttribute("id", "print-send");
@@ -2771,19 +2788,32 @@ var TAFAPP = (function () {
         U.el("label", { cls: "f", kids: [U.el("span", { text: "Printer" }), which] }),
         U.el("label", { cls: "f", kids: [U.el("span", { text: "Copies" }), copies] }),
         sendBtn, pickFile,
-        U.el("div", { cls: "muted", text: "An order's worksheets: open the "
-                                          + "order and press Print at work." })
+        U.el("div", { cls: "muted", text: "Attach a PDF, a photo, or a Word, "
+          + "Excel or text file - 25 MB at most. An order's worksheets: open "
+          + "the order and press Print at work." })
       ]);
       main.appendChild(box);
       pickFile.addEventListener("change", function () {
-        var file = pickFile.files && pickFile.files[0];
-        if (!file) { return; }
+        var picked = Array.prototype.slice.call(pickFile.files || []);
+        if (!picked.length) { return; }
         sendBtn.disabled = true;
-        sendPrintFile(file, Math.max(1, Math.min(20, parseInt(copies.value, 10) || 1)))
-          .then(function () { setTimeout(function () {
-            if (active === "print") { show("print"); } }, 1500); })
-          .catch(function (err) { U.notice(box, err.message); })
-          .then(function () { sendBtn.disabled = false; pickFile.value = ""; });
+        var n = Math.max(1, Math.min(20, parseInt(copies.value, 10) || 1));
+        var problems = [];
+        // One after another, so a slow signal is not asked to carry them all
+        // at once.
+        picked.reduce(function (chain, file) {
+          return chain.then(function () {
+            return sendPrintFile(file, n).catch(function (err) {
+              problems.push(err.message);
+            });
+          });
+        }, Promise.resolve()).then(function () {
+          if (problems.length) { U.notice(box, problems.join("  ")); }
+          sendBtn.disabled = false;
+          pickFile.value = "";
+          if (!problems.length) { setTimeout(function () {
+            if (active === "print") { show("print"); } }, 1500); }
+        });
       });
 
       if (!jobs.length) {

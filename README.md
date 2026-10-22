@@ -1082,9 +1082,14 @@ anything.
    work printers**, pick the printer, and Save. From then on every Print
    button on that PC (worksheets, dockets, run sheets, invoices) goes to that
    printer at work. **Print queue…** shows what has been sent and whether it
-   printed, lets you cancel something still waiting, and sends any PDF or
-   photo with **Print a file at work…**.
-4. On a phone: **Print at work** (under More) sends a PDF or photo to the
+   printed, and lets you cancel something still waiting.
+4. **🖨 Print a File at work**, at the top of the window on any PC: attach
+   one or more files, pick the printer at work and how many copies, and send.
+   PDFs and photos print anywhere; Word, Excel and text files are printed by
+   Word, Excel or Notepad on the station PC, so it needs those installed.
+   25 MB at most a file.
+5. On a phone: **Print at work** (under More) → **Print a File at work**
+   attaches files from the phone (the same kinds) and sends them to the
    printer picked there. An order's **Print at work** button has the station
    build that order's worksheets itself and print them.
 

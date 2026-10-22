@@ -1638,11 +1638,28 @@ def run() -> int:
               and job.get("title") == "Run sheet" and job.get("created_by") == "u1"
               and job.get("file_path") == UPLOADED[-1].split("print-jobs/", 1)[1],
               str(job))
+        check("the button says Print a File at work",
+              "Print a File at work" in page.locator("#print-send").inner_text())
         job["status"] = "printed"
         page.wait_for_function("document.querySelector('#toast') && "
                                "document.querySelector('#toast').textContent"
                                ".indexOf('Printed at work') >= 0", timeout=10000)
         check("and the phone says when it has printed", True)
+        uploads = len(UPLOADED)
+        page.set_input_files("#print-file", files=[
+            {"name": "Price list.docx", "buffer": b"PK\x03\x04",
+             "mimeType": "application/vnd.openxmlformats-officedocument."
+                         "wordprocessingml.document"},
+            {"name": "virus.exe", "mimeType": "application/octet-stream",
+             "buffer": b"MZ"}])
+        page.wait_for_function("document.querySelector('#screen .err')")
+        check("a Word file can be attached and sent too, and something that "
+              "does not print is refused",
+              len(UPLOADED) == uploads + 1 and UPLOADED[-1].endswith(".docx")
+              and PRINT_JOBS[0].get("title") == "Price list"
+              and "virus.exe" in page.locator("#screen .err").inner_text(),
+              f"{UPLOADED[-1:]} {PRINT_JOBS[:1]}")
+        PRINT_JOBS[0]["status"] = "printed"
         page.click('#tabs button[data-tab="orders"]')
         page.wait_for_selector("#screen table")
         page.locator("#screen tbody tr", has_text="Bells Creek").first.click()

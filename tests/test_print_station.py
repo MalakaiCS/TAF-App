@@ -154,3 +154,18 @@ def test_whoever_sent_it_hears_when_it_printed():
     assert ps.status_text({"status": "failed", "error": "Jammed"}) == \
         "Did not print: Jammed"
     assert ps.status_text({"status": "queued"}) == "Waiting"
+
+
+def test_only_files_that_print_can_be_sent():
+    import tempfile
+    from taf_order_app import db
+    folder = Path(tempfile.mkdtemp())
+    bad = folder / "setup.exe"
+    bad.write_bytes(b"MZ")
+    try:
+        db.send_print_file(str(bad))
+        raise AssertionError("an .exe was accepted")
+    except ValueError as exc:
+        assert "setup.exe" in str(exc) and "Word, Excel" in str(exc)
+    for ext in (".pdf", ".jpg", ".png", ".docx", ".doc", ".xlsx", ".xls", ".txt"):
+        assert ext in db.PRINT_TYPES

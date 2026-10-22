@@ -2788,6 +2788,34 @@ def _steps(app, gui, root):
             row = tree.item(tree.get_children()[0])["values"]
             assert "Did not print: Jammed" in row, row
             win.destroy()
+            # Print a File at work, from the link at the top of the window.
+            assert app._print_at_work_link.cget("text").endswith(
+                "Print a File at work")
+            sent.clear()
+            app._settings["print_station"] = False
+            dlg = app._print_file_at_work_dialog()
+            for _ in range(60):
+                root.update()
+                if dlg._printer_cb.cget("values"):
+                    break
+                time.sleep(0.05)
+            doc = pdf.with_name("Price list.docx")
+            doc.write_bytes(b"PK")
+            dlg._files.extend([str(pdf), str(doc)])
+            dlg._printer_cb.set("WORKSHOP: Brother  (off right now)")
+            got = []
+            db.send_print_file = lambda path, title="", printer="", \
+                station_id="", copies=1: got.append(
+                    (Path(path).name, printer, station_id, copies)) or {"id": "j"}
+            dlg._send()
+            for _ in range(100):
+                root.update()
+                if not dlg.winfo_exists():
+                    break
+                time.sleep(0.05)
+            assert got == [("Run_sheet.pdf", "Brother", "s1", 1),
+                           ("Price list.docx", "Brother", "s1", 1)], got
+            assert not dlg.winfo_exists(), "closes once everything is sent"
             # A phone's order with no Location: the sender is told why.
             db.get_order = lambda oid: {"id": oid, "header": {
                 "Customer Name": "BATARE", "Order Number": "21700",

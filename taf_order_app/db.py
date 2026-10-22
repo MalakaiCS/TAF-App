@@ -3566,8 +3566,18 @@ def outstanding_lines(items: list, header: dict) -> list:
 # private bucket, in a folder named after whoever sent it.
 
 PRINT_BUCKET = "print-jobs"
-PRINT_TYPES = {".pdf": "application/pdf", ".jpg": "image/jpeg",
-               ".jpeg": "image/jpeg", ".png": "image/png"}
+# PDFs and photos print anywhere. Word, Excel and text files are printed by
+# whatever opens them on the station PC, so that PC needs Word and Excel.
+PRINT_TYPES = {
+    ".pdf": "application/pdf", ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
+    ".png": "image/png", ".txt": "text/plain",
+    ".doc": "application/msword",
+    ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    ".xls": "application/vnd.ms-excel",
+    ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+}
+PRINT_TYPES_TEXT = "a PDF, a photo (JPG, PNG), or a Word, Excel or text file"
+PRINT_MAX_BYTES = 25 * 1024 * 1024
 
 
 def print_stations() -> list:
@@ -3595,7 +3605,10 @@ def send_print_file(path: str, title: str = "", printer: str = "",
     p = _P(path)
     ext = p.suffix.lower()
     if ext not in PRINT_TYPES:
-        raise ValueError("Only a PDF or a photo (JPG, PNG) can be printed at work.")
+        raise ValueError(f"{p.name}: only {PRINT_TYPES_TEXT} can be printed "
+                         "at work.")
+    if p.stat().st_size > PRINT_MAX_BYTES:
+        raise ValueError(f"{p.name} is over 25 MB - too big to send.")
     name = f"{current_user_id()}/{_uuid.uuid4().hex}{ext}"
     get_client().storage.from_(PRINT_BUCKET).upload(
         name, p.read_bytes(), file_options={"content-type": PRINT_TYPES[ext]})
