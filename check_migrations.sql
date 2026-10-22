@@ -218,7 +218,10 @@ WITH checks(step, file, purpose, needed, present) AS (VALUES
                  AND column_name='cash_sale')),
 
   (52, 'migrate_part_links.sql', 'The part number each product sells as', 'recommended',
-      to_regclass('public.part_links') IS NOT NULL)
+      to_regclass('public.part_links') IS NOT NULL),
+
+  (53, 'migrate_print_queue.sql', 'Printing on the work printers from anywhere', 'recommended',
+      to_regprocedure('public.claim_print_job(uuid)') IS NOT NULL)
 )
 SELECT step,
        CASE WHEN present THEN 'already done' ELSE 'RUN THIS' END AS status,

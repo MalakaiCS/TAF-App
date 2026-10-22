@@ -31,6 +31,7 @@ var TAFAPP = (function () {
     { key: "count",       label: "Stocktake", icon: "count", feature: "stocktake" },
     { key: "chat",        label: "Messages",  icon: "chat" },
     { key: "howto",       label: "How to",    icon: "book" },
+    { key: "print",       label: "Print at work", icon: "printer" },
     { key: "log",         label: "Log",       icon: "clock", from: 3 }
   ];
   var BAR = 4;
@@ -56,6 +57,7 @@ var TAFAPP = (function () {
              "M16 8v6"],
     count:  ["M9 3.5h6v3H9z", "M7 5H5.5v16h13V5H17", "M9 13l2 2 4-4"],
     chat:   ["M4 5h16v11H9l-5 4z", "M8 9.5h8", "M8 12.5h5"],
+    printer: ["M6 9V3h12v6", "M6 18H3.5v-8.5h17V18H18", "M6 14h12v7H6z"],
     book:   ["M4 4.5h6a2 2 0 0 1 2 2V20a2 2 0 0 0-2-2H4z",
              "M20 4.5h-6a2 2 0 0 0-2 2V20a2 2 0 0 1 2-2h6z"],
     more:   ["M5 12h.01", "M12 12h.01", "M19 12h.01"]
@@ -2519,6 +2521,16 @@ var TAFAPP = (function () {
 
   function drawStatus(actions, row, body, pill, close) {
     U.clear(actions);
+    var printBtn = U.button("🖨  Print at work", function () {
+      printBtn.disabled = true;
+      sendPrint({ kind: "order", order_id: row.id,
+                  title: (row.customer || "Order")
+                         + (row.order_no ? " O/N " + row.order_no : "") })
+        .catch(function (err) { U.notice(body, err.message); })
+        .then(function () { printBtn.disabled = false; });
+    }, "quiet");
+    printBtn.setAttribute("id", "print-order");
+    actions.appendChild(printBtn);
     if (feature("fault_log")) {
       actions.appendChild(U.button("⚠  Record a fault", function () {
         reportFault(row, null, row._items || []);
@@ -2586,6 +2598,219 @@ var TAFAPP = (function () {
      wording in it, so one day's work reads as one list whichever screen
      each thing was done on. Managers and above only, which the database
      enforces — the tab is simply not offered below that. */
+
+  /* ── Printing at work, from anywhere (step 53) ─────────────────────────
+     The printers stay on the workshop's network. A job waits in the
+     database until the print station - a PC at work with the app open -
+     takes it and prints it. A phone can send a PDF or a photo, or an
+     order's worksheets, which the station builds itself. */
+
+  var PRINT_PICK = "taf-print-printer";
+  var PRINT_ONLINE_MS = 120000;
+  var PRINT_WORDS = { queued: "Waiting", printing: "Printing",
+                      printed: "Printed", failed: "Did not print",
+                      cancelled: "Cancelled" };
+
+  function stationOn(st, now) {
+    if (!st || st.enabled === false) { return false; }
+    var seen = Date.parse(st.last_seen || "");
+    return !isNaN(seen) && ((now || Date.now()) - seen) <= PRINT_ONLINE_MS;
+  }
+
+  // [{label, station, printer}] - each station's usual printer, then each
+  // of its printers. A station that is off is still offered: the job waits.
+  function printerChoices(stations, now) {
+    var out = [];
+    (stations || []).forEach(function (st) {
+      if (st.enabled === false) { return; }
+      var tag = stationOn(st, now) ? "" : "  (off right now)";
+      out.push({ label: st.name + ": its usual printer"
+                        + (st.default_printer ? " (" + st.default_printer + ")" : "")
+                        + tag, station: st.id, printer: "" });
+      (st.printers || []).forEach(function (p) {
+        out.push({ label: st.name + ": " + p + tag, station: st.id, printer: p });
+      });
+    });
+    return out;
+  }
+
+  function printStatus(job) {
+    var word = PRINT_WORDS[job.status] || job.status;
+    return job.status === "failed" && job.error ? word + ": " + job.error : word;
+  }
+
+  function savedPrinter() {
+    try { return JSON.parse(localStorage.getItem(PRINT_PICK) || "null") || {}; }
+    catch (e) { return {}; }
+  }
+
+  function randomName() {
+    var a = new Uint8Array(12);
+    (window.crypto || window.msCrypto).getRandomValues(a);
+    return Array.prototype.map.call(a, function (b) {
+      return ("0" + b.toString(16)).slice(-2); }).join("");
+  }
+
+  // Queue a job for the printer picked on Print at work, then say when it
+  // has printed - or why not.
+  function sendPrint(job) {
+    var pick = savedPrinter();
+    var row = { kind: job.kind, title: job.title || "Print",
+                printer: pick.printer || "", copies: job.copies || 1,
+                created_by: D.whoami().id,
+                sent_by: D.cachedProfile().full_name
+                         || D.cachedProfile().username || "" };
+    if (pick.station) { row.station_id = pick.station; }
+    if (job.order_id) { row.order_id = job.order_id; }
+    if (job.file_path) { row.file_path = job.file_path; }
+    return D.insert("print_jobs", row).then(function (got) {
+      var made = (got && got[0]) || {};
+      U.toast("🖨  Sent to the work printer: " + row.title);
+      followPrint(made.id, row.title);
+      return made;
+    }).catch(function (err) {
+      if (/print_jobs/.test(err.message || "")) {
+        throw new Error("Printing at work is not set up yet - a manager "
+                        + "needs to run step 53 (migrate_print_queue.sql).");
+      }
+      throw err;
+    });
+  }
+
+  function followPrint(id, title) {
+    if (!id) { return; }
+    var tries = 0;
+    (function look() {
+      tries += 1;
+      D.select("print_jobs", { "select": "status,error", "id": "eq." + id })
+        .then(function (rows) {
+          var j = rows && rows[0];
+          if (j && j.status === "printed") { U.toast("✓  Printed at work: " + title); return; }
+          if (j && j.status === "failed") {
+            U.toast("✗  " + title + " did not print: " + (j.error || "no reason given"));
+            return;
+          }
+          if (j && j.status === "cancelled") { return; }
+          if (tries < 45) { setTimeout(look, 4000); }
+          else { U.toast(title + " is still waiting - is the print station on?"); }
+        }).catch(function () { if (tries < 45) { setTimeout(look, 8000); } });
+    })();
+  }
+
+  function sendPrintFile(file, copies) {
+    if (!file) { return Promise.reject(new Error("Pick a PDF or a photo.")); }
+    var pdf = /pdf$/i.test(file.type || "") || /\.pdf$/i.test(file.name || "");
+    if (!pdf && !/^image\//.test(file.type || "")) {
+      return Promise.reject(new Error("Only a PDF or a photo can be printed at work."));
+    }
+    if (file.size > 25 * 1024 * 1024) {
+      return Promise.reject(new Error("That file is over 25 MB - too big to send."));
+    }
+    var ready = pdf ? Promise.resolve(file) : shrinkPhoto(file);
+    return ready.then(function (blob) {
+      var ext = pdf ? ".pdf" : ".jpg";
+      var path = D.whoami().id + "/" + randomName() + ext;
+      return D.upload("print-jobs", path, blob, pdf ? "application/pdf" : "image/jpeg")
+        .then(function () {
+          return sendPrint({ kind: "file", file_path: path, copies: copies,
+                             title: (file.name || "Photo").replace(/\.[^.]+$/, "") });
+        });
+    });
+  }
+
+  SCREENS.print = function (main) {
+    Promise.all([
+      D.select("print_stations", { "select": "*", "order": "name" })
+        .catch(function () { return null; }),
+      D.select("print_jobs", { "select": "*", "order": "created_at.desc",
+                               "limit": 30 }).catch(function () { return []; })
+    ]).then(function (got) {
+      var stations = got[0], jobs = got[1] || [];
+      U.clear(main);
+      if (stations === null) {
+        main.appendChild(U.card("Print at work", [U.empty(
+          "Printing at work is not set up yet",
+          "A manager needs to run step 53 (migrate_print_queue.sql).")]));
+        return;
+      }
+      var on = stations.filter(function (s) { return stationOn(s); });
+      var choices = printerChoices(stations);
+      var pick = savedPrinter();
+      var which = U.el("select", { attr: { id: "print-printer" },
+        kids: choices.map(function (c, i) {
+          var o = U.el("option", { text: c.label, attr: { value: String(i) } });
+          if (c.station === pick.station && c.printer === (pick.printer || "")) {
+            o.selected = true;
+          }
+          return o;
+        }) });
+      which.addEventListener("change", function () {
+        var c = choices[parseInt(which.value, 10)] || {};
+        try {
+          localStorage.setItem(PRINT_PICK, JSON.stringify(
+            { station: c.station || "", printer: c.printer || "" }));
+        } catch (e) {}
+      });
+      if (choices.length && !pick.station) { which.dispatchEvent(new Event("change")); }
+      var copies = U.el("input", { attr: { id: "print-copies", type: "number",
+                                           min: "1", max: "20", value: "1",
+                                           inputmode: "numeric" } });
+      var pickFile = U.el("input", { attr: { id: "print-file", type: "file",
+        accept: "application/pdf,image/*", style: "display:none" } });
+      var sendBtn = U.button("📄  Send a PDF or photo", function () {
+        pickFile.click();
+      }, "go");
+      sendBtn.setAttribute("id", "print-send");
+      var box = U.card("Print at work", [
+        U.el("div", { cls: "muted", text: on.length
+          ? "Print station on: " + on.map(function (s) { return s.name; }).join(", ")
+          : (stations.length
+             ? "No print station is on right now - what you send prints when one is."
+             : "No print station yet. On a PC at work, tick \u201cThis PC prints "
+               + "for everybody\u201d in Settings.") }),
+        U.el("label", { cls: "f", kids: [U.el("span", { text: "Printer" }), which] }),
+        U.el("label", { cls: "f", kids: [U.el("span", { text: "Copies" }), copies] }),
+        sendBtn, pickFile,
+        U.el("div", { cls: "muted", text: "An order's worksheets: open the "
+                                          + "order and press Print at work." })
+      ]);
+      main.appendChild(box);
+      pickFile.addEventListener("change", function () {
+        var file = pickFile.files && pickFile.files[0];
+        if (!file) { return; }
+        sendBtn.disabled = true;
+        sendPrintFile(file, Math.max(1, Math.min(20, parseInt(copies.value, 10) || 1)))
+          .then(function () { setTimeout(function () {
+            if (active === "print") { show("print"); } }, 1500); })
+          .catch(function (err) { U.notice(box, err.message); })
+          .then(function () { sendBtn.disabled = false; pickFile.value = ""; });
+      });
+
+      if (!jobs.length) {
+        main.appendChild(U.card("Sent", [U.empty("Nothing sent yet")]));
+        return;
+      }
+      main.appendChild(U.card("Sent", [U.table(["When", "What", "Status", ""],
+        jobs.map(function (j) {
+          var cancel = j.status === "queued" ? U.button("Cancel", function () {
+            cancel.disabled = true;
+            D.rpc("cancel_print_job", { p_id: j.id })
+              .then(function () { show("print"); })
+              .catch(function (err) { U.notice(main, err.message); cancel.disabled = false; });
+          }, "quiet") : null;
+          return U.el("tr", { attr: { "data-job": j.id }, kids: [
+            U.cell(stampOf(j.created_at)), U.cell(j.title || ""),
+            U.cell(printStatus(j)), U.cell(null, cancel ? { node: cancel } : {})] });
+        }))]));
+      // Something still waiting or printing: look again shortly.
+      if (jobs.some(function (j) { return j.status === "queued" || j.status === "printing"; })) {
+        setTimeout(function () { if (active === "print" && !U.sheetOpen()) { show("print"); } }, 5000);
+      }
+    }).catch(function (err) {
+      U.clear(main);
+      U.notice(main, err.message);
+    });
+  };
 
   SCREENS.log = function (main) {
     D.select("audit_log", {
@@ -5599,6 +5824,7 @@ var TAFAPP = (function () {
                   return [g[0], g[1].map(function (x) { return x.id; })]; }); },
               forgetSops: function () { SOPS = null; },
               pollChats: pollChats },
+    _print: { choices: printerChoices, on: stationOn, status: printStatus },
     _stock: { types: STOCK_TYPES, units: STOCK_UNITS, duplicate: function (r, n, k) {
                 var hit = stockDuplicate(r, n, k); return hit ? hit.id : null; } },
     _route: { suggest: function (s) { return suggestRoute(s).map(function (x) { return x.id; }); },

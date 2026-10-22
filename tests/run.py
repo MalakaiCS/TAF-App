@@ -60,6 +60,7 @@ MODULES = ["tests.test_rules", "tests.test_db_and_updates", "tests.test_orders",
            "tests.test_sales",
            "tests.test_stock_insight", "tests.test_money",
            "tests.test_staff_board", "tests.test_part_links",
+           "tests.test_print_station",
            "tests.test_xero_customers"]
 
 

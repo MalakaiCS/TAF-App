@@ -1728,6 +1728,107 @@ def run_part_link_checks(pg: Postgres) -> None:
     check("an account nobody approved reads none", ok and out == "0", out or err)
 
 
+def run_print_queue_checks(pg: Postgres) -> None:
+    print("\n── printing on the work printers from anywhere (step 53) ──")
+    for _ in range(2):
+        ok, _o, err = pg.psql((ROOT / "migrate_print_queue.sql").read_text(
+            encoding="utf-8"), "f")
+        check("step 53 runs, and runs again cleanly", ok, err)
+    ok, _o, err = as_in(pg, "f", DAVE, "SELECT print_station_checkin("
+                        "'WORKSHOP-PC', ARRAY['Brother'], 'Brother');")
+    check("somebody on the floor cannot make a PC a print station",
+          not ok and "Only a manager" in err, err)
+    ok, sid, err = as_in(pg, "f", SARAH, "SELECT print_station_checkin("
+                         "'WORKSHOP-PC', ARRAY['Brother','Label'], 'Brother');")
+    check("a manager can", ok and len(sid) == 36, sid or err)
+    ok, again, err = as_in(pg, "f", DAVE, "SELECT print_station_checkin("
+                           "'WORKSHOP-PC', ARRAY['Brother'], 'Brother');")
+    check("and once it is one, whoever is signed in there keeps it going",
+          ok and again == sid, again or err)
+    ok, out, err = as_in(pg, "f", STRANGER, "SELECT print_station_checkin("
+                         "'WORKSHOP-PC', ARRAY['Brother'], 'Brother');")
+    check("an account nobody approved cannot", not ok, err)
+
+    ok, job, err = as_in(pg, "f", DAVE, "INSERT INTO print_jobs (title, kind, "
+                         f"file_path) VALUES ('Run sheet', 'file', '{DAVE}/a.pdf') "
+                         "RETURNING id;")
+    check("anybody on staff can send something to print", ok and job, err)
+    ok, _o, err = as_in(pg, "f", DAVE, "INSERT INTO print_jobs (title, kind, "
+                        f"file_path, status) VALUES ('x', 'file', '{DAVE}/b.pdf', "
+                        "'printed');")
+    check("but only as waiting, not as already printed", not ok)
+    ok, _o, err = as_in(pg, "f", DAVE, "INSERT INTO print_jobs (title, kind, "
+                        f"file_path, created_by) VALUES ('x', 'file', 'b.pdf', "
+                        f"'{SARAH}');")
+    check("and only as themselves", not ok)
+    ok, _o, err = as_in(pg, "f", STRANGER, "INSERT INTO print_jobs (title, kind, "
+                        f"file_path) VALUES ('x', 'file', '{STRANGER}/c.pdf');")
+    check("an account nobody approved cannot print at all", not ok)
+    ok, _o, err = as_in(pg, "f", DAVE, "INSERT INTO print_jobs (title, kind) "
+                        "VALUES ('x', 'order');")
+    check("an order's worksheets need the order", not ok)
+    ok, out, err = as_in(pg, "f", DAVE, "UPDATE print_jobs SET status = "
+                         f"'printed' WHERE id = '{job}' RETURNING id;")
+    check("nobody marks a job printed by hand", ok and not out, out or err)
+    ok, out, err = as_in(pg, "f", KAI, f"SELECT title FROM print_jobs "
+                         f"WHERE id = '{job}';")
+    check("a director sees everybody's jobs", ok and out == "Run sheet",
+          out or err)
+
+    ok, got, err = as_in(pg, "f", DAVE, "SELECT id FROM claim_print_job("
+                         f"'{sid}');")
+    check("the station takes the job waiting", ok and got == job, got or err)
+    ok, got, err = as_in(pg, "f", SARAH, "SELECT id FROM claim_print_job("
+                         f"'{sid}');")
+    check("and nobody else gets it after", ok and got == "", got or err)
+    ok, _o, err = as_in(pg, "f", DAVE, f"SELECT cancel_print_job('{job}');")
+    check("a job already printing cannot be cancelled", not ok)
+    ok, _o, err = as_in(pg, "f", DAVE, f"SELECT finish_print_job('{job}', "
+                        f"'{sid}', true, '');")
+    check("the station says it printed", ok, err)
+    got = q(pg, f"SELECT status FROM print_jobs WHERE id = '{job}';")
+    check("and it is printed", got == "printed", got)
+    ok, _o, err = as_in(pg, "f", DAVE, f"SELECT finish_print_job('{job}', "
+                        f"'{sid}', false, 'again');")
+    check("and it cannot be finished twice", not ok)
+
+    ok, j2, err = as_in(pg, "f", DAVE, "INSERT INTO print_jobs (title, kind, "
+                        f"file_path) VALUES ('Docket', 'file', '{DAVE}/d.pdf') "
+                        "RETURNING id;")
+    ok, _o, err = as_in(pg, "f", KAI, f"SELECT cancel_print_job('{j2}');")
+    check("a manager can cancel somebody's waiting job", ok, err)
+    ok, j3, err = as_in(pg, "f", SARAH, "INSERT INTO print_jobs (title, kind, "
+                        f"file_path) VALUES ('Quote', 'file', '{SARAH}/q.pdf') "
+                        "RETURNING id;")
+    ok, _o, err = as_in(pg, "f", DAVE, f"SELECT cancel_print_job('{j3}');")
+    check("somebody on the floor cannot cancel somebody else's", not ok)
+    ok, out, err = as_in(pg, "f", DAVE, f"SELECT count(*) FROM print_jobs "
+                         f"WHERE id = '{j3}';")
+    check("or even see it", ok and out == "0", out or err)
+
+    as_in(pg, "f", DAVE, f"SELECT id FROM claim_print_job('{sid}');")
+    q(pg, "UPDATE print_jobs SET claimed_at = now() - interval '20 minutes' "
+          f"WHERE id = '{j3}';")
+    ok, got, err = as_in(pg, "f", DAVE, f"SELECT id FROM claim_print_job('{sid}');")
+    got = q(pg, f"SELECT status || ':' || error FROM print_jobs WHERE id = '{j3}';")
+    check("a job left printing when the station went off is failed, "
+          "not printed twice", got.startswith("failed:The print station stopped"),
+          got)
+
+    ok, _o, err = as_in(pg, "f", DAVE, "UPDATE print_stations SET enabled = false "
+                        f"WHERE id = '{sid}' RETURNING id;")
+    got = q(pg, f"SELECT enabled FROM print_stations WHERE id = '{sid}';")
+    check("somebody on the floor cannot turn a station off", got == "t", got)
+    ok, _o, err = as_in(pg, "f", SARAH, "UPDATE print_stations SET enabled = false "
+                        f"WHERE id = '{sid}';")
+    ok, _o, err = as_in(pg, "f", DAVE, f"SELECT id FROM claim_print_job('{sid}');")
+    check("a station a manager turned off prints nothing",
+          not ok and "turned off" in err, err)
+    ok, _o, err = as_in(pg, "f", DAVE, "SELECT print_station_checkin("
+                        "'WORKSHOP-PC', ARRAY['Brother'], 'Brother');")
+    check("and stays off", not ok and "turned off" in err, err)
+
+
 def _skip(why: str) -> int:
     """Skipping is fine on a laptop. In CI it is not: a workflow that goes
     green having checked nothing is worse than no workflow, because it is
@@ -1764,6 +1865,7 @@ def main() -> int:
         run_direct_message_checks(pg)
         run_cash_sale_checks(pg)
         run_part_link_checks(pg)
+        run_print_queue_checks(pg)
     finally:
         pg.stop()
     print(f"\n{len(FAILURES)} FAILED" if FAILURES

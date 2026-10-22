@@ -72,6 +72,7 @@ ORDER = [
     "migrate_direct_messages.sql",
     "migrate_cash_sales.sql",
     "migrate_part_links.sql",
+    "migrate_print_queue.sql",
 ]
 
 

@@ -25,6 +25,7 @@ from taf_order_app import po_import as _po_import
 from taf_order_app import part_numbers as _pn
 from taf_order_app import stock_usage as _stock_usage
 from taf_order_app import pricing as _pricing
+from taf_order_app import print_station as _pstation
 from taf_order_app import delivery as _delivery
 from taf_order_app import emails as _emails
 from taf_order_app import notify as _notify
@@ -17958,28 +17959,7 @@ class ModernOrderApp(tk.Frame):
         self._printer_cb.pack(side="left", padx=(0, 8))
 
         def _refresh_printers():
-            # Windows keeps its printers in WMI; a Mac and a Linux box keep
-            # theirs in CUPS, which is also what the printing path uses there
-            # (lpr). Asking PowerShell on a Mac gets an empty list and a
-            # dropdown with nothing in it.
-            try:
-                import subprocess as _sp
-                if platform.system() == "Windows":
-                    out = _sp.run(
-                        ["powershell", "-NoProfile", "-Command",
-                         "Get-Printer | Select-Object -ExpandProperty Name"],
-                        capture_output=True, text=True, timeout=8,
-                        creationflags=0x08000000      # no command prompt
-                    )
-                    names = [p.strip() for p in out.stdout.splitlines() if p.strip()]
-                else:
-                    # "name accepting requests since ..." — the name is first.
-                    out = _sp.run(["lpstat", "-a"],
-                                  capture_output=True, text=True, timeout=8)
-                    names = [ln.split()[0] for ln in out.stdout.splitlines()
-                             if ln.strip()]
-            except Exception:
-                names = []
+            names = self._list_printers()
             values = ["(System Default)"] + names
             self._printer_cb.configure(values=values)
             cur = self._printer_var.get()
@@ -18004,6 +17984,107 @@ class ModernOrderApp(tk.Frame):
 
         # Load printers on first open
         self.master.after(300, _refresh_printers)
+
+        # ── Printing at work, from anywhere ──────────────────────────────
+        # Part of the printer card, so it sits under Printing.
+        tk.Frame(pr_card, bg=CBR, height=1).pack(fill="x", pady=(14, 10))
+        rp_card = tk.Frame(pr_card, bg=CCA)
+        rp_card.pack(fill="x")
+        tk.Label(rp_card, text="Printing at work, from anywhere",
+                 bg=CCA, fg=CA, font=F_SEC, anchor="w").pack(anchor="w")
+        tk.Label(rp_card,
+                 text="Away from work, send everything you print to a printer "
+                      "at work instead. One PC at work, left on with the app "
+                      "open, does the printing for everybody.",
+                 bg=CCA, fg=CMU, font=F_SM, justify="left",
+                 wraplength=620).pack(anchor="w", pady=(2, 8))
+
+        route_var = tk.StringVar(value=self._settings.get("print_route") or "here")
+        rp_row = tk.Frame(rp_card, bg=CCA)
+        rp_row.pack(anchor="w", fill="x")
+        for val, txt in (("here", "Print on this PC's printer"),
+                         ("work", "Send my printing to the work printers")):
+            tk.Radiobutton(rp_row, text=txt, variable=route_var, value=val,
+                           bg=CCA, fg=CTX, selectcolor=CCA, activebackground=CCA,
+                           font=F_SM).pack(side="left", padx=(0, 14))
+
+        wp_row = tk.Frame(rp_card, bg=CCA)
+        wp_row.pack(anchor="w", fill="x", pady=(6, 0))
+        tk.Label(wp_row, text="Work printer:", bg=CCA, fg=CTX,
+                 font=F_SM).pack(side="left", padx=(0, 6))
+        work_cb = ttk.Combobox(wp_row, state="readonly", width=52)
+        work_cb.pack(side="left", padx=(0, 8))
+        choices = []
+
+        def _load_work_printers():
+            def _work():
+                found = _pstation.printer_choices(_db.print_stations())
+
+                def _show():
+                    choices[:] = found
+                    labels = [c[0] for c in found] or \
+                        ["(no print station yet - set one up on a PC at work)"]
+                    work_cb.configure(values=labels)
+                    want = (self._settings.get("print_work_station", ""),
+                            self._settings.get("print_work_printer", ""))
+                    pick = next((c[0] for c in found if (c[1], c[2]) == want),
+                                labels[0])
+                    work_cb.set(pick)
+                self.master.after(0, _show)
+            threading.Thread(target=_work, daemon=True).start()
+
+        flat_btn(wp_row, "↻", _load_work_printers, bg=CNE, pady=4, padx=8,
+                 font=F_SM).pack(side="left", padx=(0, 8))
+
+        def _save_route():
+            self._settings["print_route"] = route_var.get()
+            hit = next((c for c in choices if c[0] == work_cb.get()), None)
+            self._settings["print_work_station"] = hit[1] if hit else ""
+            self._settings["print_work_printer"] = hit[2] if hit else ""
+            _save_settings(self._settings)
+            self.status_var.set(
+                "Printing goes to the work printer: " + work_cb.get()
+                if self._prints_at_work() else
+                "Printing on this PC's printer.")
+
+        flat_btn(wp_row, "Save", _save_route, bg=CGR, pady=4, padx=10,
+                 font=F_SM).pack(side="left")
+
+        st_row = tk.Frame(rp_card, bg=CCA)
+        st_row.pack(anchor="w", fill="x", pady=(10, 0))
+        station_var = tk.BooleanVar(value=bool(self._settings.get("print_station")))
+        tk.Checkbutton(st_row, text="This PC prints for everybody (the print "
+                                    "station) - as",
+                       variable=station_var, bg=CCA, fg=CTX, selectcolor=CCA,
+                       activebackground=CCA, font=F_SM).pack(side="left")
+        st_name = tk.StringVar(value=self._settings.get("print_station_name")
+                               or platform.node() or "Workshop PC")
+        tk.Entry(st_row, textvariable=st_name, width=22,
+                 font=F_SM).pack(side="left", padx=(6, 8))
+
+        def _save_station():
+            on = bool(station_var.get())
+            name = st_name.get().strip() or platform.node() or "Workshop PC"
+            self._settings["print_station"] = on
+            self._settings["print_station_name"] = name
+            _save_settings(self._settings)
+            self._stop_print_station()
+            if on:
+                self._start_print_station()
+            else:
+                self.status_var.set("This PC no longer prints for everybody.")
+
+        flat_btn(st_row, "Save", _save_station, bg=CGR, pady=4, padx=10,
+                 font=F_SM).pack(side="left")
+        tk.Label(rp_card,
+                 text="The first time, a manager has to tick it. Leave that PC "
+                      "on with the app open; a job sent while it is off prints "
+                      "when it is back.",
+                 bg=CCA, fg=CMU, font=F_SM, justify="left",
+                 wraplength=620).pack(anchor="w", pady=(4, 0))
+        flat_btn(rp_card, "🖨 Print queue…", self._print_queue_window,
+                 bg=CNE, pady=4, padx=10, font=F_SM).pack(anchor="w", pady=(8, 0))
+        self.master.after(400, _load_work_printers)
 
         # ── Appearance / Dark Mode ────────────────────────────────────────
         ap_card = tk.Frame(frm, bg=CCA, relief="flat", bd=0, highlightthickness=1, highlightbackground=CBR, padx=16, pady=12)
@@ -18489,6 +18570,7 @@ class ModernOrderApp(tk.Frame):
                     self._refresh_feature_switches()
                 self._refresh_media_codes()
                 self._start_xero_sync()
+                self._start_print_station()
                 cft = data.get("custom_filter_types")
                 if isinstance(cft, list):
                     self._custom_filter_types = [str(x) for x in cft]
@@ -30575,13 +30657,24 @@ class ModernOrderApp(tk.Frame):
             return False
 
     def _print_file(self, path: str) -> str:
-        """Send a file to the configured printer (or OS default if none set).
+        """Send a file to the printer: this PC's, or - away from work, with
+        "Send my printing to the work printers" chosen in Settings - one at
+        work, through the print station.
 
         Returns "" on success, or an error message on failure. This method
         blocks while the print job spools, so it MUST be called from a
         background thread — it touches no UI, so that is safe.
         """
-        printer = self._settings.get("default_printer", "").strip()
+        if self._prints_at_work():
+            return self._send_to_work_printer(path)
+        return self._print_here(path)
+
+    def _print_here(self, path: str, printer=None) -> str:
+        """Print on a printer this PC has: the one named, or the one chosen
+        in Settings, or the system default. "" or why not."""
+        if printer is None:
+            printer = self._settings.get("default_printer", "")
+        printer = (printer or "").strip()
         try:
             if platform.system() != "Windows":
                 import subprocess as _sp
@@ -30637,6 +30730,238 @@ class ModernOrderApp(tk.Frame):
         except Exception as exc:
             return str(exc)
 
+    # ── Printing on the work printers from anywhere (step 53) ─────────────
+
+    def _prints_at_work(self) -> bool:
+        """This PC sends its printing to work. Never the station itself."""
+        return (self._settings.get("print_route") == "work"
+                and not self._settings.get("print_station"))
+
+    @staticmethod
+    def _list_printers() -> list:
+        """The printers this PC has. Windows keeps them in WMI; a Mac and a
+        Linux box keep theirs in CUPS, which is also what the printing path
+        uses there (lpr)."""
+        try:
+            import subprocess as _sp
+            if platform.system() == "Windows":
+                out = _sp.run(
+                    ["powershell", "-NoProfile", "-Command",
+                     "Get-Printer | Select-Object -ExpandProperty Name"],
+                    capture_output=True, text=True, timeout=8,
+                    creationflags=0x08000000      # no command prompt
+                )
+                return [p.strip() for p in out.stdout.splitlines() if p.strip()]
+            # "name accepting requests since ..." — the name is first.
+            out = _sp.run(["lpstat", "-a"],
+                          capture_output=True, text=True, timeout=8)
+            return [ln.split()[0] for ln in out.stdout.splitlines()
+                    if ln.strip()]
+        except Exception:
+            return []
+
+    def _send_to_work_printer(self, path: str, title: str = "",
+                              watch: bool = True) -> str:
+        """Queue a file for the printer at work chosen in Settings. "" once
+        it is queued, or why it could not be. Not on the window's thread."""
+        title = title or Path(str(path)).stem.replace("_", " ")
+        try:
+            job = _db.send_print_file(
+                str(path), title,
+                printer=self._settings.get("print_work_printer", ""),
+                station_id=self._settings.get("print_work_station", ""))
+        except Exception as exc:
+            text = str(exc)
+            if "print_jobs" in text or "print-jobs" in text or "Bucket" in text:
+                return ("Printing at work is not set up yet - run "
+                        "migrate_print_queue.sql (step 53) in Supabase.")
+            return f"It could not be sent to the work printer: {text}"
+        if watch:
+            self._watch_print_job(job, title)
+        return ""
+
+    def _watch_print_job(self, job: dict, title: str) -> None:
+        """Say when it has printed at work - or why not."""
+        def _say(text):
+            self.master.after(0, lambda: self.status_var.set(text))
+
+        def _work():
+            stations = _db.print_stations()
+            if not any(_pstation.is_online(st) for st in stations):
+                _say(f"Sent to the work printer: {title}. No print station "
+                     "is on right now - it prints when one is.")
+            else:
+                _say(f"Sent to the work printer: {title}…")
+            done = _pstation.wait_for(str(job.get("id") or ""), _db.print_job)
+            if not done:
+                return
+            if done.get("status") == "printed":
+                _say(f"Printed at work: {title}")
+            elif done.get("status") == "failed":
+                why = done.get("error") or "the station did not say why"
+                self.master.after(0, lambda: messagebox.showerror(
+                    "Printing at work", f"{title} did not print:\n\n{why}"))
+                _say(f"Did not print at work: {title}")
+            elif done.get("status") == "queued":
+                _say(f"Still waiting for the work printer: {title}. "
+                     "Is the print station on?")
+        threading.Thread(target=_work, daemon=True).start()
+
+    def _start_print_station(self) -> None:
+        """Run the print station, when Settings says this PC is one."""
+        if not self._settings.get("print_station"):
+            return
+        st = getattr(self, "_print_station", None)
+        if st is not None and st.running:
+            return
+        name = (self._settings.get("print_station_name")
+                or platform.node() or "Workshop PC").strip()
+
+        def _event(what, job, error):
+            title = job.get("title") or "a print job"
+            who = job.get("sent_by") or "somebody"
+            text = {
+                "started": f"Print station on: printing for everybody as {name}.",
+                "printing": f"Printing for {who}: {title}…",
+                "printed": f"Printed for {who}: {title}",
+                "failed": f"Could not print {title} for {who}: {error}",
+                "trouble": f"Print station cannot reach the database: {error}",
+                "stopped": f"Print station off: {error}",
+            }.get(what, "")
+            if text:
+                self.master.after(0, lambda: self.status_var.set(text))
+
+        self._print_station = _pstation.PrintStation(
+            name, _db, self._list_printers,
+            lambda: self._settings.get("default_printer", ""),
+            lambda path, printer: self._print_here(path, printer or None),
+            self._station_order_pdfs, _event)
+        self._print_station.start()
+
+    def _stop_print_station(self) -> None:
+        st = getattr(self, "_print_station", None)
+        if st is not None:
+            st.stop()
+        self._print_station = None
+
+    def _station_order_pdfs(self, order_id: str):
+        """An order's worksheets, made at the station for somebody who sent
+        them from their phone. (paths, "") or ([], why not)."""
+        r = _db.get_order(order_id)
+        if not r:
+            return [], "That order could not be found."
+        header = dict(r.get("header") or {})
+        items = r.get("items")
+        if items is None:
+            items = _db.get_order_items(order_id)
+        items = [dict(i) for i in (items or []) if isinstance(i, dict)]
+        if not items:
+            return [], "That order has no lines to print."
+        problems = header_problems(header)
+        if problems:
+            return [], ("The order needs fixing before it prints: "
+                        + " ".join(m for _k, m in problems))
+        name_hdr = {k: header.get(k, "") for k in
+                    ("Customer Name", "Order Number", "Date Ordered",
+                     "Date Due")}
+        paths, errors = self._order_pdfs(header, items, name_hdr)
+        if errors:
+            return [], " ".join(errors)
+        if paths:
+            self._flag_printed(db_id=order_id)
+        return paths, ""
+
+    def _print_queue_window(self):
+        """What has been sent to the work printers: yours, or everybody's
+        for a manager. Cancel one still waiting; send a file from here."""
+        win = tk.Toplevel(self.master)
+        win.title("Printing at work")
+        win.configure(bg=CBG)
+        win.geometry("760x420")
+        top = tk.Frame(win, bg=CBG, padx=12, pady=10)
+        top.pack(fill="x")
+        stations_var = tk.StringVar(value="Looking for print stations…")
+        tk.Label(top, textvariable=stations_var, bg=CBG, fg=CMU, font=F_SM,
+                 justify="left", anchor="w").pack(side="left", fill="x",
+                                                  expand=True)
+        cols = ("when", "title", "who", "printer", "status")
+        tree = ttk.Treeview(win, columns=cols, show="headings", height=12)
+        for c, w, txt in (("when", 120, "Sent"), ("title", 220, "What"),
+                          ("who", 110, "By"), ("printer", 120, "Printer"),
+                          ("status", 170, "Status")):
+            tree.heading(c, text=txt)
+            tree.column(c, width=w, anchor="w")
+        tree.pack(fill="both", expand=True, padx=12)
+        jobs = {}
+
+        def _load():
+            def _work():
+                st = _db.print_stations()
+                js = _db.print_jobs()
+
+                def _show():
+                    if not win.winfo_exists():
+                        return
+                    on = [s["name"] for s in st if _pstation.is_online(s)]
+                    stations_var.set(
+                        ("Print stations on: " + ", ".join(on)) if on else
+                        ("No print station is on - jobs wait until one is."
+                         if st else "No print station yet. On a PC at work, "
+                         "tick \"This PC prints for everybody\" in Settings."))
+                    tree.delete(*tree.get_children())
+                    jobs.clear()
+                    for j in js:
+                        jobs[j["id"]] = j
+                        when = _pstation._when(j.get("created_at"))
+                        tree.insert("", "end", iid=j["id"], values=(
+                            when.astimezone().strftime("%d/%m %H:%M") if when else "",
+                            j.get("title", ""), j.get("sent_by", ""),
+                            j.get("printer") or "usual",
+                            _pstation.status_text(j)))
+                win.after(0, _show)
+            threading.Thread(target=_work, daemon=True).start()
+
+        def _cancel():
+            sel = tree.selection()
+            if not sel:
+                return
+            job = jobs.get(sel[0]) or {}
+            if job.get("status") != "queued":
+                messagebox.showinfo("Printing at work",
+                                    "Only a job still waiting can be "
+                                    "cancelled.", parent=win)
+                return
+            try:
+                _db.cancel_print_job(sel[0])
+            except Exception as exc:
+                messagebox.showerror("Printing at work", str(exc), parent=win)
+            _load()
+
+        def _send_file():
+            path = filedialog.askopenfilename(
+                parent=win, title="Print a file at work",
+                filetypes=[("PDF or photo", "*.pdf *.jpg *.jpeg *.png")])
+            if not path:
+                return
+
+            def _work():
+                err = self._send_to_work_printer(path)
+                win.after(0, lambda: (messagebox.showerror(
+                    "Printing at work", err, parent=win) if err else None,
+                    _load()))
+            threading.Thread(target=_work, daemon=True).start()
+
+        bar = tk.Frame(win, bg=CBG, padx=12, pady=10)
+        bar.pack(fill="x")
+        flat_btn(bar, "📄 Print a file at work…", _send_file, bg=CGR,
+                 pady=4, padx=10, font=F_SM).pack(side="left")
+        flat_btn(bar, "Cancel job", _cancel, bg=CNE, pady=4, padx=10,
+                 font=F_SM).pack(side="left", padx=(8, 0))
+        flat_btn(bar, "↻ Refresh", _load, bg=CNE, pady=4, padx=10,
+                 font=F_SM).pack(side="left", padx=(8, 0))
+        _load()
+        return win
+
     def _print_prev_order(self):
         """Regenerate the selected order's PDFs and send to the default printer."""
         row = self._get_selected_order()
@@ -30666,80 +30991,19 @@ class ModernOrderApp(tk.Frame):
         if header is None:
             return
 
-        for it in items:
-            if "item_kind" not in it:
-                it["item_kind"] = "bag" if "product_type" in it else "filter"
-
-        # A bag with a header gets a header page on the filter worksheet,
-        # after the filters and before the bag docket.
-        filter_items, bag_items, total = _bag_headers.worksheet_split(items)
-        n_filter     = len(filter_items)
-        bag_start    = n_filter + 1
-        has_filter   = bool(filter_items)
-        has_bag      = bool(bag_items)
-
-        if has_bag and not any(not _bag_headers.is_header_line(i)
-                               for i in filter_items):
-            order_type = "bags"
-        elif has_filter and has_bag:
-            order_type = "mixed"
-        elif has_bag:
-            order_type = "bags"
-        else:
-            order_type = "filter"
-
         _name_hdr = {
             "Customer Name": row.get("customer", ""),
             "Order Number":  row.get("order_no", ""),
             "Date Ordered":  row.get("date_ordered", ""),
             "Date Due":      row.get("date_due", ""),
         }
-        base = self._apply_pdf_name_template(_name_hdr, order_type)
-
-        prog         = _ProgressDialog(self.master, order_type)
-        service      = self.service
-        custom_media = list(self._custom_media)
-        custom_filter_types = list(self._custom_filter_types)
+        order_type = self._order_pdf_kind(items)
+        prog = _ProgressDialog(self.master, order_type)
         self.status_var.set(f"Preparing to print {row.get('customer','')}…")
 
         def _worker():
-            pdf_paths = []
-            errors    = []
-            if has_filter:
-                prog.advance("Building filter worksheets…")
-                try:
-                    r = service.create_order(
-                        header, filter_items, persist_json=False,
-                        extra_media_types=custom_media, auto_open=False,
-                        extra_filter_types=custom_filter_types,
-                        page_start=1, grand_total=total)
-                    prog.advance("Exporting to PDF…")
-                    p = r.get("output_path", "")
-                    if p:
-                        pdf_paths.append(p)
-                except Exception as exc:
-                    errors.append(f"Filter: {exc}")
-            if has_bag:
-                prog.advance("Building bag docket…")
-                try:
-                    docx_p = str(ORDERS_DIR / f"{base}_bags.docx")
-                    prog.advance("Exporting to PDF…")
-                    p = generate_bag_docket(
-                        header, bag_items, docx_p, auto_open=False,
-                        item_start=bag_start, grand_total=total)
-                    if p:
-                        pdf_paths.append(p)
-                except Exception as exc:
-                    errors.append(f"Bags: {exc}")
-
-            real_pdfs = [p for p in pdf_paths
-                         if str(p).lower().endswith(".pdf") and os.path.exists(p)]
-            if len(real_pdfs) > 1:
-                prog.advance("Merging PDFs…")
-                merged = str(ORDERS_DIR / f"{base}_order.pdf")
-                if _ProgressDialog._merge(real_pdfs, merged):
-                    real_pdfs = [merged]
-
+            real_pdfs, errors = self._order_pdfs(header, items, _name_hdr,
+                                                 prog.advance)
             prog.advance("Done!")
             prog.after(0, lambda: _finish(real_pdfs, errors))
 
@@ -30790,6 +31054,69 @@ class ModernOrderApp(tk.Frame):
             threading.Thread(target=_print_worker, daemon=True).start()
 
         threading.Thread(target=_worker, daemon=True).start()
+
+    @staticmethod
+    def _order_pdf_kind(items) -> str:
+        """filter, bags or mixed - which progress steps and file name an
+        order's printout gets. Sets each line's item_kind on the way."""
+        for it in items:
+            if "item_kind" not in it:
+                it["item_kind"] = "bag" if "product_type" in it else "filter"
+        filter_items, bag_items, _t = _bag_headers.worksheet_split(items)
+        if bag_items and not any(not _bag_headers.is_header_line(i)
+                                 for i in filter_items):
+            return "bags"
+        if filter_items and bag_items:
+            return "mixed"
+        return "bags" if bag_items else "filter"
+
+    def _order_pdfs(self, header, items, name_hdr, advance=None):
+        """An order's worksheets and bag docket, as Print sends them: one
+        PDF where there are both. Not on the window's thread, and asks
+        nobody anything - the print station uses it too. Returns
+        (pdf paths, errors)."""
+        advance = advance or (lambda _m="": None)
+        order_type = self._order_pdf_kind(items)
+        # A bag with a header gets a header page on the filter worksheet,
+        # after the filters and before the bag docket.
+        filter_items, bag_items, total = _bag_headers.worksheet_split(items)
+        base = self._apply_pdf_name_template(name_hdr, order_type)
+        pdf_paths, errors = [], []
+        if filter_items:
+            advance("Building filter worksheets…")
+            try:
+                r = self.service.create_order(
+                    header, filter_items, persist_json=False,
+                    extra_media_types=list(self._custom_media),
+                    auto_open=False,
+                    extra_filter_types=list(self._custom_filter_types),
+                    page_start=1, grand_total=total)
+                advance("Exporting to PDF…")
+                p = r.get("output_path", "")
+                if p:
+                    pdf_paths.append(p)
+            except Exception as exc:
+                errors.append(f"Filter: {exc}")
+        if bag_items:
+            advance("Building bag docket…")
+            try:
+                docx_p = str(ORDERS_DIR / f"{base}_bags.docx")
+                advance("Exporting to PDF…")
+                p = generate_bag_docket(
+                    header, bag_items, docx_p, auto_open=False,
+                    item_start=len(filter_items) + 1, grand_total=total)
+                if p:
+                    pdf_paths.append(p)
+            except Exception as exc:
+                errors.append(f"Bags: {exc}")
+        real_pdfs = [p for p in pdf_paths
+                     if str(p).lower().endswith(".pdf") and os.path.exists(p)]
+        if len(real_pdfs) > 1:
+            advance("Merging PDFs…")
+            merged = str(ORDERS_DIR / f"{base}_order.pdf")
+            if _ProgressDialog._merge(real_pdfs, merged):
+                real_pdfs = [merged]
+        return real_pdfs, errors
 
     def _flag_printed(self, db_id=None, json_path=None):
         """Mark an order as printed in the shared DB and/or its local JSON."""

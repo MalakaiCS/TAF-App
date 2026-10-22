@@ -604,6 +604,7 @@ just run it — nothing is lost and nothing is duplicated.
 | 50 | `migrate_direct_messages.sql` | Private messages: a conversation between any two people on staff, only they can see it - one per pair (needs step 49) | recommended |
 | 51 | `migrate_cash_sales.sql` | Cash sales: the account walk-in buyers go under, whose invoices are emailed to an address asked for each time, not the one on file (needs step 39) | recommended |
 | 52 | `migrate_part_links.sql` | The part number each product sells as: a code the app makes for a line (a 3-Peak bag's, say) linked to the part number in the price list and Xero | recommended |
+| 53 | `migrate_print_queue.sql` | Printing on the work printers from anywhere: the print stations (PCs at work that print for everybody), the jobs waiting for them, and a private bucket for the files sent | recommended |
 
 **Step 16 is the one that matters most.** Every policy in the older scripts is
 `TO authenticated USING (true)` — meaning *anyone Supabase counts as signed
@@ -1064,6 +1065,35 @@ Optional function secrets: `XERO_PURCHASE_ACCOUNT` (default `310`, Cost of Goods
 itself instead of Xero, set `PO_EMAIL_VIA=app` with `RESEND_API_KEY` and
 `MAIL_FROM` (optionally `MAIL_REPLY_TO` and `COMPANY_NAME`).
 
+### Printing on the work printers from anywhere
+
+The printers stay on the workshop's network; nothing on the internet can
+reach them. Instead, one PC at work is the **print station**. It is left on
+with the app open, and every few seconds it picks up whatever anybody has
+sent and prints it. Only people on staff, signed in to the app, can send
+anything.
+
+1. Run **step 53** (`migrate_print_queue.sql`).
+2. On the PC at work, a **manager** opens Settings → Printing, ticks **This
+   PC prints for everybody**, names it if they like, and presses Save. (The
+   first time needs a manager. After that, whoever is signed in on that PC
+   keeps it going.) Pick its usual printer under Default Printer as before.
+3. On a PC away from work: Settings → Printing → **Send my printing to the
+   work printers**, pick the printer, and Save. From then on every Print
+   button on that PC (worksheets, dockets, run sheets, invoices) goes to that
+   printer at work. **Print queue…** shows what has been sent and whether it
+   printed, lets you cancel something still waiting, and sends any PDF or
+   photo with **Print a file at work…**.
+4. On a phone: **Print at work** (under More) sends a PDF or photo to the
+   printer picked there. An order's **Print at work** button has the station
+   build that order's worksheets itself and print them.
+
+The sender is told when it has printed, or why not (out of paper, a header
+that needs fixing first, and so on). A job sent while the station is off
+waits and prints when it is back on; one still waiting after 7 days is
+dropped. A manager can turn a station off by setting `enabled` to false on
+its row in `print_stations`.
+
 ### The part number each product sells as
 
 The app makes a code for every line from its type, media and size - a full
@@ -1465,6 +1495,7 @@ taf_order_app/
   updater.py               In-app auto-update (APP_VERSION lives here)
   po_import.py             Purchase-order import + phone inbox
   part_numbers.py          Part numbers, square metres, filter-type rules
+  print_station.py         Printing on the work printers from anywhere: the station loop
   pricing.py               Price lists, quote lines, Xero export
   invoice_wording.py       What each kind of filter says on a Xero invoice
   xero.py                  Talking to the xero function; the background sync

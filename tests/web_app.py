@@ -129,6 +129,11 @@ RAISED: list = []      # orders the web app raised
 FILES: list = []       # photos and signatures kept against an order
 UPLOADED: list = []    # what actually reached Storage
 MADE_STOCK: list = []  # stock items made from the phone
+PRINT_JOBS: list = []  # what the phone sent to the work printers
+PRINT_STATIONS = [
+    {"id": "st1", "name": "WORKSHOP", "enabled": True,
+     "printers": ["Brother", "Zebra"], "default_printer": "Brother",
+     "last_seen": "2999-01-01T00:00:00Z"}]
 
 QUOTES = [
     {"id": "q1", "quote_number": "Q-1041", "customer_name": "Bells Creek",
@@ -292,6 +297,23 @@ class Stub:
             cid = url.split("channel_id=eq.", 1)[1].split("&")[0]
             rows = [m for m in CHAT_MSGS if m["channel_id"] == cid]
             return send(sorted(rows, key=lambda m: m["created_at"], reverse=True))
+        if "/rest/v1/print_stations" in url:
+            return send(PRINT_STATIONS)
+        if "/rest/v1/print_jobs" in url and req.method == "POST":
+            row = dict(body, id="pj" + str(len(PRINT_JOBS) + 1), status="queued",
+                       error="", created_at="2026-10-22T01:00:00Z")
+            PRINT_JOBS.insert(0, row)
+            return send([row], 201)
+        if "/rest/v1/print_jobs" in url and "id=eq." in url:
+            jid = url.split("id=eq.", 1)[1].split("&")[0]
+            return send([j for j in PRINT_JOBS if j["id"] == jid])
+        if "/rest/v1/print_jobs" in url:
+            return send(PRINT_JOBS)
+        if "/rest/v1/rpc/cancel_print_job" in url:
+            for j in PRINT_JOBS:
+                if j["id"] == body.get("p_id"):
+                    j["status"] = "cancelled"
+            return send(None)
         if "/rest/v1/profiles" in url:
             return send([PROFILE])
         if "/rest/v1/notify_settings" in url:
@@ -1585,6 +1607,64 @@ def run() -> int:
         check("a manager can change an item's photo from its card",
               len(UPLOADED) == uploads + 2 and UPLOADED[-1] == f"stock-images/s-new-{n_before}.jpg")
         STOCK[:] = [s for s in STOCK if not str(s["id"]).startswith("s-new-")]
+
+        print("\n── printing at work, from the phone ──")
+        page.click('#tabs button[data-tab="print"]')
+        page.wait_for_selector("#print-send")
+        text = page.locator("#screen").inner_text()
+        check("the phone says which print station is on",
+              "Print station on: WORKSHOP" in text, text[:200])
+        opts = page.locator("#print-printer option").all_inner_texts()
+        check("and offers its printers to pick from",
+              opts == ["WORKSHOP: its usual printer (Brother)", "WORKSHOP: Brother",
+                       "WORKSHOP: Zebra"], str(opts))
+        page.select_option("#print-printer", label="WORKSHOP: Zebra")
+        page.fill("#print-copies", "2")
+        uploads = len(UPLOADED)
+        page.set_input_files("#print-file", files=[{
+            "name": "Run sheet.pdf", "mimeType": "application/pdf",
+            "buffer": b"%PDF-1.4 run sheet"}])
+        page.wait_for_function("document.querySelector('#toast') && "
+                               "document.querySelector('#toast').textContent"
+                               ".indexOf('Sent to the work printer') >= 0")
+        job = PRINT_JOBS[0] if PRINT_JOBS else {}
+        check("a PDF from the phone goes up to the private print bucket, in "
+              "the sender's own folder",
+              len(UPLOADED) == uploads + 1 and UPLOADED[-1].startswith("print-jobs/u1/")
+              and UPLOADED[-1].endswith(".pdf"), str(UPLOADED[-1:]))
+        check("and is queued for the printer picked, as many copies as asked",
+              job.get("kind") == "file" and job.get("printer") == "Zebra"
+              and job.get("station_id") == "st1" and job.get("copies") == 2
+              and job.get("title") == "Run sheet" and job.get("created_by") == "u1"
+              and job.get("file_path") == UPLOADED[-1].split("print-jobs/", 1)[1],
+              str(job))
+        job["status"] = "printed"
+        page.wait_for_function("document.querySelector('#toast') && "
+                               "document.querySelector('#toast').textContent"
+                               ".indexOf('Printed at work') >= 0", timeout=10000)
+        check("and the phone says when it has printed", True)
+        page.click('#tabs button[data-tab="orders"]')
+        page.wait_for_selector("#screen table")
+        page.locator("#screen tbody tr", has_text="Bells Creek").first.click()
+        page.wait_for_selector("#print-order")
+        page.click("#print-order")
+        page.wait_for_function("document.querySelector('#toast') && "
+                               "document.querySelector('#toast').textContent"
+                               ".indexOf('Bells Creek') >= 0")
+        job = PRINT_JOBS[0]
+        check("an order's worksheets are sent from its sheet, for the station "
+              "to build", job.get("kind") == "order" and job.get("order_id") == "o1"
+              and job.get("printer") == "Zebra" and "PO-8842" in job.get("title", ""),
+              str(job))
+        page.keyboard.press("Escape")
+        page.wait_for_selector("#sheet.hidden", state="attached")
+        page.click('#tabs button[data-tab="print"]')
+        page.wait_for_selector(f'#screen tr[data-job="{job["id"]}"]')
+        page.locator(f'#screen tr[data-job="{job["id"]}"] button').click()
+        page.wait_for_timeout(300)
+        check("a job still waiting can be cancelled from the phone",
+              job["status"] == "cancelled", job["status"])
+        PRINT_JOBS.clear()
 
         print("\n── delivery ──")
         page.click('#tabs button[data-tab="delivery"]')

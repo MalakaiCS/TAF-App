@@ -3558,3 +3558,120 @@ def outstanding_lines(items: list, header: dict) -> list:
             "left": max(0, want - gone),
         })
     return out
+
+
+# ── Printing on the work printers from anywhere (step 53) ───────────────────
+# A job waits in print_jobs; the print station - a PC at work with the app
+# open - takes it, prints it and says how it went. The file goes up to a
+# private bucket, in a folder named after whoever sent it.
+
+PRINT_BUCKET = "print-jobs"
+PRINT_TYPES = {".pdf": "application/pdf", ".jpg": "image/jpeg",
+               ".jpeg": "image/jpeg", ".png": "image/png"}
+
+
+def print_stations() -> list:
+    """Every print station, with its printers - empty before step 53."""
+    try:
+        return list(get_client().table("print_stations")
+                    .select("id,name,printers,default_printer,enabled,last_seen")
+                    .order("name").execute().data or [])
+    except Exception:
+        return []
+
+
+def print_station_checkin(name: str, printers: list, default: str = "") -> str:
+    resp = get_client().rpc("print_station_checkin", {
+        "p_name": str(name).strip(), "p_printers": [str(p) for p in printers],
+        "p_default": str(default or "")}).execute()
+    return str(resp.data or "")
+
+
+def send_print_file(path: str, title: str = "", printer: str = "",
+                    station_id: str = "", copies: int = 1) -> dict:
+    """Upload a PDF or photo and queue it for a work printer."""
+    import uuid as _uuid
+    from pathlib import Path as _P
+    p = _P(path)
+    ext = p.suffix.lower()
+    if ext not in PRINT_TYPES:
+        raise ValueError("Only a PDF or a photo (JPG, PNG) can be printed at work.")
+    name = f"{current_user_id()}/{_uuid.uuid4().hex}{ext}"
+    get_client().storage.from_(PRINT_BUCKET).upload(
+        name, p.read_bytes(), file_options={"content-type": PRINT_TYPES[ext]})
+    try:
+        return _queue_print({"kind": "file", "file_path": name,
+                             "title": title or p.name}, printer, station_id,
+                            copies)
+    except Exception:
+        remove_print_file(name)
+        raise
+
+
+def send_print_order(order_id: str, title: str = "", printer: str = "",
+                     station_id: str = "", copies: int = 1) -> dict:
+    """Queue an order's worksheets: the station builds and prints them."""
+    return _queue_print({"kind": "order", "order_id": str(order_id),
+                         "title": title or "Order worksheets"},
+                        printer, station_id, copies)
+
+
+def _queue_print(row: dict, printer: str, station_id: str, copies: int) -> dict:
+    row = dict(row, printer=str(printer or ""),
+               copies=max(1, min(20, int(copies or 1))),
+               created_by=current_user_id(),
+               sent_by=current_full_name() or current_username() or "")
+    if station_id:
+        row["station_id"] = str(station_id)
+    resp = get_client().table("print_jobs").insert(row).execute()
+    return (resp.data or [{}])[0]
+
+
+def claim_print_job(station_id: str) -> "dict | None":
+    resp = get_client().rpc("claim_print_job",
+                            {"p_station": str(station_id)}).execute()
+    data = resp.data or []
+    if isinstance(data, dict):
+        return data or None
+    return data[0] if data else None
+
+
+def finish_print_job(job_id: str, station_id: str, ok: bool,
+                     error: str = "") -> None:
+    get_client().rpc("finish_print_job", {
+        "p_id": str(job_id), "p_station": str(station_id),
+        "p_ok": bool(ok), "p_error": str(error or "")[:500]}).execute()
+
+
+def cancel_print_job(job_id: str) -> None:
+    get_client().rpc("cancel_print_job", {"p_id": str(job_id)}).execute()
+
+
+def print_job(job_id: str) -> "dict | None":
+    try:
+        rows = (get_client().table("print_jobs").select("*")
+                .eq("id", str(job_id)).limit(1).execute().data or [])
+        return rows[0] if rows else None
+    except Exception:
+        return None
+
+
+def print_jobs(limit: int = 50) -> list:
+    """The latest jobs: your own, or everybody's for a manager."""
+    try:
+        return list(get_client().table("print_jobs").select("*")
+                    .order("created_at", desc=True).limit(limit)
+                    .execute().data or [])
+    except Exception:
+        return []
+
+
+def download_print_file(name: str) -> bytes:
+    return bytes(get_client().storage.from_(PRINT_BUCKET).download(name))
+
+
+def remove_print_file(name: str) -> None:
+    try:
+        get_client().storage.from_(PRINT_BUCKET).remove([name])
+    except Exception:
+        pass

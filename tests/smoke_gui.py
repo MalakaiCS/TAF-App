@@ -2743,6 +2743,66 @@ def _steps(app, gui, root):
     add("orders: several invoiced at once print as one PDF",
         _invoice_several_one_pdf)
 
+    def _print_at_work():
+        """Away from work, Print goes to the queue for the work printer; the
+        queue window opens; the station builds a phone's order itself."""
+        import tempfile
+        db = gui._db
+        sent, watched = [], []
+        saved = (db.send_print_file, db.print_stations, db.print_jobs,
+                 db.get_order, db.get_order_items, dict(app._settings),
+                 app._watch_print_job, app._print_here)
+        db.send_print_file = lambda path, title="", printer="", station_id="", \
+            copies=1: sent.append((title, printer, station_id)) or {"id": "j1"}
+        db.print_stations = lambda: [{"id": "s1", "name": "WORKSHOP",
+                                      "enabled": True, "printers": ["Brother"],
+                                      "default_printer": "Brother",
+                                      "last_seen": "2000-01-01T00:00:00+00:00"}]
+        db.print_jobs = lambda limit=50: [{"id": "j1", "title": "Run sheet",
+                                           "sent_by": "Kai", "printer": "",
+                                           "status": "failed", "error": "Jammed",
+                                           "created_at": "2026-10-22T01:00:00+00:00"}]
+        app._watch_print_job = lambda job, title: watched.append(title)
+        here = []
+        app._print_here = lambda path, printer=None: here.append(path) or ""
+        try:
+            pdf = Path(tempfile.mkdtemp()) / "Run_sheet.pdf"
+            pdf.write_bytes(b"%PDF-1.4")
+            app._settings.update(print_route="here", print_station=False)
+            assert app._print_file(str(pdf)) == "" and here and not sent
+            app._settings.update(print_route="work", print_work_station="s1",
+                                 print_work_printer="Brother")
+            assert app._print_file(str(pdf)) == "", "queued"
+            assert sent == [("Run sheet", "Brother", "s1")], sent
+            assert watched == ["Run sheet"], watched
+            # The station itself never sends its own printing away.
+            app._settings["print_station"] = True
+            assert not app._prints_at_work()
+            win = app._print_queue_window()
+            for _ in range(60):
+                root.update()
+                if win.winfo_children()[1].get_children():
+                    break
+                time.sleep(0.05)
+            tree = win.winfo_children()[1]
+            row = tree.item(tree.get_children()[0])["values"]
+            assert "Did not print: Jammed" in row, row
+            win.destroy()
+            # A phone's order with no Location: the sender is told why.
+            db.get_order = lambda oid: {"id": oid, "header": {
+                "Customer Name": "BATARE", "Order Number": "21700",
+                "Date Ordered": "22/10/26"}, "items": [{"item_kind": "filter"}]}
+            paths, why = app._station_order_pdfs("o-1")
+            assert paths == [] and "Location" in why, why
+        finally:
+            (db.send_print_file, db.print_stations, db.print_jobs,
+             db.get_order, db.get_order_items) = saved[:5]
+            app._settings.clear()
+            app._settings.update(saved[5])
+            del app._watch_print_job
+            del app._print_here
+    add("printing: at work, from anywhere", _print_at_work)
+
     def _cash_sale_invoice():
         """The cash sale account: the buyer's email asked for, a wrong one
         asked again, kept on the order, and Cancel invoicing nothing."""
