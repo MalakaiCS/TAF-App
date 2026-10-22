@@ -916,9 +916,19 @@ def run() -> int:
                   not saved["items"][0].get("Part Number"))
             check("it starts as Pending, not made",
                   saved["header"]["status"] == "Pending")
-            check("and it says where to finish it",
-                  "desktop" in page.locator("#screen .ok").inner_text(),
+            page.wait_for_function("document.querySelector('#screen .ok') && "
+                                   "document.querySelector('#screen .ok')"
+                                   ".textContent.indexOf('printer at work') >= 0")
+            sent = [j for j in PRINT_JOBS if j.get("kind") == "order"]
+            check("and, filled out, it is sent to print at work by itself - "
+                  "the station builds it as Generate Output does",
+                  sent and sent[0].get("order_id") == saved.get("id")
+                  and "Pelican Waters" in sent[0].get("title", ""),
+                  str(PRINT_JOBS)[:300])
+            check("and says so", "Sent to the printer at work"
+                  in page.locator("#screen .ok").inner_text(),
                   page.locator("#screen .ok").inner_text())
+            PRINT_JOBS.clear()
             check("the form is cleared for the next one",
                   page.locator('#screen input').first.input_value() == "")
 

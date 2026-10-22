@@ -10773,6 +10773,19 @@ class ModernOrderApp(tk.Frame):
         flat_btn(gen_row, "💲  Quote",
                  self._quote_current_order, variant="secondary",
                  pady=10, padx=18, font=F_BOLD).pack(side="right", padx=(0, 8))
+        # Where Generate Output prints: here at work, or - away from work -
+        # on the printers at work. Pressing it changes that.
+        self._print_where_var = tk.StringVar(value="🖨  Prints here  ▾")
+        pwl = tk.Label(gen_row, textvariable=self._print_where_var, bg=CBG,
+                       fg=CMU, font=F_SM, cursor="hand2")
+        pwl.pack(side="right", padx=(0, px(12)))
+        pwl.bind("<Button-1>", lambda _e: self._print_where_menu(pwl))
+        pwl.bind("<Enter>", lambda _e: pwl.config(fg=CA))
+        pwl.bind("<Leave>", lambda _e: pwl.config(fg=CMU))
+        _Tooltip(pwl, "Where Generate Output prints. Away from work it goes "
+                      "to the printers at work by itself.")
+        self._print_where_label = pwl
+        self.master.after(2500, self._refresh_print_where)
         # The order's value, beside the buttons that use it.
         self._order_total_var = tk.StringVar(value="")
         tk.Label(gen_row, textvariable=self._order_total_var, bg=CBG, fg=CTX,
@@ -18004,20 +18017,20 @@ class ModernOrderApp(tk.Frame):
         tk.Label(rp_card, text="Printing at work, from anywhere",
                  bg=CCA, fg=CA, font=F_SEC, anchor="w").pack(anchor="w")
         tk.Label(rp_card,
-                 text="Away from work, send everything you print to a printer "
-                      "at work instead. One PC at work, left on with the app "
-                      "open, does the printing for everybody.",
+                 text="Away from work, everything you print - New Order's "
+                      "worksheets included - goes to a printer at work by "
+                      "itself. One PC at work, left on with the app open, "
+                      "does the printing for everybody.",
                  bg=CCA, fg=CMU, font=F_SM, justify="left",
                  wraplength=620).pack(anchor="w", pady=(2, 8))
 
-        route_var = tk.StringVar(value=self._settings.get("print_route") or "here")
+        route_var = tk.StringVar(value=self._print_route())
         rp_row = tk.Frame(rp_card, bg=CCA)
         rp_row.pack(anchor="w", fill="x")
-        for val, txt in (("here", "Print on this PC's printer"),
-                         ("work", "Send my printing to the work printers")):
+        for val, txt in self.PRINT_ROUTES:
             tk.Radiobutton(rp_row, text=txt, variable=route_var, value=val,
                            bg=CCA, fg=CTX, selectcolor=CCA, activebackground=CCA,
-                           font=F_SM).pack(side="left", padx=(0, 14))
+                           font=F_SM).pack(anchor="w")
 
         wp_row = tk.Frame(rp_card, bg=CCA)
         wp_row.pack(anchor="w", fill="x", pady=(6, 0))
@@ -18053,10 +18066,13 @@ class ModernOrderApp(tk.Frame):
             self._settings["print_work_station"] = hit[1] if hit else ""
             self._settings["print_work_printer"] = hit[2] if hit else ""
             _save_settings(self._settings)
-            self.status_var.set(
-                "Printing goes to the work printer: " + work_cb.get()
-                if self._prints_at_work() else
-                "Printing on this PC's printer.")
+            self.status_var.set({
+                "auto": "Printing: on this PC at work, and on the work "
+                        "printer (" + work_cb.get() + ") when away.",
+                "here": "Printing on this PC's printer.",
+                "work": "Printing goes to the work printer: " + work_cb.get(),
+            }[self._print_route()])
+            self._refresh_print_where(force=True, again=False)
 
         flat_btn(wp_row, "Save", _save_route, bg=CGR, pady=4, padx=10,
                  font=F_SM).pack(side="left")
@@ -28928,37 +28944,9 @@ class ModernOrderApp(tk.Frame):
             # are labelled from the same packing plan the sheets print. A
             # label that cannot be made yet (no delivery address, say) never
             # stops the order - it is said in the Done message instead.
-            labels_pdf, label_problems, labels_off = None, [], ""
             prog.advance("Making delivery labels…")
-            try:
-                # One read of the settings for the whole request: every label
-                # carries the same base address.
-                try:
-                    label_settings = _calc_settings.load(force=True)
-                except Exception:
-                    label_settings = _calc_settings.cached()
-                customer = None
-                if _db.is_ready():
-                    try:
-                        customer = _db.customer_for_order(
-                            header.get("Customer Name", ""),
-                            header.get("customer_id") or "")
-                    except Exception:
-                        customer = None
-                if not _calc_settings.labels_enabled(label_settings):
-                    labels_off = "switched off for everyone (Settings)"
-                elif not _db.customer_wants_labels(customer):
-                    labels_off = (f"switched off for "
-                                  f"{(customer or {}).get('name', '')}")
-                elif all(_delivery_labels.is_bag_filter(it)
-                         for it in _printing):
-                    labels_off = "none for bag filters"
-                else:
-                    labels_pdf, label_problems = make_delivery_labels(
-                        {"header": header}, list(_printing), label_settings,
-                        customer=customer)
-            except Exception as exc:
-                label_problems = [str(exc)]
+            labels_pdf, label_problems, labels_off = self._order_labels(
+                header, _printing)
 
             # ── Save JSON + Database ───────────────────────────────────────
             prog.advance("Saving order…")
@@ -29073,10 +29061,27 @@ class ModernOrderApp(tk.Frame):
 
                     def _print_worker():
                         perr = ""
-                        for p in to_print:
-                            perr = self._print_file(p)
-                            if perr:
-                                break
+                        at_work = self._prints_at_work()
+                        if at_work:
+                            # Away from work: the sheets and labels go to the
+                            # printer at work as one job, named for the order.
+                            one = to_print[0]
+                            if len(to_print) > 1:
+                                joined = str(ORDERS_DIR / f"{base}_to_print.pdf")
+                                if _ProgressDialog._merge(to_print, joined):
+                                    one = joined
+                            title = (f"{header.get('Customer Name', '')} O/N "
+                                     f"{header.get('Order Number', '')}").strip()
+                            for p in ([one] if one != to_print[0]
+                                      or len(to_print) == 1 else to_print):
+                                perr = self._send_to_work_printer(p, title)
+                                if perr:
+                                    break
+                        else:
+                            for p in to_print:
+                                perr = self._print_file(p)
+                                if perr:
+                                    break
                         if not perr:
                             # Auto-printed on generate → flag it printed.
                             self._flag_printed(db_id=new_order_id, json_path=json_path)
@@ -29088,6 +29093,10 @@ class ModernOrderApp(tk.Frame):
                                     f"The order was generated and saved, but "
                                     f"printing failed:\n{perr}")
                                 self.status_var.set("Order generated — printing failed.")
+                            elif at_work:
+                                self.status_var.set(
+                                    "Order generated and sent to the printer "
+                                    "at work.")
                             else:
                                 self.status_var.set("Order generated and sent to printer.")
                         self.master.after(0, _done)
@@ -30743,10 +30752,98 @@ class ModernOrderApp(tk.Frame):
 
     # ── Printing on the work printers from anywhere (step 53) ─────────────
 
+    PRINT_ROUTES = (("auto", "Automatic: the work printers when I'm away from work"),
+                    ("here", "Always this PC's printer"),
+                    ("work", "Always the work printers"))
+
+    def _print_route(self) -> str:
+        route = self._settings.get("print_route") or "auto"
+        return route if route in dict(self.PRINT_ROUTES) else "auto"
+
     def _prints_at_work(self) -> bool:
-        """This PC sends its printing to work. Never the station itself."""
-        return (self._settings.get("print_route") == "work"
-                and not self._settings.get("print_station"))
+        """This PC sends its printing to the printers at work: chosen to, or
+        - on Automatic - because it is away from work. Never the station
+        itself. May ask the database, so not on the window's thread."""
+        if self._settings.get("print_station"):
+            return False
+        route = self._print_route()
+        if route != "auto":
+            return route == "work"
+        return self._away_from_work()
+
+    def _away_from_work(self, force: bool = False) -> bool:
+        """Away from work, by the internet connection (step 54) - asked at
+        most every five minutes. Not away when it cannot be told, so a PC
+        with no print station set up prints on its own printer as before."""
+        import time as _time
+        now = _time.monotonic()
+        seen = getattr(self, "_where_seen", None)
+        if seen and not force and now - seen[0] < 300:
+            return seen[1]
+        away = _db.print_where() is False
+        self._where_seen = (now, away)
+        return away
+
+    def _print_where_text(self, away: bool) -> str:
+        if self._settings.get("print_station"):
+            return "🖨  Prints here - this PC is the print station"
+        route = self._print_route()
+        if route == "here":
+            return "🖨  Prints on this PC  ▾"
+        if route == "work":
+            return "🖨  Prints at work  ▾"
+        return ("🖨  Away from work - prints at work  ▾" if away
+                else "🖨  Prints here  ▾")
+
+    def _refresh_print_where(self, force: bool = False, again: bool = True):
+        """Keep New Order's "where it prints" up to date."""
+        var = getattr(self, "_print_where_var", None)
+        if var is None:
+            return
+
+        def _work():
+            try:
+                if force and self._print_route() == "auto":
+                    self._away_from_work(force=True)
+                away = self._prints_at_work()
+            except Exception:
+                away = False
+            self.master.after(0, lambda: var.set(self._print_where_text(away)))
+        threading.Thread(target=_work, daemon=True).start()
+        if again:
+            prev = getattr(self, "_print_where_job", None)
+            if prev:
+                try:
+                    self.master.after_cancel(prev)
+                except Exception:
+                    pass
+            self._print_where_job = self.master.after(
+                300000, lambda: self._refresh_print_where())
+
+    def _print_where_menu(self, anchor):
+        """Choose where New Order (and every Print button) prints."""
+        menu = tk.Menu(anchor, tearoff=0)
+        route_var = tk.StringVar(value=self._print_route())
+        self._print_where_menu_var = route_var
+
+        def _pick():
+            self._settings["print_route"] = route_var.get()
+            _save_settings(self._settings)
+            self._refresh_print_where(force=True, again=False)
+
+        for val, txt in self.PRINT_ROUTES:
+            menu.add_radiobutton(label=txt, value=val, variable=route_var,
+                                 command=_pick)
+        menu.add_separator()
+        menu.add_command(label="📎  Print a File at work…",
+                         command=self._print_file_at_work_dialog)
+        menu.add_command(label="Print queue…", command=self._print_queue_window)
+        try:
+            menu.tk_popup(anchor.winfo_rootx(),
+                          anchor.winfo_rooty() + anchor.winfo_height())
+        finally:
+            menu.grab_release()
+        return menu
 
     @staticmethod
     def _list_printers() -> list:
@@ -30875,12 +30972,25 @@ class ModernOrderApp(tk.Frame):
         if problems:
             return [], ("The order needs fixing before it prints: "
                         + " ".join(m for _k, m in problems))
+        # What Generate Output does with an order before it prints: the part
+        # numbers a phone cannot work out, and the wraps the sheets and the
+        # labels share.
+        for it in items:
+            if _pn.needs_part_number(it):
+                self._stamp_item(it)
+        try:
+            printing = _order_packing.stamp_codes(items, _calc_settings.cached())
+        except Exception:
+            printing = items
         name_hdr = {k: header.get(k, "") for k in
                     ("Customer Name", "Order Number", "Date Ordered",
                      "Date Due")}
-        paths, errors = self._order_pdfs(header, items, name_hdr)
+        paths, errors = self._order_pdfs(header, printing, name_hdr)
         if errors:
             return [], " ".join(errors)
+        labels, _problems, _off = self._order_labels(header, printing)
+        if paths and labels and os.path.exists(labels):
+            paths = paths + [labels]
         if paths:
             self._flag_printed(db_id=order_id)
         return paths, ""
@@ -31214,6 +31324,42 @@ class ModernOrderApp(tk.Frame):
             threading.Thread(target=_print_worker, daemon=True).start()
 
         threading.Thread(target=_worker, daemon=True).start()
+
+    def _order_labels(self, header, printing):
+        """An order's delivery labels, as Generate Output prints them with
+        the worksheets: (labels pdf or None, problems, why there are none).
+        Not on the window's thread."""
+        labels_pdf, label_problems, labels_off = None, [], ""
+        try:
+            # One read of the settings for the whole request: every label
+            # carries the same base address.
+            try:
+                label_settings = _calc_settings.load(force=True)
+            except Exception:
+                label_settings = _calc_settings.cached()
+            customer = None
+            if _db.is_ready():
+                try:
+                    customer = _db.customer_for_order(
+                        header.get("Customer Name", ""),
+                        header.get("customer_id") or "")
+                except Exception:
+                    customer = None
+            if not _calc_settings.labels_enabled(label_settings):
+                labels_off = "switched off for everyone (Settings)"
+            elif not _db.customer_wants_labels(customer):
+                labels_off = (f"switched off for "
+                              f"{(customer or {}).get('name', '')}")
+            elif all(_delivery_labels.is_bag_filter(it)
+                     for it in printing):
+                labels_off = "none for bag filters"
+            else:
+                labels_pdf, label_problems = make_delivery_labels(
+                    {"header": header}, list(printing), label_settings,
+                    customer=customer)
+        except Exception as exc:
+            label_problems = [str(exc)]
+        return labels_pdf, label_problems, labels_off
 
     @staticmethod
     def _order_pdf_kind(items) -> str:

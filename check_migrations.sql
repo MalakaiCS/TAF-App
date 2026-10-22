@@ -221,7 +221,10 @@ WITH checks(step, file, purpose, needed, present) AS (VALUES
       to_regclass('public.part_links') IS NOT NULL),
 
   (53, 'migrate_print_queue.sql', 'Printing on the work printers from anywhere', 'recommended',
-      to_regprocedure('public.claim_print_job(uuid)') IS NOT NULL)
+      to_regprocedure('public.claim_print_job(uuid)') IS NOT NULL),
+
+  (54, 'migrate_print_where.sql', 'Printing goes to the work printers by itself when you are away from work', 'recommended',
+      to_regprocedure('public.print_where()') IS NOT NULL)
 )
 SELECT step,
        CASE WHEN present THEN 'already done' ELSE 'RUN THIS' END AS status,

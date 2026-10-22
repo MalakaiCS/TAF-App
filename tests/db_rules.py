@@ -1829,6 +1829,54 @@ def run_print_queue_checks(pg: Postgres) -> None:
     check("and stays off", not ok and "turned off" in err, err)
 
 
+def _as_from(pg: Postgres, who: str, ip: str, sql: str):
+    """As somebody, on a request the internet saw coming from `ip`."""
+    headers = '{"x-forwarded-for": "%s, 10.0.0.1"}' % ip if ip else "{}"
+    return pg.psql("SET ROLE authenticated;\n"
+                   f"SELECT set_config('request.jwt.claim.sub', '{who}', false) "
+                   "\\g /dev/null\n"
+                   f"SELECT set_config('request.headers', '{headers}', false) "
+                   "\\g /dev/null\n" + sql, "f")
+
+
+def run_print_where_checks(pg: Postgres) -> None:
+    print("\n── is this PC at work? (step 54) ──")
+    for _ in range(2):
+        ok, _o, err = pg.psql((ROOT / "migrate_print_where.sql").read_text(
+            encoding="utf-8"), "f")
+        check("step 54 runs, and runs again cleanly", ok, err)
+    q(pg, "UPDATE print_stations SET enabled = true, networks = '{}';")
+    ok, out, err = _as_from(pg, DAVE, "203.0.113.7",
+                            "SELECT print_where() ->> 'at_work';")
+    check("before the station has said where it is, nobody can be told",
+          ok and out == "", out or err)
+    ok, _o, err = _as_from(pg, DAVE, "203.0.113.7", "SELECT print_station_checkin("
+                           "'WORKSHOP-PC', ARRAY['Brother'], 'Brother');")
+    check("the station checks in from work", ok, err)
+    ok, _o, err = _as_from(pg, DAVE, "2001:db8:5:6:a:b:c:d", "SELECT "
+                           "print_station_checkin('WORKSHOP-PC', ARRAY['Brother'], "
+                           "'Brother');")
+    got = q(pg, "SELECT array_to_string(networks, ' ') FROM print_stations "
+                "WHERE name = 'WORKSHOP-PC';")
+    check("and both ways the connection reaches the internet are noted",
+          got == "2001:db8:5:6::/64 203.0.113.7", got)
+    ok, out, err = _as_from(pg, SARAH, "203.0.113.7",
+                            "SELECT print_where() ->> 'at_work';")
+    check("a PC on the same connection is at work", ok and out == "true",
+          out or err)
+    ok, out, err = _as_from(pg, SARAH, "2001:db8:5:6:1:2:3:4",
+                            "SELECT print_where() ->> 'at_work';")
+    check("so is one on its IPv6 network", ok and out == "true", out or err)
+    ok, out, err = _as_from(pg, SARAH, "198.51.100.20",
+                            "SELECT print_where() ->> 'at_work';")
+    check("a PC at home is not", ok and out == "false", out or err)
+    ok, out, err = _as_from(pg, SARAH, "", "SELECT print_where() ->> 'at_work';")
+    check("and a request with no address is not guessed at",
+          ok and out == "", out or err)
+    ok, out, err = _as_from(pg, STRANGER, "203.0.113.7", "SELECT print_where();")
+    check("an account nobody approved is told nothing", not ok)
+
+
 def _skip(why: str) -> int:
     """Skipping is fine on a laptop. In CI it is not: a workflow that goes
     green having checked nothing is worse than no workflow, because it is
@@ -1866,6 +1914,7 @@ def main() -> int:
         run_cash_sale_checks(pg)
         run_part_link_checks(pg)
         run_print_queue_checks(pg)
+        run_print_where_checks(pg)
     finally:
         pg.stop()
     print(f"\n{len(FAILURES)} FAILED" if FAILURES

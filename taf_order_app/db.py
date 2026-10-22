@@ -3688,3 +3688,17 @@ def remove_print_file(name: str) -> None:
         get_client().storage.from_(PRINT_BUCKET).remove([name])
     except Exception:
         pass
+
+
+def print_where() -> "bool | None":
+    """Is this PC at work (step 54)? True: on the same connection as a print
+    station. False: away. None: it cannot be told - step 54 not run, no
+    station has checked in yet, or no connection."""
+    try:
+        data = get_client().rpc("print_where", {}).execute().data
+    except Exception:
+        return None
+    if isinstance(data, list):
+        data = data[0] if data else {}
+    at = (data or {}).get("at_work")
+    return at if isinstance(at, bool) else None

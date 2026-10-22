@@ -2816,12 +2816,64 @@ def _steps(app, gui, root):
             assert got == [("Run_sheet.pdf", "Brother", "s1", 1),
                            ("Price list.docx", "Brother", "s1", 1)], got
             assert not dlg.winfo_exists(), "closes once everything is sent"
+            # Automatic: away from work (by the connection) it goes to work;
+            # at work, or when it cannot be told, it prints here.
+            saved_where = db.print_where
+            try:
+                app._settings.update(print_route="auto", print_station=False)
+                for answer, want in ((False, True), (True, False), (None, False)):
+                    db.print_where = lambda a=answer: a
+                    app._where_seen = None
+                    assert app._prints_at_work() is want, (answer, want)
+                app._settings["print_station"] = True
+                db.print_where = lambda: False
+                app._where_seen = None
+                assert not app._prints_at_work(), "the station prints here"
+                app._settings["print_station"] = False
+                # New Order says where Generate Output prints, and changes it.
+                app._show_tab("new_order")
+                app._where_seen = None
+                app._refresh_print_where(again=False)
+                for _ in range(60):
+                    root.update()
+                    if "away" in app._print_where_var.get().lower():
+                        break
+                    time.sleep(0.05)
+                assert app._print_where_var.get().startswith(
+                    "🖨  Away from work - prints at work"), app._print_where_var.get()
+                menu = app._print_where_menu(app._print_where_label)
+                menu.unpost()
+                app._print_where_menu_var.set("here")
+                menu.invoke(1)
+                assert app._settings["print_route"] == "here"
+                for _ in range(60):
+                    root.update()
+                    if "this PC" in app._print_where_var.get():
+                        break
+                    time.sleep(0.05)
+                assert "Prints on this PC" in app._print_where_var.get()
+                menu.destroy()
+            finally:
+                db.print_where = saved_where
             # A phone's order with no Location: the sender is told why.
             db.get_order = lambda oid: {"id": oid, "header": {
                 "Customer Name": "BATARE", "Order Number": "21700",
                 "Date Ordered": "22/10/26"}, "items": [{"item_kind": "filter"}]}
             paths, why = app._station_order_pdfs("o-1")
             assert paths == [] and "Location" in why, why
+            # A whole phone order: part numbers filled in, worksheets built.
+            phone_line = {"item_kind": "filter", "Filter Type": "V-form",
+                          "Media Type": "G4", "Short": 592, "Long": 592,
+                          "Channel": 45, "Quantity": 2}
+            db.get_order = lambda oid: {"id": oid, "header": {
+                "Customer Name": "BATARE", "Order Number": "21701",
+                "Date Ordered": "22/10/26", "Date Due": "ASAP",
+                "Location": "Brisbane"}, "items": [dict(phone_line)]}
+            paths, why = app._station_order_pdfs("o-2")
+            assert paths and not why, why
+            from pypdf import PdfReader
+            text = "".join(pg.extract_text() for pg in PdfReader(paths[0]).pages)
+            assert "BATARE" in text and "21701" in text, text[:300]
         finally:
             (db.send_print_file, db.print_stations, db.print_jobs,
              db.get_order, db.get_order_items) = saved[:5]

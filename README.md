@@ -605,6 +605,7 @@ just run it — nothing is lost and nothing is duplicated.
 | 51 | `migrate_cash_sales.sql` | Cash sales: the account walk-in buyers go under, whose invoices are emailed to an address asked for each time, not the one on file (needs step 39) | recommended |
 | 52 | `migrate_part_links.sql` | The part number each product sells as: a code the app makes for a line (a 3-Peak bag's, say) linked to the part number in the price list and Xero | recommended |
 | 53 | `migrate_print_queue.sql` | Printing on the work printers from anywhere: the print stations (PCs at work that print for everybody), the jobs waiting for them, and a private bucket for the files sent | recommended |
+| 54 | `migrate_print_where.sql` | Printing goes to the work printers by itself when you are away from work: the print station notes the connection it is on, and any PC or phone can ask whether it is on the same one (needs step 53) | recommended |
 
 **Step 16 is the one that matters most.** Every policy in the older scripts is
 `TO authenticated USING (true)` — meaning *anyone Supabase counts as signed
@@ -1078,20 +1079,29 @@ anything.
    PC prints for everybody**, names it if they like, and presses Save. (The
    first time needs a manager. After that, whoever is signed in on that PC
    keeps it going.) Pick its usual printer under Default Printer as before.
-3. On a PC away from work: Settings → Printing → **Send my printing to the
-   work printers**, pick the printer, and Save. From then on every Print
-   button on that PC (worksheets, dockets, run sheets, invoices) goes to that
-   printer at work. **Print queue…** shows what has been sent and whether it
-   printed, and lets you cancel something still waiting.
+3. Run **step 54** (`migrate_print_where.sql`). Every PC is then on
+   **Automatic**: at work it prints on its own printer as always; away from
+   work - worked out from the internet connection, compared with the one the
+   print station is on - everything it prints goes to the printer at work by
+   itself: New Order's worksheets and labels from Generate Output, dockets,
+   run sheets, invoices. New Order shows which, beside the buttons
+   ("🖨 Prints here" / "🖨 Away from work - prints at work"); press it to
+   choose Always this PC or Always the work printers instead, or to send a
+   file. Settings → Printing has the same choice, and which printer at work
+   to use. **Print queue…** shows what has been sent and whether it printed,
+   and lets you cancel something still waiting.
 4. **🖨 Print a File at work**, at the top of the window on any PC: attach
    one or more files, pick the printer at work and how many copies, and send.
    PDFs and photos print anywhere; Word, Excel and text files are printed by
    Word, Excel or Notepad on the station PC, so it needs those installed.
    25 MB at most a file.
-5. On a phone: **Print at work** (under More) → **Print a File at work**
-   attaches files from the phone (the same kinds) and sends them to the
-   printer picked there. An order's **Print at work** button has the station
-   build that order's worksheets itself and print them.
+5. On a phone: an order filled out on **New order** prints at work as soon
+   as it is saved - the station fills in the part numbers and prints the
+   worksheets and delivery labels, the same as Generate Output on a PC
+   (untick "Print it at work when it is saved" to stop that on one phone).
+   **Print at work** (under More) → **Print a File at work** attaches files
+   from the phone (the same kinds) and sends them to the printer picked
+   there. An order's **Print at work** button prints that order again.
 
 The sender is told when it has printed, or why not (out of paper, a header
 that needs fixing first, and so on). A job sent while the station is off

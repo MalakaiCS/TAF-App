@@ -2606,6 +2606,11 @@ var TAFAPP = (function () {
      order's worksheets, which the station builds itself. */
 
   var PRINT_PICK = "taf-print-printer";
+  var NEW_PRINT = "taf-new-order-prints";
+
+  function newOrderPrints() {
+    try { return localStorage.getItem(NEW_PRINT) !== "0"; } catch (e) { return true; }
+  }
   var PRINT_ONLINE_MS = 120000;
   var PRINT_WORDS = { queued: "Waiting", printing: "Printing",
                       printed: "Printed", failed: "Did not print",
@@ -3335,6 +3340,17 @@ var TAFAPP = (function () {
     });
     main.appendChild(U.card("Notes", [notes]));
 
+    // Printed at work as soon as it is saved, the way Generate Output
+    // prints it on the PC - unless this is switched off on this phone.
+    var autoPrint = U.el("input", { attr: { type: "checkbox", id: "new-print" } });
+    autoPrint.checked = newOrderPrints();
+    autoPrint.addEventListener("change", function () {
+      try { localStorage.setItem(NEW_PRINT, autoPrint.checked ? "1" : "0"); }
+      catch (e) {}
+    });
+    main.appendChild(U.el("label", { cls: "check", kids: [autoPrint,
+      U.el("span", { text: "🖨  Print it at work when it is saved" })] }));
+
     var save = U.button("Save the order", function () { saveDraft(main); }, "go");
     main.appendChild(U.el("div", { cls: "row-actions", kids: [
       save,
@@ -3536,10 +3552,24 @@ var TAFAPP = (function () {
             + " | " + count + " line" + (count === 1 ? "" : "s")
             + " | Raised on the web");
       show("new");
-      U.notice(document.getElementById("screen"),
-        "Saved. Open it on the desktop app to print the worksheets — that is "
-        + "where the part numbers are filled in."
-        + (made.order_number ? " Order " + made.order_number + "." : ""), "ok");
+      var said = "Saved." + (made.order_number ? " Order " + made.order_number + "." : "");
+      if (!made.id || !newOrderPrints()) {
+        U.notice(document.getElementById("screen"), said + " Print the "
+          + "worksheets from the desktop app or Print at work.", "ok");
+        return;
+      }
+      // The worksheets and labels are made by the print station at work -
+      // with the part numbers filled in, as the PC does - and printed there.
+      sendPrint({ kind: "order", order_id: made.id,
+                  title: h["Customer Name"] + (made.order_number || h["Order Number"]
+                         ? " O/N " + (made.order_number || h["Order Number"]) : "") })
+        .then(function () {
+          U.notice(document.getElementById("screen"), said
+            + " Sent to the printer at work.", "ok");
+        }).catch(function (err) {
+          U.notice(document.getElementById("screen"), said + " It did not "
+            + "go to the printer at work: " + err.message, "ok");
+        });
     }).catch(function (err) {
       U.notice(main, err.message);
     }).then(function () { btn.disabled = false; });
