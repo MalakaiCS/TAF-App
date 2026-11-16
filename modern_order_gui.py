@@ -10987,6 +10987,10 @@ class ModernOrderApp(tk.Frame):
             ("Quote from this order",  self._quote_prev_order),
             ("Send to Xero & invoice customer",
              lambda: self._xero_send_selected(True)),
+            ("Invoice with an earlier date…",
+             lambda: self._xero_invoice_dated(self._get_selected_orders())),
+            ("Match past Xero invoices to orders…",
+             lambda: self._xero_match_invoices()),
             ("Send draft to Xero",     lambda: self._xero_send_selected(False)),
             ("Xero import file (CSV)", self._invoice_selected_orders),
             ("Repeat this job…",       self._repeat_this_job),
@@ -25056,12 +25060,190 @@ class ModernOrderApp(tk.Frame):
             flat_btn(foot, "Purchase orders…", self._purchase_orders,
                      bg=CNE, pady=px(6),
                      variant="secondary").pack(side="left", padx=(px(8), 0))
+            flat_btn(foot, "Match past invoices…",
+                     lambda: self._xero_match_invoices(dlg), bg=CNE,
+                     pady=px(6), variant="secondary").pack(side="left",
+                                                           padx=(px(8), 0))
             flat_btn(foot, "Disconnect", _disconnect, bg=CNE, pady=px(6),
                      variant="secondary").pack(side="left", padx=(px(8), 0))
         else:
             tk.Label(foot, text="Only a manager can connect Xero.", bg=CBG,
                      fg=CMU, font=F_SM).pack(side="left")
         _refresh()
+
+    # ── Invoices already in Xero, matched to orders ──────────────────────
+
+    MATCH_SINCE = (("The last 3 months", 92), ("The last 6 months", 183),
+                   ("The last 12 months", 366), ("The last 2 years", 731),
+                   ("Every invoice in Xero", 0))
+
+    def _xero_match_invoices(self, parent=None):
+        """Find each invoice already in Xero in the Orders tab, by the order
+        number in its Reference, and link the two - so the order shows its
+        invoice number and the app never makes it a second invoice. Shown
+        first; only the ticked ones are linked."""
+        if _db.role_level() < 3:
+            messagebox.showinfo("Match Xero invoices",
+                                "Only a manager can match invoices.")
+            return None
+        win = tk.Toplevel(parent or self.master)
+        win.title("Match Xero invoices to orders")
+        win.configure(bg=CBG)
+        win.geometry(f"{px(1040)}x{px(600)}")
+        top = tk.Frame(win, bg=CBG, padx=12, pady=10)
+        top.pack(fill="x")
+        tk.Label(top, text="Invoices already in Xero, found in the Orders tab "
+                           "by the order number in their Reference.",
+                 bg=CBG, fg=CTX, font=F_BOLD, anchor="w").pack(anchor="w")
+        tk.Label(top, text="Linked, an order shows its invoice number and is "
+                           "never invoiced a second time; the invoice itself "
+                           "is left exactly as it is in Xero. Untick (Ctrl-click) "
+                           "any that are wrong before linking.",
+                 bg=CBG, fg=CMU, font=F_SM, anchor="w", justify="left",
+                 wraplength=px(980)).pack(anchor="w", pady=(2, 6))
+        row = tk.Frame(top, bg=CBG)
+        row.pack(anchor="w", fill="x")
+        tk.Label(row, text="Look at:", bg=CBG, fg=CTX, font=F_SM).pack(side="left")
+        since_cb = ttk.Combobox(row, state="readonly", width=24,
+                                values=[t for t, _d in self.MATCH_SINCE])
+        since_cb.set(self.MATCH_SINCE[2][0])
+        since_cb.pack(side="left", padx=(6, 8))
+        summary = tk.StringVar(value="")
+        cols = ("invoice", "date", "reference", "contact", "order", "customer",
+                "note")
+        tree = ttk.Treeview(win, columns=cols, show="headings",
+                            selectmode="extended")
+        for c, w, txt in (("invoice", 90, "Invoice"), ("date", 86, "Date"),
+                          ("reference", 140, "Reference in Xero"),
+                          ("contact", 190, "Xero contact"),
+                          ("order", 110, "→ Order"),
+                          ("customer", 190, "Customer in the app"),
+                          ("note", 200, "")):
+            tree.heading(c, text=txt)
+            tree.column(c, width=px(w), anchor="w")
+        tree.tag_configure("check", foreground=CRD)
+        tree.tag_configure("unclear", foreground=CMU)
+        tree.pack(fill="both", expand=True, padx=12)
+        foot = tk.Frame(win, bg=CBG, padx=12, pady=10)
+        foot.pack(fill="x")
+        tk.Label(foot, textvariable=summary, bg=CBG, fg=CMU, font=F_SM,
+                 anchor="w", justify="left", wraplength=px(620)).pack(
+                     side="left", fill="x", expand=True)
+        state = {"matches": {}, "since": ""}
+
+        def _since() -> str:
+            days = dict(self.MATCH_SINCE).get(since_cb.get(), 366)
+            return ("" if not days else
+                    (datetime.date.today() - datetime.timedelta(days=days)).isoformat())
+
+        def _look():
+            since = _since()
+            summary.set("Reading the invoices in Xero…")
+            tree.delete(*tree.get_children())
+            link_btn.configure(state="disabled")
+
+            def _work():
+                got = _xero.match_invoices(since)
+
+                def _show():
+                    if not win.winfo_exists():
+                        return
+                    if got.get("error"):
+                        summary.set("")
+                        messagebox.showerror("Match Xero invoices", got["error"],
+                                             parent=win)
+                        return
+                    state["since"] = since
+                    state["matches"] = {}
+                    picked = []
+                    for m in got.get("matches") or []:
+                        iid = f"{m['invoice_id']}|{m['order_id']}"
+                        state["matches"][iid] = m
+                        tree.insert("", "end", iid=iid, values=(
+                            m.get("number", ""), m.get("date", ""),
+                            m.get("reference", ""), m.get("contact", ""),
+                            m.get("order_number", ""), m.get("customer", ""),
+                            "Check: the customer's name differs"
+                            if m.get("check") else ""),
+                            tags=("check",) if m.get("check") else ())
+                        if not m.get("check"):
+                            picked.append(iid)
+                    for u in got.get("unclear") or []:
+                        tree.insert("", "end", values=(
+                            u.get("number", ""), u.get("date", ""),
+                            u.get("reference", ""), u.get("contact", ""),
+                            u.get("order_number", "") or "?", u.get("customer", ""),
+                            "Not linked - " + str(u.get("why", ""))),
+                            tags=("unclear",))
+                    tree.selection_set(picked)
+                    n = len(state["matches"])
+                    summary.set(
+                        f"{got.get('scanned', 0)} invoices in Xero looked at: "
+                        f"{n} found an order, {len(got.get('unclear') or [])} "
+                        f"fit more than one, {got.get('unmatched', 0)} have a "
+                        f"reference no order has, and {got.get('already', 0)} "
+                        "were linked already.")
+                    _count()
+                win.after(0, _show)
+            threading.Thread(target=_work, daemon=True).start()
+
+        def _picked():
+            return [state["matches"][i] for i in tree.selection()
+                    if i in state["matches"]]
+
+        def _count(_e=None):
+            n = len(_picked())
+            link_btn.configure(text=f"Link {n} ticked",
+                               state="normal" if n else "disabled")
+
+        def _link():
+            chosen = _picked()
+            if not chosen or not messagebox.askyesno(
+                    "Match Xero invoices",
+                    f"Link {len(chosen)} invoice{'s' if len(chosen) != 1 else ''} "
+                    "to their orders?\n\nEach order then shows its invoice "
+                    "number and is not invoiced again from the app. Nothing "
+                    "in Xero changes.", parent=win):
+                return
+            link_btn.configure(state="disabled", text="Linking…")
+
+            def _work():
+                out = _xero.link_invoices(state["since"], chosen)
+
+                def _done():
+                    if out.get("error"):
+                        messagebox.showerror("Match Xero invoices", out["error"],
+                                             parent=win)
+                    else:
+                        skipped = out.get("skipped") or []
+                        messagebox.showinfo(
+                            "Match Xero invoices",
+                            f"{out.get('linked', 0)} linked."
+                            + (("\n\nNot linked:\n" + "\n".join(
+                                f"  • {x}" for x in skipped[:15]))
+                               if skipped else ""), parent=win)
+                        try:
+                            _db.log_action("xero_invoices_matched",
+                                           f"{out.get('linked', 0)} linked")
+                        except Exception:
+                            pass
+                        self._tab_loaded.pop("prev_orders", None)
+                        self._all_orders_data = []
+                    if win.winfo_exists():
+                        _look()
+                self.master.after(0, _done)
+            threading.Thread(target=_work, daemon=True).start()
+
+        flat_btn(row, "Look", _look, bg=CA, pady=4, padx=12,
+                 font=F_SM).pack(side="left")
+        flat_btn(foot, "Close", win.destroy, bg=CNE, pady=6).pack(side="right")
+        link_btn = flat_btn(foot, "Link 0 ticked", _link, bg=CGR, pady=6)
+        link_btn.pack(side="right", padx=(0, 8))
+        tree.bind("<<TreeviewSelect>>", _count)
+        since_cb.bind("<<ComboboxSelected>>", lambda _e: _look())
+        win._tree, win._link, win._state = tree, _link, state   # for the tests
+        _look()
+        return win
 
     # ── What a job actually cost ──────────────────────────────────────────
 
@@ -28332,13 +28514,59 @@ class ModernOrderApp(tk.Frame):
     def _xero_send_selected(self, invoice: bool, on_done=None):
         self._xero_send_orders(self._get_selected_orders(), invoice, on_done)
 
-    def _xero_send_orders(self, rows, invoice: bool, on_done=None):
+    def _ask_invoice_date(self, parent=None):
+        """An earlier date for an invoice: today back to a year ago. None
+        when cancelled."""
+        today = datetime.date.today()
+        while True:
+            text = simpledialog.askstring(
+                "Invoice with an earlier date",
+                "Date the invoice (dd/mm/yy) - today or earlier, up to a "
+                "year back.\n\nThe invoice is approved and emailed now, "
+                "carrying this date; its due date follows from it.",
+                initialvalue=f"{today:%d/%m/%y}", parent=parent or self.master)
+            if text is None:
+                return None
+            got = parse_date(text)
+            if not got:
+                messagebox.showwarning("Invoice date",
+                                       f'"{text}" is not a date. Use dd/mm/yy, '
+                                       "like 03/11/26.", parent=parent or self.master)
+                continue
+            day = got.date()
+            if day > today:
+                messagebox.showwarning("Invoice date", "An invoice cannot be "
+                                       "dated in the future.",
+                                       parent=parent or self.master)
+                continue
+            if (today - day).days > 365:
+                messagebox.showwarning("Invoice date", "An invoice can be "
+                                       "dated back a year at most.",
+                                       parent=parent or self.master)
+                continue
+            return day
+
+    def _xero_invoice_dated(self, rows, on_done=None, parent=None):
+        """Send to Xero & invoice customer, with the invoice dated an
+        earlier day - work done last week and invoiced today."""
+        if not rows:
+            messagebox.showinfo("Invoice with an earlier date",
+                                "Select an order first.")
+            return
+        day = self._ask_invoice_date(parent)
+        if day is None:
+            return
+        self._xero_send_orders(rows, True, on_done, invoice_date=day)
+
+    def _xero_send_orders(self, rows, invoice: bool, on_done=None,
+                          invoice_date=None):
         """Send orders to Xero from their button.
 
         `invoice`: "Send to Xero & invoice customer" - the invoice is made,
-        approved and emailed by Xero to the contact on file, dated today, and
-        the order is marked Complete. Otherwise "Send draft to Xero": a draft
-        to look at in Xero, nothing to the customer.
+        approved and emailed by Xero to the contact on file, dated today (or
+        `invoice_date`, an earlier day), and the order is marked Complete.
+        Otherwise "Send draft to Xero": a draft to look at in Xero, nothing
+        to the customer.
 
         Each order is priced from its work order - the line prices, or the
         customer's tier for a line without one - and worded with the invoice
@@ -28408,10 +28636,12 @@ class ModernOrderApp(tk.Frame):
         if len(prepared) > 12:
             listed += f"\n  … and {len(prepared) - 12} more"
         n = len(prepared)
+        dated = (f"dated {invoice_date:%d/%m/%Y}" if invoice_date
+                 else "dated today")
         if invoice:
             ask = (f"Invoice {n} order{'s' if n != 1 else ''} through Xero?\n\n"
-                   f"{listed}\n\nEach is made in Xero, approved, dated "
-                   "today and emailed by Xero to the customer's contact on "
+                   f"{listed}\n\nEach is made in Xero, approved, {dated} "
+                   "and emailed by Xero to the customer's contact on "
                    "file - a cash sale to the email given for it. The order "
                    "is then marked Complete.")
         else:
@@ -28440,7 +28670,10 @@ class ModernOrderApp(tk.Frame):
                         results.append((r, header, {"error": "the buyer's email "
                                         f"could not be saved on the order: {exc}"}, False))
                         continue
-                out = _xero.push_draft(r["db_id"], built, invoice_now=invoice)
+                kw = ({"invoice_date": _xero.invoice_date_text(invoice_date)}
+                      if invoice and invoice_date else {})
+                out = _xero.push_draft(r["db_id"], built, invoice_now=invoice,
+                                       **kw)
                 completed = False
                 if invoice and out.get("state") in ("sent", "approved"):
                     try:
@@ -31625,6 +31858,10 @@ class ModernOrderApp(tk.Frame):
             flat_btn(foot, "Send to Xero & invoice customer",
                      lambda: self._xero_send_orders([row], True, _after_xero),
                      bg=CGR, pady=px(6)).pack(side="left")
+            flat_btn(foot, "…with an earlier date",
+                     lambda: self._xero_invoice_dated([row], _after_xero, dlg),
+                     variant="secondary", pady=px(6)).pack(side="left",
+                                                           padx=(px(6), 0))
         actions = [
             ("Add a note…",            _act(self._add_order_note)),
             ("Change status…",         _act(self._change_order_status)),

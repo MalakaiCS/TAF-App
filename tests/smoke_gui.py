@@ -2743,6 +2743,103 @@ def _steps(app, gui, root):
     add("orders: several invoiced at once print as one PDF",
         _invoice_several_one_pdf)
 
+    def _invoice_dated_and_matched():
+        """Invoice with an earlier date; and invoices already in Xero found
+        in the Orders tab by their reference, linked once ticked."""
+        import datetime as _d
+        from taf_order_app import features as _feat
+        from taf_order_app import xero as _x
+        sent, asked, said = [], [], []
+        saved = (_x.push_draft, gui._db.set_order_status, gui.messagebox.askyesno,
+                 gui.messagebox.showinfo, gui.messagebox.showwarning,
+                 dict(_feat._switches), _x.invoice_pdf, gui.simpledialog.askstring,
+                 _x.match_invoices, _x.link_invoices, gui._db.role_level)
+        day = _d.date.today() - _d.timedelta(days=9)
+        answers = [(_d.date.today() + _d.timedelta(days=3)).strftime("%d/%m/%y"),
+                   day.strftime("%d/%m/%y")]
+        gui.simpledialog.askstring = lambda *a, **k: answers.pop(0)
+        _x.push_draft = lambda oid, built, md5="", invoice_now=False, **kw: (
+            sent.append((oid, invoice_now, kw))
+            or {"state": "sent", "number": "INV-7", "emailed_to": "a@b.example"})
+        _x.invoice_pdf = lambda oid, timeout=60: {"error": "not in this test"}
+        gui._db.set_order_status = lambda oid, st: None
+        gui.messagebox.askyesno = lambda *a, **k: asked.append(a) or True
+        gui.messagebox.showinfo = lambda *a, **k: said.append(a)
+        gui.messagebox.showwarning = lambda *a, **k: said.append(a)
+        _feat._switches = {"xero_live": True}
+        loaded = dict(app._tab_loaded)
+        all_orders = list(getattr(app, "_all_orders_data", []) or [])
+        app._refresh_orders_list = lambda: None
+        app._output_invoice_paperwork = lambda path: None
+        try:
+            order = {"source": "db", "db_id": "o-31", "order_no": "21731",
+                     "customer": "BATARE", "status": "Complete",
+                     "db_header": {"Order Number": "21731", "Customer Name": "BATARE",
+                                   "Date Ordered": "01/11/26"},
+                     "db_items": [{"item_kind": "filter", "Filter Type": "V-form",
+                                   "Media Type": "G4", "Short": 595, "Long": 595,
+                                   "Channel": 45, "Quantity": 1, "Unit Price": 30.0,
+                                   "Price Source": "tier 1"}]}
+            app._xero_invoice_dated([order])
+            for _ in range(200):
+                root.update()
+                if sent and any("Done" in str(a) for a in said):
+                    break                 # sent, and reported
+                time.sleep(0.05)
+            assert any("future" in str(a) for a in said), "a future date was let through"
+            assert sent and sent[0][1] is True and \
+                sent[0][2] == {"invoice_date": day.isoformat()}, sent
+            assert f"dated {day:%d/%m/%Y}" in str(asked[0]), asked[0]
+
+            # Invoices already in Xero, matched to orders.
+            gui._db.role_level = lambda role=None: 3
+            looked, linked = [], []
+            _x.match_invoices = lambda since="": looked.append(since) or {
+                "scanned": 4, "already": 1, "unmatched": 1, "unclear": [
+                    {"number": "INV-U", "reference": "9000", "contact": "X",
+                     "why": "the reference fits 2 orders"}],
+                "matches": [
+                    {"invoice_id": "i1", "order_id": "o1", "number": "INV-1",
+                     "reference": "PO 5501", "contact": "Bells Pty Ltd",
+                     "date": "2026-08-01", "order_number": "PO-5501",
+                     "customer": "Bells Pty Ltd", "check": False},
+                    {"invoice_id": "i2", "order_id": "o2", "number": "INV-2",
+                     "reference": "Job 7788", "contact": "FD Greenwood",
+                     "date": "2026-08-02", "order_number": "7788",
+                     "customer": "Quiet Co", "check": True}]}
+            _x.link_invoices = lambda since, links: linked.append(
+                (since, [l["invoice_id"] for l in links])) or {"linked": len(links)}
+            win = app._xero_match_invoices()
+            for _ in range(100):
+                root.update()
+                if win._state["matches"]:
+                    break
+                time.sleep(0.05)
+            assert len(win._tree.get_children()) == 3, win._tree.get_children()
+            assert looked and looked[0] == (_d.date.today()
+                                            - _d.timedelta(days=366)).isoformat()
+            assert set(win._tree.selection()) == {"i1|o1"}, win._tree.selection()
+            win._link()
+            for _ in range(100):
+                root.update()
+                if any("1 linked" in str(a) for a in said):
+                    break
+                time.sleep(0.05)
+            assert linked and linked[0][1] == ["i1"], linked
+            win.destroy()
+        finally:
+            (_x.push_draft, gui._db.set_order_status, gui.messagebox.askyesno,
+             gui.messagebox.showinfo, gui.messagebox.showwarning, _feat._switches,
+             _x.invoice_pdf, gui.simpledialog.askstring, _x.match_invoices,
+             _x.link_invoices, gui._db.role_level) = saved
+            del app._refresh_orders_list
+            del app._output_invoice_paperwork
+            app._tab_loaded.clear()
+            app._tab_loaded.update(loaded)
+            app._all_orders_data = all_orders
+    add("orders: invoiced with an earlier date; past Xero invoices matched",
+        _invoice_dated_and_matched)
+
     def _print_at_work():
         """Away from work, Print goes to the queue for the work printer; the
         queue window opens; the station builds a phone's order itself."""

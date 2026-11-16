@@ -897,6 +897,25 @@ View Order → Actions → **Invoice & packing slip (PDF)** makes it again
 for an order already invoiced. (It opens for now, while it is being tried;
 switching `INVOICE_PAPERWORK_PRINTS` on sends it straight to the printer.)
 
+**Invoice with an earlier date.** Order ▾ → *Invoice with an earlier date…*
+(or *…with an earlier date* beside *Send to Xero & invoice customer* in View
+Order) does the same as Send to Xero & invoice customer, but asks for the
+invoice date first - today or earlier, up to a year back. The invoice is
+approved and emailed now, carrying that date, and its due date follows from it.
+
+**Invoices already in Xero, found in the Orders tab.** Order ▾ → *Match past
+Xero invoices to orders…* (or *Match past invoices…* on the Xero screen;
+managers) reads the invoices in Xero - the last 3, 6 or 12 months, 2 years, or
+all of them - and looks for the order number in each one's **Reference** in
+the Orders tab ("PO 5501" finds order PO-5501; "Job 7788 - Tallai" finds
+7788). Where two orders share a number, the invoice's customer decides. It
+shows what it found first: rows in red are where the Xero contact isn't the
+customer on the order (left unticked to check), and invoices whose reference
+fits more than one order, or one order with two invoices, are listed but
+never linked. *Link N ticked* links them: each order then shows its invoice
+number and is never invoiced again from the app, and the invoice is left
+exactly as it is in Xero. Needs the xero function redeployed.
+
 **Every customer in Xero.** Make a new customer and the app asks whether they
 already have an account in Xero: *Yes* finds it (by their legal name, name or
 short name) to link; *No* makes their contact in Xero from everything the app

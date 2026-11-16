@@ -273,6 +273,13 @@ def xero_api(method: str, path: str, query: dict, body, headers):
             "Day": 20, "Type": "OFFOLLOWINGMONTH"}}}]}
     if kind != "Invoices":
         return 404, {}
+    if method == "GET" and not ident and q("summaryOnly"):
+        # Every invoice, for matching to orders: not deleted or voided.
+        page = int(q("page") or 1)
+        rows = [dict(invoice_out(i), DateString=str(i.get("Date", "")) + "T00:00:00")
+                for i in W.invoices.values()
+                if i.get("Status") not in ("DELETED", "VOIDED")]
+        return 200, {"Invoices": rows if page == 1 else []}
     if method == "GET" and not ident:
         page = int(q("page") or 1)
         rows = [invoice_out(i) for i in W.invoices.values()
@@ -490,7 +497,16 @@ class Fake(BaseHTTPRequestHandler):
             if auth != f"Bearer {SERVICE}":
                 return self._send(401, {"message": "service role only"})
             query = urllib.parse.parse_qs(url.query)
+            first = query.get("offset", ["0"])[0] == "0"
             with LOCK:
+                if url.path.endswith("orders") and "id" not in query:
+                    return self._send(200, [
+                        {"id": k, "order_number": o.get("order_number", ""),
+                         "customer_name": o.get("customer_name", ""),
+                         "customer_id": o.get("customer_id")}
+                        for k, o in W.orders.items()] if first else [])
+                if url.path.endswith("customers") and "id" not in query:
+                    return self._send(200, list(W.customers) if first else [])
                 if url.path.endswith("orders"):
                     o = W.orders.get(query.get("id", [""])[0].removeprefix("eq."))
                     return self._send(200, [o] if o else [])
@@ -501,7 +517,14 @@ class Fake(BaseHTTPRequestHandler):
         if url.path == "/rest/v1/xero_invoices":
             if auth != f"Bearer {SERVICE}":
                 return self._send(401, {"message": "service role only"})
-            order = urllib.parse.parse_qs(url.query).get("order_id", [""])[0]
+            query = urllib.parse.parse_qs(url.query)
+            if "invoice_id" in query:
+                with LOCK:
+                    linked = [{"order_id": r["order_id"], "invoice_id": r["invoice_id"]}
+                              for r in W.rows.values() if r.get("invoice_id")]
+                return self._send(200, linked
+                                  if query.get("offset", ["0"])[0] == "0" else [])
+            order = query.get("order_id", [""])[0]
             order = order.removeprefix("eq.")
             with LOCK:
                 row = W.rows.get(order)
@@ -1190,6 +1213,93 @@ def run_checks() -> None:
     get(f"?do=finish&code=good&state={state}")
     check("reconnected, orders taken while it was down still go across",
           W.conn.get("drafts_from") == keep and W.conn.get("refresh_token"))
+
+    print("\n── invoiced with an earlier date ──")
+    back = str(uuid.uuid4())
+    day = (now() + dt.timedelta(hours=10) - dt.timedelta(days=9)).date().isoformat()
+    code, out = call("draft", {"order_id": back, "invoice": invoice(number=""),
+                               "hash": "hb", "invoice_now": True,
+                               "invoice_date": "2099-01-01"})
+    check("an invoice cannot be dated in the future", code == 400
+          and "future" in out.get("error", ""), str(out))
+    code, out = call("draft", {"order_id": back, "invoice": invoice(number=""),
+                               "hash": "hb", "invoice_now": True,
+                               "invoice_date": "2020-01-01"})
+    check("nor more than a year back", code == 400 and "year" in out.get("error", ""),
+          str(out))
+    code, out = call("draft", {"order_id": back, "invoice": invoice(number=""),
+                               "hash": "hb", "invoice_date": day})
+    check("and only one being sent now is dated back", code == 400, str(out))
+    code, out = call("draft", {"order_id": back, "invoice": invoice(number=""),
+                               "hash": "hb", "invoice_now": True,
+                               "invoice_date": day})
+    got = xinv(back)
+    check("invoiced now with an earlier date: approved and emailed, carrying "
+          "that date", out.get("state") == "sent" and got.get("Date") == day
+          and got.get("Status") == "AUTHORISED"
+          and W.rows[back]["invoice_date"] == day, f"{out} {got.get('Date')}")
+
+    print("\n── invoices already in Xero, found in the Orders tab ──")
+    m1, m2, m3, m4 = (str(uuid.uuid4()) for _ in range(4))
+    with LOCK:
+        W.orders[m1] = {"order_number": "PO-5501", "customer_name": "Bells Pty Ltd",
+                        "customer_id": "cu-bells", "header": {}}
+        W.orders[m2] = {"order_number": "7788", "customer_name": "Quiet Co",
+                        "customer_id": None, "header": {}}
+        W.orders[m3] = {"order_number": "9000", "customer_name": "Bells Pty Ltd",
+                        "customer_id": "cu-bells", "header": {}}
+        W.orders[m4] = {"order_number": "9000", "customer_name": "FD Greenwood",
+                        "customer_id": None, "header": {}}
+
+        def hand(ref, contact, number, status="AUTHORISED"):
+            i = {"InvoiceID": str(uuid.uuid4()), "InvoiceNumber": number,
+                 "Reference": ref, "Status": status, "Type": "ACCREC",
+                 "Contact": {"ContactID": contact, "Name": W.contacts[contact]["Name"]},
+                 "Date": "2026-08-01", "DueDate": "2026-08-31",
+                 "LineItems": [{"Description": "x", "Quantity": 1, "UnitAmount": 100}]}
+            W.invoices[i["InvoiceID"]] = i
+            return i["InvoiceID"]
+        x1 = hand("PO 5501", "C-BELLS", "INV-H1")
+        x2 = hand("Job 7788 - Tallai", "C-FDG", "INV-H2")
+        x3 = hand("9000", "C-FDG", "INV-H3")
+        hand("NOPE-1", "C-BELLS", "INV-H4")
+        hand("PO-5501", "C-BELLS", "INV-H5", status="VOIDED")
+    code, out = call("invoices_match", {})
+    check("somebody on the floor cannot match invoices", code == 403, str(out))
+    code, out = call("invoices_match", {}, auth="Bearer boss")
+    found = {m["number"]: m for m in out.get("matches", [])}
+    check("an invoice's Reference finds its order: 'PO 5501' is order PO-5501",
+          found.get("INV-H1", {}).get("order_id") == m1, json.dumps(out)[:400])
+    check("a number inside a longer reference is found, but flagged when the "
+          "customer is not the one on the order",
+          found.get("INV-H2", {}).get("order_id") == m2
+          and found["INV-H2"].get("check") is True, str(found.get("INV-H2")))
+    check("two orders with one number: the invoice's customer decides",
+          found.get("INV-H3", {}).get("order_id") == m4
+          and found["INV-H3"].get("check") is False, str(found.get("INV-H3")))
+    check("a voided invoice is not matched, and one naming no order is counted",
+          "INV-H5" not in found and "INV-H4" not in found
+          and out.get("unmatched", 0) >= 1, str(out.get("unmatched")))
+    check("an invoice the app made itself is already linked, not offered again",
+          out.get("already", 0) >= 1 and not any(
+              m["invoice_id"] == W.rows[back]["invoice_id"]
+              for m in out.get("matches", [])), str(out.get("already")))
+    code, out = call("invoices_match", {"links": [
+        {"invoice_id": x1, "order_id": m1}, {"invoice_id": x3, "order_id": m4},
+        {"invoice_id": x2, "order_id": m1}]}, auth="Bearer boss")
+    check("the ticked ones are linked; one that does not match is not",
+          out.get("linked") == 2 and len(out.get("skipped", [])) == 1, str(out))
+    check("a linked order carries the invoice number and is left to Xero",
+          W.rows[m1]["invoice_number"] == "INV-H1" and W.rows[m1]["state"] == "gone"
+          and W.rows[m4]["invoice_id"] == x3 and not W.rows[m1]["claimed_until"]
+          and W.invoices[x1]["Status"] == "AUTHORISED", str(W.rows[m1]))
+    code, out = call("invoices_match", {}, auth="Bearer boss")
+    left = {m["number"] for m in out.get("matches", [])}
+    check("and is not offered again", "INV-H1" not in left and "INV-H3" not in left
+          and "INV-H2" in left, str(left))
+    code, out = draft(m1, invoice(number="", names=("Bells Pty Ltd",)))
+    check("nor does the app make that order a second invoice",
+          out.get("state") == "gone" and W.rows[m1]["invoice_id"] == x1, str(out))
 
     print("\n── what is owed, and the list ──")
     code, out = call("owing")

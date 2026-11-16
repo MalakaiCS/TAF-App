@@ -121,18 +121,47 @@ def disconnect() -> Dict[str, Any]:
 
 
 def push_draft(order_id: str, built: Dict[str, Any],
-               source_md5: str = "", invoice_now: bool = False) -> Dict[str, Any]:
+               source_md5: str = "", invoice_now: bool = False,
+               invoice_date: str = "") -> Dict[str, Any]:
     """Make or update one order's draft invoice. `built` is `draft_from`'s.
 
     `invoice_now` is the order's "Send to Xero & invoice customer" button:
-    the invoice is approved and emailed there and then, dated today. Refused,
-    before anything is made, if a line has no price.
+    the invoice is approved and emailed there and then, dated today - or
+    `invoice_date` (YYYY-MM-DD), an earlier day. Refused, before anything is
+    made, if a line has no price.
     """
-    return _call("draft", {"order_id": str(order_id),
-                           "invoice": built["invoice"],
-                           "hash": built["hash"],
-                           "source_md5": source_md5 or None,
-                           "invoice_now": bool(invoice_now)}, timeout=120)
+    body = {"order_id": str(order_id), "invoice": built["invoice"],
+            "hash": built["hash"], "source_md5": source_md5 or None,
+            "invoice_now": bool(invoice_now)}
+    if invoice_date:
+        body["invoice_date"] = str(invoice_date)
+    return _call("draft", body, timeout=120)
+
+
+def match_invoices(since: str = "") -> Dict[str, Any]:
+    """Invoices already in Xero, each with the order its Reference names:
+    {"matches", "unclear", "unmatched", "already", "scanned"}. `since` is
+    YYYY-MM-DD, or "" for every invoice. Managers only."""
+    return _call("invoices_match", {"since": since}, timeout=300)
+
+
+def link_invoices(since: str, links: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """Link the matches somebody ticked: {"linked", "skipped"}."""
+    return _call("invoices_match", {"since": since, "links": [
+        {"invoice_id": l["invoice_id"], "order_id": l["order_id"],
+         "number": l.get("number", "")} for l in links]}, timeout=300)
+
+
+def invoice_date_text(value) -> str:
+    """A date as Xero takes it (YYYY-MM-DD) from a date or "dd/mm/yy"; ""
+    when it is not one."""
+    if isinstance(value, _dt.datetime):
+        return value.date().isoformat()
+    if isinstance(value, _dt.date):
+        return value.isoformat()
+    from .validation import parse_date
+    got = parse_date(str(value or ""))
+    return got.date().isoformat() if got else ""
 
 
 MODES = {"manual": "Trial - sent from the button on each order",

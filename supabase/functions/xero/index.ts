@@ -57,6 +57,9 @@
 //   contacts    Xero contacts matching a search, to link a
 //               customer to theirs                              staff
 //   owing       what is outstanding in Xero                     staff
+//   invoices_match  invoices already in Xero matched to orders by
+//               their Reference; with links, the ticked ones
+//               linked (left to Xero, numbers on the orders)    manager
 //
 // Deploy:
 //   supabase secrets set XERO_CLIENT_ID=...
@@ -576,7 +579,7 @@ async function handOver(row: Row, cur: Row | null) {
 }
 
 async function draftOne(row: Row, inv: Row, hash: string, md5: string | null,
-                        now = false) {
+                        now = false, dated: string | null = null) {
   if (FINISHED.includes(row.state) || row.delete_wanted) {
     await put(row.order_id, { claimed_until: null });
     if (now && row.state === "gone") {
@@ -591,9 +594,10 @@ async function draftOne(row: Row, inv: Row, hash: string, md5: string | null,
       "price. Put the price on the work order, then send it again.");
   }
   if (now) {
-    // Invoiced from its button: the job is done today.
+    // Invoiced from its button: the job is done today - or on the earlier
+    // day it was given, which is the date the invoice then carries.
     row = await put(row.order_id, { complete_wanted: true,
-                                    completed_on: row.completed_on ?? today() });
+                                    completed_on: dated ?? row.completed_on ?? today() });
   }
   if (row.invoice_id && row.lines_hash === hash) {
     row = await put(row.order_id, { source_md5: md5 });
@@ -1224,6 +1228,200 @@ async function purchasableCodes(): Promise<Map<string, string>> {
 }
 
 
+// ── Invoices already in Xero, matched to orders by their reference ─────────
+// Invoices made in Xero by hand, or before the app sent them, carry the
+// customer's order number in their Reference - the same number the order
+// has in the app. Matching the two puts the invoice number on the order
+// and tells the app the order is invoiced, so it never makes a second one.
+// A matched invoice is left to Xero (state "gone"): the app does not change
+// an invoice it did not make.
+
+/** A reference or order number as compared: capitals, letters and digits. */
+function refKey(text: unknown): string {
+  return String(text ?? "").toUpperCase().replace(/[^A-Z0-9]/g, "");
+}
+
+/** The ways a number can be written: whole, and without a leading "PO". */
+function numberKeys(text: unknown): string[] {
+  const k = refKey(text);
+  const out = new Set<string>();
+  if (k.length >= 3) out.add(k);
+  const bare = k.replace(/^(PO|ON|ORDER|NO)+/, "");
+  if (bare.length >= 4 && bare !== k) out.add(bare);
+  return [...out];
+}
+
+/** Every order number a reference may name: the whole of it, and each
+ *  part of it ("21692 - PO 8842" names both). */
+function referenceKeys(ref: unknown): string[] {
+  const s = String(ref ?? "");
+  const out = new Set<string>(numberKeys(s));
+  for (const part of s.split(/\s+-\s+|[,;/&|]+|\s{2,}/)) {
+    for (const k of numberKeys(part)) out.add(k);
+  }
+  // "PO 8842" is one number written with a space.
+  for (const part of s.split(/\s+/)) {
+    for (const k of numberKeys(part)) out.add(k);
+  }
+  return [...out];
+}
+
+/** A company name as compared: no Pty, Ltd or The, letters and digits. */
+function nameKey(text: unknown): string {
+  return String(text ?? "").toUpperCase()
+    .replace(/\b(PTY|LTD|LIMITED|THE|TRUST|TRUSTEE|FOR|AUSTRALIA|AUST)\b/g, " ")
+    .replace(/[^A-Z0-9]/g, "");
+}
+
+function sameCompany(a: unknown, b: unknown): boolean {
+  const x = nameKey(a), y = nameKey(b);
+  if (!x || !y) return false;
+  if (x === y) return true;
+  const [short, long] = x.length < y.length ? [x, y] : [y, x];
+  return short.length >= 4 && long.includes(short);
+}
+
+async function restAll(path: string): Promise<Row[]> {
+  const out: Row[] = [];
+  for (let off = 0; off < 200000; off += 1000) {
+    const page = await rest("GET", `${path}${path.includes("?") ? "&" : "?"}` +
+                            `limit=1000&offset=${off}`) as Row[];
+    out.push(...(page ?? []));
+    if (!page || page.length < 1000) break;
+  }
+  return out;
+}
+
+async function xeroInvoicesSince(since: string): Promise<Row[]> {
+  let where = 'Type=="ACCREC" AND Status!="DELETED" AND Status!="VOIDED"';
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(since);
+  if (m) where += ` AND Date>=DateTime(${+m[1]},${+m[2]},${+m[3]})`;
+  const out: Row[] = [];
+  for (let page = 1; page <= 100; page++) {
+    const got = await xero("GET", "/api.xro/2.0/Invoices?where=" +
+      encodeURIComponent(where) + `&order=Date%20DESC&summaryOnly=true&page=${page}`);
+    const list = got?.Invoices ?? [];
+    out.push(...list);
+    if (list.length < 100) break;
+  }
+  return out;
+}
+
+/** Each unlinked invoice with the order its reference names, where that is
+ *  one order: the customer it is for decides between orders sharing a
+ *  number. Returns what matched, what was not clear, and the counts. */
+async function matchInvoices(since: string) {
+  const invoices = await xeroInvoicesSince(since);
+  const orders = await restAll("orders?select=id,order_number,customer_name," +
+    "date_ordered,customer_id:header->>customer_id&order=created_at.desc");
+  const customers = await restAll("customers?select=id,name,short_name," +
+    "legal_name,xero_contact_id");
+  const links = await restAll("xero_invoices?select=order_id,invoice_id" +
+    "&invoice_id=not.is.null");
+  const linkedOrders = new Set(links.map((l) => String(l.order_id)));
+  const linkedInvoices = new Set(links.map((l) => String(l.invoice_id)));
+
+  const byId = new Map(customers.map((c) => [String(c.id), c]));
+  const byName = new Map<string, Row>();
+  for (const c of customers) {
+    for (const n of [c.short_name, c.name]) {
+      const k = String(n ?? "").trim().toLowerCase();
+      if (k && !byName.has(k)) byName.set(k, c);
+    }
+  }
+  const index = new Map<string, Row[]>();
+  for (const o of orders) {
+    if (linkedOrders.has(String(o.id))) continue;
+    for (const k of numberKeys(o.order_number)) {
+      if (!index.has(k)) index.set(k, []);
+      index.get(k)!.push(o);
+    }
+  }
+
+  const proposals = new Map<string, Row[]>();     // order id -> candidates
+  const unclear: Row[] = [];
+  const unmatched: Row[] = [];
+  let already = 0;
+  for (const inv of invoices) {
+    if (linkedInvoices.has(String(inv.InvoiceID))) { already++; continue; }
+    const seen = new Map<string, Row>();
+    for (const k of referenceKeys(inv.Reference)) {
+      for (const o of index.get(k) ?? []) seen.set(String(o.id), o);
+    }
+    const info = {
+      invoice_id: String(inv.InvoiceID), number: String(inv.InvoiceNumber ?? ""),
+      reference: String(inv.Reference ?? ""),
+      contact: String(inv.Contact?.Name ?? ""),
+      contact_id: String(inv.Contact?.ContactID ?? ""),
+      date: String(inv.DateString ?? inv.Date ?? "").slice(0, 10),
+      status: String(inv.Status ?? ""), total: Number(inv.Total ?? 0),
+    };
+    if (!seen.size) { unmatched.push(info); continue; }
+    const scored = [...seen.values()].map((o) => {
+      const cust = byId.get(String(o.customer_id ?? "")) ??
+        byName.get(String(o.customer_name ?? "").trim().toLowerCase());
+      const score = cust?.xero_contact_id && cust.xero_contact_id === info.contact_id ? 3
+        : (sameCompany(info.contact, o.customer_name) ||
+           sameCompany(info.contact, cust?.legal_name) ||
+           sameCompany(info.contact, cust?.name)) ? 2 : 1;
+      return { o, score };
+    }).sort((a, b) => b.score - a.score);
+    const top = scored.filter((x) => x.score === scored[0].score);
+    if (top.length > 1) {
+      unclear.push({ ...info, why: `the reference fits ${top.length} orders: ` +
+        top.slice(0, 4).map((x) => `${x.o.order_number} (${x.o.customer_name})`).join(", ") });
+      continue;
+    }
+    const best = top[0];
+    const prop = { ...info, order_id: String(best.o.id),
+                   order_number: String(best.o.order_number ?? ""),
+                   customer: String(best.o.customer_name ?? ""),
+                   check: best.score === 1 };
+    const key = prop.order_id;
+    if (!proposals.has(key)) proposals.set(key, []);
+    proposals.get(key)!.push(prop);
+  }
+  const matches: Row[] = [];
+  for (const list of proposals.values()) {
+    if (list.length === 1) { matches.push(list[0]); continue; }
+    // Two invoices for one order: a credit and a re-issue, a part and the
+    // rest... a person decides that, not this.
+    for (const p of list) {
+      unclear.push({ ...p, why: `order ${p.order_number} is the reference on ` +
+        `${list.length} invoices: ` + list.map((x) => x.number).join(", ") });
+    }
+  }
+  matches.sort((a, b) => String(b.date).localeCompare(String(a.date)));
+  return { scanned: invoices.length, already, matches, unclear,
+           unmatched: unmatched.length, unmatched_some: unmatched.slice(0, 200) };
+}
+
+/** Link the pairs a person ticked - each checked again against Xero as it
+ *  is now, so nothing is linked that no longer matches. */
+async function linkInvoices(since: string, wanted: Row[]) {
+  const now = await matchInvoices(since);
+  const ok = new Map(now.matches.map((m) => [`${m.invoice_id}|${m.order_id}`, m]));
+  let linked = 0;
+  const skipped: string[] = [];
+  for (const w of wanted.slice(0, 5000)) {
+    const m = ok.get(`${String(w.invoice_id)}|${String(w.order_id)}`);
+    if (!m) { skipped.push(String(w.number ?? w.invoice_id) + ": no longer matches"); continue; }
+    const row = await claim(m.order_id, 60);
+    if (!row) { skipped.push(`${m.number}: the order is busy - try again`); continue; }
+    await put(m.order_id, {
+      state: "gone", invoice_id: m.invoice_id, invoice_number: m.number,
+      contact_id: m.contact_id || null, contact_name: m.contact || null,
+      total: m.total, invoice_date: m.date || null, complete_wanted: false,
+      delete_wanted: false, next_try_at: null, claimed_until: null,
+      error: `Invoice ${m.number} was made in Xero and matched to this order ` +
+             "by its reference, so the app leaves it to Xero.",
+    });
+    linked++;
+  }
+  return { linked, skipped };
+}
+
+
 // ── Requests ────────────────────────────────────────────────────────────────
 
 Deno.serve(async (req: Request) => {
@@ -1364,10 +1562,25 @@ Deno.serve(async (req: Request) => {
       if (!hash) return json({ error: "No hash was given." }, 400);
       const md5 = body.source_md5 ? String(body.source_md5).slice(0, 64) : null;
       const now = body.invoice_now === true;
+      // Invoiced with an earlier date: a day this year or last, never ahead.
+      const dated = body.invoice_date ? String(body.invoice_date) : "";
+      if (dated) {
+        const t = Date.parse(dated + "T00:00:00Z");
+        if (!/^\d{4}-\d{2}-\d{2}$/.test(dated) || isNaN(t)) {
+          return json({ error: "That invoice date is not a date." }, 400);
+        }
+        if (dated > today()) {
+          return json({ error: "An invoice cannot be dated in the future." }, 400);
+        }
+        if (Date.parse(today() + "T00:00:00Z") - t > 400 * 86400000) {
+          return json({ error: "An invoice can be dated back a year at most." }, 400);
+        }
+        if (!now) return json({ error: "Only an invoice being sent now can be dated back." }, 400);
+      }
       const row = await claim(order);
       if (!row) return json({ busy: true });
       try {
-        return json(await draftOne(row, read.inv, hash, md5, now));
+        return json(await draftOne(row, read.inv, hash, md5, now, dated || null));
       } catch (e) {
         return json(await failed(row, e, md5), 422);
       }
@@ -1517,6 +1730,16 @@ Deno.serve(async (req: Request) => {
 
     if (action === "list") {
       return json({ rows: await rpc<Row[]>("xero_list", { p_limit: 300 }) });
+    }
+
+    if (action === "invoices_match") {
+      if (!who.manager) return json({ error: "Only a manager can match invoices." }, 403);
+      const since = /^\d{4}-\d{2}-\d{2}$/.test(String(body.since ?? ""))
+        ? String(body.since) : "";
+      if (Array.isArray(body.links)) {
+        return json(await linkInvoices(since, body.links as Row[]));
+      }
+      return json(await matchInvoices(since));
     }
 
     if (action === "owing") {
