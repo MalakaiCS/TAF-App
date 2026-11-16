@@ -618,6 +618,64 @@ def contact_gaps(existing: Dict[str, Any], customer: Dict[str, Any]):
     return patch, filled
 
 
+_ADDRESS_KEYS = ("address1", "address2", "city", "state", "postcode", "country")
+
+
+def _from_xero_address(a: Dict[str, Any]) -> Dict[str, str]:
+    """A Xero address as the app's fields (no prefix). Lines 3 and 4, where
+    Xero has them, go on the second line."""
+    def g(k):
+        return str(a.get(k) or "").strip()
+    country = g("Country")
+    if country.isupper() and len(country) > 3:
+        country = country.title()          # AUSTRALIA, as Xero often has it
+    return {"address1": g("AddressLine1"),
+            "address2": ", ".join(x for x in (g("AddressLine2"), g("AddressLine3"),
+                                              g("AddressLine4")) if x),
+            "city": g("City"), "state": g("Region"), "postcode": g("PostalCode"),
+            "country": country or "Australia"}
+
+
+def app_addresses(contact: Dict[str, Any], customer: Optional[Dict[str, Any]] = None):
+    """The delivery and billing addresses a Xero contact has, as a change
+    to the app's customer: (patch, [what changed]). Xero's street address is
+    the delivery address and its postal address the billing one - the way
+    round contact_payload sends them. An address Xero does not have leaves
+    the app's as it is; one it has replaces the app's."""
+    found = {}
+    for a in contact.get("Addresses") or []:
+        kind = str(a.get("AddressType") or "").upper()
+        if kind in ("STREET", "DELIVERY") and "delivery" not in found:
+            if str(a.get("AddressLine1") or "").strip():
+                found["delivery"] = _from_xero_address(a)
+        elif kind == "POBOX" and "billing" not in found:
+            if str(a.get("AddressLine1") or "").strip():
+                found["billing"] = _from_xero_address(a)
+    customer = customer or {}
+    patch: Dict[str, Any] = {}
+    changed: List[str] = []
+    for prefix, label in (("delivery", "delivery address"),
+                          ("billing", "billing address")):
+        addr = found.get(prefix)
+        if not addr:
+            continue
+        fields = {f"{prefix}_{k}": addr[k] for k in _ADDRESS_KEYS}
+        if any(_s(customer, k) != v for k, v in fields.items()):
+            patch.update(fields)
+            changed.append(label)
+    # Billing "the same as delivery" when, after this, the two read alike.
+    delivery = {k: (patch.get(f"delivery_{k}") if f"delivery_{k}" in patch
+                    else _s(customer, f"delivery_{k}")) for k in _ADDRESS_KEYS}
+    billing = {k: (patch.get(f"billing_{k}") if f"billing_{k}" in patch
+                   else _s(customer, f"billing_{k}")) for k in _ADDRESS_KEYS}
+    if "billing" in found:
+        same = all(str(delivery[k]).lower() == str(billing[k]).lower()
+                   for k in _ADDRESS_KEYS)
+        if bool(customer.get("billing_same", True)) != same:
+            patch["billing_same"] = same
+    return patch, changed
+
+
 def read_contacts(ids: List[str]) -> Dict[str, Any]:
     """{"contacts": [...], "default_terms": {...}} - contacts in full."""
     return _call("contacts_read", {"ids": [str(i) for i in ids if i]}, timeout=120)

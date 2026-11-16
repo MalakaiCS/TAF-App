@@ -2874,6 +2874,11 @@ def _steps(app, gui, root):
             from pypdf import PdfReader
             text = "".join(pg.extract_text() for pg in PdfReader(paths[0]).pages)
             assert "BATARE" in text and "21701" in text, text[:300]
+            for p in paths:          # built beside the app; not kept
+                try:
+                    Path(p).unlink()
+                except OSError:
+                    pass
         finally:
             (db.send_print_file, db.print_stations, db.print_jobs,
              db.get_order, db.get_order_items) = saved[:5]
@@ -2973,7 +2978,11 @@ def _steps(app, gui, root):
              "email": "ap@bells.example"}]}
         _x.read_contacts = lambda ids: {"contacts": [{
             "id": ids[0], "EmailAddress": "ap@bells.example", "FirstName": "",
-            "LastName": "", "TaxNumber": "", "Phones": [], "Addresses": [],
+            "LastName": "", "TaxNumber": "", "Phones": [],
+            # Xero has their postal (billing) address, not a street one.
+            "Addresses": [{"AddressType": "POBOX", "AddressLine1": "PO Box 12",
+                           "City": "CALOUNDRA", "Region": "QLD",
+                           "PostalCode": "4551", "Country": "AUSTRALIA"}],
             "PaymentTerms": {"Type": "OFFOLLOWINGMONTH", "Day": 20}}],
             "default_terms": {"Type": "DAYSAFTERBILLDATE", "Day": 30}}
         gui._db.update_customer = lambda cid, data: updates.append((cid, dict(data)))
@@ -3016,13 +3025,22 @@ def _steps(app, gui, root):
                         if hasattr(w, "picker_link"))
             pick.picker_tree.selection_set("22222222-2222-2222-2222-222222222222")
             pick.picker_link()
-            assert _until(lambda: len(updates) >= 2), updates
+            assert _until(lambda: len(updates) >= 3), updates
             assert updates[0][1] == {"xero_contact_id": "22222222-2222-2222-2222-222222222222"}
-            assert updates[1][1] == {"payment_terms": "20th of the following month"}, updates
+            # Xero's billing address comes into the app; the app's own
+            # delivery address stays, as Xero has none to give.
+            addr = updates[1][1]
+            assert addr["billing_address1"] == "PO Box 12" and \
+                addr["billing_city"] == "CALOUNDRA" and addr["billing_same"] is False, addr
+            assert not any(k.startswith("delivery_") for k in addr), addr
+            assert updates[2][1] == {"payment_terms": "20th of the following month"}, updates
             assert saved_calls and saved_calls[0]["ContactID"] == \
                 "22222222-2222-2222-2222-222222222222", saved_calls
             assert "EmailAddress" not in saved_calls[0]        # Xero had one
             assert saved_calls[0]["TaxNumber"] == "12345678901"
+            # ...and the app's delivery address goes to Xero, which lacked it.
+            assert [a["AddressType"] for a in saved_calls[0]["Addresses"]] == \
+                ["STREET"], saved_calls[0].get("Addresses")
 
             # On an order: asked once a session, not every time.
             answers[:] = [None, None]
@@ -3040,8 +3058,11 @@ def _steps(app, gui, root):
                 {"id": "b", "name": "B", "xero_contact_id": None}]
             app._xero_terms_all()
             assert _until(lambda: said), "no report"
-            assert updates == [("a", {"payment_terms": "20th of the following month"})], updates
-            assert "1 customers are linked" in str(said[-1]) and "A: 20th" in str(said[-1])
+            assert len(updates) == 1 and updates[0][0] == "a", updates
+            assert updates[0][1]["payment_terms"] == "20th of the following month"
+            assert updates[0][1]["billing_address1"] == "PO Box 12", updates
+            assert "1 customers are linked" in str(said[-1]) and "A: 20th" in str(said[-1]) \
+                and "billing address" in str(said[-1])
         finally:
             (_x.save_contact, _x.find_contacts, _x.read_contacts,
              gui._db.update_customer, gui._db.get_customer, gui._db.get_customers,

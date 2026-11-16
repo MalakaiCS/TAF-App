@@ -38,6 +38,8 @@ invoices/
 # ── Test / scratch artifacts ────────────────────────────────────────────
 Test_TEST.xlsx
 test_test.pdf
+# Worksheets the smoke test builds land beside the app when run from source.
+/*.pdf
 compare_test.pdf
 Templates.pdf
 # Scratch files live at the repo root only — anchored so they never match

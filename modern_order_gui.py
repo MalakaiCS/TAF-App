@@ -11237,14 +11237,16 @@ class ModernOrderApp(tk.Frame):
 
         def _work():
             try:
-                built = _dockets.build_dockets(by_customer, _items_for)
+                built = _dockets.build_dockets(by_customer, _items_for,
+                                               self._docket_customer)
                 ORDERS_DIR.mkdir(parents=True, exist_ok=True)
                 today = datetime.date.today()
                 out = ORDERS_DIR / f"Delivery_Dockets_{today:%Y-%m-%d}.pdf"
                 path = _dockets.build_dockets_pdf(
                     out, built, today,
                     prepared_by=(_db.current_full_name()
-                                 or _db.current_username() or ""))
+                                 or _db.current_username() or ""),
+                    company_address=self._docket_company_address())
                 err = ""
             except Exception as exc:
                 built, path, err = [], "", f"{exc}"
@@ -14159,7 +14161,8 @@ class ModernOrderApp(tk.Frame):
                 ("Open in Xero",          lambda: self._customer_xero(link=False)),
                 ("Link to a Xero contact…", lambda: self._customer_xero(link=True)),
                 ("Make them in Xero…",    self._customer_make_in_xero),
-                ("Payment terms from Xero (everyone)", self._xero_terms_all),
+                ("Payment terms and addresses from Xero (everyone)",
+                 self._xero_terms_all),
                 None,
                 ("Delete this customer…", self._delete_customer),
             ]
@@ -15110,9 +15113,9 @@ class ModernOrderApp(tk.Frame):
         return result
 
     def _after_xero_link(self, cust, contact_id, wait: bool = False):
-        """Just linked: fill in what their Xero contact is missing from the
-        app (nothing Xero has is changed), and take their payment terms
-        from Xero."""
+        """Just linked: take their delivery and billing addresses and their
+        payment terms from Xero into the app, then fill in what their Xero
+        contact is missing from the app (nothing Xero has is changed)."""
         result = {}
 
         def _work():
@@ -15121,6 +15124,15 @@ class ModernOrderApp(tk.Frame):
                 result["error"] = got.get("error") or "not found"
                 return
             contact = got["contacts"][0]
+            addr_patch, addresses = _xero.app_addresses(contact, cust)
+            if addr_patch:
+                try:
+                    _db.update_customer(cust["id"], addr_patch)
+                    cust.update(addr_patch)
+                except Exception as exc:
+                    addresses = []
+                    result["address_error"] = str(exc)
+            result["addresses"] = addresses
             patch, filled = _xero.contact_gaps(contact, cust)
             if patch:
                 out = _xero.save_contact(dict(patch, ContactID=contact_id))
@@ -15141,6 +15153,9 @@ class ModernOrderApp(tk.Frame):
 
         def _say():
             bits = []
+            if result.get("addresses"):
+                bits.append("their " + " and ".join(result["addresses"])
+                            + " taken from Xero")
             if result.get("filled"):
                 bits.append("filled in their " + ", ".join(result["filled"]) + " in Xero")
             if result.get("terms"):
@@ -15155,7 +15170,8 @@ class ModernOrderApp(tk.Frame):
         return result
 
     def _xero_terms_all(self):
-        """Every linked customer's payment terms, as Xero has them."""
+        """Every linked customer's payment terms and addresses, as Xero
+        has them."""
         if not self._xero_customers_on():
             messagebox.showinfo("Payment terms from Xero",
                                 "Xero isn't connected, or step 39 hasn't been run.")
@@ -15176,13 +15192,24 @@ class ModernOrderApp(tk.Frame):
                 self.master.after(0, _done)
                 return
             terms = _xero.terms_by_contact(got)
+            by_id = {str(x.get("id")): x for x in got.get("contacts") or []}
             changed = []
             for c in custs:
+                patch, what = {}, []
                 want = terms.get(str(c["xero_contact_id"]))
                 if want and want != (c.get("payment_terms") or ""):
+                    patch["payment_terms"] = want
+                    what.append(want)
+                contact = by_id.get(str(c["xero_contact_id"]))
+                if contact:
+                    addr, which = _xero.app_addresses(contact, c)
+                    patch.update(addr)
+                    what.extend(which)
+                if patch:
                     try:
-                        _db.update_customer(c["id"], {"payment_terms": want})
-                        changed.append(f"{c.get('name', '')}: {want}")
+                        _db.update_customer(c["id"], patch)
+                        changed.append(f"{c.get('name', '')}: " + ", ".join(what)
+                                       if what else c.get("name", ""))
                     except Exception:
                         pass
             result.update(linked=len(custs), changed=changed)
@@ -15196,7 +15223,8 @@ class ModernOrderApp(tk.Frame):
             messagebox.showinfo(
                 "Payment terms from Xero",
                 f"{result.get('linked', 0)} customers are linked to Xero. "
-                + (f"{len(changed)} now have Xero's payment terms:\n\n"
+                + (f"{len(changed)} now have Xero's payment terms and "
+                   "addresses:\n\n"
                    + "\n".join(f"  • {c}" for c in changed[:25])
                    + ("\n  …" if len(changed) > 25 else "")
                    if changed else "Their payment terms already match Xero's."))
@@ -28540,12 +28568,15 @@ class ModernOrderApp(tk.Frame):
             order = dict(row, job=header.get("Job") or row.get("job", ""),
                          date_due=header.get("Date Due") or row.get("date_due", ""),
                          location=header.get("Location") or row.get("location", ""))
+            order["invoice_no"] = inv_no
             built = _dockets.build_dockets(_dockets.group_by_customer([order]),
-                                           lambda _o: list(items or []))
+                                           lambda _o: list(items or []),
+                                           self._docket_customer)
             parts.append(_dockets.build_dockets_pdf(
                 tmp / "docket.pdf", built, datetime.date.today(),
                 prepared_by=(_db.current_full_name()
-                             or _db.current_username() or "")))
+                             or _db.current_username() or ""),
+                company_address=self._docket_company_address()))
         except Exception as exc:
             problems.append(f"the {'collection' if (header.get('Location') or '') == 'Pick Up' else 'delivery'} slip ({exc})")
         if not parts:
@@ -28575,6 +28606,30 @@ class ModernOrderApp(tk.Frame):
         if _ProgressDialog._merge(papers, str(out)):
             return [str(out)]
         return papers
+
+    @staticmethod
+    def _docket_customer(name, orders):
+        """The account a docket's addresses come from: the order's customer,
+        by id where the order carries one. None when it cannot be found."""
+        if not _db.is_ready():
+            return None
+        cid = ""
+        for o in orders or []:
+            cid = str((o.get("db_header") or {}).get("customer_id")
+                      or o.get("customer_id") or "")
+            if cid:
+                break
+        try:
+            return _db.customer_for_order(name, cid)
+        except Exception:
+            return None
+
+    @staticmethod
+    def _docket_company_address() -> str:
+        try:
+            return _calc_settings.base_address(_calc_settings.cached())
+        except Exception:
+            return ""
 
     def _output_invoice_paperwork(self, path):
         """Open it - or, once INVOICE_PAPERWORK_PRINTS is on, print it."""

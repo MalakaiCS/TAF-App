@@ -41,6 +41,7 @@ BASE_ADDRESS_DEFAULT = ("Unit 1/19 Tradelink Road, Hillcrest Queensland 4118 "
 
 COMPANY = {
     "name": "Total Air Filtration",
+    "legal_name": "Total Air Filtration Pty Ltd",
     "abn": "45 667 800 893",
     "phone": "07 3800 3448",
 }

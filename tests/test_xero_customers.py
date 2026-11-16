@@ -80,3 +80,45 @@ def test_a_complete_xero_contact_is_left_alone():
     full = dict(xr.contact_payload(CUSTOMER), FirstName="Al", LastName="B",
                 PaymentTerms={"Type": "DAYSAFTERBILLDATE", "Day": 7})
     assert xr.contact_gaps(full, CUSTOMER) == ({}, [])
+
+
+XERO_CONTACT = {"Addresses": [
+    {"AddressType": "POBOX", "AddressLine1": "PO Box 77", "AddressLine2": "",
+     "City": "BEENLEIGH", "Region": "QLD", "PostalCode": "4207",
+     "Country": "AUSTRALIA"},
+    {"AddressType": "STREET", "AddressLine1": "59 Link Dr", "AddressLine2": "Unit 4",
+     "AddressLine3": "Gate B", "City": "YATALA", "Region": "QLD",
+     "PostalCode": "4207", "Country": "AUSTRALIA"}]}
+
+
+def test_linking_takes_the_delivery_and_billing_addresses_from_xero():
+    app = {"delivery_address1": "1 Old St", "delivery_city": "Logan",
+           "billing_same": True}
+    patch, changed = xr.app_addresses(XERO_CONTACT, app)
+    assert changed == ["delivery address", "billing address"]
+    assert patch["delivery_address1"] == "59 Link Dr"
+    assert patch["delivery_address2"] == "Unit 4, Gate B"
+    assert patch["delivery_city"] == "YATALA" and patch["delivery_postcode"] == "4207"
+    assert patch["delivery_country"] == "Australia"
+    assert patch["billing_address1"] == "PO Box 77" and patch["billing_city"] == "BEENLEIGH"
+    assert patch["billing_same"] is False
+
+
+def test_an_address_xero_does_not_have_leaves_the_apps_alone():
+    street_only = {"Addresses": [XERO_CONTACT["Addresses"][1]]}
+    app = {"billing_same": False, "billing_address1": "PO Box 9"}
+    patch, changed = xr.app_addresses(street_only, app)
+    assert changed == ["delivery address"]
+    assert not any(k.startswith("billing_") for k in patch)
+    assert xr.app_addresses({"Addresses": [{"AddressType": "STREET",
+                                            "AddressLine1": ""}]}, app) == ({}, [])
+
+
+def test_the_same_address_twice_is_billing_the_same_as_delivery():
+    street = XERO_CONTACT["Addresses"][1]
+    both = {"Addresses": [street, dict(street, AddressType="POBOX")]}
+    patch, _ = xr.app_addresses(both, {"billing_same": False})
+    assert patch["billing_same"] is True
+    # Already as Xero has them: nothing to change.
+    again, changed = xr.app_addresses(both, dict(patch))
+    assert again == {} and changed == []

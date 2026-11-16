@@ -237,10 +237,38 @@ def test_both_copies_list_exactly_the_same_orders():
 
 
 def test_the_filters_are_printed_under_their_order_number():
+    # One order: its number in the block at the top, as the invoice has it.
     page = _pdf_pages(_build([FIVE[1]]))[0]      # PO-902: two lines
-    assert "Order PO-902" in page
+    assert "Order Number" in page and "PO-902" in page
     assert "PPF50-1.8-G4" in page and "FPF48-0.24-F7" in page
-    assert page.index("Order PO-902") < page.index("PPF50-1.8-G4")
+    assert page.index("PO-902") < page.index("PPF50-1.8-G4")
+    # Several: each order's lines under a row with its number.
+    page = _pdf_pages(_build(FIVE[:2]))[0]
+    assert page.index("Order PO-901") < page.index("Order PO-902")
+    assert page.index("Order PO-902") < page.rindex("FPF48-0.24-F7")
+
+
+def test_the_docket_is_laid_out_like_the_xero_packing_slip():
+    account = {"name": "ADJT Construction", "legal_name": "ADJT Construction Pty Ltd",
+               "delivery_address1": "59 Link Dr", "delivery_city": "Yatala",
+               "delivery_state": "QLD", "delivery_postcode": "4207",
+               "billing_same": False, "billing_address1": "PO Box 77",
+               "billing_city": "Beenleigh", "billing_state": "QLD",
+               "billing_postcode": "4207"}
+    order = dict(OTHER, customer="ADJT Construction", invoice_no="INV-9471",
+                 job="172 Tallai")
+    built = _dk.build_dockets(_dk.group_by_customer([order]), _items,
+                              lambda name, orders: account)
+    assert built[0]["deliver_to"] == ["59 Link Dr", "YATALA QLD 4207", "AUSTRALIA"]
+    assert built[0]["bill_to"] == ["PO Box 77", "BEENLEIGH QLD 4207", "AUSTRALIA"]
+    page = _pdf_pages(built)[0]
+    for words in ("DELIVERY DOCKET", "Deliver to", "59 Link Dr", "YATALA QLD 4207",
+                  "Bill to", "ADJT Construction Pty Ltd", "PO Box 77",
+                  "Invoice Number", "INV-9471", "Job", "172 Tallai", "ABN",
+                  "45 667 800 893", "Item", "Description", "Quantity",
+                  "12.00", "Total items"):
+        assert words in page, words
+    assert page.index("Deliver to") < page.index("Item")
 
 
 def test_a_collection_docket_asks_who_collected_it():

@@ -72,7 +72,12 @@ log, stock management and a customer database.
   settles "we never received those" weeks later. A pick-up prints as a
   COLLECTION docket asking who collected it, a drop as a DELIVERY docket
   asking who received it. Prints the selected orders, or the whole run when
-  nothing is selected.
+  nothing is selected. Laid out like the packing slip Xero prints with an
+  invoice: the title and logo across the top; then *Deliver to* (boxed),
+  the date, invoice and order numbers, *Bill to* (the customer's billing
+  address, or their delivery one when billing is the same), and our name,
+  address and ABN; then the lines as Item (part number), Description (the
+  same wording as the Xero invoice) and Quantity, with the total.
 - **Order Supplies** and the **bell** — anyone on the floor presses **New
   order**, on the desktop or a phone, and picks from the stock list (searched,
   or **Add everything low** at once) or types something that isn't on it.
@@ -899,11 +904,15 @@ has - legal name, email, contact person, ABN, phone, delivery and postal
 address, payment terms - and links it; *Cancel* is not now. Pick a customer
 on a new order who isn't linked and the same question comes up, once a
 session for each. When a customer is linked to a contact that already
-exists, anything that contact is **missing** in Xero is filled in from the
-app (nothing Xero already has is changed), and their **payment terms** come
+exists, their **delivery and billing addresses** come into the app from
+Xero (Xero's street address is the delivery one, its postal address the
+billing one; an address Xero doesn't have leaves the app's as it is), then
+anything that contact is **missing** in Xero is filled in from the app
+(nothing Xero already has is changed), and their **payment terms** come
 back from Xero - their own, or Xero's default when they have none - in words
 like "Net 30" or "20th of the following month". **Customer ▾ → Payment terms
-from Xero (everyone)** does the terms for every linked customer at once;
+and addresses from Xero (everyone)** does the terms and addresses for every
+linked customer at once;
 **Customer ▾ → Make them in Xero…** makes the selected one there.
 
 **Cash sales** (step 51): tick *Cash sale account* on the customer walk-in

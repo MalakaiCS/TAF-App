@@ -72,22 +72,57 @@ def handover(orders: Iterable[Dict[str, Any]]) -> str:
 
 
 def order_lines(items: Iterable[Dict[str, Any]]) -> List[Dict[str, str]]:
-    """The filters on one order, as rows for a docket.
-
-    Quantity first, because the person checking the pallet is counting.
+    """The filters on one order, as rows for a docket: the item code and the
+    wording the Xero invoice uses, so the docket and the invoice read alike.
     """
+    from . import invoice_wording as _wording
     out = []
     for item in items or []:
+        try:
+            part = _pricing.line_part_number(item)
+        except Exception:
+            part = ""
+        try:
+            text = _wording.describe(item)
+        except Exception:
+            text = ""
         out.append({
-            "quantity": str(_int(item.get("Quantity"), 1) or 1),
-            "part": str(item.get("Part Number") or "").strip() or "-",
-            "description": _pricing.describe_item(item),
+            "quantity": str(_int(item.get("Quantity") or item.get("quantity"), 1)
+                            or 1),
+            "part": (part or str(item.get("Part Number") or "")).strip() or "-",
+            "description": text or _pricing.describe_item(item),
         })
     return out
 
 
+def address_lines(customer: Optional[Dict[str, Any]], prefix: str) -> List[str]:
+    """A customer's delivery or billing address as Xero prints it: street
+    lines, then "YATALA QLD 4207", then the country in capitals."""
+    c = customer or {}
+
+    def g(k):
+        return str(c.get(f"{prefix}_{k}") or "").strip()
+    if not g("address1"):
+        return []
+    town = " ".join(x for x in (g("city").upper(), g("state"), g("postcode")) if x)
+    return [x for x in (g("address1"), g("address2"), town,
+                        (g("country") or "Australia").upper()) if x]
+
+
+def bill_to_lines(customer: Optional[Dict[str, Any]]) -> List[str]:
+    """Where the invoice goes: the billing address, or the delivery one when
+    billing is the same (or none was given)."""
+    c = customer or {}
+    if c.get("billing_same", True) is not False or not str(
+            c.get("billing_address1") or "").strip():
+        return address_lines(c, "delivery")
+    return address_lines(c, "billing")
+
+
 def build_docket(customer: str, orders: List[Dict[str, Any]],
-                 items_for: Callable[[Dict[str, Any]], Any]) -> Dict[str, Any]:
+                 items_for: Callable[[Dict[str, Any]], Any],
+                 customer_for: Optional[Callable[[str, List[Dict[str, Any]]],
+                                                 Any]] = None) -> Dict[str, Any]:
     """Everything one docket needs, with the lines already looked up.
 
     `items_for` is passed in rather than called here so this module never
@@ -118,8 +153,24 @@ def build_docket(customer: str, orders: List[Dict[str, Any]],
                     else ("No lines recorded on this order" if not lines
                           else ""),
         })
+    # Their account, for the addresses. Looked up by the caller, like the
+    # lines; a docket with no address still lists what is being handed over.
+    try:
+        account = customer_for(customer, orders) if customer_for else None
+    except Exception:
+        account = None
+    account = account or {}
+    invoices = []
+    for order in orders:
+        no = str(order.get("invoice_no") or "").strip()
+        if no and no not in invoices:
+            invoices.append(no)
     return {
         "customer": customer,
+        "bill_name": str(account.get("legal_name") or "").strip() or customer,
+        "deliver_to": address_lines(account, "delivery"),
+        "bill_to": bill_to_lines(account),
+        "invoices": invoices,
         "kind": handover(orders),
         "orders": entries,
         "order_count": len(entries),
@@ -129,9 +180,12 @@ def build_docket(customer: str, orders: List[Dict[str, Any]],
 
 
 def build_dockets(grouped: List[tuple],
-                  items_for: Callable[[Dict[str, Any]], Any]
+                  items_for: Callable[[Dict[str, Any]], Any],
+                  customer_for: Optional[Callable[[str, List[Dict[str, Any]]],
+                                                  Any]] = None
                   ) -> List[Dict[str, Any]]:
-    return [build_docket(name, orders, items_for) for name, orders in grouped]
+    return [build_docket(name, orders, items_for, customer_for)
+            for name, orders in grouped]
 
 
 def summary(dockets: List[Dict[str, Any]]) -> str:
@@ -145,10 +199,34 @@ def summary(dockets: List[Dict[str, Any]]) -> str:
 
 
 # ── The printed docket ───────────────────────────────────────────────────────
+# Laid out like the packing slip Xero prints with an invoice: the title and
+# the logo across the top; who it goes to, the dates and numbers, who is
+# billed and who it is from in a row under them; then the lines as Item,
+# Description and Quantity, ruled and unfilled.
+
+def _logo_path() -> Optional[str]:
+    import sys
+    from pathlib import Path
+    base = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent.parent))
+    p = base / "TAF_logo_horizontal.png"
+    return str(p) if p.exists() else None
+
+
+def _esc(text: Any) -> str:
+    return (str(text).replace("&", "&amp;").replace("<", "&lt;")
+            .replace(">", "&gt;"))
+
+
+def _company_lines(company_address: str) -> List[str]:
+    """"Unit 1/19 Tradelink Road, Hillcrest Queensland 4118 Australia" as
+    the lines it is printed on."""
+    return [p.strip() for p in str(company_address or "").split(",") if p.strip()]
+
 
 def build_dockets_pdf(out_path, dockets: List[Dict[str, Any]],
                       when: Optional[_dt.date] = None,
-                      prepared_by: str = "") -> str:
+                      prepared_by: str = "",
+                      company_address: str = "") -> str:
     """Two pages per customer: their copy, then the one they sign.
 
     Both pages list exactly the same thing. The only difference is the block
@@ -159,135 +237,206 @@ def build_dockets_pdf(out_path, dockets: List[Dict[str, Any]],
     from reportlab.lib.units import mm
     from reportlab.lib.styles import ParagraphStyle
     from reportlab.platypus import (SimpleDocTemplate, Paragraph, Spacer,
-                                    Table, TableStyle, HRFlowable, PageBreak)
+                                    Table, TableStyle, PageBreak, Image,
+                                    KeepTogether)
     from pathlib import Path
+    from . import calc_settings as _settings
 
     out_path = Path(out_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     when = when or _dt.date.today()
+    company_address = company_address or _settings.BASE_ADDRESS_DEFAULT
+    company = _settings.COMPANY
 
-    navy = _c.HexColor("#1A4F8A")
-    dark = _c.HexColor("#2D3748")
-    muted = _c.HexColor("#718096")
-    rule = _c.HexColor("#D5DDE5")
+    black = _c.HexColor("#1A1A1A")
+    muted = _c.HexColor("#6B7280")
+    rule = _c.HexColor("#CFCFCF")
+    box = _c.HexColor("#C8C8C8")
 
     # Explicit leading everywhere: ReportLab defaults to 12pt whatever the
     # font size, so a large heading draws over the line beneath it.
-    s_h1 = ParagraphStyle("h1", fontSize=17, leading=21, textColor=navy,
-                          fontName="Helvetica-Bold")
-    s_copy = ParagraphStyle("copy", fontSize=12, leading=15, textColor=dark,
-                            fontName="Helvetica-Bold", alignment=2)
-    s_meta = ParagraphStyle("meta", fontSize=9, leading=12, textColor=muted)
-    s_who = ParagraphStyle("who", fontSize=14, leading=18, textColor=dark,
-                           fontName="Helvetica-Bold")
-    s_order = ParagraphStyle("order", fontSize=10, leading=13, textColor=navy,
-                             fontName="Helvetica-Bold")
-    s_cell = ParagraphStyle("cell", fontSize=9, leading=12, textColor=dark)
-    s_head = ParagraphStyle("head", parent=s_cell, textColor=_c.white,
-                            fontName="Helvetica-Bold")
-    s_note = ParagraphStyle("note", fontSize=9, leading=12, textColor=muted,
-                            fontName="Helvetica-Oblique")
-    s_sign = ParagraphStyle("sign", fontSize=10, leading=26, textColor=dark)
+    s_title = ParagraphStyle("title", fontName="Helvetica", fontSize=24,
+                             leading=28, textColor=black)
+    s_copy = ParagraphStyle("copy", fontName="Helvetica-Bold", fontSize=8.5,
+                            leading=11, textColor=muted)
+    s_label = ParagraphStyle("label", fontName="Helvetica-Bold", fontSize=9,
+                             leading=11.5, textColor=black)
+    s_text = ParagraphStyle("text", fontName="Helvetica", fontSize=9.5,
+                            leading=13.5, textColor=black)
+    s_head = ParagraphStyle("head", fontName="Helvetica-Bold", fontSize=9.5,
+                            leading=12, textColor=black)
+    s_head_r = ParagraphStyle("head_r", parent=s_head, alignment=2)
+    s_cell = ParagraphStyle("cell", fontName="Helvetica", fontSize=9.5,
+                            leading=12.5, textColor=black)
+    s_cell_r = ParagraphStyle("cell_r", parent=s_cell, alignment=2)
+    s_order = ParagraphStyle("order", fontName="Helvetica-Bold", fontSize=9.5,
+                             leading=12.5, textColor=black)
+    s_note = ParagraphStyle("note", fontName="Helvetica-Oblique", fontSize=8.5,
+                            leading=11.5, textColor=muted)
+    s_sign = ParagraphStyle("sign", fontName="Helvetica", fontSize=9.5,
+                            leading=24, textColor=black)
 
     doc = SimpleDocTemplate(str(out_path), pagesize=A4,
                             leftMargin=15 * mm, rightMargin=15 * mm,
                             topMargin=14 * mm, bottomMargin=14 * mm,
                             title=f"Delivery dockets {when:%d/%m/%Y}")
+    width = A4[0] - 30 * mm
+    logo = _logo_path()
 
     story: List[Any] = []
 
     if not dockets:
-        story.append(Paragraph("DELIVERY DOCKET", s_h1))
+        story.append(Paragraph("DELIVERY DOCKET", s_title))
+        story.append(Spacer(1, 8))
         story.append(Paragraph(
             "Nothing was selected to make a docket for. Pick the orders "
             "going out on the Delivery tab and print again.", s_cell))
         doc.build(story)
         return str(out_path)
 
+    def _lines(label: str, lines: List[str]) -> List[Any]:
+        return ([Paragraph(_esc(label), s_label)]
+                + [Paragraph(_esc(t), s_text) for t in lines])
+
+    def _block(*parts) -> Table:
+        """Label-and-lines groups stacked in one cell, a little apart."""
+        rows = []
+        for i, part in enumerate(p for p in parts if p):
+            if i:
+                rows.append([Spacer(1, 5)])
+            rows.extend([[x] for x in part])
+        t = Table(rows or [[""]], colWidths=[None])
+        t.setStyle(TableStyle([
+            ("LEFTPADDING", (0, 0), (-1, -1), 0),
+            ("RIGHTPADDING", (0, 0), (-1, -1), 0),
+            ("TOPPADDING", (0, 0), (-1, -1), 0),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 0),
+        ]))
+        return t
+
     def _page(docket: Dict[str, Any], copy_label: str) -> List[Any]:
         bits: List[Any] = []
-        head = Table(
-            [[Paragraph(f"{docket['kind']} DOCKET", s_h1),
-              Paragraph(copy_label, s_copy)]],
-            colWidths=[110 * mm, None])
+        collected = docket["kind"] == COLLECTED
+
+        # ── Title and logo ────────────────────────────────────────────────
+        title = [Paragraph(f"{docket['kind']} DOCKET", s_title),
+                 Spacer(1, 3), Paragraph(copy_label, s_copy)]
+        right = (Image(logo, width=62 * mm, height=21 * mm, kind="proportional")
+                 if logo else Paragraph("Total Air Filtration", s_label))
+        head = Table([[title, right]], colWidths=[width - 66 * mm, 66 * mm])
         head.setStyle(TableStyle([
             ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+            ("ALIGN", (1, 0), (1, 0), "RIGHT"),
             ("LEFTPADDING", (0, 0), (-1, -1), 0),
             ("RIGHTPADDING", (0, 0), (-1, -1), 0),
         ]))
         bits.append(head)
-        bits.append(Paragraph(
-            f"Total Air Filtration &nbsp;·&nbsp; {when:%A %d %B %Y}"
-            + (f" &nbsp;·&nbsp; prepared by {prepared_by}" if prepared_by else ""),
-            s_meta))
-        bits.append(HRFlowable(width="100%", thickness=1, color=navy,
-                               spaceBefore=6, spaceAfter=8))
+        bits.append(Spacer(1, 12))
 
-        bits.append(Paragraph(docket["customer"], s_who))
-        bits.append(Paragraph(
-            f"{docket['order_count']} order"
-            f"{'s' if docket['order_count'] != 1 else ''} &nbsp;·&nbsp; "
-            f"{docket['item_count']} item"
-            f"{'s' if docket['item_count'] != 1 else ''} in total", s_meta))
-        bits.append(Spacer(1, 10))
+        # ── Who, when, billed to, from ────────────────────────────────────
+        orders = docket["orders"]
+        to = _lines("Collection for" if collected else "Deliver to",
+                    [docket["customer"]] + list(docket.get("deliver_to") or []))
+        numbers = [_lines("Date", [f"{when:%d %b %Y}"])]
+        if docket.get("invoices"):
+            numbers.append(_lines(
+                "Invoice Number" if len(docket["invoices"]) == 1
+                else "Invoice Numbers", [", ".join(docket["invoices"])]))
+        if len(orders) == 1:
+            numbers.append(_lines("Order Number", [orders[0]["order_no"]]))
+            if orders[0].get("job"):
+                numbers.append(_lines("Job", [orders[0]["job"]]))
+        else:
+            numbers.append(_lines("Orders", [f"{len(orders)} - listed below"]))
+        bill = _lines("Bill to", [docket.get("bill_name") or docket["customer"]]
+                      + list(docket.get("bill_to") or []))
+        ours = ([Paragraph(_esc(str(company.get("legal_name")
+                                    or "Total Air Filtration Pty Ltd").upper()),
+                           s_text)]
+                + [Paragraph(_esc(t), s_text) for t in _company_lines(company_address)])
+        abn = _lines("ABN", [company.get("abn", "")]) if company.get("abn") else []
 
-        for entry in docket["orders"]:
-            label = f"Order {entry['order_no']}"
-            extra = []
-            if entry["job"]:
-                extra.append(f"job {entry['job']}")
-            if entry["due"]:
-                extra.append(f"due {entry['due']}")
-            if entry["region"] and entry["region"] != "Unassigned":
-                extra.append(entry["region"])
-            if extra:
-                label += ("&nbsp;&nbsp;<font size=9 color='#718096'>"
-                          + " &nbsp;·&nbsp; ".join(extra) + "</font>")
-            bits.append(Paragraph(label, s_order))
-            bits.append(Spacer(1, 3))
+        to_box = Table([[_block(to)]], colWidths=[58 * mm])
+        to_box.setStyle(TableStyle([
+            ("BOX", (0, 0), (-1, -1), 0.6, box),
+            ("LEFTPADDING", (0, 0), (-1, -1), 4 * mm),
+            ("RIGHTPADDING", (0, 0), (-1, -1), 3 * mm),
+            ("TOPPADDING", (0, 0), (-1, -1), 3 * mm),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 3 * mm),
+        ]))
+        rest = width - 58 * mm
+        row = Table([[to_box, _block(*numbers), _block(bill),
+                      _block(ours, abn)]],
+                    colWidths=[58 * mm + 6 * mm, rest * 0.24 - 2 * mm,
+                               rest * 0.38 - 2 * mm, rest * 0.38 - 2 * mm])
+        row.setStyle(TableStyle([
+            ("VALIGN", (0, 0), (-1, -1), "TOP"),
+            ("LEFTPADDING", (0, 0), (-1, -1), 0),
+            ("RIGHTPADDING", (0, 0), (-1, -1), 4),
+            ("RIGHTPADDING", (0, 0), (0, 0), 6 * mm),
+        ]))
+        bits.append(row)
+        bits.append(Spacer(1, 24))
 
+        # ── The lines ─────────────────────────────────────────────────────
+        body = [[Paragraph("Item", s_head), Paragraph("Description", s_head),
+                 Paragraph("Quantity", s_head_r)]]
+        spans = []
+        several = len(orders) > 1
+        for entry in orders:
+            if several:
+                label = f"Order {_esc(entry['order_no'])}"
+                extra = []
+                if entry["job"]:
+                    extra.append(f"Job {_esc(entry['job'])}")
+                if entry["due"]:
+                    extra.append(f"due {_esc(entry['due'])}")
+                if extra:
+                    label += ("&nbsp;&nbsp;<font name='Helvetica' color='#6B7280'>"
+                              + " &nbsp;·&nbsp; ".join(extra) + "</font>")
+                spans.append(len(body))
+                body.append([Paragraph(label, s_order), "", ""])
             if entry["note"]:
-                bits.append(Paragraph(entry["note"], s_note))
-                bits.append(Spacer(1, 10))
+                spans.append(len(body))
+                body.append([Paragraph(_esc(entry["note"]), s_note), "", ""])
                 continue
-
-            body = [[Paragraph(h, s_head)
-                     for h in ("Qty", "Part Number", "Description")]]
             for line in entry["lines"]:
-                body.append([Paragraph(line["quantity"], s_cell),
-                             Paragraph(line["part"], s_cell),
-                             Paragraph(line["description"], s_cell)])
-            table = Table(body, colWidths=[14 * mm, 38 * mm, None],
-                          repeatRows=1)
-            style = [
-                ("BACKGROUND", (0, 0), (-1, 0), navy),
-                ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
-                ("GRID", (0, 0), (-1, -1), 0.4, rule),
-                ("ALIGN", (0, 0), (0, -1), "CENTER"),
-                ("TOPPADDING", (0, 1), (-1, -1), 5),
-                ("BOTTOMPADDING", (0, 1), (-1, -1), 5),
-            ]
-            for r in range(1, len(body)):
-                if r % 2 == 0:
-                    style.append(("BACKGROUND", (0, r), (-1, r),
-                                  _c.HexColor("#F5F8FB")))
-            table.setStyle(TableStyle(style))
-            bits.append(table)
-            bits.append(Spacer(1, 10))
+                qty = _int(line["quantity"], 1)
+                body.append([
+                    Paragraph(_esc(line["part"]), s_cell),
+                    Paragraph(_esc(line["description"]).replace("\n", "<br/>"),
+                              s_cell),
+                    Paragraph(f"{qty:.2f}", s_cell_r)])
+        # The count to check the pallet against, under the Quantity column.
+        body.append(["", Paragraph("Total items", s_head_r),
+                     Paragraph(f"{docket['item_count']:.2f}", s_head_r)])
+        table = Table(body, colWidths=[38 * mm, None, 24 * mm], repeatRows=1)
+        style = [
+            ("VALIGN", (0, 0), (-1, -1), "TOP"),
+            ("LEFTPADDING", (0, 0), (-1, -1), 2),
+            ("RIGHTPADDING", (0, 0), (-1, -1), 2),
+            ("TOPPADDING", (0, 0), (-1, -1), 5),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 6),
+            ("LINEBELOW", (0, 0), (-1, 0), 0.9, black),
+            ("LINEBELOW", (0, 1), (-1, -2), 0.5, rule),
+            ("TOPPADDING", (0, -1), (-1, -1), 8),
+        ]
+        for r in spans:
+            style.append(("SPAN", (0, r), (-1, r)))
+            if r > 1:
+                style.append(("TOPPADDING", (0, r), (-1, r), 10))
+        table.setStyle(TableStyle(style))
+        bits.append(table)
+        bits.append(Spacer(1, 16))
 
-        bits.append(HRFlowable(width="100%", thickness=0.6, color=rule,
-                               spaceBefore=4, spaceAfter=8))
-
+        # ── Signed for, or the customer's copy ────────────────────────────
         if copy_label == OFFICE_COPY:
-            taking = ("Collected by" if docket["kind"] == COLLECTED
-                      else "Received by")
+            taking = "Collected by" if collected else "Received by"
             sign = Table([
                 [Paragraph(f"{taking} (print name)", s_cell),
-                 Paragraph("_" * 34, s_sign)],
-                [Paragraph("Signature", s_cell),
-                 Paragraph("_" * 34, s_sign)],
-                [Paragraph("Date and time", s_cell),
-                 Paragraph("_" * 34, s_sign)],
+                 Paragraph("_" * 46, s_sign)],
+                [Paragraph("Signature", s_cell), Paragraph("_" * 46, s_sign)],
+                [Paragraph("Date and time", s_cell), Paragraph("_" * 46, s_sign)],
             ], colWidths=[46 * mm, None])
             sign.setStyle(TableStyle([
                 ("VALIGN", (0, 0), (-1, -1), "BOTTOM"),
@@ -295,11 +444,12 @@ def build_dockets_pdf(out_path, dockets: List[Dict[str, Any]],
                 ("TOPPADDING", (0, 0), (-1, -1), 4),
                 ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
             ]))
-            bits.append(sign)
-            bits.append(Spacer(1, 4))
-            bits.append(Paragraph(
+            # The signature and what it is for stay on one page together.
+            bits.append(KeepTogether([sign, Spacer(1, 4), Paragraph(
                 "Signed for the orders listed above. Total Air Filtration "
-                "keeps this copy.", s_note))
+                "keeps this copy."
+                + (f" Prepared by {_esc(prepared_by)}." if prepared_by else ""),
+                s_note)]))
         else:
             bits.append(Paragraph(
                 "This is your copy - keep it. Please check the items listed "
