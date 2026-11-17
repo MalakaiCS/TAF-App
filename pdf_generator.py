@@ -344,7 +344,31 @@ def _brace_under(c, cx, cw, rh, ctx, below):
 
 # ── Geometry ──────────────────────────────────────────────────────────────────
 
-def _geom(col_chars, row_heights_pt):
+BANNER_H = 22.0          # the PRIORITY / RUSH band across the top
+
+
+def _banner(header) -> str:
+    try:
+        from taf_order_app import worksheet_blocks as wb
+        return wb.priority_banner(header)
+    except Exception:
+        return ""
+
+
+def draw_priority_banner(c, text: str, x: float, top: float, w: float,
+                         h: float = BANNER_H) -> None:
+    """A black band, white capitals: seen from across the floor, and it
+    prints the same on a black-and-white printer."""
+    c.setFillColor(BLACK)
+    c.rect(x, top - h, w, h, stroke=0, fill=1)
+    c.setFillColorRGB(1, 1, 1)
+    size = h * 0.62
+    c.setFont("Helvetica-Bold", size)
+    c.drawCentredString(x + w / 2, top - h / 2 - size * 0.35, text)
+    c.setFillColor(BLACK)
+
+
+def _geom(col_chars, row_heights_pt, drop=0.0):
     content_w = PAGE_W - 2 * MARGIN
     scale_x   = content_w / sum(col_chars)
     col_w = [ch * scale_x for ch in col_chars]
@@ -357,7 +381,7 @@ def _geom(col_chars, row_heights_pt):
     scale_y = 1.25   # fixed scale — content fills ~75% of page height
     row_h = {r: row_h[r] * scale_y for r in row_h}
 
-    row_y, y = {}, PAGE_H - MARGIN
+    row_y, y = {}, PAGE_H - MARGIN - drop
     for r in range(1, 27):
         row_y[r] = y - row_h[r]; y -= row_h[r]
     return col_x, col_w, row_y, row_h
@@ -435,7 +459,12 @@ def _draw_header(c, col_x, col_w, row_y, row_h,
 
 def _draw_vorf(c, header, item, page_num, total_pages, d_ord, d_due,
                ctx=None):
-    col_x, col_w, row_y, row_h = _geom(_VORF_CHARS, _VORF_ROW_H)
+    banner = _banner(header)
+    col_x, col_w, row_y, row_h = _geom(_VORF_CHARS, _VORF_ROW_H,
+                                       BANNER_H + 4 if banner else 0)
+    if banner:
+        draw_priority_banner(c, banner, MARGIN, PAGE_H - MARGIN,
+                             PAGE_W - 2 * MARGIN)
     CI = {l:i for i,l in enumerate("ABCDEFGHIJKLMNOPQ")}
     cx  = lambda l: col_x[CI[l]]
     cw  = lambda *ls: sum(col_w[CI[l]] for l in ls)
@@ -585,7 +614,12 @@ def _draw_vorf(c, header, item, page_num, total_pages, d_ord, d_due,
 
 def _draw_fs(c, header, item, page_num, total_pages, d_ord, d_due,
              ctx=None):
-    col_x, col_w, row_y, row_h = _geom(_FS_CHARS, _FS_ROW_H)
+    banner = _banner(header)
+    col_x, col_w, row_y, row_h = _geom(_FS_CHARS, _FS_ROW_H,
+                                       BANNER_H + 4 if banner else 0)
+    if banner:
+        draw_priority_banner(c, banner, MARGIN, PAGE_H - MARGIN,
+                             PAGE_W - 2 * MARGIN)
     CI = {l:i for i,l in enumerate("ABCDEFGHIJKL")}
     cx  = lambda l: col_x[CI[l]]
     cw  = lambda *ls: sum(col_w[CI[l]] for l in ls)

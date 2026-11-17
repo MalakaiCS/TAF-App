@@ -247,3 +247,35 @@ def test_a_line_with_no_quantity_says_so():
     ctx = wb.order_context([{"Short": 500, "Long": 600, "Channel": 25,
                              "Filter Type": "Flat Panel"}], cs.defaults())
     assert wb.wrapping_lines(ctx[0])[0][0].startswith("SET BEFORE PACKING")
+
+
+def test_a_job_that_cannot_wait_has_a_banner():
+    from taf_order_app import worksheet_blocks as wb
+    assert wb.priority_banner({}) == ""
+    assert wb.priority_banner({"Date Due": "10/11/26"}) == ""
+    assert wb.priority_banner({"priority": True}) == "PRIORITY"
+    assert wb.priority_banner({"Date Due": " asap "}) == "RUSH  -  DUE ASAP"
+    assert wb.priority_banner({"priority": True, "Date Due": "ASAP"}) == \
+        "PRIORITY  -  DUE ASAP"
+
+
+def test_the_banner_is_printed_across_the_top_of_the_worksheet():
+    import tempfile
+    from pathlib import Path
+    import pdf_generator
+    h = {"Customer Name": "Bells Creek", "Order Number": "PO-1",
+         "Date Ordered": "01/11/26", "Date Due": "ASAP", "Location": "Local"}
+    items = [{"Filter Type": "V-form", "Media Type": "G4", "Short": 595,
+              "Long": 595, "Channel": 50, "Quantity": "2"}]
+    out = Path(tempfile.mkdtemp()) / "ws.pdf"
+    pdf_generator.generate_pdf(h, items, str(out))
+    try:
+        from pypdf import PdfReader
+    except Exception:
+        return
+    text = " ".join(PdfReader(str(out)).pages[0].extract_text().split())
+    assert "RUSH - DUE ASAP" in text, text[:200]
+    out2 = Path(tempfile.mkdtemp()) / "ws.pdf"
+    pdf_generator.generate_pdf(dict(h, **{"Date Due": "10/11/26"}), items, str(out2))
+    text = PdfReader(str(out2)).pages[0].extract_text()
+    assert "RUSH" not in text and "PRIORITY" not in text

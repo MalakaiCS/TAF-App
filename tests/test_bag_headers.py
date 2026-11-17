@@ -116,7 +116,17 @@ def test_the_bag_sheet_shows_the_due_date_big_at_the_foot():
          "Date Due": "16/10/26"}, [BAG] * 20, str(path))
     data = path.read_bytes()
     pages = len(re.findall(rb"/Type /Page(?!s)", data))
-    assert pages == 2, pages                   # the band on every page
+    assert pages >= 2, pages                   # twenty lines run over a page
+    try:
+        from pypdf import PdfReader
+    except Exception:
+        return
+    text = [pg.extract_text() for pg in PdfReader(str(path)).pages]
+    assert all("DUE FRI 16 OCT 2026" in " ".join(t.split()) for t in text), text
+    # Every line is there, numbered, and the checklist comes at the end.
+    flat = " ".join(" ".join(t.split()) for t in text)
+    assert flat.count("of 20") == 20
+    assert "COMPLETION CHECKLIST" in text[-1] and "COMPLETION CHECKLIST" not in text[0]
 
 
 def test_a_bag_on_wire_shows_its_wire_and_it_can_be_changed():

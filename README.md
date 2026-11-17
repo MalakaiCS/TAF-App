@@ -258,8 +258,17 @@ log, stock management and a customer database.
   how much channel the order takes per depth, and where two pages' frames
   fit on one length it says so: "cut G 1312 from one end, then page 2's
   G 1112 from the other end". The New Order screen shows the total too.
-- **Due date on the bag worksheet** — large and bold at the foot of every
-  bag page.
+- **The bag worksheet** — laid out to be read across the floor: our logo,
+  then the customer and order number large in a box with the attention, job,
+  date ordered and location; each line with its item number, the quantity
+  big, the product and size, its header or wire, notes, part number and a
+  tick box; the order's notes; a completion checklist (made & quality
+  checked, packed & labelled, dispatched / collected - ticked, initialled
+  and dated); and the due date large with the order's barcode at the foot of
+  every page.
+- **PRIORITY / RUSH banner** — a black band across the top of every
+  worksheet page (filter, flyscreen and bag) for an order marked high
+  priority ("PRIORITY") or due ASAP ("RUSH - DUE ASAP").
 - **Completion checklist on the worksheet** — every step of the job in one
   table where the production tick boxes and "Office use" were: marked / cut
   / drilled channel, assembled, quality checked, packed & labelled,

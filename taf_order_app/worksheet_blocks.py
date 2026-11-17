@@ -256,3 +256,19 @@ def shows_calculator(item: Dict[str, Any]) -> bool:
     a pleated panel) worksheets - not flyscreens."""
     return _calc.construction_of(item.get("Filter Type")) in (
         "Flat Panel", "V-form", "Header", "Stepped Filter")
+
+
+def priority_banner(header: Dict[str, Any]) -> str:
+    """The banner across the top of a worksheet for a job that cannot wait:
+    "PRIORITY" for an order marked high priority, "RUSH - DUE ASAP" for one
+    due ASAP, both when it is both. "" for an ordinary job."""
+    h = header or {}
+    flagged = h.get("priority") in (True, "true", "True", 1, "1", "yes")
+    asap = str(h.get("Date Due") or "").strip().upper() == "ASAP"
+    if flagged and asap:
+        return "PRIORITY  -  DUE ASAP"
+    if flagged:
+        return "PRIORITY"
+    if asap:
+        return "RUSH  -  DUE ASAP"
+    return ""
