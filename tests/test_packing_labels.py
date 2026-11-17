@@ -560,8 +560,10 @@ def test_one_landscape_a4_page_per_wrap_with_everything_on_it():
     assert "ask at the gatehouse" in flat
     for gone in ("Fax", "Purchase Order", "Dispatch", "Delivery Instructions"):
         assert gone.lower() not in flat.lower(), gone
-    # The order reference once per label, as Order Number.
-    assert flat.count("57920") == 3
+    # The order reference twice per label: big as Order Number, and under
+    # its barcode.
+    assert flat.count("57920") == 6
+    assert flat.count("Order Number") == 3
 
 
 def test_nothing_to_print_is_an_error_not_an_empty_file():

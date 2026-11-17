@@ -199,6 +199,31 @@ def test_a_worksheet_carries_its_order_number_as_a_barcode():
         assert "PO-8842" in found, f"scanner read {found or 'nothing'}"
 
 
+def test_a_delivery_label_carries_its_order_number_as_a_barcode():
+    from taf_order_app import delivery_labels as dl
+    lab = {"from_address": "Unit 1/19 Tradelink Road, Hillcrest QLD 4118",
+           "phone": "07 3800 3448", "abn": "45 667 800 893",
+           "customer_name": "APS", "address_lines": ["5/45 Textile Cresent"],
+           "locality": "Salisbury QLD 4107", "filter_size": "540 × 1480 × 45 mm",
+           "described": False, "wrap_quantity": 4, "line_quantity": 4,
+           "weight_kg": "12.4", "weight_source": "calculated",
+           "wrap_page": "1 of 1", "group": "", "contact_name": "Zac",
+           "contact_phone": "", "order_number": "po-8842", "job_number": "N/A"}
+    with tempfile.TemporaryDirectory() as tmp:
+        out = Path(tmp) / "label.pdf"
+        dl.render_pdf([lab, dict(lab, order_number="")], str(out))
+        assert out.exists()
+        found = _decode(out)
+    if found:                       # only assert where the tools exist
+        assert found == {"PO-8842"}, f"scanner read {found}"
+    from reportlab.pdfgen import canvas as rc
+    with tempfile.TemporaryDirectory() as tmp:
+        c = rc.Canvas(str(Path(tmp) / "x.pdf"))
+        assert dl._barcode(c, "PO-8842", 0, 0, 300, 50) is True
+        # Too long to print as bars anyone can read: the number, as text.
+        assert dl._barcode(c, "X" * 80, 0, 0, 300, 50) is False
+
+
 def test_an_order_with_no_number_still_produces_a_worksheet():
     import pdf_generator
     from reportlab.pdfgen import canvas as rc

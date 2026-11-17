@@ -430,6 +430,35 @@ def _logo_path() -> Optional[str]:
     return str(p) if p.exists() else None
 
 
+def _barcode(c, code: str, x: float, y: float, w: float, h: float) -> bool:
+    """The order number as a Code 128 barcode, centred in the box, with the
+    number under it. Bars 1pt wide, as on the worksheet (the narrowest every
+    handheld reads), down to 0.75pt for a long number; a number too long even
+    then is left as text rather than printed as bars nobody can read."""
+    try:
+        from reportlab.graphics.barcode import code128
+    except Exception:
+        return False
+    bar = None
+    for narrow in (1.0, 0.9, 0.8, 0.75):
+        try:
+            b = code128.Code128(code, barWidth=narrow, barHeight=h * 0.55,
+                                humanReadable=False, quiet=False)
+        except Exception:
+            return False
+        if b.width <= w - 8:
+            bar = b
+            break
+    c.setFont("Helvetica-Bold", 9)
+    if bar is None:
+        c.drawCentredString(x + w / 2, y + h / 2 - 3, code)
+        return False
+    bx = x + (w - bar.width) / 2
+    bar.drawOn(c, bx, y + h * 0.33)
+    c.drawCentredString(x + w / 2, y + h * 0.12, code)
+    return True
+
+
 def render_pdf(labels: Sequence[Dict[str, Any]], path: str) -> str:
     """Write the labels to one PDF, one A4 landscape page each.
 
@@ -598,9 +627,9 @@ def render_pdf(labels: Sequence[Dict[str, Any]], path: str) -> str:
         # Contact, then references.
         rh = 19 * mm
 
-        def row(ry, pairs):
+        def row(ry, pairs, end=None):
             n = len(pairs)
-            rw = (right - left - (n - 1) * gap) / n
+            rw = ((end or right) - left - (n - 1) * gap) / n
             rx = left
             for title, value in pairs:
                 box(rx, ry, rw, rh)
@@ -611,10 +640,18 @@ def render_pdf(labels: Sequence[Dict[str, Any]], path: str) -> str:
                          else [" ".join(vl)], "Helvetica-Bold", vs)
                 rx += rw + gap
 
-        # The order and job numbers are up in the header now, big.
+        # The order and job numbers are up in the header now, big. The
+        # bottom row is who to ask for, and the order number as a barcode -
+        # the one the Scan screen opens the order from, as on the worksheet.
         ry = by - gap - rh
+        code = str(lab.get("order_number") or "").strip().upper()
+        bar_w = (right - left - gap) * 0.42 if code else 0
         row(ry, [("Delivery contact", lab["contact_name"]),
-                 ("Contact phone", lab["contact_phone"])])
+                 ("Contact phone", lab["contact_phone"])],
+            end=right - (bar_w + gap if code else 0))
+        if code:
+            box(right - bar_w, ry, bar_w, rh)
+            _barcode(c, code, right - bar_w, ry, bar_w, rh)
         c.showPage()
     c.save()
     return path
