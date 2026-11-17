@@ -266,6 +266,15 @@ log, stock management and a customer database.
   checked, packed & labelled, dispatched / collected - ticked, initialled
   and dated); and the due date large with the order's barcode at the foot of
   every page.
+- **Wire and media cutting labels** — 3" × 2" (76 × 51 mm) labels for a
+  thermal label printer: one for the wire and one for the media of each
+  worksheet line (flyscreens left out), with the order number, customer,
+  line ("Line 2 of 5"), filter and size, the cut size large with how many,
+  and the due date - the same cut sizes as the worksheet. Choose the label
+  printer under Settings → Printing; they then print with Generate Output
+  (untick "Print them with Generate Output" to stop that), and View Order →
+  Actions → Cutting labels prints them again. Away from work they go to the
+  print station's label printer; orders raised on a phone get them there too.
 - **PRIORITY / RUSH banner** — a black band across the top of every
   worksheet page (filter, flyscreen and bag) for an order marked high
   priority ("PRIORITY") or due ASAP ("RUSH - DUE ASAP").
@@ -1558,6 +1567,7 @@ taf_order_app/
   po_import.py             Purchase-order import + phone inbox
   part_numbers.py          Part numbers, square metres, filter-type rules
   print_station.py         Printing on the work printers from anywhere: the station loop
+  cutting_labels.py        3" x 2" wire and media cutting labels
   pricing.py               Price lists, quote lines, Xero export
   invoice_wording.py       What each kind of filter says on a Xero invoice
   xero.py                  Talking to the xero function; the background sync

@@ -2985,6 +2985,61 @@ def _steps(app, gui, root):
             del app._print_here
     add("printing: at work, from anywhere", _print_at_work)
 
+    def _cutting_labels():
+        """View Order → Cutting labels: printed on the label printer when
+        there is one, opened when not; and the print station sends "@label"
+        jobs to its own label printer."""
+        printed, opened = [], []
+        saved = (dict(app._settings), gui._open_path, app._print_here)
+        app._print_here = lambda path, printer=None: printed.append(
+            (Path(path).name, printer)) or ""
+        gui._open_path = lambda p: opened.append(p)
+        row = {"source": "db", "db_id": "o-cut", "order_no": "865486",
+               "customer": "AIR DIFFUSION", "date_ordered": "06/11/26",
+               "date_due": "10/11/26",
+               "db_header": {"Order Number": "865486",
+                             "Customer Name": "AIR DIFFUSION",
+                             "Date Ordered": "06/11/26", "Date Due": "10/11/26"},
+               "db_items": [{"item_kind": "filter", "Filter Type": "V-form",
+                             "Media Type": "G4", "Short": 260, "Long": 440,
+                             "Channel": 50, "Quantity": 4}]}
+        try:
+            app._settings.update(print_route="here", print_station=False,
+                                 label_printer="M9 Label Printer")
+            app._cutting_labels_for_order(dict(row))
+            for _ in range(100):
+                root.update()
+                if printed:
+                    break
+                time.sleep(0.05)
+            assert printed and printed[0][1] == "M9 Label Printer" and \
+                printed[0][0].endswith("_cutting_labels.pdf"), printed
+            app._settings["label_printer"] = ""
+            app._cutting_labels_for_order(dict(row))
+            for _ in range(100):
+                root.update()
+                if opened:
+                    break
+                time.sleep(0.05)
+            assert opened and len(printed) == 1, (opened, printed)
+            # At the station: "@label" is its own label printer.
+            app._settings["label_printer"] = "M9 Label Printer"
+            assert app._station_print("x.pdf", "@label") == ""
+            assert printed[-1] == ("x.pdf", "M9 Label Printer"), printed
+            app._settings["label_printer"] = ""
+            assert "no label printer" in app._station_print("x.pdf", "@label")
+        finally:
+            app._settings.clear()
+            app._settings.update(saved[0])
+            gui._open_path = saved[1]
+            del app._print_here
+            for p in opened:
+                try:
+                    Path(p).unlink()
+                except OSError:
+                    pass
+    add("printing: wire and media cutting labels", _cutting_labels)
+
     def _cash_sale_invoice():
         """The cash sale account: the buyer's email asked for, a wrong one
         asked again, kept on the order, and Cancel invoicing nothing."""

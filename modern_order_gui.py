@@ -26,6 +26,7 @@ from taf_order_app import part_numbers as _pn
 from taf_order_app import stock_usage as _stock_usage
 from taf_order_app import pricing as _pricing
 from taf_order_app import print_station as _pstation
+from taf_order_app import cutting_labels as _cutlabels
 from taf_order_app import delivery as _delivery
 from taf_order_app import emails as _emails
 from taf_order_app import notify as _notify
@@ -18016,6 +18017,10 @@ class ModernOrderApp(tk.Frame):
 
         def _refresh_printers():
             names = self._list_printers()
+            label_cb.configure(values=["(none)"] + names)
+            label_cb.set(self._label_printer() if self._label_printer() in names
+                         else ("(none)" if not self._label_printer()
+                               else self._label_printer()))
             values = ["(System Default)"] + names
             self._printer_cb.configure(values=values)
             cur = self._printer_var.get()
@@ -18036,6 +18041,35 @@ class ModernOrderApp(tk.Frame):
                 f"Default printer set to: {printer or 'System Default'}")
 
         flat_btn(pr_row, "Save", _save_printer,
+                 bg=CGR, pady=4, padx=10, font=F_SM).pack(side="left")
+
+        # The label printer: wire and media cutting labels, 3" x 2".
+        tk.Label(pr_card, text="Label printer - wire and media cutting labels, "
+                               "3\" × 2\" (76 × 51 mm), one for each worksheet line.",
+                 bg=CCA, fg=CMU, font=F_SM, justify="left").pack(anchor="w",
+                                                               pady=(12, 4))
+        lp_row = tk.Frame(pr_card, bg=CCA)
+        lp_row.pack(anchor="w", fill="x")
+        label_cb = ttk.Combobox(lp_row, state="readonly", width=36,
+                                values=["(none)"])
+        label_cb.set(self._label_printer() or "(none)")
+        label_cb.pack(side="left", padx=(0, 8))
+        auto_var = tk.BooleanVar(value=self._cutting_labels_auto())
+        tk.Checkbutton(lp_row, text="Print them with Generate Output",
+                       variable=auto_var, bg=CCA, fg=CTX, selectcolor=CCA,
+                       activebackground=CCA, font=F_SM).pack(side="left",
+                                                             padx=(0, 8))
+
+        def _save_label_printer():
+            sel = label_cb.get().strip()
+            self._settings["label_printer"] = "" if sel in ("", "(none)") else sel
+            self._settings["cutting_labels_auto"] = bool(auto_var.get())
+            _save_settings(self._settings)
+            self.status_var.set(
+                f"Cutting labels print on: {self._label_printer()}"
+                if self._label_printer() else "No label printer set.")
+
+        flat_btn(lp_row, "Save", _save_label_printer,
                  bg=CGR, pady=4, padx=10, font=F_SM).pack(side="left")
 
         # Load printers on first open
@@ -29373,6 +29407,13 @@ class ModernOrderApp(tk.Frame):
                         if not perr:
                             # Auto-printed on generate → flag it printed.
                             self._flag_printed(db_id=new_order_id, json_path=json_path)
+                        # The wire and media cutting labels, on the label
+                        # printer, when there is one (or the station's).
+                        lerr = ""
+                        if (not perr and self._cutting_labels_auto()
+                                and (self._label_printer() or at_work)):
+                            _lp, lerr = self._print_cutting_labels(
+                                header, filter_items, base, grand_total=total)
 
                         def _done():
                             if perr:
@@ -29387,6 +29428,10 @@ class ModernOrderApp(tk.Frame):
                                     "at work.")
                             else:
                                 self.status_var.set("Order generated and sent to printer.")
+                            if lerr:
+                                self.status_var.set(
+                                    f"{self.status_var.get()} Cutting labels "
+                                    f"not printed: {lerr}")
                         self.master.after(0, _done)
 
                     threading.Thread(target=_print_worker, daemon=True).start()
@@ -31206,6 +31251,92 @@ class ModernOrderApp(tk.Frame):
                      "Is the print station on?")
         threading.Thread(target=_work, daemon=True).start()
 
+    # ── Wire and media cutting labels (3" x 2", thermal) ──────────────────
+
+    def _label_printer(self) -> str:
+        return str(self._settings.get("label_printer") or "").strip()
+
+    def _cutting_labels_auto(self) -> bool:
+        return self._settings.get("cutting_labels_auto", True) is not False
+
+    def _print_cutting_labels(self, header, filter_items, base="order",
+                              page_start=1, grand_total=None, force=False):
+        """Make the order's cutting labels and send them to the label
+        printer: this PC's, or - away from work - the print station's.
+        (pdf path or "", what went wrong or ""). Not on the window's thread.
+        Without a label printer they are made but not printed, unless away."""
+        labels = _cutlabels.labels_for_order(header, list(filter_items or []),
+                                            page_start, grand_total)
+        if not labels:
+            return "", ""
+        ORDERS_DIR.mkdir(parents=True, exist_ok=True)
+        path = str(ORDERS_DIR / f"{base}_cutting_labels.pdf")
+        try:
+            _cutlabels.render_pdf(labels, path)
+        except Exception as exc:
+            return "", f"The cutting labels could not be made: {exc}"
+        if self._prints_at_work():
+            title = (f"Cutting labels {header.get('Order Number', '')}").strip()
+            return path, self._send_to_work_printer(
+                path, title, where=(self._settings.get("print_work_station", ""),
+                                    "@label"))
+        printer = self._label_printer()
+        if not printer:
+            return path, ("" if not force else
+                          "No label printer is set - choose it in Settings → "
+                          "Printing.")
+        return path, self._print_here(path, printer)
+
+    def _cutting_labels_for_order(self, row):
+        """View Order → Cutting labels: made again, and printed on the label
+        printer - or opened, where this PC has none."""
+        header, items = self._order_header_items(row, "Cutting labels")
+        if items is None:
+            return
+        for it in items:
+            if "item_kind" not in it:
+                it["item_kind"] = "bag" if "product_type" in it else "filter"
+        filter_items, _bags, total = _bag_headers.worksheet_split(items)
+        name_hdr = {k: header.get(k, "") or row.get(
+            {"Customer Name": "customer", "Order Number": "order_no",
+             "Date Ordered": "date_ordered", "Date Due": "date_due"}[k], "")
+            for k in ("Customer Name", "Order Number", "Date Ordered", "Date Due")}
+        base = self._apply_pdf_name_template(name_hdr, "filter")
+        header = dict(header, **{k: v for k, v in name_hdr.items() if v})
+        if not filter_items:
+            messagebox.showinfo("Cutting labels", "This order has no wire or "
+                                "media to cut - bag lines are cut from the bag "
+                                "worksheet.")
+            return
+        printing = bool(self._label_printer() or self._prints_at_work())
+        self.status_var.set("Making the cutting labels…")
+
+        def _work():
+            path, err = self._print_cutting_labels(
+                header, filter_items, base, grand_total=total)
+
+            def _done():
+                if err:
+                    messagebox.showerror("Cutting labels", err)
+                    self.status_var.set("Cutting labels: not printed.")
+                elif not path:
+                    messagebox.showinfo("Cutting labels",
+                                        "Nothing on this order is cut from "
+                                        "wire or media.")
+                elif printing:
+                    self.status_var.set("Cutting labels sent to the label "
+                                        "printer.")
+                else:
+                    self.status_var.set("Cutting labels made - no label "
+                                        "printer is set, so here they are.")
+                    try:
+                        _open_path(path)
+                    except Exception:
+                        messagebox.showinfo("Cutting labels",
+                                            f"Saved to:\n{path}")
+            self.master.after(0, _done)
+        threading.Thread(target=_work, daemon=True).start()
+
     def _start_print_station(self) -> None:
         """Run the print station, when Settings says this PC is one."""
         if not self._settings.get("print_station"):
@@ -31233,9 +31364,19 @@ class ModernOrderApp(tk.Frame):
         self._print_station = _pstation.PrintStation(
             name, _db, self._list_printers,
             lambda: self._settings.get("default_printer", ""),
-            lambda path, printer: self._print_here(path, printer or None),
+            self._station_print,
             self._station_order_pdfs, _event)
         self._print_station.start()
+
+    def _station_print(self, path: str, printer: str) -> str:
+        """The station printing a job: on the printer it names, its usual
+        one when it names none, or - "@label" - this PC's label printer."""
+        if printer == "@label":
+            if not self._label_printer():
+                return ("The print station has no label printer set "
+                        "(Settings → Printing on that PC).")
+            return self._print_here(path, self._label_printer())
+        return self._print_here(path, printer or None)
 
     def _stop_print_station(self) -> None:
         st = getattr(self, "_print_station", None)
@@ -31281,6 +31422,20 @@ class ModernOrderApp(tk.Frame):
             paths = paths + [labels]
         if paths:
             self._flag_printed(db_id=order_id)
+            # The cutting labels, on this PC's label printer, as Generate
+            # Output does on the PC the order was raised on.
+            if self._cutting_labels_auto() and self._label_printer():
+                filter_items, _b, total = _bag_headers.worksheet_split(printing)
+                try:
+                    base = self._apply_pdf_name_template(name_hdr, "filter")
+                    cpath = str(ORDERS_DIR / f"{base}_cutting_labels.pdf")
+                    labs = _cutlabels.labels_for_order(header, filter_items,
+                                                       grand_total=total)
+                    if labs:
+                        _cutlabels.render_pdf(labs, cpath)
+                        self._print_here(cpath, self._label_printer())
+                except Exception:
+                    pass        # the worksheets still print
         return paths, ""
 
     PRINT_FILE_TYPES = [
@@ -31880,6 +32035,8 @@ class ModernOrderApp(tk.Frame):
             ("Packing and weights…",   _act(lambda r=row: self._packing_for_order(r))),
             ("Delivery labels…",       _act(lambda r=row: self._labels_for_order(r))),
             ("Pallet labels…",         _act(lambda r=row: self._pallet_labels_for_order(r))),
+            ("Cutting labels (3″ × 2″)",
+             _act(lambda r=row: self._cutting_labels_for_order(r))),
             None,
         ]
         menu_btn(foot, "Actions  ▾", actions + [
