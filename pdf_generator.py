@@ -409,6 +409,13 @@ def _draw_header(c, col_x, col_w, row_y, row_h,
         except Exception:
             pass  # never crash the PDF over a missing logo
 
+    # The text across the top sits in the same places on every kind of
+    # sheet - the flyscreen sheet's, whose wider columns leave the customer
+    # name room before DATE ORDERED. The filter sheet's own narrower columns
+    # put the date over the end of a long name.
+    col_x, col_w = _geom(_FS_CHARS, _FS_ROW_H)[:2]
+    last_idx = len(col_x) - 1
+
     _txt(c, cx(2), ry(1), cw(2,3,4,5), rh(1), cust, bold=True, size=13)
     _txt(c, cx(6), ry(1), cw(*range(6, last_idx+1)), rh(1),
          f"DATE ORDERED: {d_ord}", bold=True, size=11)
