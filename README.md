@@ -262,7 +262,7 @@ log, stock management and a customer database.
   bag page.
 - **Completion checklist on the worksheet** — where "Office use" was: each
   step of finishing the job (measurements double checked, made & quality
-  checked, packed & labelled, dispatched / collected, invoiced) with a box
+  checked, packed & labelled, dispatched / collected) with a box
   to tick, the initials of whoever did it and the date.
 - **Delivery labels** — the order number and job number are printed large
   in the top right, beside our name and address, so a wrap is found by its

@@ -186,7 +186,6 @@ COMPLETION_STEPS = (
     "Made & quality checked",
     "Packed & labelled",
     "Dispatched / collected",
-    "Invoiced",
 )
 
 
