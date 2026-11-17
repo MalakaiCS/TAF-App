@@ -228,6 +228,49 @@ REFUSE_MOVE = {"on": False}  # row-level security matching nothing
 
 
 
+def _code_pngs() -> dict:
+    """A QR code and a Code 128 barcode - the worksheet's kind - as PNG data
+    URLs, for the phone's reader to read. Empty where the tools to draw them
+    are missing (the QR code needs the qrcode package)."""
+    import base64
+    import io
+    out = {}
+    try:
+        from PIL import Image, ImageDraw
+    except Exception:
+        return out
+    try:
+        import qrcode
+        buf = io.BytesIO()
+        qrcode.make("PO-8842").save(buf, "PNG")
+        out["qr"] = "data:image/png;base64," + base64.b64encode(buf.getvalue()).decode()
+        buf = io.BytesIO()
+        qrcode.make("TAF-ON-0002").save(buf, "PNG")
+        out["qr_order"] = "data:image/png;base64," + base64.b64encode(buf.getvalue()).decode()
+    except Exception:
+        pass
+    try:
+        from reportlab.graphics.barcode import code128
+        bc = code128.Code128("865486")
+        bc.validate(); bc.encode(); bc.decompose()
+        unit, quiet, h = 3, 30, 120
+        widths = [(ch.isupper(), ord(ch.upper()) - 64) for ch in bc.decomposed]
+        total = quiet * 2 * unit + sum(w for _b, w in widths) * unit
+        img = Image.new("L", (total, h + 40), 255)
+        d = ImageDraw.Draw(img)
+        x = quiet * unit
+        for bar, w in widths:
+            if bar:
+                d.rectangle([x, 20, x + w * unit - 1, 20 + h], fill=0)
+            x += w * unit
+        buf = io.BytesIO()
+        img.save(buf, "PNG")
+        out["code128"] = "data:image/png;base64," + base64.b64encode(buf.getvalue()).decode()
+    except Exception:
+        pass
+    return out
+
+
 def _png(width: int, height: int) -> bytes:
     """A plain, wide photo - wider than a card, to show it is shrunk to fit
     rather than cropped."""
@@ -1618,6 +1661,36 @@ def run() -> int:
               len(UPLOADED) == uploads + 2 and UPLOADED[-1] == f"stock-images/s-new-{n_before}.jpg")
         STOCK[:] = [s for s in STOCK if not str(s["id"]).startswith("s-new-")]
 
+        print("\n── scanning with the phone's camera ──")
+        codes = {k: v for k, v in _code_pngs().items() if k != "qr_order"}
+        read = page.evaluate("""async (codes) => {
+            const det = await TAFAPP._scan.zxing();
+            const out = {};
+            for (const [name, url] of Object.entries(codes)) {
+                const img = new Image();
+                img.src = url;
+                await img.decode();
+                const hits = await det.detect(img);
+                out[name] = hits.length ? hits[0].rawValue : "";
+            }
+            return out;
+        }""", codes)
+        check("the camera reader (ZXing, for phones with no reader of their "
+              "own - every iPhone) loads with the app", "qr" not in codes
+              or bool(page.evaluate("!!window.ZXing")))
+        if "qr" in codes:
+            check("and reads a QR code", read.get("qr") == "PO-8842", str(read))
+        if "code128" in codes:
+            check("and the Code 128 barcode on worksheets and labels",
+                  read.get("code128") == "865486", str(read))
+        page.click('#tabs button[data-tab="scan"]')
+        page.wait_for_selector("#screen .scanbox", state="attached")
+        check("the camera button is there whether or not the browser can read "
+              "codes itself", page.locator("#screen button",
+                                           has_text="Use the camera").count() == 1
+              and not page.locator("#screen button",
+                                   has_text="Use the camera").is_disabled())
+
         print("\n── printing at work, from the phone ──")
         page.click('#tabs button[data-tab="print"]')
         page.wait_for_selector("#print-send")
@@ -2236,18 +2309,44 @@ def run() -> int:
         check("a code that means nothing says so, rather than nothing at all",
               "Nothing here answers to that code" in newest().inner_text())
 
-        # Every iPhone today, and Firefox. The camera button must not sit
-        # there doing nothing with no explanation.
+        # Every iPhone today, and Firefox: no reader of their own, so ZXing
+        # reads for them - the camera button is offered all the same.
         page.evaluate("window.__BD = window.BarcodeDetector;"
                       "delete window.BarcodeDetector;")
         page.click('#tabs button[data-tab="orders"]')
         page.click('#tabs button[data-tab="scan"]')
         page.wait_for_selector("#screen .code")
-        check("a browser that cannot read barcodes says what to do instead",
-              "cannot read a barcode" in page.locator("#screen").inner_text())
-        check("and does not offer a camera button that would do nothing",
-              page.locator('#screen button:has-text("Use the camera")')
-              .is_disabled())
+        check("a browser with no barcode reader of its own still offers the "
+              "camera (ZXing reads for it)",
+              not page.locator('#screen button:has-text("Use the camera")')
+              .is_disabled()
+              and "cannot read a barcode" not in page.locator("#screen").inner_text())
+        qr = _code_pngs().get("qr_order")
+        if qr:
+            # The whole way round, as on an iPhone: a camera showing a QR
+            # code, no BarcodeDetector, ZXing reading it, the order found.
+            page.evaluate("""async (url) => {
+              const img = new Image(); img.src = url; await img.decode();
+              window.__streams = [];
+              navigator.mediaDevices.getUserMedia = function () {
+                const c = document.createElement("canvas");
+                c.width = 640; c.height = 480;
+                const g = c.getContext("2d");
+                g.fillStyle = "#fff"; g.fillRect(0, 0, 640, 480);
+                g.drawImage(img, 170, 90, 300, 300);
+                const s = c.captureStream(5);
+                window.__streams.push(s);
+                setInterval(() => g.fillRect(0, 0, 1, 1), 200);  // keep frames coming
+                return Promise.resolve(s);
+              };
+            }""", qr)
+            page.click('#screen button:has-text("Use the camera")')
+            page.wait_for_selector('#scans .card:has-text("TAF-ON-0002")',
+                                   timeout=15000)
+            check("an iPhone's camera reads a QR code and opens what it is for",
+                  "CAS - Tweed" in newest().inner_text())
+            page.click('#screen button:has-text("Stop the camera")')
+            page.wait_for_timeout(200)
 
         print("\n── the camera ──")
         # A stubbed detector and a canvas for a camera: the point being

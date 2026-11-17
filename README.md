@@ -742,11 +742,13 @@ asks, waits a minute, then signs out — so whoever picks it up next isn't
 signed in as the last person. It won't do that over work that hasn't been
 sent: that would strand it under an account nobody else can send it with.
 
-**Scan** reads the Code 128 barcodes the app already prints — on a worksheet,
-on a rack label — through the phone's camera, and opens the order or the stock
-item it names. There's a box to type or scan a code into as well: a handheld
-scanner in keyboard mode types straight into it, and it's the way in on any
-browser without a barcode reader, which today means every iPhone. What a code
+**Scan** reads QR codes and the Code 128 barcodes the app prints — on a
+worksheet, a delivery label, a rack label — through the phone's camera, on
+iPhones and Android alike, and opens the order or the stock item it names.
+Where the browser has its own reader (Chrome on Android) that is used; on
+iPhones ZXing (`docs/app/vendor/zxing.min.js`, Apache 2.0) does the reading,
+loaded the first time the camera is used. There's a box to type or scan a code
+into as well: a handheld scanner in keyboard mode types straight into it. What a code
 means is decided by `resolve_scan` in the database, so the handheld, the phone
 and the desktop can't drift apart. Out of signal it still resolves anything the
 phone has already seen.

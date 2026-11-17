@@ -18,3 +18,13 @@ invoked as a separate, unmodified executable.
 The complete corresponding source code for the bundled SumatraPDF version is
 available at the repository above. A copy can also be obtained from the
 maintainers of this application on request.
+
+ZXing ("Zebra Crossing") for JavaScript
+----------------------------------------
+The web/phone app (docs/app/vendor/zxing.min.js) includes @zxing/library
+0.21.3, unmodified, to read QR codes and barcodes through the phone's camera
+on browsers that cannot read them themselves (every iPhone).
+
+Copyright the ZXing authors. Licensed under the Apache License, Version 2.0;
+the full licence is in docs/app/vendor/ZXING-LICENSE.txt.
+Source: https://github.com/zxing-js/library

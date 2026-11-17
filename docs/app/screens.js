@@ -3051,9 +3051,12 @@ var TAFAPP = (function () {
      Two ways in, because a factory has both. The camera, where the browser
      can read one; and a plain text box, which is what a Zebra handheld in
      keyboard mode types into anyway - it sends the digits and an Enter, so
-     the box below works with a gun without knowing a gun exists. That box is
-     also the answer on any browser without BarcodeDetector, which today
-     means every iPhone. */
+     the box below works with a gun without knowing a gun exists.
+
+     The camera reads QR codes and barcodes alike. Where the browser has its
+     own reader (BarcodeDetector - Chrome on Android) that is used; where it
+     has none - every iPhone - ZXing does the reading, loaded the first time
+     it is needed (vendor/zxing.min.js). */
 
   var SCAN = { stop: null, last: "", at: 0, recent: [] };
 
@@ -3099,17 +3102,94 @@ var TAFAPP = (function () {
             + "once so it has the cursor, then scan." })]));
     main.appendChild(out);
     drawRecent(out);
-    if (!window.BarcodeDetector) {
-      camMsg.textContent = "This browser cannot read a barcode through the "
-        + "camera, so type the code in below or use a handheld scanner.";
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+      camMsg.textContent = "This browser will not hand over the camera, so "
+        + "type the code in below or use a handheld scanner.";
       camBtn.disabled = true;
     }
     typed.focus();
   };
 
-  function startCamera(box, msg, found) {
+  /* Whatever reads codes on this phone: the browser's own, or ZXing. Both
+     answer detect(video) with [{rawValue}], so the camera loop below does
+     not care which. */
+  function getDetector() {
     var Detector = window.BarcodeDetector;
-    if (!Detector) { return; }
+    if (Detector) {
+      return formats(Detector).then(function (want) {
+        // A browser that has the API but none of our formats (some desktop
+        // builds) is no use: fall back to ZXing.
+        if (Detector.getSupportedFormats && !want.length) {
+          return loadZxing().then(zxingDetector);
+        }
+        return want.length ? new Detector({ formats: want }) : new Detector();
+      });
+    }
+    return loadZxing().then(zxingDetector);
+  }
+
+  var ZXING_SRC = "vendor/zxing.min.js";
+
+  function loadZxing() {
+    if (window.ZXing) { return Promise.resolve(window.ZXing); }
+    if (loadZxing.pending) { return loadZxing.pending; }
+    loadZxing.pending = new Promise(function (resolve, reject) {
+      var tag = document.createElement("script");
+      tag.src = ZXING_SRC;
+      tag.onload = function () {
+        if (window.ZXing) { resolve(window.ZXing); return; }
+        loadZxing.pending = null;
+        reject(new Error("The code reader did not start."));
+      };
+      tag.onerror = function () {
+        loadZxing.pending = null;
+        tag.remove();
+        reject(new Error("The code reader did not load - check the signal "
+                         + "and try again."));
+      };
+      document.head.appendChild(tag);
+    });
+    return loadZxing.pending;
+  }
+
+  function zxingDetector(Z) {
+    var hints = new Map();
+    hints.set(Z.DecodeHintType.POSSIBLE_FORMATS, [
+      Z.BarcodeFormat.QR_CODE, Z.BarcodeFormat.CODE_128,
+      Z.BarcodeFormat.CODE_39, Z.BarcodeFormat.EAN_13]);
+    hints.set(Z.DecodeHintType.TRY_HARDER, true);
+    var reader = new Z.MultiFormatReader();
+    reader.setHints(hints);
+    var canvas = document.createElement("canvas");
+    var ctx = canvas.getContext("2d", { willReadFrequently: true });
+    return {
+      detect: function (source) {
+        var w = source.videoWidth || source.naturalWidth || source.width || 0;
+        var h = source.videoHeight || source.naturalHeight || source.height || 0;
+        if (!w || !h) { return Promise.resolve([]); }
+        // A phone camera is 1920 wide or more; a third of that reads a label
+        // held in the box just as well, and is what keeps an older iPhone
+        // from stuttering.
+        var scale = Math.min(1, 1100 / w);
+        canvas.width = Math.round(w * scale);
+        canvas.height = Math.round(h * scale);
+        ctx.drawImage(source, 0, 0, canvas.width, canvas.height);
+        try {
+          var bitmap = new Z.BinaryBitmap(new Z.HybridBinarizer(
+            new Z.HTMLCanvasElementLuminanceSource(canvas)));
+          var got = reader.decode(bitmap, hints);
+          return Promise.resolve([{ rawValue: got.getText(),
+                                    format: String(got.getBarcodeFormat()) }]);
+        } catch (e) {
+          return Promise.resolve([]);   // nothing in this frame
+        } finally {
+          reader.reset();
+        }
+      }
+    };
+  }
+
+  function startCamera(box, msg, found) {
     msg.textContent = "Opening the camera…";
     var media = navigator.mediaDevices;
     if (!media || !media.getUserMedia) {
@@ -3125,11 +3205,15 @@ var TAFAPP = (function () {
         msg.textContent = "Hold the code inside the box.";
         var play = video.play();
         if (play && play.catch) { play.catch(function () {}); }
-        return formats(Detector).then(function (want) {
-          var det = want.length ? new Detector({ formats: want })
-                                : new Detector();
+        var reading = false;
+        return getDetector().then(function (det) {
           var timer = setInterval(function () {
+            // ZXing reads on this thread: never start a frame before the
+            // last one has finished.
+            if (reading) { return; }
+            reading = true;
             det.detect(video).then(function (hits) {
+              reading = false;
               if (!hits || !hits.length) { return; }
               var code = String(hits[0].rawValue || "").trim();
               // A camera sees the same label thirty times a second. Without
@@ -3142,8 +3226,8 @@ var TAFAPP = (function () {
                 if (navigator.vibrate) { navigator.vibrate(40); }
                 found(code);
               }
-            }).catch(function () { /* a blurred frame is not an error */ });
-          }, 300);
+            }).catch(function () { reading = false; /* a blurred frame */ });
+          }, 250);
           SCAN.stop = function () {
             clearInterval(timer);
             stream.getTracks().forEach(function (t) { t.stop(); });
@@ -3154,6 +3238,12 @@ var TAFAPP = (function () {
         });
       })
       .catch(function (err) {
+        var video = box.querySelector("video");
+        if (video && video.srcObject) {
+          video.srcObject.getTracks().forEach(function (t) { t.stop(); });
+          video.srcObject = null;
+          box.classList.add("hidden");
+        }
         msg.textContent = "The camera did not open (" + (err.message || err)
           + "). Type the code in instead.";
       });
@@ -5885,6 +5975,8 @@ var TAFAPP = (function () {
               forgetSops: function () { SOPS = null; },
               pollChats: pollChats },
     _print: { choices: printerChoices, on: stationOn, status: printStatus },
+    _scan: { detector: getDetector,
+             zxing: function () { return loadZxing().then(zxingDetector); } },
     _stock: { types: STOCK_TYPES, units: STOCK_UNITS, duplicate: function (r, n, k) {
                 var hit = stockDuplicate(r, n, k); return hit ? hit.id : null; } },
     _route: { suggest: function (s) { return suggestRoute(s).map(function (x) { return x.id; }); },

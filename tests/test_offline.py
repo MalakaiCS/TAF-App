@@ -267,11 +267,23 @@ def test_one_label_is_not_thirty_lookups():
 
 
 def test_there_is_a_way_in_without_a_camera():
-    """Every iPhone today has no BarcodeDetector, and a handheld scanner in
-    keyboard mode types into a text box anyway."""
+    """A handheld scanner in keyboard mode types into a text box, and a
+    browser that will not hand over the camera says to type the code."""
     src = _screens()
-    assert "cannot read a barcode through the" in src
+    assert "will not hand over the camera" in src
     assert 'cls: "code"' in src, "there is no box to type or scan a code into"
+
+
+def test_an_iphone_reads_codes_through_its_camera_too():
+    """Every iPhone has no BarcodeDetector: ZXing, shipped with the app,
+    reads QR codes and barcodes for it."""
+    from pathlib import Path
+    src = _screens()
+    assert "loadZxing" in src and "vendor/zxing.min.js" in src
+    assert "QR_CODE" in src and "CODE_128" in src
+    vendor = Path(__file__).resolve().parent.parent / "docs" / "app" / "vendor"
+    assert (vendor / "zxing.min.js").stat().st_size > 100000
+    assert (vendor / "ZXING-LICENSE.txt").exists()
 
 
 if __name__ == "__main__":
