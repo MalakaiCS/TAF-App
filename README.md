@@ -260,6 +260,13 @@ log, stock management and a customer database.
   G 1112 from the other end". The New Order screen shows the total too.
 - **Due date on the bag worksheet** — large and bold at the foot of every
   bag page.
+- **Completion checklist on the worksheet** — where "Office use" was: each
+  step of finishing the job (measurements double checked, made & quality
+  checked, packed & labelled, dispatched / collected, invoiced) with a box
+  to tick, the initials of whoever did it and the date.
+- **Delivery labels** — the order number and job number are printed large
+  in the top right, beside our name and address, so a wrap is found by its
+  numbers at a glance.
 - **Pallet labels** — for an order going out on pallets: say how many
   pallets and how many of each line go on each (or spread them evenly), and
   each pallet gets an A4 sheet: `Pallet 1 of 3`, the filters on it, the

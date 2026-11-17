@@ -484,37 +484,56 @@ def render_pdf(labels: Sequence[Dict[str, Any]], path: str) -> str:
     gap = 4 * mm
     for lab in labels:
         c.setFillColor(black)
-        # Header: logo and From on the left, title and contact on the right.
-        hh = 36 * mm
+        # Header: logo, From, phone and ABN on the left; the order and job
+        # numbers on the right, big - what the label is looked up by.
+        hh = 60 * mm
         y0 = top - hh
         box(left, y0, right - left, hh)
-        split_x = left + (right - left) * 0.62
+        split_x = left + (right - left) * 0.56
         c.setStrokeColor(grey)
         c.line(split_x, y0, split_x, top)
         if logo:
-            lh = 22 * mm
+            lh = 30 * mm
             c.drawImage(logo, left + 3 * mm, top - 3 * mm - lh,
                         width=lh * 2.985, height=lh,
                         preserveAspectRatio=True, mask="auto")
+        c.setFont("Helvetica-Bold", 15)
+        c.drawRightString(split_x - 4 * mm, top - 9 * mm, "Delivery label")
         from_w = split_x - left - 8 * mm - c.stringWidth("FROM  ",
                                                           "Helvetica-Bold", 9)
         fsize, flines = fit(lab["from_address"], "Helvetica", 10, from_w,
                             min_size=7, max_lines=2)
-        fy = y0 + 4 * mm + (len(flines) - 1) * fsize * 1.15
+        contact = f"Phone {lab['phone']}   ·   ABN {lab['abn']}"
+        cy = y0 + 4 * mm
+        c.setFont("Helvetica", 9.5)
+        c.drawString(left + 4 * mm, cy, contact)
+        fy = cy + 5.5 * mm + (len(flines) - 1) * fsize * 1.15
         c.setFont("Helvetica-Bold", 9)
         c.drawString(left + 4 * mm, fy, "FROM")
         lines_at(left + 4 * mm + c.stringWidth("FROM  ", "Helvetica-Bold", 9),
                  fy, flines, "Helvetica", fsize)
-        c.setFont("Helvetica-Bold", 26)
-        c.drawRightString(right - 5 * mm, top - 13 * mm, "Delivery label")
-        c.setFont("Helvetica", 11)
-        phone_w = c.stringWidth(lab["phone"], "Helvetica-Bold", 12)
-        c.drawRightString(right - 5 * mm - phone_w - 2 * mm, top - 22 * mm,
-                          "Phone")
-        c.setFont("Helvetica-Bold", 12)
-        c.drawRightString(right - 5 * mm, top - 22 * mm, lab["phone"])
-        c.setFont("Helvetica", 10)
-        c.drawRightString(right - 5 * mm, top - 29 * mm, f"ABN {lab['abn']}")
+
+        rw = right - split_x - 9 * mm
+        half = hh / 2
+        for k, (title, value) in enumerate((
+                ("Order Number", lab["order_number"]),
+                ("Job Number", lab["job_number"]))):
+            cy0 = top - (k + 1) * half
+            if k:
+                c.setStrokeColor(grey)
+                c.line(split_x, cy0 + half, right, cy0 + half)
+            caption(split_x + 4.5 * mm, cy0 + half - 6.5 * mm, title)
+            size, vl = fit(value or "", "Helvetica-Bold", 44, rw,
+                           min_size=16, max_lines=1)
+            if len(vl) > 1 or size < 24:
+                # A long one reads bigger on two lines than squeezed on one.
+                s2, l2 = fit(value or "", "Helvetica-Bold", 24, rw,
+                             min_size=10, max_lines=2)
+                if len(vl) > 1 or (len(l2) <= 2 and s2 > size):
+                    size, vl = s2, l2
+            vy = cy0 + 5 * mm + (len(vl) - 1) * size * 1.05
+            lines_at(split_x + 4.5 * mm, vy, vl, "Helvetica-Bold", size,
+                     lead=1.05)
 
         # Deliver to: name, address, locality. Shrinks to fit, never clips.
         dh = 46 * mm
@@ -592,12 +611,10 @@ def render_pdf(labels: Sequence[Dict[str, Any]], path: str) -> str:
                          else [" ".join(vl)], "Helvetica-Bold", vs)
                 rx += rw + gap
 
+        # The order and job numbers are up in the header now, big.
         ry = by - gap - rh
         row(ry, [("Delivery contact", lab["contact_name"]),
                  ("Contact phone", lab["contact_phone"])])
-        ry -= gap + rh
-        row(ry, [("Order Number", lab["order_number"]),
-                 ("Job Number", lab["job_number"])])
         c.showPage()
     c.save()
     return path

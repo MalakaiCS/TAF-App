@@ -176,6 +176,66 @@ def _txt(c, x, y, w, h, text, bold=False, size=8, align="left", valign="center",
         else: c.drawString(x + 2, ty, line)
 
 
+# ── Completion checklist ──────────────────────────────────────────────────────
+# Where the "office use" box was: each step of finishing the job, ticked,
+# initialled and dated by whoever did it - so a sheet in the folder says who
+# signed off what, and when, not just that somebody did.
+
+COMPLETION_STEPS = (
+    "Measurements double checked",
+    "Made & quality checked",
+    "Packed & labelled",
+    "Dispatched / collected",
+    "Invoiced",
+)
+
+
+def _completion_checklist(c, x, top, w, steps=COMPLETION_STEPS):
+    """The checklist, its top-left corner at (x, top). Returns its bottom."""
+    title_h, head_h, row_h = 15.0, 12.0, 20.0
+    # Step | Done (a box to tick) | Initials | Date
+    cols = [w * 0.50, w * 0.12, w * 0.17, w * 0.21]
+    xs = [x]
+    for cwid in cols[:-1]:
+        xs.append(xs[-1] + cwid)
+
+    def words(x0, y0, wid, h, text, size, bold=False, centre=False):
+        font = "Helvetica-Bold" if bold else "Helvetica"
+        c.setFont(font, size)
+        c.setFillColor(BLACK)
+        base = y0 + (h - size * 0.7) / 2
+        if centre:
+            c.drawCentredString(x0 + wid / 2, base, text)
+        else:
+            c.drawString(x0 + 3, base, text)
+
+    y = top - title_h
+    c.setStrokeColor(BLACK)
+    words(x, y, w, title_h, "COMPLETION CHECKLIST", 8, bold=True, centre=True)
+    _h(c, x, y, x + w, LW_MEDIUM)
+    y -= head_h
+    for xi, cwid, label in zip(xs, cols, ("", "DONE", "INITIALS", "DATE")):
+        if label:
+            words(xi, y, cwid, head_h, label, 6.5, bold=True, centre=True)
+    for xi in xs[1:]:
+        _v(c, xi, y, y + head_h)
+    _h(c, x, y, x + w)
+    for step in steps:
+        y -= row_h
+        for xi in xs[1:]:
+            _v(c, xi, y, y + row_h)
+        words(x, y, cols[0], row_h, step.upper(), 6.2)
+        # The tick box, square, in the middle of DONE.
+        side = row_h * 0.6
+        _box(c, xs[1] + (cols[1] - side) / 2, y + (row_h - side) / 2,
+             side, side, lw=LW_MEDIUM)
+        # Where the date goes, so it is written the same way every time.
+        words(xs[3], y, cols[3], row_h, "/        /", 8, centre=True)
+        _h(c, x, y, x + w)
+    _box(c, x, y, w, top - y, lw=LW_MEDIUM)
+    return y
+
+
 # ── The blocks under Notes ────────────────────────────────────────────────────
 
 def _block(c, x, top, w, title, lines, floor, size=7.5):
@@ -487,17 +547,8 @@ def _draw_vorf(c, header, item, page_num, total_pages, d_ord, d_due,
                  calculator=can_mark, item=item,
                  prefer=header.get("_frame_prefer", ""))
 
-    # ── Bottom table rows 24-26 (B-F) — exact borders ─────────────────────
-    # Row 24: single cell B-F
-    _box(c, cx('B'), ry(24), cw('B','C','D','E','F'), rh(24))
-    _txt(c, cx('B'), ry(24), cw('B','C','D','E','F'), rh(24), "OFFICE USE", size=7, align="center")
-    # Row 25: cell B-E  +  cell F
-    _box(c, cx('B'), ry(25), cw('B','C','D','E'), rh(25))
-    _txt(c, cx('B'), ry(25), cw('B','C','D','E'), rh(25), "MEASUREMENTS DOUBLE CHECKED", size=6)
-    _box(c, cx('F'), ry(25), cw('F'), rh(25))
-    # Row 26: single cell B-F
-    _box(c, cx('B'), ry(26), cw('B','C','D','E','F'), rh(26))
-    _txt(c, cx('B'), ry(26), cw('B','C','D','E','F'), rh(26), "INVOICED", size=7, align="center")
+    # ── Completion checklist (B-F, from row 24 down) ──────────────────────
+    _completion_checklist(c, cx('B'), yt(24), cw('B','C','D','E','F'))
 
     draw_order_barcode(c, ord_n)
 
@@ -586,14 +637,8 @@ def _draw_fs(c, header, item, page_num, total_pages, d_ord, d_due,
     _under_notes(c, cx('G'), yb(18) - 3, cw('G','H','I','J','K','L'), ctx,
                  calculator=False)
 
-    # ── Bottom table rows 24-26 (B-F) — matches VorF ─────────────────────
-    _box(c, cx('B'), ry(24), cw('B','C','D','E','F'), rh(24))
-    _txt(c, cx('B'), ry(24), cw('B','C','D','E','F'), rh(24), "OFFICE USE", size=7, align="center")
-    _box(c, cx('B'), ry(25), cw('B','C','D','E'), rh(25))
-    _txt(c, cx('B'), ry(25), cw('B','C','D','E'), rh(25), "MEASUREMENTS DOUBLE CHECKED", size=6)
-    _box(c, cx('F'), ry(25), cw('F'), rh(25))
-    _box(c, cx('B'), ry(26), cw('B','C','D','E','F'), rh(26))
-    _txt(c, cx('B'), ry(26), cw('B','C','D','E','F'), rh(26), "INVOICED", size=7, align="center")
+    # ── Completion checklist (B-F, from row 24 down) — matches VorF ──────
+    _completion_checklist(c, cx('B'), yt(24), cw('B','C','D','E','F'))
 
     draw_order_barcode(c, ord_n)
 
