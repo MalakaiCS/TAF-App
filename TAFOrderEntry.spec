@@ -24,6 +24,14 @@ MACOS   = sys.platform == 'darwin'
 pdf_helper_datas = ([('SumatraPDF.exe', '.')]
                     if WINDOWS and os.path.exists('SumatraPDF.exe') else [])
 
+# reportlab's barcode package loads every kind of barcode it knows the
+# moment any one of them is imported - code93, the QR encoder and the rest -
+# in a way PyInstaller does not follow. Leave one out and Code 128 will not
+# import either, and every barcode the app prints (worksheets, delivery and
+# bag sheets, stock labels) silently goes missing. So all of it, by name.
+from PyInstaller.utils.hooks import collect_submodules
+barcode_imports = collect_submodules('reportlab.graphics.barcode')
+
 # pywin32 is not installed off Windows and never will be. Listing it as a
 # hidden import there is not a warning, it is a build that stops.
 windows_imports = ['win32com', 'win32com.client', 'win32print', 'win32api',
@@ -138,7 +146,7 @@ a = Analysis(
         'queue',
         'threading',
         'calendar',
-    ] + windows_imports,
+    ] + barcode_imports + windows_imports,
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],

@@ -33036,8 +33036,37 @@ def main():
     # opening a window nobody is there to close.
     if "--version" in sys.argv:
         print(f"TAF Order Entry {APP_VERSION}")
+        problem = _bundle_problem()
+        if problem:
+            print(f"MISSING FROM THE BUNDLE: {problem}")
+            sys.exit(1)
         return
     _start_app()
+
+
+def _bundle_problem() -> str:
+    """What the packaged app would be missing when it came to print, or "".
+    These are only loaded at the moment something is printed, so a bundle
+    without them starts, looks fine, and leaves every barcode off the page
+    without saying so - which is what --version is here to catch."""
+    import io
+    try:
+        from reportlab.pdfgen import canvas as _canvas
+        import pdf_generator
+        c = _canvas.Canvas(io.BytesIO())
+        if not pdf_generator.draw_order_barcode(c, "PO-8842"):
+            from reportlab.graphics.barcode import code128   # says what is missing
+            code128.Code128("PO-8842")
+            return "the worksheet barcode could not be drawn"
+    except Exception as exc:
+        return f"barcodes ({type(exc).__name__}: {exc})"
+    for name in ("pypdf", "PIL.Image", "taf_order_app.cutting_labels",
+                 "taf_order_app.delivery_labels", "taf_order_app.labels"):
+        try:
+            __import__(name)
+        except Exception as exc:
+            return f"{name} ({type(exc).__name__}: {exc})"
+    return ""
 
 
 if __name__ == "__main__":

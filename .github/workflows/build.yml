@@ -150,6 +150,22 @@ jobs:
       - name: Build app (PyInstaller)
         run: pyinstaller --noconfirm --clean TAFOrderEntry.spec
 
+      # The packaged app checks it has everything it only loads when it
+      # prints - the barcodes above all, which once went missing from the
+      # bundle and left every worksheet without one, silently.
+      - name: It has everything it prints with
+        timeout-minutes: 5
+        shell: pwsh
+        run: |
+          $p = Start-Process -FilePath "dist\TAFOrderEntry\TAFOrderEntry.exe" `
+                -ArgumentList "--version" -Wait -PassThru -NoNewWindow `
+                -RedirectStandardOutput out.txt
+          Get-Content out.txt
+          if ($p.ExitCode -ne 0) {
+            Write-Error "The packaged app is missing something it prints with (exit $($p.ExitCode))."
+            exit 1
+          }
+
       - name: Install Inno Setup
         run: choco install innosetup -y --no-progress
 
