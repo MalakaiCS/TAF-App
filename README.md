@@ -261,9 +261,9 @@ log, stock management and a customer database.
 - **Due date on the bag worksheet** — large and bold at the foot of every
   bag page.
 - **Completion checklist on the worksheet** — every step of the job in one
-  table where the production tick boxes and "Office use" were: measurements
-  double checked, marked / cut / drilled channel, assembled, quality checked,
-  packed & labelled, dispatched / collected (a flyscreen page: cut
+  table where the production tick boxes and "Office use" were: marked / cut
+  / drilled channel, assembled, quality checked, packed & labelled,
+  dispatched / collected (a flyscreen page: cut
   aluminium, assembled, loaded, packed & labelled, checked) - each with a box
   to tick, the initials of whoever did it and the date.
 - **Delivery labels** — the order number and job number are printed large

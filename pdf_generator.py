@@ -182,7 +182,6 @@ def _txt(c, x, y, w, h, text, bold=False, size=8, align="left", valign="center",
 # the folder says who did what, and when, not just that it was done.
 
 VORF_STEPS = (
-    "Measurements double checked",
     "Marked channel",
     "Cut channel",
     "Drilled channel",
@@ -191,8 +190,11 @@ VORF_STEPS = (
     "Packed & labelled",
     "Dispatched / collected",
 )
+# Clear space between the checklist and the job details and wrapping boxes
+# beside it, so the two read as separate things.
+CHECKLIST_GAP = 22.0
+
 FS_STEPS = (
-    "Measurements double checked",
     "Cut aluminium",
     "Assembled",
     "Loaded",
@@ -205,8 +207,8 @@ FS_STEPS = (
 def _completion_checklist(c, x, top, w, steps, height):
     """The checklist in a box `w` wide and at most `height` tall, its top-left
     corner at (x, top). Returns its bottom."""
-    head_h = 13.0
-    row_h = min(21.0, (height - head_h) / max(1, len(steps)))
+    head_h = 14.0
+    row_h = min(24.0, (height - head_h) / max(1, len(steps)))
     # Step | Done (a box to tick) | Initials | Date
     cols = [w * 0.50, w * 0.12, w * 0.17, w * 0.21]
     xs = [x]
@@ -256,7 +258,7 @@ def _block(c, x, top, w, title, lines, floor, size=7.5):
     `floor` rather than drawing over whatever is below, and says so.
     Returns the y of its bottom edge."""
     from reportlab.lib.utils import simpleSplit
-    pad, lead = 3.0, size + 1.6
+    pad, lead = 5.0, size + 2.6
     rows = []
     for text, bold in lines:
         font = "Helvetica-Bold" if bold else "Helvetica"
@@ -266,13 +268,13 @@ def _block(c, x, top, w, title, lines, floor, size=7.5):
     if len(rows) > room:
         rows = rows[:max(0, room - 1)] + [("(more on screen in the app)",
                                            "Helvetica-Oblique")]
-    h = 2 * pad + 11 + lead * len(rows)
+    h = 2 * pad + 13 + lead * len(rows)
     bottom = top - h
     _box(c, x, bottom, w, h)
     c.setFillColor(BLACK)
     c.setFont("Helvetica-Bold", 8)
     c.drawString(x + pad, top - pad - 7, title)
-    y = top - pad - 11 - size
+    y = top - pad - 13 - size
     for text, font in rows:
         c.setFont(font, size)
         c.drawString(x + pad, y, text)
@@ -304,7 +306,7 @@ def _under_notes(c, x, top, w, ctx, calculator, item=None, prefer=""):
                                    ctx.get("order_method") or "") + \
                 list(ctx.get("channel_lines") or [])
             if lines:
-                _block(c, x, bottom - 4, w, "FILTER CALCULATOR", lines, floor)
+                _block(c, x, bottom - 12, w, "FILTER CALCULATOR", lines, floor)
     except Exception:
         pass                       # never lose a worksheet over its extras
 
@@ -551,8 +553,9 @@ def _draw_vorf(c, header, item, page_num, total_pages, d_ord, d_due,
 
     # Every step, ticked, initialled and dated, from row 12 down to just
     # above BRACE REQ?.
-    done_y = _completion_checklist(c, cx('B'), yt(12), cw('B','C','D','E','F'),
-                                   VORF_STEPS, 13.0 + 21.0 * len(VORF_STEPS))
+    done_y = _completion_checklist(c, cx('B'), yt(12),
+                                   cw('B','C','D','E','F') - CHECKLIST_GAP,
+                                   VORF_STEPS, 14.0 + 24.0 * len(VORF_STEPS))
     for row in info:
         _txt(c, cx('G'), ry(row),
              cw('G','H','I','J','K','L','M','N','O','P','Q'),
@@ -562,7 +565,7 @@ def _draw_vorf(c, header, item, page_num, total_pages, d_ord, d_due,
     _brace_under(c, cx, cw, rh, ctx, done_y)
 
     # ── Under Notes: wrapping, then the calculator ────────────────────────
-    _under_notes(c, cx('G'), yb(18) - 3,
+    _under_notes(c, cx('G'), yb(18) - 12,
                  cw('G','H','I','J','K','L','M','N','O','P','Q'), ctx,
                  calculator=can_mark, item=item,
                  prefer=header.get("_frame_prefer", ""))
@@ -638,8 +641,9 @@ def _draw_fs(c, header, item, page_num, total_pages, d_ord, d_due,
     fs_info = {12:f"JOB: {job}", 14:f"DUE: {d_due}",
                16:f"LOCATION: {loc}", 18:f"NOTES: {full_notes}"}
 
-    done_y = _completion_checklist(c, cx('B'), yt(12), cw('B','C','D','E','F'),
-                                   FS_STEPS, 13.0 + 21.0 * len(FS_STEPS))
+    done_y = _completion_checklist(c, cx('B'), yt(12),
+                                   cw('B','C','D','E','F') - CHECKLIST_GAP,
+                                   FS_STEPS, 14.0 + 24.0 * len(FS_STEPS))
     for row in fs_info:
         _txt(c, cx('G'), ry(row), cw('G','H','I','J','K','L'),
              rh(row), fs_info[row], bold=True, size=9)
@@ -648,7 +652,7 @@ def _draw_fs(c, header, item, page_num, total_pages, d_ord, d_due,
     _brace_under(c, cx, cw, rh, ctx, done_y)
 
     # ── Under Notes: wrapping (a flyscreen has no calculator block) ───────
-    _under_notes(c, cx('G'), yb(18) - 3, cw('G','H','I','J','K','L'), ctx,
+    _under_notes(c, cx('G'), yb(18) - 12, cw('G','H','I','J','K','L'), ctx,
                  calculator=False)
 
 
