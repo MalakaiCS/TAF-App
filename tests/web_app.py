@@ -1661,6 +1661,21 @@ def run() -> int:
               len(UPLOADED) == uploads + 2 and UPLOADED[-1] == f"stock-images/s-new-{n_before}.jpg")
         STOCK[:] = [s for s in STOCK if not str(s["id"]).startswith("s-new-")]
 
+        print("\n── the app's icon ──")
+        icons = page.evaluate("""() => ({
+            touch: document.querySelector('link[rel=apple-touch-icon]').getAttribute('href'),
+            icon: document.querySelector('link[rel=icon]').getAttribute('href')})""")
+        check("the home-screen icon is the TAF logo, not a letter T",
+              icons["touch"] == "../taf-icon-180.png"
+              and not icons["touch"].startswith("data:"), str(icons))
+        manifest = json.loads((ROOT / "docs" / "app" / "manifest.webmanifest")
+                              .read_text(encoding="utf-8"))
+        check("and so is every icon the app installs with",
+              {i["src"] for i in manifest["icons"]} ==
+              {"icon-192.png", "icon-512.png", "icon-maskable-512.png"}
+              and all((ROOT / "docs" / "app" / i["src"]).exists()
+                      for i in manifest["icons"]), str(manifest["icons"]))
+
         print("\n── scanning with the phone's camera ──")
         codes = {k: v for k, v in _code_pngs().items() if k != "qr_order"}
         read = page.evaluate("""async (codes) => {
@@ -3026,7 +3041,8 @@ def run() -> int:
             need = ["/app/index.html", "/app/screens.js", "/app/offline.js",
                     "/app/data.js", "/app/ui.js", "/company.js",
                     "/taf-shared.js", "/app/manifest.webmanifest",
-                    "/app/icon-192.png"]
+                    "/app/icon-192.png", "/taf-icon-180.png",
+                    "/app/vendor/zxing.min.js"]
             check("everything it is made of is kept there",
                   all(f in paths for f in need),
                   "missing " + str([f for f in need if f not in paths]))

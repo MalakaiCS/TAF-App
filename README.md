@@ -1615,6 +1615,7 @@ supabase/functions/        Edge Functions (order reading, email, the
 TAFOrderEntry.spec         PyInstaller build spec (Windows and macOS)
 installer.iss              Inno Setup installer script
 make_mac_icon.py           Builds the Mac app icon from the logo
+make_web_icons.py          Builds the phone app and web pages' home-screen icons from the logo
 ```
 
 ## Working from anywhere (incl. your phone)

@@ -38,10 +38,15 @@ var SHELL = [
   "app/manifest.webmanifest",
   "app/icon-192.png",
   "app/icon-512.png",
+  "app/icon-maskable-512.png",
+  // The camera's code reader on iPhones: kept, so scanning works out of
+  // signal too.
+  "app/vendor/zxing.min.js",
   "company.js",
   "taf-shared.js",
   "taf-logo.png",
-  "taf-badge.png"
+  "taf-badge.png",
+  "taf-icon-180.png"
 ];
 
 // The publishable key, written by CI. Always asked for over the network
