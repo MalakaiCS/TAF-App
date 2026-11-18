@@ -172,3 +172,20 @@ def test_several_orders_share_the_pallets():
     path = Path(tempfile.mkdtemp()) / "two.pdf"
     pl.render_pdf(labels, str(path))
     assert path.read_bytes().startswith(b"%PDF")
+
+
+def test_a_plain_customer_gets_plain_pallet_labels():
+    """No logo, phone or ABN for a customer on plain labels (step 55)."""
+    from taf_order_app import calc_settings as cs
+    grid = [[40], [12], [6], [10]]
+    ours, _ = pl.build(ORDER, ITEMS, CUSTOMER, 1, grid)
+    plain, _ = pl.build(ORDER, ITEMS, dict(CUSTOMER, plain_labels=True), 1,
+                        grid)
+    assert not ours[0]["plain"] and ours[0]["abn"] == cs.COMPANY["abn"]
+    assert plain[0]["plain"] and plain[0]["abn"] == plain[0]["phone"] == ""
+    tmp = Path(tempfile.mkdtemp())
+    pl.render_pdf(plain, str(tmp / "plain.pdf"))
+    raw = (tmp / "plain.pdf").read_bytes()
+    assert b"/Subtype /Image" not in raw
+    assert cs.COMPANY["abn"].encode() not in raw
+    assert cs.COMPANY["name"].encode() not in raw

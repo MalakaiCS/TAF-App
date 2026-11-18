@@ -1587,7 +1587,9 @@
   }
   // skipLines (1-based): lines that get no labels (bag filters). They still
   // count in the numbering, so line 3 of 4 is "3/4" either way.
-  function buildLabels(order, base, settings, skipLines) {
+  // plain: nothing of ours on them - no name, ABN, phone or From address.
+  function buildLabels(order, base, settings, skipLines, plain) {
+    plain = !!plain;
     var skip = {};
     (skipLines || []).forEach(function (n) { skip[n] = true; });
     var clean = validateLabels(order);
@@ -1623,8 +1625,9 @@
     var labels = [];
     clean.items.forEach(function (it, i) {
       (perLine[i] || []).forEach(function (wrap, j) {
-        labels.push({ company: COMPANY.name, abn: COMPANY.abn, phone: COMPANY.phone,
-          from_address: base, customer_name: clean.customer_name,
+        labels.push({ plain: plain, company: plain ? "" : COMPANY.name,
+          abn: plain ? "" : COMPANY.abn, phone: plain ? "" : COMPANY.phone,
+          from_address: plain ? "" : base, customer_name: clean.customer_name,
           address_lines: addr, locality: clean.suburb + "  " + clean.state + "  " + clean.postcode,
           filter_size: it.width_mm === null && it.description ? it.description.trim()
             : sizeText(it.width_mm, it.height_mm, it.depth_mm),

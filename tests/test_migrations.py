@@ -74,6 +74,7 @@ ORDER = [
     "migrate_part_links.sql",
     "migrate_print_queue.sql",
     "migrate_print_where.sql",
+    "migrate_plain_labels.sql",
 ]
 
 

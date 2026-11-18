@@ -217,10 +217,14 @@ def build_orders(entries: Sequence[Dict[str, Any]], pallets: Any,
         on = order_number(e["order"])
         if on not in numbers:
             numbers.append(on)
+    # A customer on plain labels (step 55) gets pallet labels with nothing
+    # of ours on them either.
+    plain = any(_dl.wants_plain(e.get("customer")) for e in entries)
     common = {
-        "company": _settings.COMPANY["name"],
-        "abn": _settings.COMPANY["abn"],
-        "phone": _settings.COMPANY["phone"],
+        "plain": plain,
+        "company": "" if plain else _settings.COMPANY["name"],
+        "abn": "" if plain else _settings.COMPANY["abn"],
+        "phone": "" if plain else _settings.COMPANY["phone"],
         "customer_name": " / ".join(who),
         "address_lines": address,
         "locality": f"{c.get('delivery_city') or ''}  {state}  "
@@ -275,7 +279,8 @@ def render_pdf(labels: Sequence[Dict[str, Any]], path: str) -> str:
     logo = _dl._logo_path()
     c = canvas.Canvas(path, pagesize=landscape(A4))
     c.setTitle("Pallet labels")
-    c.setAuthor(_settings.COMPANY["name"])
+    if not all(l.get("plain") for l in labels):
+        c.setAuthor(_settings.COMPANY["name"])
 
     def box(x, y, w, h):
         c.setStrokeColor(grey)
@@ -304,16 +309,18 @@ def render_pdf(labels: Sequence[Dict[str, Any]], path: str) -> str:
             hh = 26 * mm
             y0 = top - hh
             box(left, y0, right - left, hh)
-            if logo:
+            if logo and not lab.get("plain"):
                 lh = 18 * mm
                 c.drawImage(logo, left + 3 * mm, top - 4 * mm - lh,
                             width=lh * 2.985, height=lh,
                             preserveAspectRatio=True, mask="auto")
             c.setFont("Helvetica-Bold", 26)
             c.drawRightString(right - 5 * mm, top - 13 * mm, "Pallet label")
-            c.setFont("Helvetica", 10)
-            c.drawRightString(right - 5 * mm, top - 21 * mm,
-                              f"Phone {lab['phone']}   ·   ABN {lab['abn']}")
+            if not lab.get("plain"):
+                c.setFont("Helvetica", 10)
+                c.drawRightString(right - 5 * mm, top - 21 * mm,
+                                  f"Phone {lab['phone']}   ·   "
+                                  f"ABN {lab['abn']}")
 
             # Who it is for, and which pallet.
             bh = 52 * mm

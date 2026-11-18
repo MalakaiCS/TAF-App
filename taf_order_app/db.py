@@ -1571,6 +1571,30 @@ def set_customer_labels(customer_id: str, on: bool) -> None:
     update_customer(customer_id, {"delivery_labels": bool(on)})
 
 
+_PLAIN_LABELS: dict = {}
+
+
+def plain_labels_ready() -> bool:
+    """Whether customers.plain_labels exists yet (step 55). Asked once."""
+    if "ok" not in _PLAIN_LABELS:
+        try:
+            get_client().table("customers").select("plain_labels") \
+                .limit(1).execute()
+            _PLAIN_LABELS["ok"] = True
+        except Exception:
+            _PLAIN_LABELS["ok"] = False
+    return _PLAIN_LABELS["ok"]
+
+
+def customer_plain_labels(customer: "dict | None") -> bool:
+    """Whether this customer's delivery labels leave TAF off them."""
+    return (customer or {}).get("plain_labels") is True
+
+
+def set_customer_plain_labels(customer_id: str, on: bool) -> None:
+    update_customer(customer_id, {"plain_labels": bool(on)})
+
+
 def delete_customer(customer_id: str) -> None:
     get_client().table("customers").delete().eq("id", customer_id).execute()
 

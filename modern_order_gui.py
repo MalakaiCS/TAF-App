@@ -14151,6 +14151,7 @@ class ModernOrderApp(tk.Frame):
         def _customer_actions():
             cust = self._get_selected_customer()
             on = _db.customer_wants_labels(cust)
+            plain = _db.customer_plain_labels(cust)
             return [
                 ("View their orders",     self._view_customer_orders),
             ] + ([("Order again…",       self._order_again)]
@@ -14160,6 +14161,9 @@ class ModernOrderApp(tk.Frame):
                 ("Their portal link…",    self._customer_portal_link),
                 (("Turn delivery labels off" if on else
                   "Turn delivery labels on"), self._toggle_customer_labels),
+                (("Plain delivery labels off (show TAF)" if plain else
+                  "Plain delivery labels on (no TAF)"),
+                 self._toggle_customer_plain_labels),
                 ("Put this name on their past orders…",
                  lambda: self._sync_customer_order_names(ask=True)),
                 None,
@@ -14634,6 +14638,17 @@ class ModernOrderApp(tk.Frame):
                        selectcolor=CCA, activebackground=CBG).grid(
             row=_row, column=1, sticky="w", pady=4)
         _row += 1
+        # Plain labels: nothing of TAF on them (step 55).
+        plain_on = _db.is_ready() and _db.plain_labels_ready()
+        v_plain = tk.BooleanVar(value=_db.customer_plain_labels(g))
+        if plain_on:
+            tk.Checkbutton(
+                body, text="Plain delivery labels - no TAF logo, From "
+                           "address, phone or ABN",
+                variable=v_plain, bg=CBG, fg=CTX, font=F_BODY,
+                selectcolor=CCA, activebackground=CBG).grid(
+                row=_row, column=1, sticky="w", pady=(0, 4))
+            _row += 1
         # The cash sale account: its invoices go to whoever bought, asked for
         # each time. A manager's decision (the database holds that too).
         cash_on = _db.is_ready() and _db.cash_sales_ready()
@@ -14819,6 +14834,8 @@ class ModernOrderApp(tk.Frame):
                 **({"delivery_labels": bool(v_labels.get())}
                    if _db.is_ready() and _db.customers_have_label_switch()
                    else {}),
+                **({"plain_labels": bool(v_plain.get())}
+                   if plain_on else {}),
                 **({"price_tier": int(v_tier.get().split()[-1])}
                    if tiers_on and _db.can_manage_prices() else {}),
                 **({"delivery_fee": _fee_value(v_fee.get())}
@@ -15352,6 +15369,39 @@ class ModernOrderApp(tk.Frame):
         cust["delivery_labels"] = on
         self.status_var.set(f"Delivery labels {'on' if on else 'off'} for "
                             f"{cust.get('name', '')}.")
+        try:
+            self._refresh_customers_list()
+        except Exception:
+            pass
+
+    def _toggle_customer_plain_labels(self):
+        """Plain delivery labels - nothing of TAF on them - on or off for
+        the selected customer."""
+        cust = self._get_selected_customer()
+        if not cust:
+            messagebox.showinfo("Plain delivery labels",
+                                "Select a customer first.")
+            return
+        if not (_db.is_ready() and _db.plain_labels_ready()):
+            messagebox.showinfo(
+                "Plain delivery labels",
+                "This needs migrate_plain_labels.sql (step 55) run in "
+                "Supabase first.")
+            return
+        on = not _db.customer_plain_labels(cust)
+        try:
+            _db.set_customer_plain_labels(cust["id"], on)
+            _db.log_action("customer_updated",
+                           f"Plain delivery labels {'on' if on else 'off'} "
+                           f"for {cust.get('name', '')}")
+        except Exception as exc:
+            messagebox.showerror("Plain delivery labels",
+                                 f"Not saved:\n{exc}")
+            return
+        cust["plain_labels"] = on
+        self.status_var.set(
+            f"{cust.get('name', '')}: delivery labels "
+            + ("now leave TAF off." if on else "show TAF again."))
         try:
             self._refresh_customers_list()
         except Exception:

@@ -284,6 +284,13 @@ log, stock management and a customer database.
   completed (a flyscreen page: cut aluminium, assembled, loaded, packed &
   labelled, checked, completed) - each with a box
   to tick, the initials of whoever did it and the date.
+- **Plain delivery labels for chosen customers** — tick **Plain delivery
+  labels** on a customer's card (or Customers → Customer ▾ → Plain delivery
+  labels on) and their labels carry nothing of TAF: no logo, no From
+  address, no phone number or ABN. The delivery address, order and job
+  numbers, sizes, quantities, weights and barcode are all still there. For a
+  customer who resells under their own name, or whose customer must not see
+  who made the filters. Needs step 55 (`migrate_plain_labels.sql`).
 - **Delivery labels** — the order number and job number are printed large
   in the top right, beside our name and address, so a wrap is found by its
   numbers at a glance; and the order number is a barcode at the bottom right,
@@ -639,6 +646,7 @@ just run it — nothing is lost and nothing is duplicated.
 | 52 | `migrate_part_links.sql` | The part number each product sells as: a code the app makes for a line (a 3-Peak bag's, say) linked to the part number in the price list and Xero | recommended |
 | 53 | `migrate_print_queue.sql` | Printing on the work printers from anywhere: the print stations (PCs at work that print for everybody), the jobs waiting for them, and a private bucket for the files sent | recommended |
 | 54 | `migrate_print_where.sql` | Printing goes to the work printers by itself when you are away from work: the print station notes the connection it is on, and any PC or phone can ask whether it is on the same one (needs step 53) | recommended |
+| 55 | `migrate_plain_labels.sql` | Plain delivery labels for chosen customers: no TAF logo, From address, phone number or ABN on their labels (needs step 35) | recommended |
 
 **Step 16 is the one that matters most.** Every policy in the older scripts is
 `TO authenticated USING (true)` — meaning *anyone Supabase counts as signed

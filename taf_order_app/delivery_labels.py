@@ -29,6 +29,13 @@ References, phone numbers and postcodes must be text, so a leading zero in
 dispatch date and delivery instructions are not part of a label and are
 refused if sent.
 
+Plain labels
+------------
+A customer whose account has plain_labels set (step 55) gets labels with
+nothing of ours on them: no logo, no From address, no phone number or ABN.
+Everything the label is for - where it goes, the order and job numbers, the
+size, quantity, weight, wrap page and barcode - is the same.
+
 From address
 ------------
 The "From" line is {Base Address}, filled from the company's base_address
@@ -241,8 +248,11 @@ def is_bag_filter(item: Dict[str, Any]) -> bool:
 
 def build(order: Dict[str, Any], base_address: str,
           settings: Optional[Dict[str, Any]] = None,
-          skip_lines: Optional[Sequence[int]] = None) -> List[Dict[str, Any]]:
+          skip_lines: Optional[Sequence[int]] = None,
+          plain: bool = False) -> List[Dict[str, Any]]:
     """Every label for one order, in order. Raises LabelError.
+
+    `plain` leaves our name, ABN, phone and From address off every label.
 
     base_address is passed in, read once by whoever is printing, so every
     label in this request carries the same From line.
@@ -304,10 +314,11 @@ def build(order: Dict[str, Any], base_address: str,
             zip(clean["items"], per_line, codes), start=1):
         for wrap, code in zip(wraps or [], line_codes):
             labels.append({
-                "company": _settings.COMPANY["name"],
-                "abn": _settings.COMPANY["abn"],
-                "phone": _settings.COMPANY["phone"],
-                "from_address": base_address,
+                "plain": bool(plain),
+                "company": "" if plain else _settings.COMPANY["name"],
+                "abn": "" if plain else _settings.COMPANY["abn"],
+                "phone": "" if plain else _settings.COMPANY["phone"],
+                "from_address": "" if plain else base_address,
                 "customer_name": clean["customer_name"],
                 "address_lines": address_lines,
                 "locality": f"{clean['suburb']}  {clean['state']}  "
@@ -401,6 +412,12 @@ def order_contract(order: Dict[str, Any], customer: Optional[Dict[str, Any]],
     return contract
 
 
+def wants_plain(customer: Optional[Dict[str, Any]]) -> bool:
+    """Whether this customer's labels leave us off (customers.plain_labels,
+    step 55). No account, or no column yet: our labels, as always."""
+    return (customer or {}).get("plain_labels") is True
+
+
 def build_for_order(order: Dict[str, Any], customer: Optional[Dict[str, Any]],
                     settings: Dict[str, Any], base_address: str,
                     only_wrap_ids: Optional[Sequence[str]] = None
@@ -414,7 +431,7 @@ def build_for_order(order: Dict[str, Any], customer: Optional[Dict[str, Any]],
     skip = [i for i, it in enumerate(order.get("items") or [], start=1)
             if is_bag_filter(it)]
     labels = build(order_contract(order, customer, settings), base_address,
-                   settings, skip)
+                   settings, skip, plain=wants_plain(customer))
     if only_wrap_ids:
         wanted = set(only_wrap_ids)
         labels = [l for l in labels if l.get("wrap_id") in wanted]
@@ -480,7 +497,8 @@ def render_pdf(labels: Sequence[Dict[str, Any]], path: str) -> str:
     logo = _logo_path()
     c = canvas.Canvas(path, pagesize=landscape(A4))
     c.setTitle("Delivery labels")
-    c.setAuthor(_settings.COMPANY["name"])
+    if not all(l.get("plain") for l in labels):
+        c.setAuthor(_settings.COMPANY["name"])
 
     def box(x, y, w, h):
         c.setStrokeColor(grey)
@@ -513,34 +531,41 @@ def render_pdf(labels: Sequence[Dict[str, Any]], path: str) -> str:
     gap = 4 * mm
     for lab in labels:
         c.setFillColor(black)
-        # Header: logo, From, phone and ABN on the left; the order and job
-        # numbers on the right, big - what the label is looked up by.
+        # Header: logo, From, phone and ABN on the left (or, for a customer
+        # on plain labels, just DELIVERY LABEL); the order and job numbers
+        # on the right, big - what the label is looked up by.
         hh = 60 * mm
         y0 = top - hh
         box(left, y0, right - left, hh)
         split_x = left + (right - left) * 0.56
         c.setStrokeColor(grey)
         c.line(split_x, y0, split_x, top)
-        if logo:
-            lh = 30 * mm
-            c.drawImage(logo, left + 3 * mm, top - 3 * mm - lh,
-                        width=lh * 2.985, height=lh,
-                        preserveAspectRatio=True, mask="auto")
-        c.setFont("Helvetica-Bold", 15)
-        c.drawRightString(split_x - 4 * mm, top - 9 * mm, "Delivery label")
-        from_w = split_x - left - 8 * mm - c.stringWidth("FROM  ",
-                                                          "Helvetica-Bold", 9)
-        fsize, flines = fit(lab["from_address"], "Helvetica", 10, from_w,
-                            min_size=7, max_lines=2)
-        contact = f"Phone {lab['phone']}   ·   ABN {lab['abn']}"
-        cy = y0 + 4 * mm
-        c.setFont("Helvetica", 9.5)
-        c.drawString(left + 4 * mm, cy, contact)
-        fy = cy + 5.5 * mm + (len(flines) - 1) * fsize * 1.15
-        c.setFont("Helvetica-Bold", 9)
-        c.drawString(left + 4 * mm, fy, "FROM")
-        lines_at(left + 4 * mm + c.stringWidth("FROM  ", "Helvetica-Bold", 9),
-                 fy, flines, "Helvetica", fsize)
+        if lab.get("plain"):
+            # Nothing of ours: the left of the header just says what it is.
+            c.setFont("Helvetica-Bold", 30)
+            c.drawString(left + 6 * mm, y0 + hh / 2 - 4 * mm,
+                         "DELIVERY LABEL")
+        else:
+            if logo:
+                lh = 30 * mm
+                c.drawImage(logo, left + 3 * mm, top - 3 * mm - lh,
+                            width=lh * 2.985, height=lh,
+                            preserveAspectRatio=True, mask="auto")
+            c.setFont("Helvetica-Bold", 15)
+            c.drawRightString(split_x - 4 * mm, top - 9 * mm, "Delivery label")
+            from_w = split_x - left - 8 * mm - c.stringWidth("FROM  ",
+                                                              "Helvetica-Bold", 9)
+            fsize, flines = fit(lab["from_address"], "Helvetica", 10, from_w,
+                                min_size=7, max_lines=2)
+            contact = f"Phone {lab['phone']}   ·   ABN {lab['abn']}"
+            cy = y0 + 4 * mm
+            c.setFont("Helvetica", 9.5)
+            c.drawString(left + 4 * mm, cy, contact)
+            fy = cy + 5.5 * mm + (len(flines) - 1) * fsize * 1.15
+            c.setFont("Helvetica-Bold", 9)
+            c.drawString(left + 4 * mm, fy, "FROM")
+            lines_at(left + 4 * mm + c.stringWidth("FROM  ", "Helvetica-Bold", 9),
+                     fy, flines, "Helvetica", fsize)
 
         rw = right - split_x - 9 * mm
         half = hh / 2

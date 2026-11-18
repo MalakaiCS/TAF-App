@@ -636,3 +636,59 @@ def test_bag_filters_get_no_labels_but_keep_the_numbering():
                                "items": [bag]}, cust, s, "Base") == []
     assert dl.is_bag_filter(bag) and not dl.is_bag_filter(frame) \
         and not dl.is_bag_filter(panel)
+
+
+# ── Plain labels: nothing of ours on them (step 55) ─────────────────────────
+
+def _has_image(path: str) -> bool:
+    return b"/Subtype /Image" in Path(path).read_bytes()
+
+
+def test_a_plain_label_has_nothing_of_ours_on_it():
+    o = order(job_number="J-77")
+    labs = dl.build(o, "Unit 9 Somewhere Street, Brisbane QLD 4000",
+                    plain=True)
+    assert all(l["plain"] for l in labs)
+    assert {l["company"] for l in labs} == {""}
+    assert {l["from_address"] for l in labs} == {""}
+    with tempfile.TemporaryDirectory() as tmp:
+        path = str(Path(tmp) / "plain.pdf")
+        dl.render_pdf(labs, path)
+        flat = re.sub(r"\s+", " ", _pdf_text(path))
+        assert not _has_image(path), "the logo is still on it"
+        raw = Path(path).read_bytes()
+    for gone in ("FROM", "Unit 9 Somewhere", "ABN", "45 667 800 893",
+                 "07 3800 3448", "Total Air", "TAF"):
+        assert gone not in flat, gone
+    assert cs.COMPANY["name"].encode() not in raw   # not even as the author
+    # What the label is for is all still there.
+    assert flat.count("DELIVERY LABEL") == 3
+    assert "Complete Air Supply" in flat and "Tweed Heads" in flat
+    assert "J-77" in flat and flat.count("57920") == 6
+    assert "1A/2" in flat and "07 5513 1044" in flat
+
+
+def test_only_a_customer_marked_plain_gets_plain_labels():
+    assert dl.wants_plain({"plain_labels": True})
+    for c in (None, {}, {"plain_labels": False}, {"plain_labels": None}):
+        assert not dl.wants_plain(c)
+    with tempfile.TemporaryDirectory() as tmp:
+        path = str(Path(tmp) / "ours.pdf")
+        dl.render_pdf(dl.build(order(), BASE), path)
+        assert _has_image(path) == bool(dl._logo_path())
+        assert "FROM" in _pdf_text(path)
+
+
+def test_a_saved_order_for_a_plain_customer_prints_plain():
+    items = [{"Filter Type": "Flat Panel", "Short": 595, "Long": 595,
+              "Channel": 25, "Quantity": 4, "Media Type": "F5"}]
+    cust = {"name": "Reseller Pty Ltd", "delivery_address1": "1 Main St",
+            "delivery_city": "Logan", "delivery_state": "QLD",
+            "delivery_postcode": "4114"}
+    rec = {"order_number": "60001", "header": {}, "items": items}
+    ours = dl.build_for_order(rec, cust, cs.defaults(), BASE)
+    plain = dl.build_for_order(rec, dict(cust, plain_labels=True),
+                               cs.defaults(), BASE)
+    assert ours and not ours[0]["plain"] and ours[0]["from_address"] == BASE
+    assert plain[0]["plain"] and plain[0]["from_address"] == ""
+    assert plain[0]["abn"] == "" and plain[0]["phone"] == ""

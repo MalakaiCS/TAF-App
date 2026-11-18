@@ -224,7 +224,12 @@ WITH checks(step, file, purpose, needed, present) AS (VALUES
       to_regprocedure('public.claim_print_job(uuid)') IS NOT NULL),
 
   (54, 'migrate_print_where.sql', 'Printing goes to the work printers by itself when you are away from work', 'recommended',
-      to_regprocedure('public.print_where()') IS NOT NULL)
+      to_regprocedure('public.print_where()') IS NOT NULL),
+
+  (55, 'migrate_plain_labels.sql', 'Plain delivery labels (no TAF logo, From address, phone or ABN) for chosen customers', 'recommended',
+      EXISTS (SELECT 1 FROM information_schema.columns
+               WHERE table_schema='public' AND table_name='customers'
+                 AND column_name='plain_labels'))
 )
 SELECT step,
        CASE WHEN present THEN 'already done' ELSE 'RUN THIS' END AS status,
