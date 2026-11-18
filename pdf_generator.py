@@ -188,7 +188,7 @@ VORF_STEPS = (
     "Assembled",
     "Quality checked",
     "Packed & labelled",
-    "Dispatched / collected",
+    "Completed",
 )
 # Clear space between the checklist and the job details and wrapping boxes
 # beside it, so the two read as separate things.
@@ -200,7 +200,7 @@ FS_STEPS = (
     "Loaded",
     "Packed & labelled",
     "Checked",
-    "Dispatched / collected",
+    "Completed",
 )
 
 

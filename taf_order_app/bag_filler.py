@@ -759,7 +759,7 @@ def due_text(value) -> str:
 
 
 BAG_STEPS = ("Made & quality checked", "Packed & labelled",
-             "Dispatched / collected")
+             "Completed")
 
 
 def _bag_logo() -> Optional[str]:

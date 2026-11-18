@@ -263,7 +263,7 @@ log, stock management and a customer database.
   date ordered and location; each line with its item number, the quantity
   big, the product and size, its header or wire, notes, part number and a
   tick box; the order's notes; a completion checklist (made & quality
-  checked, packed & labelled, dispatched / collected - ticked, initialled
+  checked, packed & labelled, completed - ticked, initialled
   and dated); and the due date large with the order's barcode at the foot of
   every page.
 - **Wire and media cutting labels** — 3" × 2" (76 × 51 mm) labels for a
@@ -281,8 +281,8 @@ log, stock management and a customer database.
 - **Completion checklist on the worksheet** — every step of the job in one
   table where the production tick boxes and "Office use" were: marked / cut
   / drilled channel, assembled, quality checked, packed & labelled,
-  dispatched / collected (a flyscreen page: cut
-  aluminium, assembled, loaded, packed & labelled, checked) - each with a box
+  completed (a flyscreen page: cut aluminium, assembled, loaded, packed &
+  labelled, checked, completed) - each with a box
   to tick, the initials of whoever did it and the date.
 - **Delivery labels** — the order number and job number are printed large
   in the top right, beside our name and address, so a wrap is found by its
