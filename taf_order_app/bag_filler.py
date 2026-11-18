@@ -13,6 +13,11 @@ Data model for a single bag line-item (dict keys):
   on_wire       : bool
   gelled        : bool
   special_size  : bool
+  header        : bool  – the bag hangs from a header (adds H to the code);
+                          made on the filter worksheet, see bag_headers
+  header_width, header_height, header_depth : int – the header's size when
+                          it was set on the line (else bag - 15, 25 deep)
+  pockets       : int   – Custom Bag Filter only: pockets in each frame
   label_suffix  : str   – "LONG" | "SHORT" | ""
   efficiency    : str   – MPHE only: "60-65%" etc.
   roll_width    : str   – e.g. "2100mm"   (Media Roll only)
@@ -96,15 +101,30 @@ def prewarm_word():
     """Call on a background thread at app startup to hide Word's first-launch cost."""
     _ensure_word_app()
 
-try:
-    from docx import Document
-    from docx.shared import Pt, Inches, Cm, RGBColor
-    from docx.enum.text import WD_ALIGN_PARAGRAPH
-    from docx.oxml.ns import qn
-    from docx.oxml import OxmlElement
+# python-docx is loaded the first time a docket is written, not when the app
+# starts: it was a noticeable share of start-up for something used once an
+# order. _docx() puts its names in this module's globals on first use.
+_DOCX_AVAILABLE = None
+
+
+def _docx() -> bool:
+    global _DOCX_AVAILABLE
+    if _DOCX_AVAILABLE is not None:
+        return _DOCX_AVAILABLE
+    try:
+        from docx import Document
+        from docx.shared import Pt, Inches, Cm, RGBColor
+        from docx.enum.text import WD_ALIGN_PARAGRAPH
+        from docx.oxml.ns import qn
+        from docx.oxml import OxmlElement
+    except ImportError:
+        _DOCX_AVAILABLE = False
+        return False
+    globals().update(Document=Document, Pt=Pt, Inches=Inches, Cm=Cm,
+                     RGBColor=RGBColor, WD_ALIGN_PARAGRAPH=WD_ALIGN_PARAGRAPH,
+                     qn=qn, OxmlElement=OxmlElement)
     _DOCX_AVAILABLE = True
-except ImportError:
-    _DOCX_AVAILABLE = False
+    return True
 
 
 # ── Catalogue constants ───────────────────────────────────────────────────────
@@ -116,6 +136,7 @@ BAG_PRODUCT_TYPES = [
     "MPHE 8-Pocket",
     "MPHE 4-Pocket",
     "HEPA",
+    "Custom Bag Filter",
     "Mounting Frame",
     "Media Roll",
     "Cut Pads",
@@ -129,9 +150,10 @@ ROLL_LENGTHS     = ["8m", "20m", "40m"]
 MPHE_EFFICIENCIES = ["", "60-65%", "80-85%", "90-95%"]
 
 # product types that are "bag" filters (need W/H/D + media)
-_BAG_TYPES  = {"3-Peak", "2-Wedge", "4-Point", "MPHE 8-Pocket", "MPHE 4-Pocket", "HEPA"}
+_BAG_TYPES  = {"3-Peak", "2-Wedge", "4-Point", "MPHE 8-Pocket", "MPHE 4-Pocket", "HEPA",
+               "Custom Bag Filter"}
 # types that use bag media dropdown
-_MEDIA_TYPES_BAG  = {"3-Peak", "2-Wedge", "4-Point", "HEPA"}
+_MEDIA_TYPES_BAG  = {"3-Peak", "2-Wedge", "4-Point", "HEPA", "Custom Bag Filter"}
 _MEDIA_TYPES_MPHE = {"MPHE 8-Pocket", "MPHE 4-Pocket"}
 
 # Standard size presets: {product_type: [(label, width, height, depth|None), ...]}
@@ -173,6 +195,10 @@ STANDARD_SIZES: Dict[str, list] = {
         ("Full  610×610×292",            610, 610, 292),
         ("Custom",                       None, None, None),
     ],
+    # Ordered by its header size, pockets and pocket depth: no standard ones.
+    "Custom Bag Filter": [
+        ("Custom",                       None, None, None),
+    ],
     "Mounting Frame": [
         ("610×610  Standard",            610, 610, None),
         ("Custom",                       None, None, None),
@@ -192,8 +218,11 @@ def generate_part_number(item: dict) -> str:
     on_wire = bool(item.get("on_wire"))
     gelled  = bool(item.get("gelled"))
     special = bool(item.get("special_size"))
+    header  = bool(item.get("header"))
 
-    bag_sfx  = ("W" if on_wire else "") + ("G" if gelled else "")
+    # H follows the W: on wire with a header is "WH".
+    bag_sfx  = (("W" if on_wire else "") + ("H" if header else "")
+                + ("G" if gelled else ""))
     spec_sfx = " SPEC" if special else ""
 
     # helper
@@ -226,6 +255,12 @@ def generate_part_number(item: dict) -> str:
         dims = _d3()
         return f"GSHEP99-{dims}" if dims else ""
 
+    if pt == "Custom Bag Filter":
+        dims = _d3()
+        pockets = int(item.get("pockets") or 0)
+        pk = f"-{pockets}P" if pockets else ""
+        return f"CBF{media}-{dims}{pk}{bag_sfx}{spec_sfx}" if dims else ""
+
     if pt == "Mounting Frame":
         dims = _d2()
         return f"TAFGSMF-{dims}" if dims else ""
@@ -243,6 +278,36 @@ def generate_part_number(item: dict) -> str:
         return ""
 
     return ""
+
+
+def standard_products() -> List[Dict[str, Any]]:
+    """Every standard size of every bag and roll, in each media it comes in,
+    with the code the app makes for it: [{"code", "product", "item"}]. What
+    the part-number links screen lists, so each can be linked before it is
+    first ordered."""
+    out, seen = [], set()
+
+    def add(item, product):
+        code = generate_part_number(item).strip().upper()
+        if code and code not in seen:
+            seen.add(code)
+            out.append({"code": code, "product": product, "item": item})
+
+    for pt, sizes in STANDARD_SIZES.items():
+        medias = (BAG_MEDIA_TYPES if pt in _MEDIA_TYPES_BAG or pt in _MEDIA_TYPES_MPHE
+                  else [""])
+        for label, w, h, d in sizes:
+            if w is None:
+                continue
+            size = " ".join(label.split())
+            for m in medias:
+                add({"product_type": pt, "media": m, "width": w, "height": h,
+                     "depth": d}, f"{pt} {m} {size}".replace("  ", " ").strip())
+    for m in ROLL_MEDIA_TYPES:
+        for rw in ROLL_WIDTHS:
+            add({"product_type": "Media Roll", "media": m, "roll_width": rw},
+                f"Media Roll {m} {rw}")
+    return out
 
 
 # ── Description / display helpers ─────────────────────────────────────────────
@@ -276,6 +341,8 @@ def build_label_line(item: dict) -> str:
         pockets = "8-Pocket" if "8" in pt else "4-Pocket"
         eff_str = f" {eff}" if eff else ""
         name = f"{half_pfx}{pockets} {media}{eff_str}"
+    elif pt == "Custom Bag Filter":
+        name = f"Custom Bag Filter {media}"
     elif pt == "Mounting Frame":
         return f"{qty} x Gal Steel Mounting Frame"
     elif pt == "Media Roll":
@@ -306,6 +373,18 @@ def build_dims_line(item: dict) -> str:
     h = item.get("height") or 0
     d = item.get("depth")  or 0
 
+    if pt == "Custom Bag Filter":
+        # As the order reads: "855mm x 570mm x 5 Pockets, 480mm pocket depth"
+        if not (w and h):
+            return ""
+        pockets = int(item.get("pockets") or 0)
+        text = f"{int(w)}mm x {int(h)}mm"
+        if pockets:
+            text += f" x {pockets} Pockets"
+        if d:
+            text += f", {int(d)}mm pocket depth"
+        return text
+
     if pt == "Mounting Frame" or not d:
         return f"{int(w)}mm x {int(h)}mm" if (w and h) else ""
 
@@ -327,6 +406,10 @@ def item_summary_short(item: dict) -> str:
         return f"{item.get('roll_width','')} × {item.get('roll_length','')}"
     if pt == "Mounting Frame":
         return f"{w}×{h}" if (w and h) else ""
+    if pt == "Custom Bag Filter":
+        pockets = int(item.get("pockets") or 0)
+        base = f"{w}×{h}×{d}" if (w and h and d) else (f"{w}×{h}" if w and h else "")
+        return f"{base} {pockets}P" if (base and pockets) else base
     return f"{w}×{h}×{d}" if (w and h and d) else ""
 
 
@@ -372,7 +455,7 @@ def generate_bag_docket(header: dict, items: List[dict], out_path: str,
     item_start / grand_total set the stock-number range within the full order
     (e.g. item_start=3, grand_total=5 → items numbered 3/5, 4/5, 5/5).
     """
-    if not _DOCX_AVAILABLE:
+    if not _docx():
         raise RuntimeError(
             "python-docx is not installed.  "
             "Run:  pip install python-docx")
@@ -659,197 +742,322 @@ def generate_bag_docket(header: dict, items: List[dict], out_path: str,
     return out_path
 
 
+def due_text(value) -> str:
+    """The due date as the floor reads it: "FRI 16 OCT 2026", "ASAP", or
+    "NOT GIVEN"."""
+    import datetime as _dt
+    text = str(value or "").strip()
+    if not text:
+        return "NOT GIVEN"
+    for fmt in ("%d/%m/%y", "%d/%m/%Y", "%Y-%m-%d", "%d-%m-%y", "%d-%m-%Y"):
+        try:
+            day = _dt.datetime.strptime(text, fmt).date()
+        except ValueError:
+            continue
+        return day.strftime("%a %d %b %Y").upper()
+    return text.upper()
+
+
+BAG_STEPS = ("Made & quality checked", "Packed & labelled",
+             "Completed")
+
+
+def _bag_logo() -> Optional[str]:
+    import sys
+    from pathlib import Path
+    base = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent.parent))
+    p = base / "TAF_logo_horizontal.png"
+    return str(p) if p.exists() else None
+
+
+def _item_name(item: dict) -> str:
+    """The product without its quantity: "3-Peak F7 / ON WIRE"."""
+    label = build_label_line(item)
+    qty = str(item.get("quantity", 1))
+    for prefix in (f"{qty} x ", f"{qty} X "):
+        if label.startswith(prefix):
+            return label[len(prefix):]
+    return label
+
+
 def _generate_bag_pdf_reportlab(header: dict, items: list, pdf_path: str,
                                  item_start: int = 1,
                                  grand_total: int = None) -> bool:
-    """Generate a bag docket PDF directly using reportlab. Returns True on success."""
+    """The bag worksheet as a PDF, made with reportlab (no Word needed).
+
+    Big where the floor reads it from a distance - the customer, the order
+    number, how many and what size - with the job details in a box at the
+    top, a tick box for each line, the notes, a completion checklist, and
+    the due date and the order's barcode at the foot of every page.
+    Returns True on success."""
     try:
         from reportlab.pdfgen import canvas as rl_canvas
         from reportlab.lib.pagesizes import A4
         from reportlab.lib import colors
+        from reportlab.lib.utils import simpleSplit
     except ImportError:
         return False
 
     try:
         PAGE_W, PAGE_H = A4
-        MARGIN  = 42.0
-        C_W     = PAGE_W - 2 * MARGIN
-
-        # Greyscale palette
-        K100 = colors.HexColor("#1A1A1A")   # near-black headings
-        K70  = colors.HexColor("#4D4D4D")   # sub-text
-        K30  = colors.HexColor("#B3B3B3")   # rules / light text
-        G10  = colors.HexColor("#E8E8E8")   # header band fill
-        G05  = colors.HexColor("#F4F4F4")   # alternating row fill
-        WHITE = colors.white
+        M = 34.0
+        W = PAGE_W - 2 * M
+        BLACK = colors.HexColor("#111111")
+        GREY = colors.HexColor("#5A5A5A")
+        RULE = colors.HexColor("#BDBDBD")
+        TINT = colors.HexColor("#F2F2F2")
 
         c = rl_canvas.Canvas(pdf_path, pagesize=A4)
+        c.setTitle(f"Bag worksheet {header.get('Order Number', '')}".strip())
 
-        d_ord      = header.get("Date Ordered", "") or ""
-        d_due      = header.get("Date Due", "")    or ""
-        cust       = (header.get("Customer Name") or "").upper()
-        ord_n      = (header.get("Order Number")  or "")
-        attn       = (header.get("Attention")      or "").upper()
-        job        = (header.get("Job")            or "")
-        loc        = (header.get("Location")       or "").upper()
-        notes      = (header.get("Notes")          or "")
-        created_by = (header.get("Created By")     or "").upper()
+        d_ord = str(header.get("Date Ordered") or "")
+        d_due = str(header.get("Date Due") or "")
+        cust = str(header.get("Customer Name") or "").upper()
+        ord_n = str(header.get("Order Number") or "")
+        attn = str(header.get("Attention") or "").upper()
+        job = str(header.get("Job") or "")
+        loc = str(header.get("Location") or "").upper()
+        notes = str(header.get("Notes") or "").strip()
+        made_by = str(header.get("Created By") or header.get("_created_by")
+                      or "").upper()
         total_shown = grand_total if grand_total is not None else len(items)
+        try:
+            from .worksheet_blocks import priority_banner
+            banner = priority_banner(header)
+        except Exception:
+            banner = ""
+        logo = _bag_logo()
+        page_no = [0]
 
-        def _font(bold=False, size=10):
-            c.setFont("Helvetica-Bold" if bold else "Helvetica", size)
-
-        def _txt(x, y, text, size=10, bold=False, col=K100, align="left"):
-            _font(bold, size)
+        def text(x, y, s, size, bold=False, col=BLACK, align="left",
+                 font=None):
+            c.setFont(font or ("Helvetica-Bold" if bold else "Helvetica"), size)
             c.setFillColor(col)
-            s = str(text)
-            if align == "center": c.drawCentredString(x, y, s)
-            elif align == "right": c.drawRightString(x, y, s)
-            else: c.drawString(x, y, s)
+            s = str(s)
+            if align == "center":
+                c.drawCentredString(x, y, s)
+            elif align == "right":
+                c.drawRightString(x, y, s)
+            else:
+                c.drawString(x, y, s)
 
-        def _hrule(y, lw=0.5, col=K30):
-            c.setStrokeColor(col)
+        def fit(s, size, width, bold=True, least=8):
+            font = "Helvetica-Bold" if bold else "Helvetica"
+            while size > least and c.stringWidth(str(s), font, size) > width:
+                size -= 0.5
+            return size
+
+        def box(x, y, w, h, lw=0.8, col=BLACK, fill=None):
             c.setLineWidth(lw)
-            c.line(MARGIN, y, MARGIN + C_W, y)
+            c.setStrokeColor(col)
+            if fill is not None:
+                c.setFillColor(fill)
+            c.rect(x, y, w, h, stroke=1, fill=1 if fill is not None else 0)
 
-        def _new_page(y, need=80):
-            if y < MARGIN + need:
-                _draw_footer(y)
+        def label_value(x, top, w, label, value, size):
+            text(x + 6, top - 11, label, 7.5, bold=True, col=GREY)
+            size = fit(value or "-", size, w - 12)
+            text(x + 6, top - 13 - size, value or "-", size, bold=True)
+
+        # ── The foot of every page: due date and barcode ─────────────────
+        FOOT = 58.0
+
+        def footer():
+            c.setStrokeColor(BLACK)
+            c.setLineWidth(1.5)
+            c.line(M, M + FOOT - 8, M + W, M + FOOT - 8)
+            due = due_text(d_due)
+            size = fit(f"DUE  {due}", 28, W * 0.62)
+            text(M, M + 12, f"DUE  {due}", size, bold=True)
+            if ord_n.strip():
+                try:
+                    from reportlab.graphics.barcode import code128
+                    bar = code128.Code128(ord_n.strip().upper(), barWidth=1.0,
+                                          barHeight=26, humanReadable=False)
+                    if bar.width <= W * 0.36:
+                        bar.drawOn(c, M + W - bar.width, M + 14)
+                        text(M + W, M + 3, ord_n.strip().upper(), 8,
+                             col=GREY, align="right")
+                except Exception:
+                    pass
+
+        # ── The top of every page ────────────────────────────────────────
+        def page_header():
+            page_no[0] += 1
+            y = PAGE_H - M
+            if logo:
+                try:
+                    c.drawImage(logo, M, y - 40, width=40 * 2.985, height=40,
+                                preserveAspectRatio=True, mask="auto")
+                except Exception:
+                    pass
+            text(M + W, y - 20, "BAG WORKSHEET", 20, bold=True, align="right")
+            meta = f"Page {page_no[0]}"
+            if made_by:
+                meta = f"By {made_by}   ·   " + meta
+            text(M + W, y - 36, meta, 10, col=GREY, align="right")
+            y -= 50
+            if banner:
+                c.setFillColor(BLACK)
+                c.rect(M, y - 28, W, 28, stroke=0, fill=1)
+                text(M + W / 2, y - 20, banner, 17, bold=True,
+                     col=colors.white, align="center")
+                y -= 36
+            # Job details: customer and order number, then four smaller.
+            top_h, low_h = 50.0, 38.0
+            on_w = W * 0.34
+            box(M, y - top_h - low_h, W, top_h + low_h, lw=1.2)
+            c.setLineWidth(0.6)
+            c.line(M, y - top_h, M + W, y - top_h)
+            c.line(M + W - on_w, y, M + W - on_w, y - top_h)
+            label_value(M, y, W - on_w, "CUSTOMER", cust, 20)
+            label_value(M + W - on_w, y, on_w, "ORDER NUMBER", ord_n, 20)
+            cells = (("ATTENTION", attn), ("JOB", job),
+                     ("DATE ORDERED", d_ord), ("LOCATION", loc))
+            cw = W / len(cells)
+            for k, (lab, val) in enumerate(cells):
+                if k:
+                    c.line(M + k * cw, y - top_h, M + k * cw, y - top_h - low_h)
+                label_value(M + k * cw, y - top_h, cw, lab, val, 13)
+            y -= top_h + low_h + 16
+            # Column headings.
+            text(M + COL["n"] + 4, y, "ITEM", 8, bold=True, col=GREY)
+            text(M + COL["qty"] + COLW["qty"] / 2, y, "QTY", 8, bold=True,
+                 col=GREY, align="center")
+            text(M + COL["what"] + 6, y, "PRODUCT AND SIZE", 8, bold=True,
+                 col=GREY)
+            text(M + COL["pn"] + 4, y, "PART NO.", 8, bold=True, col=GREY)
+            text(M + COL["done"] + COLW["done"] / 2, y, "DONE", 8, bold=True,
+                 col=GREY, align="center")
+            c.setStrokeColor(BLACK)
+            c.setLineWidth(1.2)
+            c.line(M, y - 5, M + W, y - 5)
+            return y - 5
+
+        COLW = {"n": 44.0, "qty": 54.0, "pn": 104.0, "done": 46.0}
+        COLW["what"] = W - sum(COLW.values())
+        COL, x = {}, 0.0
+        for k in ("n", "qty", "what", "pn", "done"):
+            COL[k] = x
+            x += COLW[k]
+
+        def room(y, need):
+            """Start a new page when what comes next will not fit."""
+            if y - need < M + FOOT:
+                footer()
                 c.showPage()
-                return _draw_page_header()
+                return page_header()
             return y
 
-        def _draw_page_header():
-            y = PAGE_H - MARGIN
-
-            # Top rule (thick)
-            c.setStrokeColor(K100)
-            c.setLineWidth(2)
-            c.line(MARGIN, y, MARGIN + C_W, y)
-
-            y -= 6
-
-            # Right-side meta column — each row is "LABEL  VALUE" right-aligned
-            rx  = MARGIN + C_W
-            meta = []
-            if d_ord:      meta.append(("DATE ORDERED", d_ord))
-            if d_due:      meta.append(("DATE DUE",     d_due))
-            if job:        meta.append(("JOB",          job))
-            if loc:        meta.append(("LOCATION",     loc))
-            if created_by: meta.append(("CREATED BY",  created_by))
-
-            my = y - 2
-            for lbl, val in meta:
-                # Draw label in grey then value in black, both right-aligned as a unit
-                val_w   = c.stringWidth(str(val),    "Helvetica-Bold", 8)
-                gap     = 5
-                lbl_str = lbl + ":"
-                lbl_w   = c.stringWidth(lbl_str, "Helvetica", 7)
-                total_w = lbl_w + gap + val_w
-                lx = rx - total_w
-                c.setFont("Helvetica", 7);      c.setFillColor(K70);  c.drawString(lx, my, lbl_str)
-                c.setFont("Helvetica-Bold", 8); c.setFillColor(K100); c.drawString(lx + lbl_w + gap, my, str(val))
-                my -= 11
-
-            # Customer name — larger for visibility
-            _txt(MARGIN, y - 16, cust, size=20, bold=True, col=K100)
-
-            # O/N + ATT line below customer name — bolder and larger
-            y -= 34
-            parts = []
-            if ord_n: parts.append(f"O/N  {ord_n}")
-            if attn:  parts.append(f"ATT  {attn}")
-            _txt(MARGIN, y, "   ·   ".join(parts), size=11, bold=True, col=K100)
-
-            # Rule under header
-            y -= 10
-            _hrule(y, lw=0.75, col=K100)
-            y -= 6
-
-            # Column labels row
-            _txt(MARGIN,      y - 10, "ITEM",        size=7, bold=True, col=K70)
-            _txt(MARGIN + 46, y - 10, "DESCRIPTION", size=7, bold=True, col=K70)
-            _txt(rx,          y - 10, "P/N",         size=7, bold=True, col=K70, align="right")
-            _hrule(y - 14, lw=0.4, col=K30)
-
-            return y - 18
-
-        def _draw_footer(y):
-            fy = MARGIN + 20
-            _hrule(fy, lw=0.5, col=K30)
-            parts = []
-            if notes: parts.append(f"NOTES: {notes}")
-            if parts:
-                _txt(MARGIN, fy - 10, "   ".join(parts), size=8, col=K70)
-
-        # ── First page header ────────────────────────────────────────────────
-        y = _draw_page_header()
-
-        # ── Items ────────────────────────────────────────────────────────────
-        BADGE_W = 40
-        PAD     = 6
-
+        y = page_header()
         for i, item in enumerate(items):
-            stock_num  = item_start + i
-            label      = build_label_line(item)
-            dims       = build_dims_line(item)
-            pn         = (item.get("part_number") or "").strip()
-            item_notes = (item.get("notes") or "").strip()
-
-            lines = 1 + (1 if dims else 0) + (1 if item_notes else 0)
-            row_h = lines * 17 + PAD * 2 + 4   # taller rows for better visibility
-
-            y = _new_page(y, row_h + 4)
-
-            # Row background (alternating)
-            if i % 2 == 0:
-                c.setFillColor(G05)
-                c.rect(MARGIN, y - row_h, C_W, row_h, fill=1, stroke=0)
-
-            # Left badge column (slightly darker)
-            c.setFillColor(G10)
-            c.rect(MARGIN, y - row_h, BADGE_W, row_h, fill=1, stroke=0)
-
-            # Item number centred in badge
-            _txt(MARGIN + BADGE_W / 2, y - row_h / 2 - 4,
-                 str(stock_num), size=16, bold=True, col=K100, align="center")
-            _txt(MARGIN + BADGE_W / 2, y - row_h + PAD,
-                 f"of {total_shown}", size=7, col=K70, align="center")
-
-            # Thin vertical rule after badge
-            c.setStrokeColor(K30)
-            c.setLineWidth(0.4)
-            c.line(MARGIN + BADGE_W, y - row_h, MARGIN + BADGE_W, y)
-
-            # Description block
-            tx = MARGIN + BADGE_W + PAD + 2
-            ty = y - PAD - 12
-            _txt(tx, ty, label, size=12, bold=True, col=K100)
+            name = _item_name(item)
+            dims = build_dims_line(item)
+            extra = ""
+            if item.get("header") or item.get("on_wire"):
+                try:
+                    from .bag_headers import extras_text
+                    extra = extras_text(item)
+                except Exception:
+                    extra = "Header" if item.get("header") else ""
+            note = str(item.get("notes") or "").strip()
+            pn = str(item.get("part_number") or "").strip()
+            wrap_w = COLW["what"] - 12
+            note_lines = simpleSplit(f"Note: {note}", "Helvetica-Oblique", 10,
+                                     wrap_w)[:3] if note else []
+            row_h = 12 + 18 + (17 if dims else 0) + (14 if extra else 0) \
+                + 13 * len(note_lines) + 8
+            row_h = max(row_h, 56)
+            y = room(y, row_h)
+            if i % 2:
+                c.setFillColor(TINT)
+                c.rect(M, y - row_h, W, row_h, stroke=0, fill=1)
+            # Item number of the whole order.
+            text(M + COL["n"] + COLW["n"] / 2, y - 26, str(item_start + i), 18,
+                 bold=True, align="center")
+            text(M + COL["n"] + COLW["n"] / 2, y - 38, f"of {total_shown}", 8,
+                 col=GREY, align="center")
+            # How many - the first thing counted.
+            qty = str(item.get("quantity", 1))
+            qs = fit(qty, 26, COLW["qty"] - 6)
+            text(M + COL["qty"] + COLW["qty"] / 2, y - 12 - qs * 0.9, qty, qs,
+                 bold=True, align="center")
+            # What and what size.
+            tx, ty = M + COL["what"] + 6, y - 12 - 13
+            text(tx, ty, name, fit(name, 15, wrap_w), bold=True)
             if dims:
-                ty -= 16
-                _txt(tx, ty, dims, size=10, col=K70)
-            if item_notes:
+                ty -= 18
+                text(tx, ty, dims, fit(dims, 13, wrap_w, bold=False),
+                     col=BLACK)
+            if extra:
                 ty -= 15
-                _txt(tx, ty, f"Note: {item_notes}", size=9, col=K70)
-
-            # P/N right-aligned
+                text(tx, ty, extra, fit(extra, 10.5, wrap_w, bold=False),
+                     col=GREY)
+            for line in note_lines:
+                ty -= 13
+                text(tx, ty, line, 10, col=GREY, font="Helvetica-Oblique")
             if pn:
-                pn_x = MARGIN + C_W - 4
-                pn_y = y - PAD - 10
-                _txt(pn_x, pn_y, pn, size=8, col=K70, align="right")
-                _txt(pn_x - c.stringWidth(pn, "Helvetica", 8) - 4,
-                     pn_y, "P/N", size=7, bold=True, col=K30, align="right")
+                for k, part in enumerate(simpleSplit(pn, "Helvetica", 9,
+                                                     COLW["pn"] - 8)[:3]):
+                    text(M + COL["pn"] + 4, y - 22 - k * 11, part, 9, col=GREY)
+            side = 20
+            box(M + COL["done"] + (COLW["done"] - side) / 2,
+                y - 14 - side, side, side, lw=1.5)
+            c.setStrokeColor(RULE)
+            c.setLineWidth(0.6)
+            c.line(M, y - row_h, M + W, y - row_h)
+            y -= row_h
 
-            # Bottom hairline
-            _hrule(y - row_h, lw=0.3, col=K30)
+        # Notes for the whole order.
+        if notes:
+            lines = simpleSplit(notes, "Helvetica", 11, W - 16)[:8]
+            need = 26 + 15 * len(lines) + 14
+            y = room(y, need)
+            y -= 14
+            box(M, y - need + 14, W, need - 14, lw=0.8)
+            text(M + 8, y - 14, "NOTES", 8, bold=True, col=GREY)
+            for k, line in enumerate(lines):
+                text(M + 8, y - 30 - k * 15, line, 11)
+            y -= need - 14
 
-            y -= row_h + 1
+        # Completion checklist: each step ticked, initialled and dated.
+        head_h, step_h = 16.0, 24.0
+        need = 18 + head_h + step_h * len(BAG_STEPS)
+        y = room(y, need)
+        y -= 18
+        cl_w = W * 0.62
+        cols = [cl_w * 0.46, cl_w * 0.14, cl_w * 0.18, cl_w * 0.22]
+        xs = [M]
+        for cwid in cols[:-1]:
+            xs.append(xs[-1] + cwid)
+        total_h = head_h + step_h * len(BAG_STEPS)
+        box(M, y - total_h, cl_w, total_h, lw=1.2)
+        text(M + 5, y - 11.5, "COMPLETION CHECKLIST", 8.5, bold=True)
+        for xi, cwid, lab in zip(xs[1:], cols[1:], ("DONE", "INITIALS", "DATE")):
+            text(xi + cwid / 2, y - 11.5, lab, 7.5, bold=True, align="center")
+        c.setStrokeColor(BLACK)
+        c.setLineWidth(1.0)
+        c.line(M, y - head_h, M + cl_w, y - head_h)
+        for xi in xs[1:]:
+            c.setLineWidth(0.6)
+            c.line(xi, y, xi, y - total_h)
+        ry = y - head_h
+        for step in BAG_STEPS:
+            text(M + 5, ry - step_h / 2 - 3.5, step.upper(), 9, bold=True)
+            side = step_h * 0.6
+            box(xs[1] + (cols[1] - side) / 2, ry - step_h + (step_h - side) / 2,
+                side, side, lw=1.5)
+            text(xs[3] + cols[3] / 2, ry - step_h / 2 - 3.5, "/        /", 10,
+                 align="center")
+            ry -= step_h
+            if step != BAG_STEPS[-1]:
+                c.setStrokeColor(BLACK)
+                c.setLineWidth(0.5)
+                c.line(M, ry, M + cl_w, ry)
 
-        _draw_footer(y)
+        footer()
         c.save()
         return os.path.exists(pdf_path)
-    except Exception:
-        return False
     except Exception:
         return False
 
@@ -891,8 +1099,21 @@ def _build_bag_options(item: dict) -> str:
     """Options flags for a bag / roll item."""
     opts = []
     if item.get("on_wire"):      opts.append("On Wire")
+    if item.get("half_size"):    opts.append("Half Size")
     if item.get("gelled"):       opts.append("Gelled")
     if item.get("special_size"): opts.append("Special Size")
+    if item.get("header") or item.get("on_wire"):
+        # The header is made on the filter worksheet; the docket says what
+        # size it and the wire are, so the bag is made to match.
+        try:
+            from .bag_headers import extras_text
+            extra = extras_text(item)
+        except Exception:
+            extra = ""
+        if extra:
+            opts.append(extra)
+        elif item.get("header"):
+            opts.append("Header")
     ls = (item.get("label_suffix") or "").strip()
     if ls:                       opts.append(ls)
     return "  ·  ".join(opts)
@@ -932,7 +1153,7 @@ def generate_unified_docket(header: dict, items: List[dict], out_path: str) -> s
     Saves to out_path, attempts PDF export via PowerShell Word COM,
     opens the result, and returns the opened path.
     """
-    if not _DOCX_AVAILABLE:
+    if not _docx():
         raise RuntimeError(
             "python-docx is not installed.  Run:  pip install python-docx")
 

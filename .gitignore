@@ -24,12 +24,22 @@ data_entry_gui.exe
 TAFOrderEntry_Setup.exe
 
 # ── Runtime / user data ─────────────────────────────────────────────────
+# Off Windows there is no APPDATA, so the app keeps these next to itself —
+# which is the repo when it is run from source, or by the smoke test.
 orders/
 draft_order.json
+catalog_cache.json
+last_seen_version.txt
+phone_inbox/
+pending_sync/
+backups/
+invoices/
 
 # ── Test / scratch artifacts ────────────────────────────────────────────
 Test_TEST.xlsx
 test_test.pdf
+# Worksheets the smoke test builds land beside the app when run from source.
+/*.pdf
 compare_test.pdf
 Templates.pdf
 # Scratch files live at the repo root only — anchored so they never match
@@ -43,3 +53,8 @@ Desktop.ini
 .DS_Store
 .idea/
 .vscode/
+
+# ── Built by the Mac job, never committed ───────────────────────────────
+icon_master.png
+TAF_logo.icns
+*.dmg

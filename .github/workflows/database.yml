@@ -1,0 +1,41 @@
+name: Database rules
+
+# The rules that decide who can ask for supplies, who is told, and who can
+# write in whose notification bell are not in any app - they are row-level
+# security and triggers in the migrations, and the apps are trusted with none
+# of them. The release build runs on Windows with no Postgres, so nothing
+# there would notice a policy that stopped holding.
+#
+# This runs the real migration against a real Postgres, then acts as each
+# kind of person - somebody on the floor, a manager, a director, and an
+# account nobody approved - and checks what each of them can and cannot do.
+# GitHub's Ubuntu runners have Postgres installed; there is nothing to set up.
+
+on:
+  push:
+    paths:
+      - '*.sql'
+      - 'tests/db_rules.py'
+      - '.github/workflows/database.yml'
+  pull_request:
+    paths:
+      - '*.sql'
+      - 'tests/db_rules.py'
+  workflow_dispatch:
+
+jobs:
+  rules:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      # REQUIRE_POSTGRES: if the runner ever stops shipping Postgres, this
+      # fails rather than skipping and going green having checked nothing.
+      - name: Check the database holds its own rules
+        env:
+          REQUIRE_POSTGRES: "1"
+        run: python tests/db_rules.py
